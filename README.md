@@ -50,7 +50,8 @@ all. Never add `-ffast-math`.
 ```bash
 source ~/emsdk/emsdk_env.sh
 wasm/build_wasm.sh                     # -> web/evo_boids.{js,wasm}
-python3 -m http.server -d web 8123     # open http://localhost:8123
+python3 -m http.server 8123            # serve the REPO ROOT (web/ reads ../img/)
+                                       # open http://localhost:8123/web/
 wasm/parity.sh                         # native serial == wasm, bit for bit
 ```
 

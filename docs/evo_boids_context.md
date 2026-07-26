@@ -87,9 +87,11 @@ in **C++20**.
 
 ---
 
-## 2. Current version: v0.19.0
+## 2. Current version: v0.20.0
 
-> **Banner matches the code.** `CMakeLists.txt` is at **0.19.0**: adds `--toroidal`
+> **Banner matches the code.** `CMakeLists.txt` is at **0.20.0** (frontend parity:
+> native window gains [T] turbo + [S] checkpoint and the fixed-dt loop; unified
+> `img/rocks.jpg` background — see the 0.20.0 history entry). 0.19.0 adds `--toroidal`
 > (opt-in wrap-around perception — see the 0.19.0 history entry; default off,
 > fingerprint-verified byte-identical). 0.17.0 added
 > checkpoint/resume (bit-exact in the serial build, JSON format). 0.18.0 is the
@@ -297,6 +299,21 @@ in **C++20**.
   bug** (that grid is stale by the time `computeStats` runs; §10.5). Negligible at
   the populations run so far (it was never the cause of the slowdown — §10.5), but it
   removes the O(n²) cliff for large-N / Stage-B runs.
+- **0.20.0 (frontend parity: native window == web page).** App/frontend only —
+  zero core changes. The native windowed phase gains the web's controls: **[T]**
+  toggles turbo (flat-out fixed-dt stepping in ~200 ms adaptive chunks, window
+  stays responsive at ~5 fps, HUD shows measured steps/s — the CLI's --headless
+  remains the fastest path) and **[S]** saves `<base>.<frame>.json` mid-run using
+  the --checkpoint-every base rules, closing the old gap where the windowed phase
+  could not checkpoint. The windowed loop also switches from wall-clock dt
+  (clamped 0.033) to the **fixed dt 0.016** the headless phase and the web have
+  always used — a deliberate one-time change to the (never-scientific) visual
+  phase that makes windowed sessions per-step reproducible and all three
+  frontends behaviourally identical. Background art unified: `img/rocks.jpg`
+  (user's ink texture) is now the single asset — native loads it (SFML reads
+  JPG), web reads `../img/rocks.jpg`, `img/rocks.png` and the web copy removed;
+  the dev server must now serve the REPO ROOT (`python3 -m http.server 8123`,
+  open `/web/`).
 - **0.19.0 (`--toroidal` — wrap-around perception; opt-in, off = byte-identical,
   fingerprint-verified vs 0.18.0 across 2 seeds x 1500 rich-config steps).**
   Motivated by a user report of fish "stuck" at edges at 50x. Empirical diagnosis

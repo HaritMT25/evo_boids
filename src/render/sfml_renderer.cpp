@@ -22,7 +22,7 @@ SfmlRenderer::SfmlRenderer(int width, int height, const std::string& title)
         throw std::runtime_error("Failed to load img/circle.png");
     }
 
-    hasBg_ = bgTexture_.loadFromFile("img/rocks.png");
+    hasBg_ = bgTexture_.loadFromFile("img/rocks.jpg");
     if (hasBg_) bgSprite_.setTexture(bgTexture_);
 
     hasFont_ = font_.loadFromFile("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf") ||
@@ -67,6 +67,15 @@ InputEvents SfmlRenderer::poll() {
     bool down = sf::Keyboard::isKeyPressed(sf::Keyboard::Down);
     if (down && !downWasPressed_) ev.speedDown = true;
     downWasPressed_ = down;
+
+    // T -> toggle headless burst (turbo); S -> save a checkpoint (rising edge)
+    bool t = sf::Keyboard::isKeyPressed(sf::Keyboard::T);
+    if (t && !tWasPressed_) ev.toggleTurbo = true;
+    tWasPressed_ = t;
+
+    bool s = sf::Keyboard::isKeyPressed(sf::Keyboard::S);
+    if (s && !sWasPressed_) ev.saveCheckpoint = true;
+    sWasPressed_ = s;
 
     return ev;
 }
@@ -247,7 +256,9 @@ void SfmlRenderer::drawHud(const HudInfo& hud) {
         << "  Speed: " << hud.simSpeed << "x"
         << "  FPS: " << hud.fps;
     if (hud.paused) out << "  [PAUSED]";
-    out << "\n[Space] pause  [Up/Down] speed";
+    if (hud.turbo)
+        out << "  [TURBO " << std::setprecision(0) << hud.stepsPerSec << " steps/s]";
+    out << "\n[Space] pause  [Up/Down] speed  [T] turbo  [S] save checkpoint";
 
     sf::Text text(out.str(), font_, 14);
     text.setFillColor(sf::Color(200, 200, 200, 200));

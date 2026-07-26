@@ -104,8 +104,8 @@
 
   var canvas = document.getElementById("canvas");
   var ctx = canvas.getContext("2d", { alpha: false });
-  var bgImage = new Image();  /* background texture (web-only art, 1920x1080) */
-  bgImage.src = "rocks.jpg";
+  var bgImage = new Image();  /* background texture — shared with the native app (img/rocks.jpg) */
+  bgImage.src = "../img/rocks.jpg";
   function el(id) { return document.getElementById(id); }
   var errEl = el("err");
 

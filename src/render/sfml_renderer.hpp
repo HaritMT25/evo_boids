@@ -47,6 +47,8 @@ private:
     bool spaceWasPressed_ = false;
     bool upWasPressed_    = false;
     bool downWasPressed_  = false;
+    bool tWasPressed_     = false;
+    bool sWasPressed_     = false;
 
     // Selection state (live neural inspector).
     std::uint64_t selectedId_   = 0;      // 0 = nothing selected

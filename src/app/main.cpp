@@ -523,7 +523,27 @@ int main(int argc, char** argv) {
         std::make_unique<SfmlRenderer>(W, H, "evo_boids — evolved flocking");
 
     bool paused = false;
+    bool turbo  = false;         // headless burst mode ([T], mirrors the web's Turbo)
+    float turboStepsPerSec = 0.0f;
     int simSpeed = 1;  // how many sim steps per rendered frame
+
+    // Fixed timestep, identical to the headless phase and the web frontend.
+    // The old wall-clock dt made windowed sessions unrepeatable; with a fixed
+    // dt the state at frame N is the same state every frontend computes.
+    const float fixedDt = 0.016f;
+
+    // [S] writes "<base>.<frame>.json" using the same base rules as
+    // --checkpoint-every (--save-checkpoint path, else runs/<name>, else
+    // runs/checkpoint), so windowed and headless checkpoints land together.
+    auto windowCheckpointPath = [&]() {
+        std::string base = !saveCheckpoint.empty() ? saveCheckpoint
+                         : (!runName.empty() ? ("runs/" + runName) : std::string("runs/checkpoint"));
+        if (base.size() > 5 && base.compare(base.size() - 5, 5, ".json") == 0)
+            base.resize(base.size() - 5);
+        const auto parent = std::filesystem::path(base).parent_path();
+        if (!parent.empty()) std::filesystem::create_directories(parent);
+        return base + "." + std::to_string(world.frame) + ".json";
+    };
 
     // FPS counter (SFML-free, wall-clock based)
     int fps = 0;
@@ -536,15 +556,35 @@ int main(int argc, char** argv) {
         if (ev.togglePause) paused = !paused;
         if (ev.speedUp)   simSpeed = std::min(simSpeed + 1, 50);
         if (ev.speedDown) simSpeed = std::max(simSpeed - 1, 1);
+        if (ev.toggleTurbo) turbo = !turbo;
+        if (ev.saveCheckpoint) {
+            const std::string path = windowCheckpointPath();
+            std::string err;
+            if (checkpoint::save(world, path, EVO_VERSION, err))
+                std::cout << "  checkpoint -> " << path << " (frame " << world.frame << ")\n";
+            else
+                std::cerr << "!! checkpoint failed: " << err << "\n";
+        }
 
-        float dt = renderer->frameDelta();
-        dt = std::min(dt, 0.033f);
-
-        // Simulate multiple steps per rendered frame.
-        // Fast-forward: simulate N real ticks, render once.
+        // Simulate. Turbo = flat-out adaptive chunks (~200 ms of stepping per
+        // rendered frame, so the window stays responsive at ~5 fps while the
+        // sim runs at full speed); normal = simSpeed steps per rendered frame.
         if (!paused) {
-            for (int s = 0; s < simSpeed; ++s) {
-                world.update(dt);
+            if (turbo) {
+                const auto t0 = std::chrono::steady_clock::now();
+                int steps = 0;
+                float elapsed = 0.0f;
+                do {
+                    world.update(fixedDt);
+                    ++steps;
+                    elapsed = std::chrono::duration<float>(
+                        std::chrono::steady_clock::now() - t0).count();
+                } while (elapsed < 0.2f);
+                turboStepsPerSec = (float)steps / elapsed;
+            } else {
+                for (int s = 0; s < simSpeed; ++s) {
+                    world.update(fixedDt);
+                }
             }
         }
 
@@ -573,6 +613,8 @@ int main(int argc, char** argv) {
         hud.simSpeed   = simSpeed;
         hud.fps        = fps;
         hud.paused     = paused;
+        hud.turbo      = turbo;
+        hud.stepsPerSec = turbo ? turboStepsPerSec : 0.0f;
 
         renderer->render(world, hud);
     }

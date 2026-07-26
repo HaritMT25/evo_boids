@@ -17,10 +17,12 @@
 // One frame's discrete, edge-triggered input. The backend translates raw
 // window/keyboard events into these so `main` never sees an SFML event.
 struct InputEvents {
-    bool quit = false;          // window closed / quit requested
-    bool togglePause = false;   // pause <-> run
-    bool speedUp = false;       // increase steps-per-frame
-    bool speedDown = false;     // decrease steps-per-frame
+    bool quit = false;           // window closed / quit requested
+    bool togglePause = false;    // pause <-> run
+    bool speedUp = false;        // increase steps-per-frame
+    bool speedDown = false;      // decrease steps-per-frame
+    bool toggleTurbo = false;    // headless burst mode <-> live rendering (T)
+    bool saveCheckpoint = false; // write a checkpoint of the current state (S)
 };
 
 // Everything the renderer needs to draw the on-screen HUD. Plain data,
@@ -36,6 +38,8 @@ struct HudInfo {
     int simSpeed = 1;
     int fps = 0;
     bool paused = false;
+    bool turbo = false;          // headless burst mode active
+    float stepsPerSec = 0.0f;    // measured sim throughput while in turbo
 };
 
 class IRenderer {

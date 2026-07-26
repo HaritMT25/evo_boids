@@ -1,0 +1,16 @@
+# build trees
+build/
+build_*/
+cmake-build-*/
+
+# run outputs (CSV logs, SVGs, sidecars produced by --name)
+runs/
+*.deaths.csv
+*.cluster.svg
+*.wiring.csv
+
+# editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store

@@ -65,6 +65,23 @@
     font: inherit;
   }
   input[type="checkbox"] { accent-color: #4a8a64; }
+  fieldset {
+    border: 1px solid #1e3a2e;
+    border-radius: 4px;
+    padding: 3px 10px 6px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 12px;
+    min-width: 0;
+  }
+  legend {
+    font-size: 10px;
+    text-transform: lowercase;
+    letter-spacing: 1px;
+    color: #6f927e;
+    padding: 0 5px;
+  }
   button {
     background: #1a3a2a;
     color: #cfe8d8;
@@ -91,10 +108,16 @@
   }
   #adv summary { cursor: pointer; color: #7ea08c; user-select: none; }
   #advgrid {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin: 8px 0;
+  }
+  #advgrid fieldset { display: block; padding: 1px 10px 6px; }
+  #advgrid .agrid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-    gap: 6px 18px;
-    margin: 10px 0;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 4px 18px;
   }
   #advgrid label { justify-content: space-between; }
   #advgrid label:has(input[type="checkbox"]) { justify-content: flex-start; }
@@ -105,21 +128,36 @@
   <h1>evo_boids — wasm</h1>
   <div id="stage"><canvas id="canvas" width="1920" height="1080"></canvas></div>
   <div id="bar">
-    <button id="pausebtn">Pause</button>
-    <button id="slower">&minus;</button>
-    <span id="speedlabel">speed 1x</span>
-    <button id="faster">+</button>
-    <button id="savecp">Save checkpoint</button>
-    <button id="loadcp">Load checkpoint</button>
-    <input id="cpfile" type="file" accept=".json" hidden>
+    <fieldset>
+      <legend>playback</legend>
+      <button id="pausebtn">Pause</button>
+      <button id="slower">&minus;</button>
+      <span id="speedlabel">speed 1x</span>
+      <button id="faster">+</button>
+    </fieldset>
+    <fieldset>
+      <legend>checkpoint</legend>
+      <button id="savecp">Save checkpoint</button>
+      <button id="loadcp">Load checkpoint</button>
+      <input id="cpfile" type="file" accept=".json" hidden>
+    </fieldset>
   </div>
   <div id="controls">
-    <label>seed <input id="seed" type="number" value="42" min="0" step="1"></label>
-    <label>population <input id="population" type="number" value="300" min="1" step="1"></label>
-    <label>predators <input id="predators" type="number" value="0" min="0" step="1"></label>
-    <label>food patches <input id="foodPatches" type="number" value="0" min="0" step="1"></label>
-    <label>current strength <input id="currentStrength" type="number" value="0" min="0" step="1"></label>
-    <label><input id="predatorEconomy" type="checkbox"> predator economy</label>
+    <fieldset>
+      <legend>world</legend>
+      <label>seed <input id="seed" type="number" value="42" min="0" step="1"></label>
+      <label>population <input id="population" type="number" value="300" min="1" step="1"></label>
+    </fieldset>
+    <fieldset>
+      <legend>predators</legend>
+      <label>predators <input id="predators" type="number" value="0" min="0" step="1"></label>
+      <label><input id="predatorEconomy" type="checkbox"> predator economy</label>
+    </fieldset>
+    <fieldset>
+      <legend>environment</legend>
+      <label>food patches <input id="foodPatches" type="number" value="0" min="0" step="1"></label>
+      <label>current strength <input id="currentStrength" type="number" value="0" min="0" step="1"></label>
+    </fieldset>
     <button id="restart">Restart</button>
     <span id="err"></span>
   </div>

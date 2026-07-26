@@ -14,23 +14,42 @@
   var ACTION_NAMES = ["steerX", "steerY", "moveFwd", "moveRnd", "speed", "signal",
                       "oscPer", "resp", "share", "repro", "fight", "ignore"];
 
-  /* Advanced config keys: [key, default, {step,title,label,options}] */
-  var ADV = [
-    ["targetFood", 600], ["foodSpawnBase", 3], ["foodSpawnAmp", 2], ["foodEnergy", 5],
-    ["foodPatchRadius", 120], ["foodDrift", false], ["metabolicRate", 1.5],
-    ["moveCost", 0, { step: 0.00001 }], ["geneCost", 0, { step: 0.001 }],
-    ["maxAge", 120], ["reproEnergy", 20], ["newbornEnergy", 25],
-    ["minSpeed", 30], ["maxSpeed", 150], ["perceptionRadius", 80], ["interactRadius", 20],
-    ["maxNeighbors", 0, { step: 1, title: "0 = metric; N = topological cap" }],
-    ["mutationMultiplier", 1, { step: 0.1 }],
-    ["genomeInitMin", 24], ["genomeInitMax", 48], ["genomeMinLength", 16], ["genomeMaxLength", 80],
-    ["predatorSpeed", 110], ["predatorPerception", 150], ["predatorCaptureRadius", 14],
-    ["predatorMetabolism", 2], ["predatorReproEnergy", 60], ["predatorMaxAge", 0],
-    ["currentMode", 0, { options: ["eddies", "gyre"] }],
-    ["currentEddies", 5], ["currentCore", 150], ["currentDrift", 1],
-    ["triangularMotion", false], ["maxTurnRate", 4],
-    ["fastTanh", false, { label: "fast tanh (changes the numbers)" }]
+  /* Advanced config, grouped: [sectionName, [[key, default, {step,title,label,options}], ...]] */
+  var ADV_SECTIONS = [
+    ["food", [
+      ["targetFood", 600], ["foodSpawnBase", 3], ["foodSpawnAmp", 2], ["foodEnergy", 5],
+      ["foodPatchRadius", 120], ["foodDrift", false]
+    ]],
+    ["energy & life", [
+      ["metabolicRate", 1.5], ["moveCost", 0, { step: 0.00001 }],
+      ["geneCost", 0, { step: 0.001 }], ["maxAge", 120],
+      ["reproEnergy", 20], ["newbornEnergy", 25]
+    ]],
+    ["motion", [
+      ["minSpeed", 30], ["maxSpeed", 150], ["maxTurnRate", 4], ["triangularMotion", false]
+    ]],
+    ["perception & social", [
+      ["perceptionRadius", 80], ["interactRadius", 20],
+      ["maxNeighbors", 0, { step: 1, title: "0 = metric; N = topological cap" }]
+    ]],
+    ["genome", [
+      ["mutationMultiplier", 1, { step: 0.1 }], ["genomeInitMin", 24], ["genomeInitMax", 48],
+      ["genomeMinLength", 16], ["genomeMaxLength", 80]
+    ]],
+    ["predators", [
+      ["predatorSpeed", 110], ["predatorPerception", 150], ["predatorCaptureRadius", 14],
+      ["predatorMetabolism", 2], ["predatorReproEnergy", 60], ["predatorMaxAge", 0]
+    ]],
+    ["currents", [
+      ["currentMode", 0, { options: ["eddies", "gyre"] }],
+      ["currentEddies", 5], ["currentCore", 150], ["currentDrift", 1]
+    ]],
+    ["numerics", [
+      ["fastTanh", false, { label: "fast tanh (changes the numbers)" }]
+    ]]
   ];
+  /* Flat view: readAdvanced/resetAdvanced iterate every key regardless of section. */
+  var ADV = ADV_SECTIONS.reduce(function (acc, sec) { return acc.concat(sec[1]); }, []);
 
   var Module = null;
   var paused = false;
@@ -57,38 +76,49 @@
     return Number.isFinite(v) ? v : def;
   }
 
-  /* ---- advanced settings UI (generated from ADV) ---- */
+  /* ---- advanced settings UI (generated from ADV_SECTIONS) ---- */
+  function makeAdvInput(a) {
+    var key = a[0], def = a[1], opt = a[2] || {};
+    var label = document.createElement("label");
+    if (opt.title) label.title = opt.title;
+    var input;
+    if (typeof def === "boolean") {
+      input = document.createElement("input");
+      input.type = "checkbox";
+      input.checked = def;
+    } else if (opt.options) {
+      input = document.createElement("select");
+      opt.options.forEach(function (name, i) {
+        var o = document.createElement("option");
+        o.value = String(i);
+        o.textContent = i + " " + name;
+        input.appendChild(o);
+      });
+      input.value = String(def);
+    } else {
+      input = document.createElement("input");
+      input.type = "number";
+      input.step = opt.step !== undefined ? String(opt.step) : "any";
+      input.value = String(def);
+    }
+    input.id = "adv_" + key;
+    var text = document.createTextNode(opt.label || key);
+    if (typeof def === "boolean") { label.appendChild(input); label.appendChild(text); }
+    else { label.appendChild(text); label.appendChild(input); }
+    return label;
+  }
   function buildAdvancedUI() {
-    var grid = el("advgrid");
-    ADV.forEach(function (a) {
-      var key = a[0], def = a[1], opt = a[2] || {};
-      var label = document.createElement("label");
-      if (opt.title) label.title = opt.title;
-      var input;
-      if (typeof def === "boolean") {
-        input = document.createElement("input");
-        input.type = "checkbox";
-        input.checked = def;
-      } else if (opt.options) {
-        input = document.createElement("select");
-        opt.options.forEach(function (name, i) {
-          var o = document.createElement("option");
-          o.value = String(i);
-          o.textContent = i + " " + name;
-          input.appendChild(o);
-        });
-        input.value = String(def);
-      } else {
-        input = document.createElement("input");
-        input.type = "number";
-        input.step = opt.step !== undefined ? String(opt.step) : "any";
-        input.value = String(def);
-      }
-      input.id = "adv_" + key;
-      var text = document.createTextNode(opt.label || key);
-      if (typeof def === "boolean") { label.appendChild(input); label.appendChild(text); }
-      else { label.appendChild(text); label.appendChild(input); }
-      grid.appendChild(label);
+    var root = el("advgrid"); /* now a vertical stack of section fieldsets */
+    ADV_SECTIONS.forEach(function (sec) {
+      var fs = document.createElement("fieldset");
+      var lg = document.createElement("legend");
+      lg.textContent = sec[0];
+      fs.appendChild(lg);
+      var grid = document.createElement("div");
+      grid.className = "agrid";
+      sec[1].forEach(function (a) { grid.appendChild(makeAdvInput(a)); });
+      fs.appendChild(grid);
+      root.appendChild(fs);
     });
   }
   function resetAdvanced() {

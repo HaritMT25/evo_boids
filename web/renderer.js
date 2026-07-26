@@ -51,6 +51,51 @@
   /* Flat view: readAdvanced/resetAdvanced iterate every key regardless of section. */
   var ADV = ADV_SECTIONS.reduce(function (acc, sec) { return acc.concat(sec[1]); }, []);
 
+  /* Hover info per parameter: d = what it is, t = suggested values (docs/evo_boids_flags.md). */
+  var TIPS = {
+    seed: { d: "RNG seed — same seed + same settings replays the run bit-for-bit.", t: "try: any uint32; keep it to reproduce a run" },
+    population: { d: "Starting creature count (the world reseeds below a floor of 50).", t: "try: 200-800; >2000 gets slow in-browser" },
+    predators: { d: "Number of scripted hunters chasing prey (0 = none).", t: "try: 3-4 with predator economy on" },
+    foodPatches: { d: "Cluster food into N spatial patches (0 = uniform scatter).", t: "try: 5-6; patchy food makes currents matter" },
+    currentStrength: { d: "Peak ocean-flow speed in world units/sec (0 = still water).", t: "try: 80 with eddies = a lively ocean" },
+    predatorEconomy: { d: "Predators eat, breed and starve (Stage B) instead of being immortal.", t: "try: on with 3-4 predators" },
+    targetFood: { d: "Baseline food count the world regrows toward (hard cap 2x).", t: "try: 300 scarcity, 1200 abundance" },
+    foodSpawnBase: { d: "Mean food items spawned per step.", t: "try: 2-12; higher = richer world" },
+    foodSpawnAmp: { d: "Sinusoidal swing of food abundance around the base rate.", t: "try: 0 for a steady food supply" },
+    foodEnergy: { d: "Energy gained per food item eaten.", t: "try: 3-8 around the default 5" },
+    foodPatchRadius: { d: "Spread of food around each patch centre.", t: "try: 60 tight, 240 loose" },
+    foodDrift: { d: "Food is advected with the current into drifting filaments.", t: "try: on — pairs well with currents" },
+    metabolicRate: { d: "Fixed energy burned per second by every creature.", t: "try: toward 3 for harsher starvation" },
+    moveCost: { d: "Kinetic cost: energy/sec = F x speed^2 — makes thrust expensive.", t: "try: 0.00007 -> cruise ~82; 0 = free" },
+    geneCost: { d: "Extra energy/sec per gene — parsimony pressure against bloat.", t: "try: 0.005 makes big genomes costly" },
+    maxAge: { d: "Age in seconds at which a creature dies of old age.", t: "try: 60-240 around the default 120" },
+    reproEnergy: { d: "Energy a parent needs before it can reproduce.", t: "try: 15-40; higher = slower breeding" },
+    newbornEnergy: { d: "Starting energy of a newborn child.", t: "try: 15-35 around the default 25" },
+    minSpeed: { d: "Minimum swim speed.", t: "try: 0 when moveCost > 0 (drifting allowed)" },
+    maxSpeed: { d: "Maximum swim speed — the sprint ceiling.", t: "try: 150; sprinting escapes predators at 110" },
+    maxTurnRate: { d: "Turn ceiling (rad/s) at zero drive — triangular motion only.", t: "try: 2-6 around the default 4" },
+    triangularMotion: { d: "Couple drive and turn: fast = straight, slow = agile.", t: "try: on for strike-vs-reorient bouts" },
+    perceptionRadius: { d: "Sensing radius for neighbours, food and predators.", t: "try: 160 = high-density schooling regime" },
+    interactRadius: { d: "Range for social interactions (share / fight).", t: "try: 10-40 around the default 20" },
+    maxNeighbors: { d: "Attend to only the N nearest neighbours; 0 = everyone in range.", t: "try: 7 — starlings track ~6-7" },
+    mutationMultiplier: { d: "Multiplier on the per-birth mutation rate.", t: "try: 0.5 conservative, 2 fast drift" },
+    genomeInitMin: { d: "Low end of the initial gene-count range.", t: "try: init 24-48 inside bounds 16-80" },
+    genomeInitMax: { d: "High end of the initial gene-count range.", t: "try: init 24-48 inside bounds 16-80" },
+    genomeMinLength: { d: "Hard lower bound on gene count.", t: "try: 16 (the default)" },
+    genomeMaxLength: { d: "Hard upper bound on gene count.", t: "try: 80 (the default)" },
+    predatorSpeed: { d: "Predator cruise speed.", t: "try: 110 vs prey max 150 = escapable" },
+    predatorPerception: { d: "Predator's prey-detection radius; above prey's 80 = ambush edge.", t: "try: 80 for symmetric sight" },
+    predatorCaptureRadius: { d: "Contact distance at which a prey is caught.", t: "try: 10-20 around the default 14" },
+    predatorMetabolism: { d: "Predator energy burn per second (economy on); prey burn 1.5.", t: "try: 2-3; higher = must hunt more" },
+    predatorReproEnergy: { d: "Energy a predator needs to bud a child (economy on).", t: "try: 40-80; higher = slower breeding" },
+    predatorMaxAge: { d: "Predator death age; 0 = immortal until starved.", t: "try: 0, or 120 to age them out" },
+    currentMode: { d: "eddies = moving vortices; gyre = two counter-rotating basins.", t: "try: eddies with strength 80" },
+    currentEddies: { d: "Number of vortices in eddies mode.", t: "try: 3-8 around the default 5" },
+    currentCore: { d: "Eddy radius — the distance of peak flow speed.", t: "try: 100-250 around the default 150" },
+    currentDrift: { d: "How fast the flow field evolves (0 = static).", t: "try: 0.5-2 around the default 1" },
+    fastTanh: { d: "~1.25x faster tanh approximation — changes the numbers.", t: "try: off to reproduce native runs" }
+  };
+
   var Module = null;
   var paused = false;
   var simSpeed = 1;
@@ -102,9 +147,12 @@
       input.value = String(def);
     }
     input.id = "adv_" + key;
-    var text = document.createTextNode(opt.label || key);
-    if (typeof def === "boolean") { label.appendChild(input); label.appendChild(text); }
-    else { label.appendChild(text); label.appendChild(input); }
+    var text = document.createElement("span");
+    text.className = "lt";
+    text.textContent = opt.label || key;
+    label.appendChild(text);  /* name left, control in the right-aligned column */
+    label.appendChild(input);
+    attachTip(label, key);
     return label;
   }
   function buildAdvancedUI() {
@@ -474,11 +522,57 @@
   function setDrawer(open) {
     drawerEl.classList.toggle("open", open);
     menuBtn.textContent = open ? "✕" : "☰";
+    if (!open) hideTip();
   }
   menuBtn.addEventListener("click", function () {
     setDrawer(!drawerEl.classList.contains("open"));
     this.blur();
   });
+
+  /* ---- shared hover tooltip (one fixed div, styled in index.html) ---- */
+  var tipEl = document.createElement("div");
+  tipEl.id = "tooltip";
+  var tipDesc = document.createElement("div");
+  tipDesc.className = "tipd";
+  var tipTry = document.createElement("div");
+  tipTry.className = "tipt";
+  tipEl.appendChild(tipDesc);
+  tipEl.appendChild(tipTry);
+  document.body.appendChild(tipEl);
+  var tipTimer = 0;
+  function hideTip() {
+    clearTimeout(tipTimer);
+    tipEl.style.display = "none";
+  }
+  function showTip(labelEl, tip) {
+    tipDesc.textContent = tip.d;
+    tipTry.textContent = tip.t;
+    tipEl.style.display = "block";
+    /* to the LEFT of the drawer (outside its clipping), centred on the label */
+    var dr = drawerEl.getBoundingClientRect();
+    var lr = labelEl.getBoundingClientRect();
+    var left = Math.max(6, dr.left - 10 - tipEl.offsetWidth);
+    var top = lr.top + lr.height / 2 - tipEl.offsetHeight / 2;
+    top = Math.max(6, Math.min(top, window.innerHeight - tipEl.offsetHeight - 6));
+    tipEl.style.left = left + "px";
+    tipEl.style.top = top + "px";
+  }
+  function attachTip(labelEl, key) {
+    var tip = TIPS[key];
+    if (!tip) return;
+    labelEl.addEventListener("mouseenter", function () {
+      clearTimeout(tipTimer);
+      tipTimer = setTimeout(function () { showTip(labelEl, tip); }, 150);
+    });
+    labelEl.addEventListener("mouseleave", hideTip);
+  }
+  drawerEl.addEventListener("scroll", hideTip);
+  /* basic (static-HTML) parameter labels, resolved via their input ids */
+  ["seed", "population", "predators", "foodPatches", "currentStrength", "predatorEconomy"]
+    .forEach(function (id) {
+      var l = el(id).closest("label");
+      if (l) attachTip(l, id);
+    });
 
   function btn(id, fn) {
     el(id).addEventListener("click", function () { fn(); this.blur(); });

@@ -85,8 +85,18 @@
     gap: 10px;
     width: 100%;
   }
-  /* tight text-to-input gap everywhere */
-  label { display: inline-flex; align-items: center; justify-content: flex-start; gap: 4px; color: #8fa89a; }
+  label { display: inline-flex; align-items: center; gap: 4px; color: #8fa89a; }
+  /* parameter rows: name left, control in one right-aligned column down the drawer */
+  #controls fieldset { flex-direction: column; align-items: stretch; gap: 4px; }
+  #controls fieldset label, #advgrid label {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    align-items: center;
+    column-gap: 8px;
+  }
+  #controls fieldset input[type="checkbox"], #advgrid input[type="checkbox"] { justify-self: end; }
+  /* hover-info affordance on parameter names */
+  .lt { justify-self: start; border-bottom: 1px dotted #3a5a48; cursor: help; }
   input[type="number"], select {
     width: 6.5em;
     background: #10201a;
@@ -128,14 +138,13 @@
   #speedlabel { color: #8fa89a; min-width: 7.5em; text-align: center; }
   .row { display: flex; align-items: center; gap: 10px; }
   #err { color: #e05a5a; min-height: 1em; }
+  /* Borderless container so its section fieldsets sit at the same inset as
+   * the basic groups — one globally aligned control column down the drawer. */
   #adv {
     width: 100%;
-    background: #0d1813;
-    border: 1px solid #1e3a2e;
-    border-radius: 4px;
-    padding: 8px 12px;
+    padding: 0;
   }
-  #adv summary { cursor: pointer; color: #7ea08c; user-select: none; }
+  #adv summary { cursor: pointer; color: #7ea08c; user-select: none; padding: 4px 0; }
   #advgrid {
     display: flex;
     flex-direction: column;
@@ -148,7 +157,23 @@
     grid-template-columns: 1fr; /* one knob per row in the drawer */
     gap: 4px;
   }
-  #advgrid input[type="number"], #advgrid select { width: 5em; }
+  #advgrid input[type="number"], #advgrid select { width: 6.5em; }
+  /* shared hover tooltip (element created by renderer.js) */
+  #tooltip {
+    display: none;
+    position: fixed;
+    z-index: 40;
+    max-width: 280px;
+    background: rgba(10,24,17,0.94);
+    border: 1px solid #2a4a3a;
+    border-radius: 4px;
+    padding: 8px 10px;
+    font-size: 12px;
+    line-height: 1.45;
+    pointer-events: none;
+  }
+  #tooltip .tipd { color: #cfe0d5; }
+  #tooltip .tipt { color: #8fb89f; margin-top: 2px; }
 </style>
 </head>
 <body>
@@ -174,18 +199,18 @@
     <div id="controls">
       <fieldset>
         <legend>world</legend>
-        <label>seed <input id="seed" type="number" value="42" min="0" step="1"></label>
-        <label>population <input id="population" type="number" value="300" min="1" step="1"></label>
+        <label><span class="lt">seed</span><input id="seed" type="number" value="42" min="0" step="1"></label>
+        <label><span class="lt">population</span><input id="population" type="number" value="300" min="1" step="1"></label>
       </fieldset>
       <fieldset>
         <legend>predators</legend>
-        <label>predators <input id="predators" type="number" value="0" min="0" step="1"></label>
-        <label><input id="predatorEconomy" type="checkbox"> predator economy</label>
+        <label><span class="lt">predators</span><input id="predators" type="number" value="0" min="0" step="1"></label>
+        <label><span class="lt">predator economy</span><input id="predatorEconomy" type="checkbox"></label>
       </fieldset>
       <fieldset>
         <legend>environment</legend>
-        <label>food patches <input id="foodPatches" type="number" value="0" min="0" step="1"></label>
-        <label>current strength <input id="currentStrength" type="number" value="0" min="0" step="1"></label>
+        <label><span class="lt">food patches</span><input id="foodPatches" type="number" value="0" min="0" step="1"></label>
+        <label><span class="lt">current strength</span><input id="currentStrength" type="number" value="0" min="0" step="1"></label>
       </fieldset>
       <div class="row">
         <button id="restart">Restart</button>

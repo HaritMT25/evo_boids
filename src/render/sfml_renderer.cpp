@@ -351,7 +351,8 @@ void SfmlRenderer::drawNeuralOverlay(const Creature& c) {
 
     // 1) Connections first (under the nodes). Alpha ~ |weight|*|source activation|.
     sf::VertexArray links(sf::Lines);
-    for (const auto& g : c.nnet.connections) {
+    for (const auto& fc : c.nnet.flat) {
+        const Gene g = asGene(fc);
         sf::Vector2f a = (g.sourceType == SOURCE_SENSOR) ? sensorPos(g.sourceNum)
                                                          : hiddenPos(g.sourceNum);
         sf::Vector2f b = (g.sinkType == SINK_ACTION) ? actionPos(g.sinkNum)

@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <chrono>
 #include <cstdio>
+#include <utility>
 #include "vec2.hpp"
 #include "creature.hpp"
 #include "predator.hpp"
@@ -70,6 +71,22 @@ public:
 // Reusable scratch buffers for the per-creature spatial queries. Kept alive
 // across creatures (and one set per thread under OpenMP) so neighbour/food/
 // probe queries don't each heap-allocate a fresh std::vector every tick.
+// One attended neighbour, with the offset already computed so the second pass
+// never re-reads its position. Used only when SimConfig::maxNeighbors > 0.
+struct NeighborCandidate {
+    float distSq;
+    float dx, dy;
+    int   index;
+};
+
+// Upper bound on the topological attention cap. Real animals attend to a
+// handful (see SimConfig::maxNeighbors), so this is far above any meaningful
+// setting; it exists so the nearest-N selection can use a fixed stack array
+// and never allocate. Materialising the candidate list instead measured
+// SLOWER than no cap at all, because writing ~150 candidates per creature per
+// step costs more memory traffic than the per-neighbour work it skips.
+constexpr int MAX_TOPOLOGICAL_NEIGHBORS = 64;
+
 struct SensorScratch {
     std::vector<int> neighbors;
     std::vector<int> nearbyFood;
@@ -348,7 +365,7 @@ public:
             // Feed through neural net
             float actions[NUM_ACTIONS];
             std::memset(actions, 0, sizeof(actions));
-            feedForward(c.nnet, sensors, actions);
+            feedForward(c.nnet, sensors, actions, cfg.fastTanh);
 
             if (prof_) tc = std::chrono::steady_clock::now();
 
@@ -823,15 +840,10 @@ private:
         int neighborCount = 0;
         float popFwd = 0, popLR = 0;
 
-        for (int ni : neighbors) {
-            if (ni == selfIdx) continue;
-            const Creature& other = creatures[ni];
-            if (!other.alive) continue;
-
-            float dx = other.pos.x - c.pos.x;
-            float dy = other.pos.y - c.pos.y;
-            float dist = std::sqrt(dx * dx + dy * dy);
-
+        // One neighbour's contribution to the social percepts. Shared by both
+        // paths below so the maths exists once; with cfg.maxNeighbors == 0 the
+        // call order is exactly the old inline loop's, hence bit-identical.
+        auto attendTo = [&](int ni, const Creature& other, float dx, float dy, float dist) {
             avgDx += dx; avgDy += dy;
             avgHx += other.vel.x; avgHy += other.vel.y;
 
@@ -842,6 +854,76 @@ private:
 
             if (dist < nearestDist) { nearestDist = dist; nearestIdx = ni; }
             neighborCount++;
+        };
+
+        // True crowding inside the radius, independent of the attention cap:
+        // density is a percept in its own right (see SimConfig::maxNeighbors).
+        int inRadiusCount = 0;
+
+        if (cfg.maxNeighbors <= 0) {
+            // Metric interaction: attend to everything in range (historical).
+            for (int ni : neighbors) {
+                if (ni == selfIdx) continue;
+                const Creature& other = creatures[ni];
+                if (!other.alive) continue;
+
+                float dx = other.pos.x - c.pos.x;
+                float dy = other.pos.y - c.pos.y;
+                float dist = std::sqrt(dx * dx + dy * dy);
+                attendTo(ni, other, dx, dy, dist);
+            }
+            inRadiusCount = neighborCount;
+        } else {
+            // Topological interaction: rank candidates by squared distance and
+            // attend to the nearest N. Ordering by (distanceSq, index) is a
+            // total order, so the selection is deterministic even when two
+            // neighbours are exactly equidistant, and independent of the order
+            // the spatial index happened to return candidates in.
+            // Selection is by (distanceSq, index), a total order, so both the
+            // chosen set and the order it is summed in are uniquely determined
+            // — no dependence on library sort internals, which is what keeps a
+            // run reproducible on another toolchain or under wasm.
+            //
+            // Kept in a small sorted stack array rather than a candidate list:
+            // once it is full, a neighbour that is farther than the current
+            // worst is rejected on a single comparison, and in a dense school
+            // that is almost every one of them.
+            const int keepMax = std::min(cfg.maxNeighbors, MAX_TOPOLOGICAL_NEIGHBORS);
+            NeighborCandidate best[MAX_TOPOLOGICAL_NEIGHBORS];
+            int have = 0;
+
+            for (int ni : neighbors) {
+                if (ni == selfIdx) continue;
+                const Creature& other = creatures[ni];
+                if (!other.alive) continue;
+                ++inRadiusCount;
+
+                const float dx = other.pos.x - c.pos.x;
+                const float dy = other.pos.y - c.pos.y;
+                const float d2 = dx * dx + dy * dy;
+
+                if (have == keepMax) {
+                    const NeighborCandidate& worst = best[have - 1];
+                    if (d2 > worst.distSq ||
+                        (d2 == worst.distSq && ni > worst.index)) continue;
+                }
+
+                int at = (have < keepMax) ? have : have - 1;
+                while (at > 0) {
+                    const NeighborCandidate& prev = best[at - 1];
+                    if (prev.distSq < d2 ||
+                        (prev.distSq == d2 && prev.index < ni)) break;
+                    best[at] = prev;
+                    --at;
+                }
+                best[at] = { d2, dx, dy, ni };
+                if (have < keepMax) ++have;
+            }
+
+            for (int j = 0; j < have; ++j) {
+                attendTo(best[j].index, creatures[best[j].index],
+                         best[j].dx, best[j].dy, std::sqrt(best[j].distSq));
+            }
         }
 
         if (neighborCount > 0) {
@@ -849,13 +931,13 @@ private:
             avgHx /= neighborCount; avgHy /= neighborCount;
         }
 
-        sensors[NEIGHBOR_COUNT] = std::tanh(neighborCount / 10.0f);
+        sensors[NEIGHBOR_COUNT] = std::tanh(inRadiusCount / 10.0f);
         sensors[AVG_NEIGHBOR_DX] = std::tanh(avgDx / cfg.perceptionRadius);
         sensors[AVG_NEIGHBOR_DY] = std::tanh(avgDy / cfg.perceptionRadius);
         sensors[AVG_NEIGHBOR_HEADING_X] = avgHx;
         sensors[AVG_NEIGHBOR_HEADING_Y] = avgHy;
         sensors[NEAREST_NEIGHBOR_DIST] = nearestDist / cfg.perceptionRadius;
-        sensors[POPULATION_DENSITY] = std::tanh(neighborCount / 15.0f);
+        sensors[POPULATION_DENSITY] = std::tanh(inRadiusCount / 15.0f);
         sensors[POPULATION_FWD] = std::tanh(popFwd / 5.0f);
         sensors[POPULATION_LR] = std::tanh(popLR / 5.0f);
 

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(evo_boids VERSION 0.15.0 LANGUAGES CXX)
+project(evo_boids VERSION 0.16.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -10,6 +10,21 @@ endif()
 
 set(CMAKE_CXX_FLAGS_RELEASE "-O3")
 set(CMAKE_CXX_FLAGS_DEBUG "-g -O0")
+
+# Reproducible floating point. Without this the compiler is free to fuse a*b+c
+# into a single-rounded FMA wherever it likes, which makes results depend on
+# -march, compiler version and target: two builds of IDENTICAL source then
+# disagree in the last bits and diverge (chaotic system). WebAssembly has no
+# scalar FMA instruction at all, so a native build WITH contraction can never
+# reproduce a wasm build.
+#
+# Keeping contraction off is what lets a fixed --seed mean the same run
+# everywhere, which is the premise of the deterministic serial build, of
+# resuming from a checkpoint, and of verifying a result by replaying it. It is
+# also what makes the flattened feedForward provably identical to the original
+# (see NeuralNet::flat in genome.hpp and the equivalence test in core_tests).
+# Do not add -ffast-math: it implies contraction and much worse.
+add_compile_options(-ffp-contract=off)
 
 # Serial build switch. OpenMP parallelises the sensor/movement phase with
 # per-thread RNGs, which makes runs NON-reproducible even at a fixed --seed (see

@@ -116,7 +116,7 @@ static void test_genome_and_net() {
 
     NeuralNet net;
     buildNeuralNet(g, net);
-    CHECK(net.connections.size() == g.size());
+    CHECK(net.flat.size() == g.size());
 
     float sensors[NUM_SENSES];
     for (int i = 0; i < NUM_SENSES; ++i) sensors[i] = rng.range(-1.0f, 1.0f);
@@ -657,6 +657,304 @@ static void test_analysis_v012() {
 }
 
 // ---------------------------------------------------------------
+// Self-contained ORACLE: verbatim copies of buildNeuralNet / feedForward as
+// they were before NeuralNet::flat existed (when the net stored a genome-
+// ordered std::vector<Gene> and branched per connection). The optimised
+// implementation in genome.hpp must reproduce this BIT for BIT, otherwise the
+// speedup would silently be a change to the science. Deliberately duplicated
+// here rather than sharing code with the implementation: an oracle that reuses
+// the thing it checks proves nothing. Do not "tidy" it to match the new one.
+namespace oracle {
+
+struct RefNet {
+    std::vector<Gene> connections;
+    struct Neuron { float output = 0.5f; bool driven = false; };
+    std::vector<Neuron> neurons;
+};
+
+static void build(const Genome& genome, RefNet& nnet) {
+    nnet.connections.clear();
+    nnet.neurons.clear();
+    nnet.neurons.resize(MAX_INTERNAL_NEURONS);
+
+    for (auto gene : genome) {
+        if (gene.sourceType == SOURCE_SENSOR) gene.sourceNum %= NUM_SENSES;
+        else                                  gene.sourceNum %= MAX_INTERNAL_NEURONS;
+        if (gene.sinkType == SINK_ACTION)     gene.sinkNum %= NUM_ACTIONS;
+        else                                  gene.sinkNum %= MAX_INTERNAL_NEURONS;
+        nnet.connections.push_back(gene);
+    }
+
+    for (const auto& conn : nnet.connections) {
+        if (conn.sinkType == SINK_NEURON) nnet.neurons[conn.sinkNum].driven = true;
+    }
+}
+
+static void feedForward(RefNet& nnet, const float sensors[], float actions[]) {
+    float neuronAccum[MAX_INTERNAL_NEURONS] = {};
+
+    for (int i = 0; i < NUM_ACTIONS; ++i) {
+        actions[i] = 0.0f;
+    }
+
+    for (const auto& conn : nnet.connections) {
+        float sourceVal;
+        if (conn.sourceType == SOURCE_SENSOR) {
+            sourceVal = sensors[conn.sourceNum];
+        } else {
+            sourceVal = nnet.neurons[conn.sourceNum].output;
+        }
+
+        float contribution = sourceVal * conn.weightAsFloat();
+
+        if (conn.sinkType == SINK_ACTION) {
+            actions[conn.sinkNum] += contribution;
+        } else {
+            neuronAccum[conn.sinkNum] += contribution;
+        }
+    }
+
+    for (int i = 0; i < MAX_INTERNAL_NEURONS; ++i) {
+        if (nnet.neurons[i].driven) {
+            nnet.neurons[i].output = std::tanh(neuronAccum[i]);
+        }
+    }
+
+    for (int i = 0; i < NUM_ACTIONS; ++i) {
+        actions[i] = std::tanh(actions[i]);
+    }
+}
+
+}  // namespace oracle
+
+static void test_feedforward_equivalence() {
+    std::printf("feedForward: flattened == original, bit for bit...\n");
+    rng.seed(20260725u);
+
+    const int NETS = 400, STEPS = 6;
+    int actionMismatches = 0, neuronMismatches = 0, flatSizeOk = 0;
+
+    for (int t = 0; t < NETS; ++t) {
+        Genome g = makeRandomGenome();
+        oracle::RefNet ref;
+        NeuralNet opt;
+        oracle::build(g, ref);
+        buildNeuralNet(g, opt);
+
+        if (opt.flat.size() == g.size() && ref.connections.size() == g.size()) ++flatSizeOk;
+
+        // Same wiring decisions: driven-neuron flags must agree.
+        bool drivenAgrees = true;
+        for (int n = 0; n < MAX_INTERNAL_NEURONS; ++n) {
+            if (ref.neurons[n].driven != opt.neurons[n].driven) drivenAgrees = false;
+        }
+        CHECK(drivenAgrees);
+
+        // Several steps, because internal neuron outputs are recurrent state:
+        // a one-step check would miss divergence that only shows up once the
+        // net starts reading back its own previous activations.
+        for (int step = 0; step < STEPS; ++step) {
+            float sensors[NUM_SENSES];
+            for (int s = 0; s < NUM_SENSES; ++s) sensors[s] = rng.range(-1.0f, 1.0f);
+
+            float actRef[NUM_ACTIONS], actOpt[NUM_ACTIONS];
+            oracle::feedForward(ref, sensors, actRef);
+            feedForward(opt, sensors, actOpt);   // exact path: fastTanh defaults off
+
+            for (int k = 0; k < NUM_ACTIONS; ++k) {
+                if (actRef[k] != actOpt[k]) ++actionMismatches;   // == , not approx
+            }
+            for (int n = 0; n < MAX_INTERNAL_NEURONS; ++n) {
+                if (ref.neurons[n].output != opt.neurons[n].output) ++neuronMismatches;
+            }
+        }
+    }
+
+    CHECK(flatSizeOk == NETS);
+    CHECK(actionMismatches == 0);
+    CHECK(neuronMismatches == 0);
+
+    // The flat list must be a permutation of the wired connections, grouped by
+    // sink: every entry's source/sink must land in its declared index space.
+    {
+        Genome g = makeRandomGenome();
+        NeuralNet n;
+        buildNeuralNet(g, n);
+        bool rangesOk = true, groupedBySink = true;
+        int prevSink = -1;
+        for (const auto& fc : n.flat) {
+            if (fc.src() >= NUM_SENSES + MAX_INTERNAL_NEURONS) rangesOk = false;
+            if (fc.sink() >= NUM_ACTIONS + MAX_INTERNAL_NEURONS) rangesOk = false;
+            if (fc.sink() < prevSink) groupedBySink = false;
+            prevSink = fc.sink();
+        }
+        CHECK(rangesOk);
+        CHECK(groupedBySink);
+
+        // The packed field must round-trip every index the two spaces allow —
+        // a silent overflow here would corrupt wiring rather than fail loudly.
+        bool packRoundTrips = true;
+        for (int src = 0; src < NUM_SENSES + MAX_INTERNAL_NEURONS; ++src) {
+            for (int sink = 0; sink < NUM_ACTIONS + MAX_INTERNAL_NEURONS; ++sink) {
+                NeuralNet::FlatConn fc{
+                    (uint16_t)(src | (sink << NeuralNet::FlatConn::SRC_BITS)), 0 };
+                if (fc.src() != src || fc.sink() != sink) packRoundTrips = false;
+            }
+        }
+        CHECK(packRoundTrips);
+
+        // asGene() must invert the flattening exactly: decoding an entry has to
+        // reproduce the same wiring the oracle's remapping produced, as a
+        // multiset (flat is sink-grouped, the oracle keeps genome order).
+        oracle::RefNet ref;
+        oracle::build(g, ref);
+        CHECK(ref.connections.size() == n.flat.size());
+        std::vector<bool> claimed(ref.connections.size(), false);
+        bool decodeMatches = true;
+        for (const auto& fc : n.flat) {
+            const Gene d = asGene(fc);
+            bool found = false;
+            for (size_t i = 0; i < ref.connections.size(); ++i) {
+                const Gene& r = ref.connections[i];
+                if (claimed[i]) continue;
+                if (r.sourceType == d.sourceType && r.sourceNum == d.sourceNum &&
+                    r.sinkType == d.sinkType && r.sinkNum == d.sinkNum &&
+                    r.weight == d.weight && r.weightAsFloat() == fc.w()) {
+                    claimed[i] = true; found = true; break;
+                }
+            }
+            if (!found) decodeMatches = false;
+        }
+        CHECK(decodeMatches);
+    }
+}
+
+static void test_fast_tanh() {
+    std::printf("fastTanhApprox: bounded error, right shape...\n");
+    float worst = 0.0f;
+    for (float x = -8.0f; x <= 8.0f; x += 0.001f) {
+        worst = std::max(worst, std::fabs(fastTanhApprox(x) - std::tanh(x)));
+    }
+    CHECK(worst < 1.2e-4f);                       // the bound genome.hpp promises
+    CHECK(fastTanhApprox(0.0f) == 0.0f);          // odd function, exact at origin
+    CHECK(approx(fastTanhApprox(-1.3f), -fastTanhApprox(1.3f), 1e-7f));
+
+    // Range invariant: an activation outside [-1,1] would be a value the exact
+    // tanh can never produce, and downstream code assumes the bound. The
+    // rational form crosses 1.0 at x = 4.9715, so this is a real risk, not a
+    // theoretical one — it is why the clamp sits at 4.95.
+    bool inRange = true;
+    for (float x = -20.0f; x <= 20.0f; x += 0.0005f) {
+        const float v = fastTanhApprox(x);
+        if (v > 1.0f || v < -1.0f) inRange = false;
+    }
+    CHECK(inRange);
+
+    // Non-decreasing, so it can't invert a comparison the exact tanh would make.
+    // Tolerance absorbs 1-ulp wobble in the rational evaluation; what matters is
+    // that there is no macroscopic reversal (the pre-fix clamp had one).
+    bool monotone = true;
+    float prev = fastTanhApprox(-20.0f);
+    for (float x = -20.0f; x <= 20.0f; x += 0.001f) {
+        const float v = fastTanhApprox(x);
+        if (v < prev - 1e-6f) monotone = false;
+        prev = v;
+    }
+    CHECK(monotone);
+}
+
+// Hash of the observable world state, for comparing two runs exactly.
+static std::uint64_t worldFingerprint(const World& w) {
+    std::uint64_t h = 1469598103934665603ull;             // FNV-1a
+    auto mix = [&](float f) {
+        std::uint32_t bits;
+        std::memcpy(&bits, &f, sizeof(bits));
+        for (int b = 0; b < 4; ++b) {
+            h ^= (bits >> (8 * b)) & 0xFF;
+            h *= 1099511628211ull;
+        }
+    };
+    for (const auto& c : w.creatures) {
+        mix(c.pos.x); mix(c.pos.y); mix(c.vel.x); mix(c.vel.y); mix(c.foodReserves);
+    }
+    return h;
+}
+
+static void test_topological_neighbors() {
+    std::printf("topological neighbour cap...\n");
+
+    auto runWorld = [](int maxNeighbors, int steps, unsigned seed) {
+        rng.seed(seed);
+        World w;
+        w.cfg.maxNeighbors = maxNeighbors;
+        w.init(600, 600, 400);            // small dense world => many neighbours in range
+        for (int i = 0; i < steps; ++i) w.update(0.016f);
+        return w;
+    };
+
+    // Run-to-run reproducibility is only promised by the serial build — under
+    // OpenMP the parallel phase draws from per-thread RNGs, so a fixed seed
+    // does not pin the run (see EVO_NO_OPENMP in CMakeLists.txt). These two
+    // checks compare whole runs, so they only mean anything there.
+#ifndef USE_OPENMP
+    // Same seed + same cap must reproduce exactly: the nearest-N selection is
+    // ordered by (distanceSq, index), so equidistant neighbours can't reorder.
+    {
+        World a = runWorld(7, 30, 4242u);
+        World b = runWorld(7, 30, 4242u);
+        CHECK(a.creatures.size() == b.creatures.size());
+        CHECK(worldFingerprint(a) == worldFingerprint(b));
+    }
+#endif
+
+    // The cap must actually be wired in: attending to 1 neighbour cannot give
+    // the same trajectory as attending to all of them in a dense world.
+    {
+        World capped = runWorld(1, 30, 99u);
+        World metric = runWorld(0, 30, 99u);
+        CHECK(worldFingerprint(capped) != worldFingerprint(metric));
+    }
+
+    // A cap no smaller than the achievable neighbour count selects everyone, so
+    // it must agree with metric interaction. Not bit-equal — summing
+    // nearest-first rounds differently from summing in spatial-index order — so
+    // this checks agreement to float tolerance after a single step, in a world
+    // sparse enough that nobody has MAX_TOPOLOGICAL_NEIGHBORS neighbours.
+#ifndef USE_OPENMP
+    {
+        rng.seed(7u);
+        World huge; huge.cfg.maxNeighbors = MAX_TOPOLOGICAL_NEIGHBORS;
+        huge.init(1200, 1200, 60); huge.update(0.016f);
+        rng.seed(7u);
+        World all;  all.cfg.maxNeighbors = 0;
+        all.init(1200, 1200, 60);  all.update(0.016f);
+
+        CHECK(huge.creatures.size() == all.creatures.size());
+        bool positionsAgree = true;
+        const size_t n = std::min(huge.creatures.size(), all.creatures.size());
+        for (size_t i = 0; i < n; ++i) {
+            if (!approx(huge.creatures[i].pos.x, all.creatures[i].pos.x, 1e-2f) ||
+                !approx(huge.creatures[i].pos.y, all.creatures[i].pos.y, 1e-2f)) {
+                positionsAgree = false;
+            }
+        }
+        CHECK(positionsAgree);
+    }
+#endif
+
+    // Capping attention must not break the run-level invariants.
+    {
+        World w = runWorld(7, 120, 31337u);
+        bool finite = true;
+        for (const auto& c : w.creatures) {
+            if (!std::isfinite(c.pos.x) || !std::isfinite(c.pos.y)) finite = false;
+        }
+        CHECK(finite);
+        CHECK(w.creatures.size() > 0);
+    }
+}
+
+// ---------------------------------------------------------------
 int main() {
     std::printf("=== evo_boids core tests (no SFML linked) ===\n");
     test_vec2();
@@ -664,6 +962,9 @@ int main() {
     test_quadtree();
     test_spatial_grid_matches_quadtree();
     test_genome_and_net();
+    test_feedforward_equivalence();
+    test_fast_tanh();
+    test_topological_neighbors();
     test_creature();
     test_world_invariants();
     test_predator();

@@ -38,8 +38,10 @@ inline void fractions(const World& world, float out[NUM_SENSES]) {
     long counts[NUM_SENSES] = {};
     for (const Creature& c : world.creatures) {
         bool used[NUM_SENSES] = {};
-        for (const Gene& g : c.nnet.connections)
+        for (const auto& fc : c.nnet.flat) {
+            const Gene g = asGene(fc);
             if (g.sourceType == SOURCE_SENSOR && g.sourceNum < NUM_SENSES) used[g.sourceNum] = true;
+        }
         for (int s = 0; s < NUM_SENSES; ++s) if (used[s]) ++counts[s];
     }
     for (int s = 0; s < NUM_SENSES; ++s) out[s] = (float)counts[s] / (float)pop;

@@ -42,6 +42,33 @@ struct SimConfig {
     float perceptionRadius = 80.0f; // neighbour/food sensing radius (also grid cell)
     float interactRadius   = 20.0f; // social-interaction range
 
+    // Topological interaction cap: attend to at most the N NEAREST neighbours
+    // inside perceptionRadius rather than every one of them. 0 = off = metric
+    // interaction (attend to all), which is the historical behaviour and is
+    // preserved byte-for-byte.
+    //
+    // WHY THIS IS A MODEL IMPROVEMENT, NOT JUST A SPEED KNOB: real schooling and
+    // flocking animals interact topologically, not metrically. Ballerini et al.
+    // (PNAS 2008) showed starlings track a fixed ~6-7 nearest neighbours
+    // regardless of flock density, and fish studies find an even smaller
+    // effective set — Katz et al. (PNAS 2011) and Herbert-Read et al. (PNAS
+    // 2011) both find golden shiner / mosquitofish motion is explained largely
+    // by the 1-2 nearest neighbours. A metric rule makes a fish in a dense
+    // school average over ~150 neighbours, which no real animal does (and which
+    // is what makes dense worlds expensive here).
+    //
+    // 7 is the recommended setting (--topological): the canonical Ballerini
+    // number, and the conservative end of the fish range, so it constrains
+    // attention without discarding the schooling signal. Set 1-4 to test the
+    // stronger fish-specific claim.
+    //
+    // Only the per-neighbour INTERACTION terms are capped (average neighbour
+    // offset/heading, fore-aft and left-right population balance). The density
+    // percepts NEIGHBOR_COUNT and POPULATION_DENSITY still see the true count
+    // inside the radius, since crowding is something a fish genuinely senses
+    // and evolution should keep access to it.
+    int maxNeighbors = 0;
+
     // --- Cooldowns ---
     float reproCooldown    = 3.0f;
     float interactCooldown = 2.0f;
@@ -156,6 +183,22 @@ struct SimConfig {
     // (build / parallel{gather,feedForward,apply} / serial). Diagnostic only.
     bool profile = false;
 
+    // --- Numerics ---
+    // Swap std::tanh for a rational approximation in the neural net (see
+    // fastTanhApprox in genome.hpp). std::tanh is >half of feedForward's cost
+    // because every creature makes MAX_INTERNAL_NEURONS + NUM_ACTIONS calls per
+    // step no matter how small its genome, so this is the single largest
+    // remaining speedup — but it CHANGES THE NUMBERS (|error| <= 1.0e-4 per
+    // activation, which a chaotic sim amplifies into different trajectories).
+    //
+    // Off by default: runs must stay comparable with the existing corpus. Turn
+    // it on for exploratory sweeps where throughput matters more than
+    // continuity, and treat the results as a separate numerical lineage —
+    // record it in the run sidecar (dump() does) and re-confirm any headline
+    // finding with it off. It does NOT bias the dynamics (the approximation is
+    // symmetric and monotone), but individual runs will not match.
+    bool fastTanh = false;
+
     // Human-readable dump for run logs and the per-run sidecar file.
     std::string dump() const {
         const std::string maxPop =
@@ -176,8 +219,12 @@ struct SimConfig {
           << " newbornEnergy="    << newbornEnergy << "\n"
           << "perceptionRadius="  << perceptionRadius
           << " interactRadius="   << interactRadius
+          << " maxNeighbors="     << (maxNeighbors > 0
+                                      ? std::to_string(maxNeighbors) + " (topological)"
+                                      : std::string("unlimited (metric)"))
           << " reproCooldown="    << reproCooldown
           << " interactCooldown=" << interactCooldown << "\n"
+          << "fastTanh="          << (fastTanh ? "on (approx activations)" : "off (std::tanh)") << "\n"
           << "minSpeed="          << minSpeed
           << " maxSpeed="         << maxSpeed << "\n"
           << "triangularMotion="  << (triangularMotion ? "on" : "off")

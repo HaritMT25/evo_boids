@@ -54,6 +54,10 @@ void printUsage(const char* prog) {
         "  --newborn-energy F    child starting energy (default 25)\n"
         "  --perception F        sensing radius / grid cell (default 80)\n"
         "  --interact-radius F   social range (default 20)\n"
+        "  --max-neighbors N     attend to only the N nearest neighbours in range,\n"
+        "                        0=all (default 0 = metric interaction)\n"
+        "  --topological         shorthand for --max-neighbors 7 (Ballerini et al. 2008:\n"
+        "                        starlings track ~6-7 nearest; fish studies suggest fewer)\n"
         "  --repro-cooldown F    (default 3)   --interact-cooldown F (default 2)\n"
         "  --min-speed F         (default 30)  --max-speed F (default 150)\n"
         "  --triangular-motion   couple speed+turn: fast=>can't turn, slow=>turns freely (default off)\n"
@@ -93,6 +97,8 @@ void printUsage(const char* prog) {
         "  --cluster-color M         'epoch' (time, default) or 'lineage' (colour points by clade)\n"
         "  --wiring-log              write <name>.wiring.csv: per-sensor wiring fraction over time (headless)\n"
         "  --profile                 print a build/parallel/serial phase timing breakdown at end (headless)\n"
+        "  --fast-tanh               approximate the neural activations (~1.2-1.3x faster, CHANGES\n"
+        "                            results; exploratory sweeps only — see config.hpp)\n"
         "  (In the live window: LEFT-CLICK a fish to watch its neural net fire in a top-right panel.)\n\n"
         "Log to CSV and then watch the result (omit --no-render):\n"
         "  " << prog << " --headless 50000 --name evolved_50k --log-every 2000\n\n"
@@ -156,6 +162,9 @@ int main(int argc, char** argv) {
         else if (arg == "--newborn-energy")   cfg.newbornEnergy     = std::atof(next("--newborn-energy"));
         else if (arg == "--perception")       cfg.perceptionRadius  = std::atof(next("--perception"));
         else if (arg == "--interact-radius")  cfg.interactRadius    = std::atof(next("--interact-radius"));
+        else if (arg == "--max-neighbors")    cfg.maxNeighbors      = std::atoi(next("--max-neighbors"));
+        else if (arg == "--topological")      cfg.maxNeighbors      = 7;
+        else if (arg == "--fast-tanh")        cfg.fastTanh          = true;
         else if (arg == "--repro-cooldown")   cfg.reproCooldown     = std::atof(next("--repro-cooldown"));
         else if (arg == "--interact-cooldown")cfg.interactCooldown  = std::atof(next("--interact-cooldown"));
         else if (arg == "--min-speed")        cfg.minSpeed          = std::atof(next("--min-speed"));
@@ -237,6 +246,12 @@ int main(int argc, char** argv) {
     fixOrder(cfg.genomeMinLength, cfg.genomeMaxLength, "genome length");
     fixOrder(cfg.genomeInitMin, cfg.genomeInitMax, "genome init");
     if (cfg.perceptionRadius < 1.0f) { std::cerr << "Note: perception clamped to 1.\n"; cfg.perceptionRadius = 1.0f; }
+    if (cfg.maxNeighbors < 0)        { std::cerr << "Note: max-neighbors < 0 treated as 0 (unlimited).\n"; cfg.maxNeighbors = 0; }
+    if (cfg.maxNeighbors > MAX_TOPOLOGICAL_NEIGHBORS) {
+        std::cerr << "Note: max-neighbors clamped to " << MAX_TOPOLOGICAL_NEIGHBORS
+                  << " (use 0 for unlimited/metric interaction).\n";
+        cfg.maxNeighbors = MAX_TOPOLOGICAL_NEIGHBORS;
+    }
     if (initialPopulation < 0)       initialPopulation = 0;
 
     // Init world with the chosen configuration.

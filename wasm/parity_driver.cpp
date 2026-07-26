@@ -72,12 +72,13 @@ int main(int argc, char** argv) {
 
     const unsigned seed = (unsigned)std::strtoul(argv[1], nullptr, 10);
     const long steps = std::strtol(argv[2], nullptr, 10);
-    bool rich = false, tri = false;
+    bool rich = false, tri = false, tor = false;
     const char* engineVersion = "parity";
     long traceEvery = 0;
     for (int i = 3; i < argc; ++i) {
         if (!std::strcmp(argv[i], "--rich")) rich = true;
         else if (!std::strcmp(argv[i], "--tri")) tri = true;
+        else if (!std::strcmp(argv[i], "--toroidal")) tor = true;
         else if (!std::strcmp(argv[i], "--engine-version") && i + 1 < argc) engineVersion = argv[++i];
         else if (!std::strcmp(argv[i], "--trace") && i + 1 < argc) traceEvery = std::strtol(argv[++i], nullptr, 10);
         else { std::fprintf(stderr, "unknown arg %s\n", argv[i]); return 2; }
@@ -100,6 +101,7 @@ int main(int argc, char** argv) {
         world.cfg.geneCost        = 0.005f;
     }
     if (tri) world.cfg.triangularMotion = true;
+    if (tor) world.cfg.toroidal = true;
     world.init(1920, 1080, 300);
 
     const auto t0 = std::chrono::steady_clock::now();

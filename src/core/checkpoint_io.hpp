@@ -94,6 +94,7 @@ inline bool rleDecode(const std::vector<long long>& in, std::vector<uint8_t>& ou
 inline void writeConfig(jsonm::Writer& w, const SimConfig& c) {
     w.key("config");
     w.beginObject();
+    w.field("toroidal", c.toroidal);
     w.field("minPopulation", c.minPopulation);
     w.field("maxPopulation", c.maxPopulation);
     w.field("targetFood", c.targetFood);
@@ -152,6 +153,7 @@ inline void writeConfig(jsonm::Writer& w, const SimConfig& c) {
 inline void readConfig(const jsonm::Value& j, SimConfig& c) {
     const jsonm::Value* o = j.find("config");
     if (!o || !o->isObject()) return;
+    c.toroidal = o->boolOr("toroidal", c.toroidal);
     c.minPopulation = o->intOr("minPopulation", c.minPopulation);
     c.maxPopulation = o->intOr("maxPopulation", c.maxPopulation);
     c.targetFood = o->intOr("targetFood", c.targetFood);

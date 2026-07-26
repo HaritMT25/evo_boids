@@ -16,6 +16,19 @@
 // net and the stats connectivity grid at compile time).
 // ----------------------------------------------------------------------------
 struct SimConfig {
+    // --- World topology ---
+    // Toroidal perception (opt-in, off = byte-identical historical behaviour).
+    // Positions have ALWAYS wrapped; this makes the SENSES wrap too: neighbour/
+    // food/predator queries and offsets use minimum-image distances across the
+    // seam, the pheromone grid deposits and reads wrap, the long probe looks
+    // through the seam, and the boundary sensors report "no wall anywhere"
+    // (a torus has no walls). Without it the seam is a sensory cliff — an
+    // edge-band creature perceives roughly HALF its true neighbours (measured:
+    // 3.0 seen vs 5.8 physically within range), which breeds wall-hugging
+    // phenotypes. Currents stay non-toroidal (the ocean is a bounded basin;
+    // a wrapped traveller feels a small velocity discontinuity at the seam).
+    bool toroidal = false;
+
     // --- Population ---
     int minPopulation = 50;   // reseed floor: random creatures injected below this
     int maxPopulation = 0;    // hard birth cap (0 = unlimited)
@@ -204,7 +217,8 @@ struct SimConfig {
         const std::string maxPop =
             (maxPopulation > 0) ? std::to_string(maxPopulation) : std::string("unlimited");
         std::ostringstream o;
-        o << "minPopulation="     << minPopulation
+        o << "toroidal="          << (toroidal ? "on (wrap-around senses)" : "off (bounded plane)") << "\n"
+          << "minPopulation="     << minPopulation
           << " maxPopulation="    << maxPop << "\n"
           << "targetFood="        << targetFood
           << " foodSpawnBase="    << foodSpawnBase

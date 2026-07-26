@@ -87,9 +87,11 @@ in **C++20**.
 
 ---
 
-## 2. Current version: v0.18.0
+## 2. Current version: v0.19.0
 
-> **Banner matches the code.** `CMakeLists.txt` is at **0.18.0**. 0.17.0 added
+> **Banner matches the code.** `CMakeLists.txt` is at **0.19.0**: adds `--toroidal`
+> (opt-in wrap-around perception — see the 0.19.0 history entry; default off,
+> fingerprint-verified byte-identical). 0.17.0 added
 > checkpoint/resume (bit-exact in the serial build, JSON format). 0.18.0 is the
 > **portable-determinism cycle + the WebAssembly build**: the native serial build and
 > the Emscripten/wasm build now produce **byte-identical checkpoints for the same
@@ -295,6 +297,36 @@ in **C++20**.
   bug** (that grid is stale by the time `computeStats` runs; §10.5). Negligible at
   the populations run so far (it was never the cause of the slowdown — §10.5), but it
   removes the O(n²) cliff for large-N / Stage-B runs.
+- **0.19.0 (`--toroidal` — wrap-around perception; opt-in, off = byte-identical,
+  fingerprint-verified vs 0.18.0 across 2 seeds x 1500 rich-config steps).**
+  Motivated by a user report of fish "stuck" at edges at 50x. Empirical diagnosis
+  first (edge_probe, 2 seeds x 6000 + 24000 steps): positions already wrap and
+  nothing is immobile — median edge visit is 19 steps (shorter than one rendered
+  frame at 50x, which is the illusion), band occupancy is 1.05-1.19x uniform with
+  total churn — BUT a real thin tail of wall-hugger phenotypes exists (2-7
+  creatures/run pinned >3000 steps until maxAge; two classes: wall-runners cruising
+  the border at ~max speed, and seam-oscillators re-crossing the wrap line every ~5
+  steps), and the mechanism is a measured **sensory cliff**: an edge-band creature
+  perceives 3.0-3.3 neighbours where minimum-image distance gives 5.8-6.0 (~90%
+  more), because SpatialGrid queries clamp at the seam, boundary sensors report a
+  wall, the long probe goes blind off-plane, and the pheromone gradient flattens.
+  The flag wraps ALL of it: `SpatialGrid::queryRadiusWrapped` (up to 9 clipped
+  image queries, no duplicates for r < min(W,H)/2, (0,0)-image first so interior
+  result order matches the metric path), min-image dx/dy in the metric +
+  topological gathers, nearest-neighbour attributes, food sensing/eating,
+  interaction pairing, predator hunt/chase/capture and prey threat sensors, wrapped
+  long probe, wrapped SignalGrid emit/read (index-wrapped over the true cell period,
+  padded +1 column untouched so checkpoint geometry is unchanged), wrapped newborn
+  midpoint and spawn placements (same rng draws either way), and BOUNDARY_* = 1.0
+  saturated no-wall. LOC_X/LOC_Y stay absolute; currents stay a bounded basin
+  (documented seam discontinuity). Checkpoints carry `"toroidal"` (old files load,
+  default false). Verified: wrapped-query differential vs brute-force min-image,
+  seam-visibility through the real sensor path, pheromone seam wrap, toroidal
+  resume bit-exactness over the full rich config, native==wasm parity for 2
+  toroidal cases (11-case matrix all PASS), ~1% throughput cost. core_tests
+  **2827/0** both builds. Expected science effect per the probe: wall-hugger and
+  seam-oscillator phenotypes disappear; aggregate band occupancy (~3.4%) barely
+  moves.
 - **0.18.0 (portable determinism + the WebAssembly build.)** Native serial and
   Emscripten builds now write byte-identical checkpoints for the same
   seed/config/steps (9-case matrix in `wasm/parity.sh`). Portable `RandomGen`

@@ -37,6 +37,8 @@ done
 run_case "rich_s42"    42    2000 --rich
 run_case "rich_s31415" 31415 2000 --rich
 run_case "tri_s42"     42    2000 --tri
+run_case "toro_s42"    42    2000 --toroidal
+run_case "toro_rich_s7" 7    2000 --rich --toroidal
 run_case "long_s42"    42    10000
 
 if [ "$FAILED" = "1" ]; then

@@ -59,6 +59,7 @@
     foodPatches: { d: "Cluster food into N spatial patches (0 = uniform scatter).", t: "try: 5-6; patchy food makes currents matter" },
     currentStrength: { d: "Peak ocean-flow speed in world units/sec (0 = still water).", t: "try: 80 with eddies = a lively ocean" },
     predatorEconomy: { d: "Predators eat, breed and starve (Stage B) instead of being immortal.", t: "try: on with 3-4 predators" },
+    toroidal: { d: "Senses wrap across the world seam — no walls, no sensory dead zone at edges.", t: "try: on; cures the wall-hugger phenotype" },
     targetFood: { d: "Baseline food count the world regrows toward (hard cap 2x).", t: "try: 300 scarcity, 1200 abundance" },
     foodSpawnBase: { d: "Mean food items spawned per step.", t: "try: 2-12; higher = richer world" },
     foodSpawnAmp: { d: "Sinusoidal swing of food abundance around the base rate.", t: "try: 0 for a steady food supply" },
@@ -195,6 +196,7 @@
     var predators = intVal("predators", 0);
     var foodPatches = intVal("foodPatches", 0);
     var currentStrength = floatVal("currentStrength", 0);
+    if (el("toroidal").checked) cfg.toroidal = true;
     if (predators !== 0) cfg.predatorCount = predators;
     if (el("predatorEconomy").checked) cfg.predatorEconomy = true;
     if (currentStrength !== 0) cfg.currentStrength = currentStrength;
@@ -568,7 +570,7 @@
   }
   drawerEl.addEventListener("scroll", hideTip);
   /* basic (static-HTML) parameter labels, resolved via their input ids */
-  ["seed", "population", "predators", "foodPatches", "currentStrength", "predatorEconomy"]
+  ["seed", "population", "toroidal", "predators", "foodPatches", "currentStrength", "predatorEconomy"]
     .forEach(function (id) {
       var l = el(id).closest("label");
       if (l) attachTip(l, id);

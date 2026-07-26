@@ -72,6 +72,48 @@ public:
         }
     }
 
+    // Toroidal radius query: the disk wraps across the world seam. Implemented
+    // as up to 9 image queries — the query rect is translated by ±width/±height
+    // and each translate is clipped against the world before its cells are
+    // enumerated, so the padded last column/row is never touched and no cell
+    // arithmetic goes modulo. Per-point distances are taken against the SHIFTED
+    // centre, which for that image IS the minimum-image distance. With
+    // radius < min(width, height)/2 (asserted by the caller's config) a point
+    // can be inside the disk in at most one image, so no duplicates are
+    // returned. The (0,0) image runs first, so away from the seam the result
+    // order is identical to queryRadius.
+    void queryRadiusWrapped(Vec2 center, float radius, std::vector<int>& results) const {
+        static const int order[9][2] = {
+            {0, 0}, {-1, -1}, {-1, 0}, {-1, 1}, {0, -1}, {0, 1}, {1, -1}, {1, 0}, {1, 1}};
+        const float r2 = radius * radius;
+        const float W = static_cast<float>(width_), H = static_cast<float>(height_);
+
+        for (const auto& im : order) {
+            const float cx0 = center.x + im[0] * W;
+            const float cy0 = center.y + im[1] * H;
+            // Clip the image's query rect against the world; skip empty clips.
+            const float lox = cx0 - radius, hix = cx0 + radius;
+            const float loy = cy0 - radius, hiy = cy0 + radius;
+            if (hix < 0.0f || lox >= W || hiy < 0.0f || loy >= H) continue;
+
+            const int minCx = clampCol(static_cast<int>(std::max(lox, 0.0f) * invCell_));
+            const int maxCx = clampCol(static_cast<int>(std::min(hix, W) * invCell_));
+            const int minCy = clampRow(static_cast<int>(std::max(loy, 0.0f) * invCell_));
+            const int maxCy = clampRow(static_cast<int>(std::min(hiy, H) * invCell_));
+
+            for (int cy = minCy; cy <= maxCy; ++cy) {
+                const std::size_t rowBase = static_cast<std::size_t>(cy) * cols_;
+                for (int cx = minCx; cx <= maxCx; ++cx) {
+                    for (const Entry& e : buckets_[rowBase + cx]) {
+                        const float dx = e.pos.x - cx0;
+                        const float dy = e.pos.y - cy0;
+                        if (dx * dx + dy * dy <= r2) results.push_back(e.index);
+                    }
+                }
+            }
+        }
+    }
+
 private:
     struct Entry {
         Vec2 pos;

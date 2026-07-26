@@ -39,6 +39,10 @@ void printUsage(const char* prog) {
         "  --version         Print version + build time, then exit.\n"
         "  --help, -h        Show this message.\n\n"
         "Simulation parameters (defaults reproduce the original behaviour):\n"
+        "  --toroidal            wrap-around senses: neighbour/food/predator perception,\n"
+        "                        pheromones and the long probe cross the world seam, and\n"
+        "                        the boundary sensors read no-wall (default off; positions\n"
+        "                        have always wrapped — this makes the SENSES wrap too)\n"
         "  --population N        starting creature count (default 300)\n"
         "  --min-pop N           reseed floor (default 50)\n"
         "  --max-pop N           hard birth cap, 0 = unlimited (default 0)\n"
@@ -183,6 +187,7 @@ int main(int argc, char** argv) {
         else if (arg == "--interact-cooldown")cfg.interactCooldown  = std::atof(next("--interact-cooldown"));
         else if (arg == "--min-speed")        cfg.minSpeed          = std::atof(next("--min-speed"));
         else if (arg == "--max-speed")        cfg.maxSpeed          = std::atof(next("--max-speed"));
+        else if (arg == "--toroidal")         cfg.toroidal          = true;
         else if (arg == "--triangular-motion") cfg.triangularMotion = true;
         else if (arg == "--max-turn-rate")    cfg.maxTurnRate       = std::atof(next("--max-turn-rate"));
         else if (arg == "--genome-min")       cfg.genomeMinLength   = std::atoi(next("--genome-min"));

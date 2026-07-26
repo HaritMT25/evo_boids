@@ -27,13 +27,31 @@ struct Food {
 class SignalGrid {
     int w_, h_, cellSize_;
     int cols_, rows_;
+    int wrapCols_ = 0, wrapRows_ = 0;   // seam period in cells (toroidal mode)
+    bool toroidal_ = false;
     std::vector<uint8_t> grid_;
 
+    static int floorDiv(int a, int b) {
+        int q = a / b;
+        if ((a % b != 0) && ((a < 0) != (b < 0))) --q;
+        return q;
+    }
+    static int wrapIdx(int i, int n) {
+        i %= n;
+        return i < 0 ? i + n : i;
+    }
+
 public:
-    void init(int worldW, int worldH, int cellSize = 8) {
+    void init(int worldW, int worldH, int cellSize = 8, bool toroidal = false) {
         w_ = worldW; h_ = worldH; cellSize_ = cellSize;
         cols_ = worldW / cellSize + 1;
         rows_ = worldH / cellSize + 1;
+        // Wrap arithmetic uses the true seam period, NOT the padded cols_/rows_
+        // (the +1 partial column/row stays allocated but is never indexed by
+        // the toroidal paths, so checkpoint geometry is unchanged).
+        wrapCols_ = worldW / cellSize;
+        wrapRows_ = worldH / cellSize;
+        toroidal_ = toroidal;
         grid_.assign(cols_ * rows_, 0);
     }
 
@@ -43,7 +61,12 @@ public:
         for (int dy = -radius; dy <= radius; ++dy) {
             for (int dx = -radius; dx <= radius; ++dx) {
                 int x = cx + dx, y = cy + dy;
-                if (x >= 0 && x < cols_ && y >= 0 && y < rows_) {
+                if (toroidal_) {
+                    x = wrapIdx(x, wrapCols_);
+                    y = wrapIdx(y, wrapRows_);
+                    int idx = y * cols_ + x;
+                    grid_[idx] = static_cast<uint8_t>(std::min(255, grid_[idx] + 64));
+                } else if (x >= 0 && x < cols_ && y >= 0 && y < rows_) {
                     int idx = y * cols_ + x;
                     grid_[idx] = static_cast<uint8_t>(std::min(255, grid_[idx] + 64));
                 }
@@ -52,8 +75,16 @@ public:
     }
 
     float read(Vec2 pos) const {
-        int x = std::clamp(static_cast<int>(pos.x) / cellSize_, 0, cols_ - 1);
-        int y = std::clamp(static_cast<int>(pos.y) / cellSize_, 0, rows_ - 1);
+        int x, y;
+        if (toroidal_) {
+            // floor division so slightly-negative probe points (readInDir near
+            // the seam) land in the right cell before wrapping.
+            x = wrapIdx(floorDiv(static_cast<int>(std::floor(pos.x)), cellSize_), wrapCols_);
+            y = wrapIdx(floorDiv(static_cast<int>(std::floor(pos.y)), cellSize_), wrapRows_);
+        } else {
+            x = std::clamp(static_cast<int>(pos.x) / cellSize_, 0, cols_ - 1);
+            y = std::clamp(static_cast<int>(pos.y) / cellSize_, 0, rows_ - 1);
+        }
         return grid_[y * cols_ + x] / 255.0f;
     }
 
@@ -223,10 +254,31 @@ public:
     // Structural constant, kept compile-time (not a tuning knob).
     static constexpr float LONGPROBE_DIST = 200.0f;
 
+    // Minimum-image displacement components on the torus (toroidal mode only):
+    // the shortest signed offset from a to b along an axis of span `span`.
+    // Exactly-half-span offsets keep their sign (+span/2), giving the fixed
+    // convention the topological tie-break's total order needs.
+    static float wrapDelta(float d, float span) {
+        const float half = 0.5f * span;
+        if (d > half) return d - span;
+        if (d < -half) return d + span;
+        return d;
+    }
+    float wrapDx(float d) const { return wrapDelta(d, (float)width); }
+    float wrapDy(float d) const { return wrapDelta(d, (float)height); }
+    // Wrap a coordinate back into [0, span). Loop form so oversized excursions
+    // (a patch radius larger than the world, a long probe) stay correct; every
+    // step is an exact float add/sub, so this is portable bit-for-bit.
+    static float wrapCoord(float v, float span) {
+        while (v < 0.0f) v += span;
+        while (v >= span) v -= span;
+        return v;
+    }
+
     void init(int w, int h, int numCreatures) {
         width = w;
         height = h;
-        signals.init(w, h);
+        signals.init(w, h, 8, cfg.toroidal);
         creatureGrid_.init(w, h, cfg.perceptionRadius);
         foodGrid_.init(w, h, cfg.perceptionRadius);
 
@@ -274,8 +326,15 @@ public:
             // (a current that pushes a creature off a patch now costs it).
             const Vec2& c = foodPatches_[rng.uint((uint32_t)foodPatches_.size() - 1)];
             const float R = cfg.foodPatchRadius;
-            f.pos = { std::clamp(c.x + rng.range(-R, R), 0.0f, (float)width),
-                      std::clamp(c.y + rng.range(-R, R), 0.0f, (float)height) };
+            if (cfg.toroidal) {
+                // Border patches wrap instead of piling food on the edge line.
+                // Same two rng draws as the clamped path (byte-identity off-flag).
+                f.pos = { wrapCoord(c.x + rng.range(-R, R), (float)width),
+                          wrapCoord(c.y + rng.range(-R, R), (float)height) };
+            } else {
+                f.pos = { std::clamp(c.x + rng.range(-R, R), 0.0f, (float)width),
+                          std::clamp(c.y + rng.range(-R, R), 0.0f, (float)height) };
+            }
         } else {
             f.pos = {rng.range(10.0f, (float)width - 10.0f),
                      rng.range(10.0f, (float)height - 10.0f)};
@@ -539,7 +598,8 @@ public:
 
             // Eat nearby food (modifies food[].alive)
             nearbyFood.clear();
-            foodGrid_.queryRadius(c.pos, cfg.pickupRadius, nearbyFood);
+            if (cfg.toroidal) foodGrid_.queryRadiusWrapped(c.pos, cfg.pickupRadius, nearbyFood);
+            else              foodGrid_.queryRadius(c.pos, cfg.pickupRadius, nearbyFood);
             for (int fi : nearbyFood) {
                 if (food[fi].alive) {
                     food[fi].alive = false;
@@ -550,7 +610,8 @@ public:
             // Social interactions
             if (c.interactTimer <= 0.0f) {
                 nearby.clear();
-                creatureGrid_.queryRadius(c.pos, cfg.interactRadius, nearby);
+                if (cfg.toroidal) creatureGrid_.queryRadiusWrapped(c.pos, cfg.interactRadius, nearby);
+                else              creatureGrid_.queryRadius(c.pos, cfg.interactRadius, nearby);
                 for (int ni : nearby) {
                     if (ni == i) continue;
                     Creature& other = creatures[ni];
@@ -659,14 +720,16 @@ private:
 
             // Nearest living prey within the detection radius.
             near.clear();
-            creatureGrid_.queryRadius(p.pos, cfg.predatorPerception, near);
+            if (cfg.toroidal) creatureGrid_.queryRadiusWrapped(p.pos, cfg.predatorPerception, near);
+            else              creatureGrid_.queryRadius(p.pos, cfg.predatorPerception, near);
             int   bestIdx = -1;
             float bestD2  = detect2;
             for (int ci : near) {
                 const Creature& prey = creatures[ci];
                 if (!prey.alive) continue;
-                const float dx = prey.pos.x - p.pos.x;
-                const float dy = prey.pos.y - p.pos.y;
+                float dx = prey.pos.x - p.pos.x;
+                float dy = prey.pos.y - p.pos.y;
+                if (cfg.toroidal) { dx = wrapDx(dx); dy = wrapDy(dy); }
                 const float d2 = dx * dx + dy * dy;
                 if (d2 < bestD2) { bestD2 = d2; bestIdx = ci; }
             }
@@ -674,7 +737,9 @@ private:
             // Steer toward the target, or wander if none is in range.
             Vec2 dir = p.forward();
             if (bestIdx >= 0) {
-                dir = normalized(creatures[bestIdx].pos - p.pos);
+                Vec2 toPrey = creatures[bestIdx].pos - p.pos;
+                if (cfg.toroidal) toPrey = { wrapDx(toPrey.x), wrapDy(toPrey.y) };
+                dir = normalized(toPrey);
             } else {
                 const float jitter = rng.range(-0.3f, 0.3f);
                 const float cs = evomath::cosf(jitter), sn = evomath::sinf(jitter);
@@ -696,8 +761,9 @@ private:
 
             // Capture: nearest prey within reach, predator not digesting.
             if (bestIdx >= 0 && p.digestTimer <= 0.0f && creatures[bestIdx].alive) {
-                const float dx = creatures[bestIdx].pos.x - p.pos.x;
-                const float dy = creatures[bestIdx].pos.y - p.pos.y;
+                float dx = creatures[bestIdx].pos.x - p.pos.x;
+                float dy = creatures[bestIdx].pos.y - p.pos.y;
+                if (cfg.toroidal) { dx = wrapDx(dx); dy = wrapDy(dy); }
                 if (dx * dx + dy * dy <= capture2) {
                     if (econ) {
                         // Carnivory is calorie-dense: absorb the victim's reserves
@@ -727,8 +793,15 @@ private:
                 } else if (p.energy >= cfg.predatorReproEnergy) {
                     Predator child;
                     // Place the child a hair off the parent with a random heading.
-                    child.pos = { std::clamp(p.pos.x + rng.range(-8.0f, 8.0f), 0.0f, (float)width  - 1.0f),
-                                  std::clamp(p.pos.y + rng.range(-8.0f, 8.0f), 0.0f, (float)height - 1.0f) };
+                    // (Toroidal: wrap instead of pinning the child to the wall;
+                    // same rng draws either way.)
+                    if (cfg.toroidal) {
+                        child.pos = { wrapCoord(p.pos.x + rng.range(-8.0f, 8.0f), (float)width),
+                                      wrapCoord(p.pos.y + rng.range(-8.0f, 8.0f), (float)height) };
+                    } else {
+                        child.pos = { std::clamp(p.pos.x + rng.range(-8.0f, 8.0f), 0.0f, (float)width  - 1.0f),
+                                      std::clamp(p.pos.y + rng.range(-8.0f, 8.0f), 0.0f, (float)height - 1.0f) };
+                    }
                     const float a = rng.range(0.0f, 6.2832f);
                     child.vel    = {evomath::cosf(a), evomath::sinf(a)};
                     child.energy = cfg.predatorNewbornEnergy;
@@ -803,6 +876,19 @@ private:
                                              cfg.genomeMaxLength,
                                              cfg.mutationMultiplier,
                                              cfg.newbornEnergy));
+                if (cfg.toroidal) {
+                    // makeChild placed the newborn at the raw parent midpoint;
+                    // for a seam-crossing pair that is mid-world. Re-place at
+                    // the wrapped midpoint (the body trail follows via
+                    // updateBody within a few frames; no rng involved).
+                    Creature& baby = newborns.back();
+                    Vec2 m = { wrapCoord(c1.pos.x + 0.5f * wrapDx(c2.pos.x - c1.pos.x), (float)width),
+                               wrapCoord(c1.pos.y + 0.5f * wrapDy(c2.pos.y - c1.pos.y), (float)height) };
+                    baby.pos = m;
+                    for (int bi = 0; bi < Creature::BODY_LEN; ++bi)
+                        baby.body[bi] = { m.x - baby.vel.x * bi * 4.0f,
+                                          m.y - baby.vel.y * bi * 4.0f };
+                }
                 newborns.back().lineageId = c1.lineageId;   // inherit maternal line
                 births++;
                 totalBirths++;
@@ -833,14 +919,23 @@ private:
         auto fwd = c.forward();
         auto rht = c.right();
 
-        // Position & boundaries
+        // Position & boundaries. LOC_X/LOC_Y stay absolute position in both
+        // modes (on the torus they are a discontinuous-but-informative
+        // coordinate). The boundary sensors saturate to "no wall anywhere"
+        // when the world wraps — a torus has no walls to sense.
         sensors[LOC_X] = c.pos.x / width;
         sensors[LOC_Y] = c.pos.y / height;
-        float bx = std::min(c.pos.x, (float)width - c.pos.x);
-        float by = std::min(c.pos.y, (float)height - c.pos.y);
-        sensors[BOUNDARY_DIST_X] = evomath::tanhf(bx / 100.0f);
-        sensors[BOUNDARY_DIST_Y] = evomath::tanhf(by / 100.0f);
-        sensors[BOUNDARY_DIST] = evomath::tanhf(std::min(bx, by) / 100.0f);
+        if (cfg.toroidal) {
+            sensors[BOUNDARY_DIST_X] = 1.0f;
+            sensors[BOUNDARY_DIST_Y] = 1.0f;
+            sensors[BOUNDARY_DIST] = 1.0f;
+        } else {
+            float bx = std::min(c.pos.x, (float)width - c.pos.x);
+            float by = std::min(c.pos.y, (float)height - c.pos.y);
+            sensors[BOUNDARY_DIST_X] = evomath::tanhf(bx / 100.0f);
+            sensors[BOUNDARY_DIST_Y] = evomath::tanhf(by / 100.0f);
+            sensors[BOUNDARY_DIST] = evomath::tanhf(std::min(bx, by) / 100.0f);
+        }
 
         // Own state
         sensors[OWN_VEL_X] = c.vel.x;
@@ -856,7 +951,8 @@ private:
         // Neighbor queries (reuse scratch buffer instead of allocating)
         std::vector<int>& neighbors = scratch.neighbors;
         neighbors.clear();
-        creatureGrid.queryRadius(c.pos, cfg.perceptionRadius, neighbors);
+        if (cfg.toroidal) creatureGrid.queryRadiusWrapped(c.pos, cfg.perceptionRadius, neighbors);
+        else              creatureGrid.queryRadius(c.pos, cfg.perceptionRadius, neighbors);
 
         float avgDx = 0, avgDy = 0, avgHx = 0, avgHy = 0;
         float nearestDist = cfg.perceptionRadius;
@@ -893,6 +989,7 @@ private:
 
                 float dx = other.pos.x - c.pos.x;
                 float dy = other.pos.y - c.pos.y;
+                if (cfg.toroidal) { dx = wrapDx(dx); dy = wrapDy(dy); }
                 float dist = std::sqrt(dx * dx + dy * dy);
                 attendTo(ni, other, dx, dy, dist);
             }
@@ -922,8 +1019,11 @@ private:
                 if (!other.alive) continue;
                 ++inRadiusCount;
 
-                const float dx = other.pos.x - c.pos.x;
-                const float dy = other.pos.y - c.pos.y;
+                float rawDx = other.pos.x - c.pos.x;
+                float rawDy = other.pos.y - c.pos.y;
+                if (cfg.toroidal) { rawDx = wrapDx(rawDx); rawDy = wrapDy(rawDy); }
+                const float dx = rawDx;
+                const float dy = rawDy;
                 const float d2 = dx * dx + dy * dy;
 
                 if (have == keepMax) {
@@ -973,6 +1073,7 @@ private:
             sensors[GENETIC_SIM_NEAREST] = genomeSimilarity(c.genome, nearest.genome);
             float dx = nearest.pos.x - c.pos.x;
             float dy = nearest.pos.y - c.pos.y;
+            if (cfg.toroidal) { dx = wrapDx(dx); dy = wrapDy(dy); }
             float dotFwd = dx * fwd.x + dy * fwd.y;
             sensors[GENETIC_SIM_FWD] = (dotFwd > 0)
                 ? genomeSimilarity(c.genome, nearest.genome) : 0.5f;
@@ -986,11 +1087,13 @@ private:
         // Food sensors (reuse scratch buffer)
         std::vector<int>& nearbyFood = scratch.nearbyFood;
         nearbyFood.clear();
-        foodGrid.queryRadius(c.pos, cfg.perceptionRadius, nearbyFood);
+        if (cfg.toroidal) foodGrid.queryRadiusWrapped(c.pos, cfg.perceptionRadius, nearbyFood);
+        else              foodGrid.queryRadius(c.pos, cfg.perceptionRadius, nearbyFood);
         float foodDx = 0, foodDy = 0, foodDist = cfg.perceptionRadius;
         for (int fi : nearbyFood) {
             float dx = food[fi].pos.x - c.pos.x;
             float dy = food[fi].pos.y - c.pos.y;
+            if (cfg.toroidal) { dx = wrapDx(dx); dy = wrapDy(dy); }
             float dist = std::sqrt(dx * dx + dy * dy);
             if (dist < foodDist) {
                 foodDist = dist;
@@ -1024,8 +1127,9 @@ private:
             Vec2  off    = {0.0f, 0.0f};
             bool  seen   = false;
             for (const Predator& p : predators) {
-                const float dx = p.pos.x - c.pos.x;
-                const float dy = p.pos.y - c.pos.y;
+                float dx = p.pos.x - c.pos.x;
+                float dy = p.pos.y - c.pos.y;
+                if (cfg.toroidal) { dx = wrapDx(dx); dy = wrapDy(dy); }
                 const float d2 = dx * dx + dy * dy;
                 if (d2 < bestD2) { bestD2 = d2; off = {dx, dy}; seen = true; }
             }
@@ -1047,7 +1151,15 @@ private:
         std::vector<int>& longProbe = scratch.longProbe;
         longProbe.clear();
         Vec2 probePos = {c.pos.x + fwd.x * LONGPROBE_DIST, c.pos.y + fwd.y * LONGPROBE_DIST};
-        creatureGrid.queryRadius(probePos, 30.0f, longProbe);
+        if (cfg.toroidal) {
+            // A probe cast past the seam looks into the far side of the world
+            // instead of going blind off-plane.
+            probePos = { wrapCoord(probePos.x, (float)width),
+                         wrapCoord(probePos.y, (float)height) };
+            creatureGrid.queryRadiusWrapped(probePos, 30.0f, longProbe);
+        } else {
+            creatureGrid.queryRadius(probePos, 30.0f, longProbe);
+        }
         sensors[LONGPROBE_POP_FWD] = evomath::tanhf((float)longProbe.size() / 5.0f);
 
         // Random

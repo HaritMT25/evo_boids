@@ -1174,6 +1174,133 @@ static void test_checkpoint() {
 }
 
 // ---------------------------------------------------------------
+// Toroidal mode (cfg.toroidal, default off): senses wrap across the seam.
+// Off-flag behaviour is byte-identical (every change is behind the flag);
+// these tests pin the on-flag semantics.
+static void test_toroidal() {
+    std::printf("toroidal: wrapped queries, seam senses, resume...\n");
+
+    // --- SpatialGrid::queryRadiusWrapped == brute-force minimum-image ---
+    {
+        rng.seed(77001u);
+        const float W = 800.0f, H = 600.0f, R = 80.0f;
+        SpatialGrid grid;
+        grid.init((int)W, (int)H, R);
+        std::vector<Vec2> pts;
+        for (int i = 0; i < 300; ++i) {
+            Vec2 p = {rng.range(0.0f, W - 0.001f), rng.range(0.0f, H - 0.001f)};
+            pts.push_back(p);
+            grid.insert(p, i);
+        }
+        auto mi = [](float d, float span) {
+            if (d > 0.5f * span) return d - span;
+            if (d < -0.5f * span) return d + span;
+            return d;
+        };
+        bool setsMatch = true, noDupes = true;
+        for (int q = 0; q < 60; ++q) {
+            // Bias half the query centres into the edge band, where it matters.
+            Vec2 c = (q % 2 == 0)
+                ? Vec2{rng.range(0.0f, W), rng.range(0.0f, H)}
+                : Vec2{rng.unit() < 0.5f ? rng.range(0.0f, 15.0f) : rng.range(W - 15.0f, W),
+                       rng.range(0.0f, H)};
+            std::vector<int> got;
+            grid.queryRadiusWrapped(c, R, got);
+            std::vector<int> want;
+            for (int i = 0; i < (int)pts.size(); ++i) {
+                const float dx = mi(pts[i].x - c.x, W), dy = mi(pts[i].y - c.y, H);
+                if (dx * dx + dy * dy <= R * R) want.push_back(i);
+            }
+            std::vector<int> gotSorted = got;
+            std::sort(gotSorted.begin(), gotSorted.end());
+            if (std::adjacent_find(gotSorted.begin(), gotSorted.end()) != gotSorted.end())
+                noDupes = false;
+            std::sort(want.begin(), want.end());
+            if (gotSorted != want) setsMatch = false;
+        }
+        CHECK(setsMatch);
+        CHECK(noDupes);
+    }
+
+    // --- seam visibility through the real sensor path ---
+    // Two creatures 10 units apart THROUGH the seam (890 apart across the
+    // plane): toroidal sees a neighbour, bounded does not.
+    for (int mode = 0; mode < 2; ++mode) {
+        const bool tor = (mode == 1);
+        rng.seed(55011u);
+        World w;
+        w.cfg.toroidal = tor;
+        w.cfg.captureActivations = true;
+        w.cfg.minPopulation = 0;
+        w.init(900, 700, 2);
+        w.creatures[0].pos = {5.0f, 350.0f};
+        w.creatures[1].pos = {895.0f, 350.0f};
+        w.update(0.016f);
+        const float n0 = w.creatures[0].lastSensors[NEIGHBOR_COUNT];
+        const float n1 = w.creatures[1].lastSensors[NEIGHBOR_COUNT];
+        if (tor) { CHECK(n0 > 0.05f); CHECK(n1 > 0.05f); }
+        else     { CHECK(n0 == 0.0f); CHECK(n1 == 0.0f); }
+        // Boundary sensors: no-wall on the torus, near-wall on the plane.
+        const float bd = w.creatures[0].lastSensors[BOUNDARY_DIST];
+        if (tor) CHECK(bd == 1.0f);
+        else     CHECK(bd < 0.2f);   // tanh(5/100) ~= 0.05
+    }
+
+    // --- pheromone deposits and reads wrap across the seam ---
+    for (int mode = 0; mode < 2; ++mode) {
+        const bool tor = (mode == 1);
+        rng.seed(55012u);
+        World w;
+        w.cfg.toroidal = tor;
+        w.cfg.minPopulation = 0;
+        w.init(800, 600, 0);
+        w.signals.emit({1.0f, 300.0f});          // cell x=0: radius-2 stamp spans the seam
+        const float far = w.signals.read({797.0f, 300.0f});   // cell x=99 (wrapped -1)
+        const float at  = w.signals.read({1.0f, 300.0f});
+        CHECK(at > 0.0f);
+        if (tor) CHECK(far > 0.0f);
+        else     CHECK(far == 0.0f);
+    }
+
+#ifndef USE_OPENMP
+    // --- toroidal + every hidden-state subsystem: resume is still bit-exact,
+    //     runs are repeatable, and positions stay in-bounds ---
+    {
+        auto runWorld = [](World& w) {
+            rng.seed(31417u);
+            configureRichWorld(w);
+            w.cfg.toroidal = true;
+            w.init(900, 700, 260);
+            for (int i = 0; i < 150; ++i) w.update(0.016f);
+        };
+        World a;
+        runWorld(a);
+        const std::string blob = checkpoint::serialize(a, "test");
+        for (int i = 0; i < 100; ++i) a.update(0.016f);
+        const std::uint64_t uninterrupted = deepFingerprint(a);
+
+        rng.seed(999u); (void)rng.unit();        // scramble the global stream
+        World b;
+        std::string err;
+        CHECK(checkpoint::deserialize(blob, b, err));
+        CHECK(b.cfg.toroidal);                    // flag round-trips
+        for (int i = 0; i < 100; ++i) b.update(0.016f);
+        CHECK(deepFingerprint(b) == uninterrupted);
+
+        bool inBounds = true;
+        for (const auto& c : b.creatures)
+            if (c.pos.x < 0.0f || c.pos.x >= (float)b.width ||
+                c.pos.y < 0.0f || c.pos.y >= (float)b.height) inBounds = false;
+        for (const auto& p : b.predators)
+            if (p.pos.x < 0.0f || p.pos.x >= (float)b.width ||
+                p.pos.y < 0.0f || p.pos.y >= (float)b.height) inBounds = false;
+        CHECK(inBounds);
+        CHECK(!b.creatures.empty());
+    }
+#endif
+}
+
+// ---------------------------------------------------------------
 // PortableMT19937 must be indistinguishable from std::mt19937 in outputs
 // (portable across standard libraries) and, on libstdc++, in serialized text
 // (so old checkpoints load and native/wasm checkpoints match byte for byte).
@@ -1222,6 +1349,7 @@ int main() {
     test_fast_tanh();
     test_topological_neighbors();
     test_checkpoint();
+    test_toroidal();
     test_creature();
     test_world_invariants();
     test_predator();

@@ -216,6 +216,7 @@
 
   function restart() {
     if (!Module) return false;
+    if (guardTurbo()) return false;
     clearError();
     var f = readForm();
     WORLD_W = DEFAULT_W; WORLD_H = DEFAULT_H;
@@ -428,9 +429,12 @@
 
   function frame() {
     if (Module) {
-      if (!paused) Module._evo_step(simSpeed);
+      if (turboState === "live" && !paused) Module._evo_step(simSpeed);
+      /* while not 'live' the main sim is frozen: re-sync repacks the same
+       * state, so this keeps drawing the last frame (never stale-black) */
       Module._evo_sync();
-      draw(snapshot(resolveSelection()));
+      draw(snapshot(turboState === "live" ? resolveSelection() : -1));
+      if (turboState !== "live") drawTurboOverlay();
     }
     requestAnimationFrame(frame);
   }
@@ -448,6 +452,7 @@
   /* ---- checkpoint save/load ---- */
   function saveCheckpoint() {
     if (!Module) return;
+    if (guardTurbo()) return;
     var str = Module.UTF8ToString(Module._evo_checkpoint());
     var frameNo = Math.round(new Float64Array(Module.HEAPF64.buffer, Module._evo_stats(), 9)[3]);
     var blob = new Blob([str], { type: "application/json" });
@@ -475,9 +480,105 @@
     showNote("(checkpoint loaded)");
   }
 
+  /* ---- TURBO (headless worker) mode ----
+   * live -> entering -> turbo -> exiting -> live. Handoff both ways is by
+   * checkpoint string (bit-exact through the shim), so the trajectory is
+   * preserved. While not 'live' the main module is frozen: the rAF loop stops
+   * stepping but keeps re-syncing/drawing the same frame. */
+  var turboState = "live";
+  var turboWorker = null;
+  var turboStats = null;
+
+  function guardTurbo() {
+    if (turboState === "live") return false;
+    showNote("exit turbo first");
+    return true;
+  }
+  function updateLocks() {
+    var tb = el("turbobtn");
+    tb.textContent = (turboState === "live" || turboState === "entering") ? "Turbo" : "Turbo ✓";
+    tb.disabled = turboState === "entering" || turboState === "exiting";
+    var locked = turboState !== "live";
+    ["restart", "savecp", "loadcp", "pausebtn", "slower", "faster"].forEach(function (id) {
+      el(id).classList.toggle("locked", locked);
+    });
+  }
+  function onTurboMessage(e) {
+    var msg = e.data || {};
+    if (msg.type === "stats") {
+      turboStats = msg;
+      if (turboState === "entering") { turboState = "turbo"; updateLocks(); }
+    } else if (msg.type === "checkpoint") {
+      if (turboState !== "exiting") return;
+      turboState = "live";
+      loadCheckpointText(msg.json); /* reuses the width/height re-read + selection clear */
+      setPaused(false);             /* turbo implies running; come back un-paused */
+      updateLocks();
+      showNote("(turbo: +" + (turboStats ? turboStats.totalSteps : 0) + " steps)");
+    } else if (msg.type === "error") {
+      showError("turbo: " + (msg.message || "unknown error"));
+      turboState = "live"; /* main module still holds its last state; nothing lost */
+      updateLocks();
+    }
+  }
+  function enterTurbo() {
+    if (turboState !== "live" || !Module) return;
+    turboState = "entering";
+    turboStats = null;
+    selectedId = null; /* ids will be stale by exit */
+    updateLocks();
+    if (!turboWorker) { /* created once, reused across sessions */
+      turboWorker = new Worker("worker.js");
+      turboWorker.onmessage = onTurboMessage;
+      turboWorker.onerror = function (ev) {
+        showError("turbo worker failed: " + (ev.message || "could not load worker.js"));
+        turboState = "live";
+        updateLocks();
+      };
+    }
+    turboWorker.postMessage({ cmd: "start",
+                              checkpoint: Module.UTF8ToString(Module._evo_checkpoint()) });
+  }
+  function exitTurbo() {
+    if (turboState !== "turbo") return;
+    turboState = "exiting";
+    updateLocks();
+    turboWorker.postMessage({ cmd: "stop" });
+  }
+  function drawTurboOverlay() {
+    var pw = 560, ph = 170;
+    var px = (WORLD_W - pw) / 2, py = (WORLD_H - ph) / 2;
+    ctx.fillStyle = "rgba(10,22,30," + (205 / 255).toFixed(4) + ")";
+    ctx.fillRect(px, py, pw, ph);
+    ctx.strokeStyle = "rgba(90,140,150," + (220 / 255).toFixed(4) + ")";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(px + 0.5, py + 0.5, pw - 1, ph - 1);
+    var cx = px + pw / 2;
+    ctx.textAlign = "center";
+    ctx.font = "28px monospace";
+    ctx.fillStyle = "rgba(220,235,240," + (235 / 255).toFixed(4) + ")";
+    ctx.fillText("TURBO — headless", cx, py + 48);
+    ctx.font = "16px monospace";
+    ctx.fillStyle = "rgba(200,215,220," + (220 / 255).toFixed(4) + ")";
+    if (turboStats) {
+      ctx.fillText("frame " + turboStats.frame + "   pop " + turboStats.pop +
+                   "   food " + turboStats.food + "   pred " + turboStats.pred, cx, py + 92);
+      ctx.fillText(turboStats.stepsPerSec + " steps/s   (+" + turboStats.totalSteps +
+                   " steps this session)", cx, py + 122);
+    } else {
+      ctx.fillText("starting…", cx, py + 92);
+    }
+    if (turboState === "exiting") {
+      ctx.font = "13px monospace";
+      ctx.fillStyle = "rgba(150,175,180," + (200 / 255).toFixed(4) + ")";
+      ctx.fillText("stopping — syncing back to live…", cx, py + 150);
+    }
+    ctx.textAlign = "left"; /* restore default for the HUD */
+  }
+
   /* ---- input ---- */
   canvas.addEventListener("click", function (e) {
-    if (!Module) return;
+    if (!Module || turboState !== "live") return;
     var rect = canvas.getBoundingClientRect();
     var wx = (e.clientX - rect.left) * (canvas.width / rect.width);
     var wy = (e.clientY - rect.top) * (canvas.height / rect.height);
@@ -504,6 +605,17 @@
     var t = e.target;
     if (t && (t.tagName === "INPUT" || t.tagName === "BUTTON" ||
               t.tagName === "SELECT" || t.tagName === "SUMMARY")) return;
+    /* sim-mutating shortcuts are locked while turbo owns the trajectory
+     * (Escape/drawer above stays live) */
+    if (turboState !== "live") {
+      if (e.code === "Space" || e.key === "ArrowUp" || e.key === "ArrowDown" ||
+          e.key === "+" || e.key === "=" || e.key === "-" ||
+          e.key === "r" || e.key === "R") {
+        showNote("exit turbo first");
+        e.preventDefault();
+      }
+      return;
+    }
     if (e.code === "Space") {
       setPaused(!paused);
       e.preventDefault();
@@ -580,16 +692,20 @@
     el(id).addEventListener("click", function () { fn(); this.blur(); });
   }
   btn("restart", restart);
-  btn("pausebtn", function () { setPaused(!paused); });
-  btn("slower", function () { setSpeed(simSpeed - 1); });
-  btn("faster", function () { setSpeed(simSpeed + 1); });
+  btn("pausebtn", function () { if (guardTurbo()) return; setPaused(!paused); });
+  btn("slower", function () { if (guardTurbo()) return; setSpeed(simSpeed - 1); });
+  btn("faster", function () { if (guardTurbo()) return; setSpeed(simSpeed + 1); });
+  btn("turbobtn", function () {
+    if (turboState === "live") enterTurbo();
+    else if (turboState === "turbo") exitTurbo();
+  });
   btn("advreset", resetAdvanced);
   btn("savecp", saveCheckpoint);
-  btn("loadcp", function () { el("cpfile").click(); });
+  btn("loadcp", function () { if (guardTurbo()) return; el("cpfile").click(); });
   el("cpfile").addEventListener("change", function () {
     var file = this.files && this.files[0];
     this.value = "";
-    if (!file || !Module) return;
+    if (!file || !Module || guardTurbo()) return;
     file.text().then(loadCheckpointText,
                      function (err) { showError("could not read file: " + err); });
   });

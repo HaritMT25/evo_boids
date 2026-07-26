@@ -134,6 +134,9 @@
     cursor: pointer;
   }
   button:hover { background: #235038; }
+  /* interlocked (turbo) and in-transition buttons */
+  button.locked, button:disabled { opacity: .45; cursor: default; }
+  button.locked:hover, button:disabled:hover { background: #1a3a2a; }
   #slower, #faster { padding: 4px 10px; }
   #speedlabel { color: #8fa89a; min-width: 7.5em; text-align: center; }
   .row { display: flex; align-items: center; gap: 10px; }
@@ -188,6 +191,7 @@
         <button id="slower">&minus;</button>
         <span id="speedlabel">speed 1x</span>
         <button id="faster">+</button>
+        <button id="turbobtn" title="run headless in a worker at full speed — no rendering, keeps running in background tabs; toggling is bit-exact">Turbo</button>
       </fieldset>
       <fieldset>
         <legend>checkpoint</legend>

@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cmath>
 #include "vec2.hpp"
+#include "portable_math.hpp"
 #include "color.hpp"
 #include "genome_color.hpp"
 #include "genome.hpp"
@@ -67,7 +68,7 @@ struct Creature {
     }
 
     float getOscillator() const {
-        return std::sin(oscPhase);
+        return evomath::sinf(oscPhase);
     }
 
     // Forward direction unit vector

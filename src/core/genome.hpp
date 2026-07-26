@@ -5,6 +5,7 @@
 #include <cmath>
 #include <algorithm>
 #include "sensors_actions.hpp"
+#include "portable_math.hpp"
 #include "random.hpp"
 
 // Max number of internal (hidden) neurons per creature
@@ -238,10 +239,10 @@ inline void feedForward(NeuralNet& nnet, const float sensors[], float actions[],
             }
         }
     } else {
-        for (int i = 0; i < NUM_ACTIONS; ++i) actions[i] = std::tanh(accum[i]);
+        for (int i = 0; i < NUM_ACTIONS; ++i) actions[i] = evomath::tanhf(accum[i]);
         for (int i = 0; i < MAX_INTERNAL_NEURONS; ++i) {
             if (nnet.neurons[i].driven) {
-                nnet.neurons[i].output = std::tanh(accum[NUM_ACTIONS + i]);
+                nnet.neurons[i].output = evomath::tanhf(accum[NUM_ACTIONS + i]);
             }
         }
     }

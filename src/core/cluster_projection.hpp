@@ -5,6 +5,7 @@
 #include "connectivity.hpp"
 #include "vec2.hpp"
 #include "genome.hpp"
+#include "random.hpp"
 
 // Projections of the (source,sink) connectivity vector — the SAME ~1272-dim space
 // the species SimHash and genome colour use. Two products:
@@ -22,9 +23,13 @@
 //       3-D sibling). PCA axes, by contrast, are data-dependent per run.
 //
 // All directions are seeded once with a LOCAL rng (the global `rng` stream is
-// untouched), so these never perturb the simulation. Caveat: a projection is a
-// lossy shadow — nearby points are close in the projected subspace, not a guarantee
-// of full genome similarity.
+// untouched), so these never perturb the simulation. v0.18.0: generation moved
+// from std::normal_distribution (implementation-defined, differs native vs
+// wasm) to portableGaussian, so sketches are cross-platform stable — but the
+// projection axes changed once at that version: cluster maps are comparable
+// only within runs from the same side of that boundary. Caveat: a projection
+// is a lossy shadow — nearby points are close in the projected subspace, not a
+// guarantee of full genome similarity.
 
 constexpr int CLUSTER_SKETCH_DIM = 32;
 
@@ -33,9 +38,8 @@ namespace clusterproj_detail {
 inline const std::array<std::vector<float>, CLUSTER_SKETCH_DIM>& sketchPlanes() {
     static const std::array<std::vector<float>, CLUSTER_SKETCH_DIM> planes = [] {
         std::mt19937 g(0x5EEDC2D2u);
-        std::normal_distribution<float> nd(0.0f, 1.0f);
         std::array<std::vector<float>, CLUSTER_SKETCH_DIM> p;
-        for (auto& row : p) { row.assign(STATS_DIM, 0.0f); for (float& x : row) x = nd(g); }
+        for (auto& row : p) { row.assign(STATS_DIM, 0.0f); for (float& x : row) x = portableGaussian(g); }
         return p;
     }();
     return planes;
@@ -44,9 +48,8 @@ inline const std::array<std::vector<float>, CLUSTER_SKETCH_DIM>& sketchPlanes() 
 inline const std::array<std::array<float, CLUSTER_SKETCH_DIM>, 2>& mapDirs() {
     static const std::array<std::array<float, CLUSTER_SKETCH_DIM>, 2> d = [] {
         std::mt19937 g(0x5EEDFACEu);
-        std::normal_distribution<float> nd(0.0f, 1.0f);
         std::array<std::array<float, CLUSTER_SKETCH_DIM>, 2> a;
-        for (auto& row : a) for (float& x : row) x = nd(g);
+        for (auto& row : a) for (float& x : row) x = portableGaussian(g);
         return a;
     }();
     return d;

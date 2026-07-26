@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <utility>
 #include "vec2.hpp"
+#include "portable_math.hpp"
 #include "creature.hpp"
 #include "predator.hpp"
 #include "quadtree.hpp"
@@ -257,7 +258,7 @@ public:
             p.pos = {rng.range(10.0f, (float)w - 10.0f),
                      rng.range(10.0f, (float)h - 10.0f)};
             const float a = rng.range(0.0f, 6.2832f);
-            p.vel = {std::cos(a), std::sin(a)};
+            p.vel = {evomath::cosf(a), evomath::sinf(a)};
             p.energy = cfg.predatorNewbornEnergy;
             predators.push_back(p);
         }
@@ -307,7 +308,7 @@ public:
         }
 
         // Food spawning with abundance cycles (from learning_boids)
-        float foodRate = cfg.foodSpawnBase + cfg.foodSpawnAmp * std::sin(frame * 0.001f);
+        float foodRate = cfg.foodSpawnBase + cfg.foodSpawnAmp * evomath::sinf(frame * 0.001f);
         for (int i = 0; i < static_cast<int>(foodRate); ++i) {
             if (static_cast<int>(food.size()) < cfg.targetFood * 2) spawnFood();
         }
@@ -403,10 +404,10 @@ public:
             float turn  = actions[STEER_X];
             float turnEff = turn * (1.0f - drive) * resp;
 
-            float theta = std::atan2(c.vel.y, c.vel.x);
+            float theta = evomath::atan2f(c.vel.y, c.vel.x);
             theta += turnEff * cfg.maxTurnRate * dt;
-            c.vel.x = std::cos(theta);
-            c.vel.y = std::sin(theta);
+            c.vel.x = evomath::cosf(theta);
+            c.vel.y = evomath::sinf(theta);
 
             c.speed = std::clamp(cfg.minSpeed + drive * (cfg.maxSpeed - cfg.minSpeed),
                                  cfg.minSpeed, cfg.maxSpeed);
@@ -676,7 +677,7 @@ private:
                 dir = normalized(creatures[bestIdx].pos - p.pos);
             } else {
                 const float jitter = rng.range(-0.3f, 0.3f);
-                const float cs = std::cos(jitter), sn = std::sin(jitter);
+                const float cs = evomath::cosf(jitter), sn = evomath::sinf(jitter);
                 dir = {dir.x * cs - dir.y * sn, dir.x * sn + dir.y * cs};
             }
             p.vel = dir;
@@ -729,7 +730,7 @@ private:
                     child.pos = { std::clamp(p.pos.x + rng.range(-8.0f, 8.0f), 0.0f, (float)width  - 1.0f),
                                   std::clamp(p.pos.y + rng.range(-8.0f, 8.0f), 0.0f, (float)height - 1.0f) };
                     const float a = rng.range(0.0f, 6.2832f);
-                    child.vel    = {std::cos(a), std::sin(a)};
+                    child.vel    = {evomath::cosf(a), evomath::sinf(a)};
                     child.energy = cfg.predatorNewbornEnergy;
                     p.energy    -= cfg.predatorNewbornEnergy;   // energy-conserving
                     newborns.push_back(child);
@@ -754,16 +755,16 @@ private:
         std::memset(s1, 0, sizeof(s1));
         std::memset(s2, 0, sizeof(s2));
 
-        s1[AGE] = std::tanh((c1.age - 50.0f) / 50.0f);
-        s1[NEAREST_NEIGHBOR_AGE] = std::tanh((c2.age - 50.0f) / 50.0f);
-        s1[FOOD_RESERVES] = std::tanh((c1.foodReserves - 25.0f) / 25.0f);
-        s1[NEAREST_NEIGHBOR_FOOD] = std::tanh((c2.foodReserves - 25.0f) / 25.0f);
+        s1[AGE] = evomath::tanhf((c1.age - 50.0f) / 50.0f);
+        s1[NEAREST_NEIGHBOR_AGE] = evomath::tanhf((c2.age - 50.0f) / 50.0f);
+        s1[FOOD_RESERVES] = evomath::tanhf((c1.foodReserves - 25.0f) / 25.0f);
+        s1[NEAREST_NEIGHBOR_FOOD] = evomath::tanhf((c2.foodReserves - 25.0f) / 25.0f);
         s1[GENETIC_SIM_NEAREST] = genomeSimilarity(c1.genome, c2.genome);
 
-        s2[AGE] = std::tanh((c2.age - 50.0f) / 50.0f);
-        s2[NEAREST_NEIGHBOR_AGE] = std::tanh((c1.age - 50.0f) / 50.0f);
-        s2[FOOD_RESERVES] = std::tanh((c2.foodReserves - 25.0f) / 25.0f);
-        s2[NEAREST_NEIGHBOR_FOOD] = std::tanh((c1.foodReserves - 25.0f) / 25.0f);
+        s2[AGE] = evomath::tanhf((c2.age - 50.0f) / 50.0f);
+        s2[NEAREST_NEIGHBOR_AGE] = evomath::tanhf((c1.age - 50.0f) / 50.0f);
+        s2[FOOD_RESERVES] = evomath::tanhf((c2.foodReserves - 25.0f) / 25.0f);
+        s2[NEAREST_NEIGHBOR_FOOD] = evomath::tanhf((c1.foodReserves - 25.0f) / 25.0f);
         s2[GENETIC_SIM_NEAREST] = genomeSimilarity(c2.genome, c1.genome);
 
         float a1[NUM_ACTIONS], a2[NUM_ACTIONS];
@@ -837,9 +838,9 @@ private:
         sensors[LOC_Y] = c.pos.y / height;
         float bx = std::min(c.pos.x, (float)width - c.pos.x);
         float by = std::min(c.pos.y, (float)height - c.pos.y);
-        sensors[BOUNDARY_DIST_X] = std::tanh(bx / 100.0f);
-        sensors[BOUNDARY_DIST_Y] = std::tanh(by / 100.0f);
-        sensors[BOUNDARY_DIST] = std::tanh(std::min(bx, by) / 100.0f);
+        sensors[BOUNDARY_DIST_X] = evomath::tanhf(bx / 100.0f);
+        sensors[BOUNDARY_DIST_Y] = evomath::tanhf(by / 100.0f);
+        sensors[BOUNDARY_DIST] = evomath::tanhf(std::min(bx, by) / 100.0f);
 
         // Own state
         sensors[OWN_VEL_X] = c.vel.x;
@@ -847,8 +848,8 @@ private:
         sensors[OWN_SPEED] = c.speed / cfg.maxSpeed;
         sensors[LAST_MOVE_DIR_X] = c.lastMoveDir.x;
         sensors[LAST_MOVE_DIR_Y] = c.lastMoveDir.y;
-        sensors[AGE] = std::tanh(c.age / 60.0f);
-        sensors[FOOD_RESERVES] = std::tanh((c.foodReserves - 25.0f) / 25.0f);
+        sensors[AGE] = evomath::tanhf(c.age / 60.0f);
+        sensors[FOOD_RESERVES] = evomath::tanhf((c.foodReserves - 25.0f) / 25.0f);
         sensors[OSCILLATOR] = c.getOscillator();
         sensors[RESPONSIVENESS] = c.responsiveness;
 
@@ -954,21 +955,21 @@ private:
             avgHx /= neighborCount; avgHy /= neighborCount;
         }
 
-        sensors[NEIGHBOR_COUNT] = std::tanh(inRadiusCount / 10.0f);
-        sensors[AVG_NEIGHBOR_DX] = std::tanh(avgDx / cfg.perceptionRadius);
-        sensors[AVG_NEIGHBOR_DY] = std::tanh(avgDy / cfg.perceptionRadius);
+        sensors[NEIGHBOR_COUNT] = evomath::tanhf(inRadiusCount / 10.0f);
+        sensors[AVG_NEIGHBOR_DX] = evomath::tanhf(avgDx / cfg.perceptionRadius);
+        sensors[AVG_NEIGHBOR_DY] = evomath::tanhf(avgDy / cfg.perceptionRadius);
         sensors[AVG_NEIGHBOR_HEADING_X] = avgHx;
         sensors[AVG_NEIGHBOR_HEADING_Y] = avgHy;
         sensors[NEAREST_NEIGHBOR_DIST] = nearestDist / cfg.perceptionRadius;
-        sensors[POPULATION_DENSITY] = std::tanh(inRadiusCount / 15.0f);
-        sensors[POPULATION_FWD] = std::tanh(popFwd / 5.0f);
-        sensors[POPULATION_LR] = std::tanh(popLR / 5.0f);
+        sensors[POPULATION_DENSITY] = evomath::tanhf(inRadiusCount / 15.0f);
+        sensors[POPULATION_FWD] = evomath::tanhf(popFwd / 5.0f);
+        sensors[POPULATION_LR] = evomath::tanhf(popLR / 5.0f);
 
         // Nearest neighbor attributes
         if (nearestIdx >= 0) {
             const Creature& nearest = creatures[nearestIdx];
-            sensors[NEAREST_NEIGHBOR_AGE] = std::tanh((nearest.age - 50.0f) / 50.0f);
-            sensors[NEAREST_NEIGHBOR_FOOD] = std::tanh((nearest.foodReserves - 25.0f) / 25.0f);
+            sensors[NEAREST_NEIGHBOR_AGE] = evomath::tanhf((nearest.age - 50.0f) / 50.0f);
+            sensors[NEAREST_NEIGHBOR_FOOD] = evomath::tanhf((nearest.foodReserves - 25.0f) / 25.0f);
             sensors[GENETIC_SIM_NEAREST] = genomeSimilarity(c.genome, nearest.genome);
             float dx = nearest.pos.x - c.pos.x;
             float dy = nearest.pos.y - c.pos.y;
@@ -1001,7 +1002,7 @@ private:
         sensors[NEAREST_FOOD_DX] = foodDx;
         sensors[NEAREST_FOOD_DY] = foodDy;
         sensors[NEAREST_FOOD_DIST] = foodDist / cfg.perceptionRadius;
-        sensors[FOOD_DENSITY] = std::tanh((float)nearbyFood.size() / 10.0f);
+        sensors[FOOD_DENSITY] = evomath::tanhf((float)nearbyFood.size() / 10.0f);
 
         // Pheromone sensors
         sensors[SIGNAL0] = signals.read(c.pos);
@@ -1011,8 +1012,8 @@ private:
         // Current / flow sensors — local flow projected onto the creature's own
         // forward and right axes (0 everywhere when currents are disabled).
         Vec2 cur = current_.velocityAt(c.pos);
-        sensors[CURRENT_FWD] = std::tanh((cur.x * fwd.x + cur.y * fwd.y) / 100.0f);
-        sensors[CURRENT_LR]  = std::tanh((cur.x * rht.x + cur.y * rht.y) / 100.0f);
+        sensors[CURRENT_FWD] = evomath::tanhf((cur.x * fwd.x + cur.y * fwd.y) / 100.0f);
+        sensors[CURRENT_LR]  = evomath::tanhf((cur.x * rht.x + cur.y * rht.y) / 100.0f);
 
         // Predator threat sensors — nearest predator within the prey's OWN
         // perception radius (the predator's larger detection radius is the ambush
@@ -1047,7 +1048,7 @@ private:
         longProbe.clear();
         Vec2 probePos = {c.pos.x + fwd.x * LONGPROBE_DIST, c.pos.y + fwd.y * LONGPROBE_DIST};
         creatureGrid.queryRadius(probePos, 30.0f, longProbe);
-        sensors[LONGPROBE_POP_FWD] = std::tanh((float)longProbe.size() / 5.0f);
+        sensors[LONGPROBE_POP_FWD] = evomath::tanhf((float)longProbe.size() / 5.0f);
 
         // Random
         sensors[RANDOM_SENSOR] = rng.range(-1.0f, 1.0f);

@@ -8,6 +8,7 @@
 #include <random>
 #include <unordered_set>
 #include <cstdint>
+#include <cstring>
 #include "world.hpp"
 #include "spatial_grid.hpp"   // temp grid for the O(n) schooling-neighbour lookup
 
@@ -40,7 +41,10 @@
 
 // Connectivity embedding (STATS_SRC/SNK/DIM + geneCell) is shared with colouring.
 #include "connectivity.hpp"
+#include "plane_data.hpp"
 constexpr int STATS_HASH_BITS = 16;  // SimHash resolution (species sensitivity)
+static_assert(sizeof(kSimHashPlaneBits) / sizeof(kSimHashPlaneBits[0]) == STATS_HASH_BITS,
+              "STATS_HASH_BITS changed — regenerate plane_data.hpp with tools/gen_planes.cpp");
 
 // One linear pass over the population: exact variance-based diversity + a
 // SimHash distinct-bucket count. Cost is O(population * genes), not O(n^2).
@@ -51,15 +55,18 @@ inline void computeGeneticSpread(const std::vector<Creature>& cs,
     const int n = static_cast<int>(cs.size());
     if (n == 0) return;
 
-    // Fixed random hyperplanes for SimHash — built once with a fixed seed so
-    // signatures are comparable across samples and runs (independent of `rng`).
+    // Fixed random hyperplanes for SimHash — FROZEN constants (plane_data.hpp)
+    // so signatures are comparable across samples and runs, and identical
+    // across native and wasm builds (runtime std::normal_distribution was not).
     static const std::vector<std::vector<float>> H = [] {
-        std::mt19937 g(0xC0FFEEu);
-        std::normal_distribution<float> nd(0.0f, 1.0f);
         std::vector<std::vector<float>> h(STATS_HASH_BITS,
                                           std::vector<float>(STATS_DIM));
-        for (auto& row : h)
-            for (float& x : row) x = nd(g);
+        for (int r = 0; r < STATS_HASH_BITS; ++r)
+            for (int i = 0; i < STATS_DIM; ++i) {
+                float v;
+                std::memcpy(&v, &kSimHashPlaneBits[r][i], 4);
+                h[r][i] = v;
+            }
         return h;
     }();
 

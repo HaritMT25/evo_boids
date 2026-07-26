@@ -2,6 +2,7 @@
 #include <vector>
 #include <cmath>
 #include "vec2.hpp"
+#include "portable_math.hpp"
 #include "random.hpp"
 
 // ----------------------------------------------------------------------------
@@ -49,15 +50,15 @@ private:
 
     Vec2 gyreVel(Vec2 p) const {
         const float xn = 2.0f * p.x / (float)w_;            // [0,2]
-        const float s  = std::sin(gyreOmega_ * gyreT_);
+        const float s  = evomath::sinf(gyreOmega_ * gyreT_);
         const float a  = gyreEps_ * s;
         const float b  = 1.0f - 2.0f * gyreEps_ * s;
         const float f  = a * xn * xn + b * xn;
         const float dfdx = (2.0f / (float)w_) * (2.0f * a * xn + b);  // d f / d(world x)
-        const float sy = std::sin(PI * p.y / (float)h_);
-        const float cy = std::cos(PI * p.y / (float)h_);
-        const float sf = std::sin(PI * f);
-        const float cf = std::cos(PI * f);
+        const float sy = evomath::sinf(PI * p.y / (float)h_);
+        const float cy = evomath::cosf(PI * p.y / (float)h_);
+        const float sf = evomath::sinf(PI * f);
+        const float cf = evomath::cosf(PI * f);
         // psi = A sin(pi f) sin(pi y/H);  u = -d psi/dy,  v = d psi/dx
         return { -gyreA_ * sf * (PI / (float)h_) * cy,
                   gyreA_ * cf * PI * dfdx * sy };
@@ -132,8 +133,8 @@ public:
         const float t = (float)frame;
         for (size_t i = 0; i < vortices_.size(); ++i) {
             const Vortex& v = vortices_[i];
-            centers_[i] = { v.base.x + v.ax*std::sin(v.fx*t + v.px),
-                            v.base.y + v.ay*std::sin(v.fy*t + v.py) };
+            centers_[i] = { v.base.x + v.ax*evomath::sinf(v.fx*t + v.px),
+                            v.base.y + v.ay*evomath::sinf(v.fy*t + v.py) };
         }
     }
 

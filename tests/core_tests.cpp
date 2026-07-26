@@ -721,12 +721,15 @@ static void feedForward(RefNet& nnet, const float sensors[], float actions[]) {
 
     for (int i = 0; i < MAX_INTERNAL_NEURONS; ++i) {
         if (nnet.neurons[i].driven) {
-            nnet.neurons[i].output = std::tanh(neuronAccum[i]);
+            // evomath::tanhf, matching the production activation (v0.18.0):
+            // this oracle pins the FLATTENING transformation, so it must share
+            // the activation or the comparison tests the tanh, not the wiring.
+            nnet.neurons[i].output = evomath::tanhf(neuronAccum[i]);
         }
     }
 
     for (int i = 0; i < NUM_ACTIONS; ++i) {
-        actions[i] = std::tanh(actions[i]);
+        actions[i] = evomath::tanhf(actions[i]);
     }
 }
 
@@ -1171,8 +1174,45 @@ static void test_checkpoint() {
 }
 
 // ---------------------------------------------------------------
+// PortableMT19937 must be indistinguishable from std::mt19937 in outputs
+// (portable across standard libraries) and, on libstdc++, in serialized text
+// (so old checkpoints load and native/wasm checkpoints match byte for byte).
+static void test_portable_mt19937() {
+    std::printf("PortableMT19937 == std::mt19937 (outputs, text, restore)...\n");
+    const long positions[] = {0, 1, 623, 624, 625, 10000};
+    for (long k : positions) {
+        std::mt19937 ref(20260725u);
+        PortableMT19937 mine(20260725u);
+        bool outputsMatch = true;
+        for (long i = 0; i < k; ++i)
+            if (ref() != mine()) { outputsMatch = false; break; }
+        CHECK(outputsMatch);
+#ifdef __GLIBCXX__
+        // Text equality with the library that wrote every pre-0.18.0
+        // checkpoint. Only meaningful under libstdc++; the wasm/libc++ build
+        // instead relies on this same pin having passed natively.
+        std::ostringstream os;
+        os << ref;
+        CHECK(os.str() == mine.text());
+#endif
+        // Round-trip: serialize, restore into a fresh engine, streams agree.
+        PortableMT19937 restored;
+        CHECK(restored.fromText(mine.text()));
+        bool restoredMatch = true;
+        for (int i = 0; i < 2000; ++i)
+            if (mine() != restored()) { restoredMatch = false; break; }
+        CHECK(restoredMatch);
+    }
+    // Malformed state strings must be rejected.
+    PortableMT19937 e;
+    CHECK(!e.fromText(""));
+    CHECK(!e.fromText("1 2 3"));
+}
+
+// ---------------------------------------------------------------
 int main() {
     std::printf("=== evo_boids core tests (no SFML linked) ===\n");
+    test_portable_mt19937();
     test_vec2();
     test_color();
     test_quadtree();

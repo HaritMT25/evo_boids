@@ -1,23 +1,30 @@
 #pragma once
 #include <cmath>
+#include <cstring>
 #include <array>
 #include <vector>
-#include <random>
 #include "connectivity.hpp"
 #include "color.hpp"
+#include "plane_data.hpp"
 
 // Project the (source,sink) connectivity vector onto 3 fixed random directions
 // (a 3-component cousin of the 16-bit species SimHash) -> RGB. Projection is
 // linear, so a small mutation shifts colour proportionally -> lineages drift
-// smoothly. Directions are seeded once with a LOCAL rng (the global `rng` stream
-// is untouched) so colours are stable and comparable across runs.
+// smoothly. Directions are FROZEN constants (plane_data.hpp) so colours are
+// stable and comparable across runs — and identical across native and wasm
+// builds, which runtime std::normal_distribution generation was not.
 // Caveat: 3-D is lossy, so similar colour does NOT guarantee similar genome.
 inline Color genomeColor(const Genome& genome) {
     static const std::array<std::vector<float>, 3> planes = [] {
-        std::mt19937 g(0x5EEDC010u);
-        std::normal_distribution<float> nd(0.0f, 1.0f);
         std::array<std::vector<float>, 3> p;
-        for (auto& row : p) { row.assign(STATS_DIM, 0.0f); for (float& x : row) x = nd(g); }
+        for (int r = 0; r < 3; ++r) {
+            p[r].resize(STATS_DIM);
+            for (int i = 0; i < STATS_DIM; ++i) {
+                float v;
+                std::memcpy(&v, &kGenomeColorPlaneBits[r][i], 4);
+                p[r][i] = v;
+            }
+        }
         return p;
     }();
 

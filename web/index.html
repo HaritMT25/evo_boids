@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>evo_boids — wasm</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { background: #0a120e; color: #c8c8c8; font: 13px/1.5 monospace; }
+  body {
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 12px;
+    gap: 10px;
+  }
+  h1 { font-size: 14px; font-weight: normal; color: #7ea08c; letter-spacing: 1px; }
+  canvas {
+    display: block;
+    width: 100%;
+    max-width: 1920px;
+    height: auto;
+    aspect-ratio: 1920 / 1080;
+    background: #0F1E19;
+    border: 1px solid #1e3a2e;
+  }
+  #controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: center;
+    gap: 10px 14px;
+    max-width: 1920px;
+  }
+  #controls label { display: inline-flex; align-items: center; gap: 5px; color: #8fa89a; }
+  #controls input[type="number"] {
+    width: 6.5em;
+    background: #10201a;
+    color: #d5e5da;
+    border: 1px solid #2a4a3a;
+    border-radius: 3px;
+    padding: 3px 5px;
+    font: inherit;
+  }
+  #controls input[type="checkbox"] { accent-color: #4a8a64; }
+  #restart {
+    background: #1a3a2a;
+    color: #cfe8d8;
+    border: 1px solid #3a6a4e;
+    border-radius: 3px;
+    padding: 4px 14px;
+    font: inherit;
+    cursor: pointer;
+  }
+  #restart:hover { background: #235038; }
+  #err { color: #e05a5a; min-height: 1em; }
+</style>
+</head>
+<body>
+  <h1>evo_boids — wasm</h1>
+  <canvas id="canvas" width="1920" height="1080"></canvas>
+  <div id="controls">
+    <label>seed <input id="seed" type="number" value="42" min="0" step="1"></label>
+    <label>population <input id="population" type="number" value="300" min="1" step="1"></label>
+    <label>predators <input id="predators" type="number" value="0" min="0" step="1"></label>
+    <label>food patches <input id="foodPatches" type="number" value="0" min="0" step="1"></label>
+    <label>current strength <input id="currentStrength" type="number" value="0" min="0" step="1"></label>
+    <label><input id="predatorEconomy" type="checkbox"> predator economy</label>
+    <button id="restart">Restart</button>
+    <span id="err"></span>
+  </div>
+  <script src="evo_boids.js"></script>
+  <script src="renderer.js"></script>
+</body>
+</html>

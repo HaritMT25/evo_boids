@@ -39,6 +39,8 @@
 
   var canvas = document.getElementById("canvas");
   var ctx = canvas.getContext("2d", { alpha: false });
+  var bgImage = new Image();  /* background sprite, same file the native app uses */
+  bgImage.src = "rocks.png";
   function el(id) { return document.getElementById(id); }
   var errEl = el("err");
 
@@ -270,6 +272,11 @@
   function draw(s) {
     ctx.fillStyle = "#0F1E19";
     ctx.fillRect(0, 0, WORLD_W, WORLD_H);
+    /* rocks.png under everything, like the native renderer: drawn at (0,0)
+     * unscaled, over the flat clear colour (which remains the fallback while
+     * the image loads or if it is missing). */
+    if (bgImage.complete && bgImage.naturalWidth > 0)
+      ctx.drawImage(bgImage, 0, 0);
 
     if (s.curActive) {
       ctx.lineWidth = 1;

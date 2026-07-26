@@ -7,25 +7,18 @@
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body { background: #0a120e; color: #c8c8c8; font: 13px/1.5 monospace; height: 100%; }
-  /* One-viewport layout: the stage (canvas) takes whatever height is left after
-   * the controls, and the canvas letterboxes inside it — so on any screen the
-   * controls stay visible without scrolling. Opening the advanced panel shrinks
-   * the stage rather than pushing content off-screen; only if the stage hits
-   * its minimum does the page scroll. */
+  /* Full-viewport stage; all controls live in the slide-in drawer. */
   body {
     height: 100dvh;
     display: flex;
     flex-direction: column;
-    align-items: center;
-    padding: 10px 12px;
-    gap: 8px;
-    overflow-y: auto;
+    padding: 6px;
+    overflow: hidden;
   }
-  h1 { font-size: 14px; font-weight: normal; color: #7ea08c; letter-spacing: 1px; flex: none; }
   #stage {
     flex: 1 1 auto;
-    min-height: 220px;   /* below this the page scrolls instead of shrinking further */
     width: 100%;
+    min-height: 0;
     display: flex;
     justify-content: center;
     align-items: center;
@@ -41,20 +34,59 @@
     background: #0F1E19;
     border: 1px solid #1e3a2e;
   }
-  @media (max-height: 640px) {
-    h1 { display: none; }  /* reclaim vertical space on short screens */
+  /* hamburger: fixed top-right, above the drawer */
+  #menubtn {
+    position: fixed;
+    top: 10px;
+    right: 10px;
+    z-index: 30;
+    width: 36px;
+    height: 36px;
+    padding: 0;
+    font-size: 16px;
+    line-height: 1;
+    background: rgba(26,58,42,0.8);
+    color: #cfe8d8;
+    border: 1px solid #3a6a4e;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  #menubtn:hover { background: rgba(35,80,56,0.95); }
+  /* right-side drawer */
+  #drawer {
+    position: fixed;
+    top: 0;
+    right: 0;
+    height: 100dvh;
+    width: 360px;
+    max-width: 90vw;
+    z-index: 20;
+    background: #0d1813;
+    border-left: 1px solid #1e3a2e;
+    padding: 12px;
+    overflow-y: auto;
+    transform: translateX(100%);
+    transition: transform 0.2s ease;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  #drawer.open { transform: translateX(0); }
+  #drawer h1 {
+    font-size: 14px;
+    font-weight: normal;
+    color: #7ea08c;
+    letter-spacing: 1px;
+    margin-right: 40px; /* keep clear of the ✕ button */
   }
   #bar, #controls {
     display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    justify-content: center;
-    gap: 8px 14px;
+    flex-direction: column;
+    gap: 10px;
     width: 100%;
-    max-width: 1920px;
-    flex: none;
   }
-  label { display: inline-flex; align-items: center; gap: 5px; color: #8fa89a; }
+  /* tight text-to-input gap everywhere */
+  label { display: inline-flex; align-items: center; justify-content: flex-start; gap: 4px; color: #8fa89a; }
   input[type="number"], select {
     width: 6.5em;
     background: #10201a;
@@ -94,17 +126,14 @@
   button:hover { background: #235038; }
   #slower, #faster { padding: 4px 10px; }
   #speedlabel { color: #8fa89a; min-width: 7.5em; text-align: center; }
+  .row { display: flex; align-items: center; gap: 10px; }
   #err { color: #e05a5a; min-height: 1em; }
   #adv {
     width: 100%;
-    max-width: 1920px;
     background: #0d1813;
     border: 1px solid #1e3a2e;
     border-radius: 4px;
     padding: 8px 12px;
-    flex: none;
-    max-height: 45dvh;   /* the panel itself scrolls before it starves the stage */
-    overflow-y: auto;
   }
   #adv summary { cursor: pointer; color: #7ea08c; user-select: none; }
   #advgrid {
@@ -116,56 +145,59 @@
   #advgrid fieldset { display: block; padding: 1px 10px 6px; }
   #advgrid .agrid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-    gap: 4px 18px;
+    grid-template-columns: 1fr; /* one knob per row in the drawer */
+    gap: 4px;
   }
-  #advgrid label { justify-content: space-between; }
-  #advgrid label:has(input[type="checkbox"]) { justify-content: flex-start; }
   #advgrid input[type="number"], #advgrid select { width: 5em; }
 </style>
 </head>
 <body>
-  <h1>evo_boids — wasm</h1>
   <div id="stage"><canvas id="canvas" width="1920" height="1080"></canvas></div>
-  <div id="bar">
-    <fieldset>
-      <legend>playback</legend>
-      <button id="pausebtn">Pause</button>
-      <button id="slower">&minus;</button>
-      <span id="speedlabel">speed 1x</span>
-      <button id="faster">+</button>
-    </fieldset>
-    <fieldset>
-      <legend>checkpoint</legend>
-      <button id="savecp">Save checkpoint</button>
-      <button id="loadcp">Load checkpoint</button>
-      <input id="cpfile" type="file" accept=".json" hidden>
-    </fieldset>
+  <button id="menubtn" aria-label="open controls">&#9776;</button>
+  <div id="drawer">
+    <h1>evo_boids — wasm</h1>
+    <div id="bar">
+      <fieldset>
+        <legend>playback</legend>
+        <button id="pausebtn">Pause</button>
+        <button id="slower">&minus;</button>
+        <span id="speedlabel">speed 1x</span>
+        <button id="faster">+</button>
+      </fieldset>
+      <fieldset>
+        <legend>checkpoint</legend>
+        <button id="savecp">Save checkpoint</button>
+        <button id="loadcp">Load checkpoint</button>
+        <input id="cpfile" type="file" accept=".json" hidden>
+      </fieldset>
+    </div>
+    <div id="controls">
+      <fieldset>
+        <legend>world</legend>
+        <label>seed <input id="seed" type="number" value="42" min="0" step="1"></label>
+        <label>population <input id="population" type="number" value="300" min="1" step="1"></label>
+      </fieldset>
+      <fieldset>
+        <legend>predators</legend>
+        <label>predators <input id="predators" type="number" value="0" min="0" step="1"></label>
+        <label><input id="predatorEconomy" type="checkbox"> predator economy</label>
+      </fieldset>
+      <fieldset>
+        <legend>environment</legend>
+        <label>food patches <input id="foodPatches" type="number" value="0" min="0" step="1"></label>
+        <label>current strength <input id="currentStrength" type="number" value="0" min="0" step="1"></label>
+      </fieldset>
+      <div class="row">
+        <button id="restart">Restart</button>
+        <span id="err"></span>
+      </div>
+    </div>
+    <details id="adv">
+      <summary>advanced settings</summary>
+      <div id="advgrid"></div>
+      <button id="advreset">reset to defaults</button>
+    </details>
   </div>
-  <div id="controls">
-    <fieldset>
-      <legend>world</legend>
-      <label>seed <input id="seed" type="number" value="42" min="0" step="1"></label>
-      <label>population <input id="population" type="number" value="300" min="1" step="1"></label>
-    </fieldset>
-    <fieldset>
-      <legend>predators</legend>
-      <label>predators <input id="predators" type="number" value="0" min="0" step="1"></label>
-      <label><input id="predatorEconomy" type="checkbox"> predator economy</label>
-    </fieldset>
-    <fieldset>
-      <legend>environment</legend>
-      <label>food patches <input id="foodPatches" type="number" value="0" min="0" step="1"></label>
-      <label>current strength <input id="currentStrength" type="number" value="0" min="0" step="1"></label>
-    </fieldset>
-    <button id="restart">Restart</button>
-    <span id="err"></span>
-  </div>
-  <details id="adv">
-    <summary>advanced settings</summary>
-    <div id="advgrid"></div>
-    <button id="advreset">reset to defaults</button>
-  </details>
   <script src="evo_boids.js"></script>
   <script src="renderer.js"></script>
 </body>

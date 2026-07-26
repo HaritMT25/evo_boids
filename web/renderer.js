@@ -444,6 +444,13 @@
   });
 
   window.addEventListener("keydown", function (e) {
+    /* Escape always closes the drawer, regardless of what has focus —
+     * blurring the focused control so the sim shortcuts work again. */
+    if (e.key === "Escape") {
+      setDrawer(false);
+      if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+      return;
+    }
     var t = e.target;
     if (t && (t.tagName === "INPUT" || t.tagName === "BUTTON" ||
               t.tagName === "SELECT" || t.tagName === "SUMMARY")) return;
@@ -460,6 +467,17 @@
       el("seed").value = String((Math.random() * 0x100000000) >>> 0);
       restart();
     }
+  });
+
+  /* ---- side drawer ---- */
+  var drawerEl = el("drawer"), menuBtn = el("menubtn");
+  function setDrawer(open) {
+    drawerEl.classList.toggle("open", open);
+    menuBtn.textContent = open ? "✕" : "☰";
+  }
+  menuBtn.addEventListener("click", function () {
+    setDrawer(!drawerEl.classList.contains("open"));
+    this.blur();
   });
 
   function btn(id, fn) {

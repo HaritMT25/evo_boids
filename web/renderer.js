@@ -58,8 +58,8 @@
 
   var canvas = document.getElementById("canvas");
   var ctx = canvas.getContext("2d", { alpha: false });
-  var bgImage = new Image();  /* background sprite, same file the native app uses */
-  bgImage.src = "rocks.png";
+  var bgImage = new Image();  /* background texture (web-only art, 1920x1080) */
+  bgImage.src = "rocks.jpg";
   function el(id) { return document.getElementById(id); }
   var errEl = el("err");
 
@@ -302,11 +302,14 @@
   function draw(s) {
     ctx.fillStyle = "#0F1E19";
     ctx.fillRect(0, 0, WORLD_W, WORLD_H);
-    /* rocks.png under everything, like the native renderer: drawn at (0,0)
-     * unscaled, over the flat clear colour (which remains the fallback while
-     * the image loads or if it is missing). */
-    if (bgImage.complete && bgImage.naturalWidth > 0)
-      ctx.drawImage(bgImage, 0, 0);
+    /* Background texture under everything, cover-scaled to the world (works at
+     * any image resolution and after a checkpoint changes the world size); the
+     * flat clear colour stays as the fallback while it loads or if missing. */
+    if (bgImage.complete && bgImage.naturalWidth > 0) {
+      var bs = Math.max(WORLD_W / bgImage.naturalWidth, WORLD_H / bgImage.naturalHeight);
+      var bw = bgImage.naturalWidth * bs, bh = bgImage.naturalHeight * bs;
+      ctx.drawImage(bgImage, (WORLD_W - bw) / 2, (WORLD_H - bh) / 2, bw, bh);
+    }
 
     if (s.curActive) {
       ctx.lineWidth = 1;

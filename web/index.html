@@ -6,32 +6,53 @@
 <title>evo_boids — wasm</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  html, body { background: #0a120e; color: #c8c8c8; font: 13px/1.5 monospace; }
+  html, body { background: #0a120e; color: #c8c8c8; font: 13px/1.5 monospace; height: 100%; }
+  /* One-viewport layout: the stage (canvas) takes whatever height is left after
+   * the controls, and the canvas letterboxes inside it — so on any screen the
+   * controls stay visible without scrolling. Opening the advanced panel shrinks
+   * the stage rather than pushing content off-screen; only if the stage hits
+   * its minimum does the page scroll. */
   body {
-    min-height: 100vh;
+    height: 100dvh;
     display: flex;
     flex-direction: column;
     align-items: center;
-    padding: 12px;
-    gap: 10px;
+    padding: 10px 12px;
+    gap: 8px;
+    overflow-y: auto;
   }
-  h1 { font-size: 14px; font-weight: normal; color: #7ea08c; letter-spacing: 1px; }
+  h1 { font-size: 14px; font-weight: normal; color: #7ea08c; letter-spacing: 1px; flex: none; }
+  #stage {
+    flex: 1 1 auto;
+    min-height: 220px;   /* below this the page scrolls instead of shrinking further */
+    width: 100%;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+  }
   canvas {
     display: block;
-    width: 100%;
-    max-width: 1920px;
-    height: auto; /* preserves the canvas's intrinsic aspect, even after checkpoint resize */
+    /* replaced element with intrinsic size: both max constraints apply and the
+     * aspect is preserved, even after a checkpoint changes the world size */
+    max-width: 100%;
+    max-height: 100%;
+    width: auto;
+    height: auto;
     background: #0F1E19;
     border: 1px solid #1e3a2e;
+  }
+  @media (max-height: 640px) {
+    h1 { display: none; }  /* reclaim vertical space on short screens */
   }
   #bar, #controls {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
     justify-content: center;
-    gap: 10px 14px;
+    gap: 8px 14px;
     width: 100%;
     max-width: 1920px;
+    flex: none;
   }
   label { display: inline-flex; align-items: center; gap: 5px; color: #8fa89a; }
   input[type="number"], select {
@@ -64,6 +85,9 @@
     border: 1px solid #1e3a2e;
     border-radius: 4px;
     padding: 8px 12px;
+    flex: none;
+    max-height: 45dvh;   /* the panel itself scrolls before it starves the stage */
+    overflow-y: auto;
   }
   #adv summary { cursor: pointer; color: #7ea08c; user-select: none; }
   #advgrid {
@@ -79,7 +103,7 @@
 </head>
 <body>
   <h1>evo_boids — wasm</h1>
-  <canvas id="canvas" width="1920" height="1080"></canvas>
+  <div id="stage"><canvas id="canvas" width="1920" height="1080"></canvas></div>
   <div id="bar">
     <button id="pausebtn">Pause</button>
     <button id="slower">&minus;</button>

@@ -89,6 +89,11 @@ EVO_EXPORT int evo_init(unsigned seed, int width, int height, int population,
         return 0;
     }
 
+    // Always capture per-creature sensor/action activations for the neural
+    // inspector. Dynamics-neutral (a pure memcpy in World::update, no rng),
+    // and not serialized into checkpoints — parity with the native CLI holds.
+    cfg.captureActivations = true;
+
     rng.seed(seed);
     delete g_world;
     g_world = new World();
@@ -221,7 +226,57 @@ EVO_EXPORT int evo_load_checkpoint(const char* json) {
     }
     delete g_world;
     g_world = w;
+    g_world->cfg.captureActivations = true;  // see evo_init
     return 1;
 }
 
 EVO_EXPORT const char* evo_last_error() { return g_error.c_str(); }
+
+// ---- Neural inspector ------------------------------------------------------
+// evo_inspect(i) snapshots creature i (index into this frame's arrays, valid
+// until the next evo_step/evo_sync) for the click-to-inspect panel. Buffers
+// mirror what the native SFML overlay reads (sfml_renderer.cpp
+// drawNeuralOverlay): lastSensors / neuron outputs / lastActions, and the
+// flattened connection list decoded via asGene().
+namespace {
+double g_inspInfo[4] = {};                 // id, speed, foodReserves, age
+std::vector<float> g_inspSensors;          // NUM_SENSES
+std::vector<float> g_inspHidden;           // MAX_INTERNAL_NEURONS
+std::vector<float> g_inspActions;          // NUM_ACTIONS
+std::vector<float> g_inspConns;            // K*5: srcIsSensor, srcNum, sinkIsAction, sinkNum, weight
+}
+
+EVO_EXPORT int evo_inspect(int index) {
+    if (!g_world || index < 0 || (size_t)index >= g_world->creatures.size()) return 0;
+    const Creature& c = g_world->creatures[(size_t)index];
+
+    g_inspInfo[0] = (double)c.id;
+    g_inspInfo[1] = (double)c.speed;
+    g_inspInfo[2] = (double)c.foodReserves;
+    g_inspInfo[3] = (double)c.age;
+
+    g_inspSensors.assign(c.lastSensors, c.lastSensors + NUM_SENSES);
+    g_inspActions.assign(c.lastActions, c.lastActions + NUM_ACTIONS);
+    g_inspHidden.resize(MAX_INTERNAL_NEURONS);
+    for (int i = 0; i < MAX_INTERNAL_NEURONS; ++i)
+        g_inspHidden[i] = c.nnet.neurons[i].output;
+
+    g_inspConns.resize(c.nnet.flat.size() * 5);
+    size_t k = 0;
+    for (const auto& fc : c.nnet.flat) {
+        const Gene g = asGene(fc);
+        g_inspConns[k++] = (g.sourceType == SOURCE_SENSOR) ? 1.0f : 0.0f;
+        g_inspConns[k++] = (float)g.sourceNum;
+        g_inspConns[k++] = (g.sinkType == SINK_ACTION) ? 1.0f : 0.0f;
+        g_inspConns[k++] = (float)g.sinkNum;
+        g_inspConns[k++] = g.weightAsFloat();
+    }
+    return 1;
+}
+
+EVO_EXPORT const double* evo_inspect_info()   { return g_inspInfo; }
+EVO_EXPORT const float* evo_inspect_sensors() { return g_inspSensors.data(); }
+EVO_EXPORT const float* evo_inspect_hidden()  { return g_inspHidden.data(); }
+EVO_EXPORT const float* evo_inspect_actions() { return g_inspActions.data(); }
+EVO_EXPORT int evo_inspect_conn_count()       { return (int)(g_inspConns.size() / 5); }
+EVO_EXPORT const float* evo_inspect_conns()   { return g_inspConns.data(); }

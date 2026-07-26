@@ -20,21 +20,21 @@
     display: block;
     width: 100%;
     max-width: 1920px;
-    height: auto;
-    aspect-ratio: 1920 / 1080;
+    height: auto; /* preserves the canvas's intrinsic aspect, even after checkpoint resize */
     background: #0F1E19;
     border: 1px solid #1e3a2e;
   }
-  #controls {
+  #bar, #controls {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
     justify-content: center;
     gap: 10px 14px;
+    width: 100%;
     max-width: 1920px;
   }
-  #controls label { display: inline-flex; align-items: center; gap: 5px; color: #8fa89a; }
-  #controls input[type="number"] {
+  label { display: inline-flex; align-items: center; gap: 5px; color: #8fa89a; }
+  input[type="number"], select {
     width: 6.5em;
     background: #10201a;
     color: #d5e5da;
@@ -43,8 +43,8 @@
     padding: 3px 5px;
     font: inherit;
   }
-  #controls input[type="checkbox"] { accent-color: #4a8a64; }
-  #restart {
+  input[type="checkbox"] { accent-color: #4a8a64; }
+  button {
     background: #1a3a2a;
     color: #cfe8d8;
     border: 1px solid #3a6a4e;
@@ -53,13 +53,42 @@
     font: inherit;
     cursor: pointer;
   }
-  #restart:hover { background: #235038; }
+  button:hover { background: #235038; }
+  #slower, #faster { padding: 4px 10px; }
+  #speedlabel { color: #8fa89a; min-width: 7.5em; text-align: center; }
   #err { color: #e05a5a; min-height: 1em; }
+  #adv {
+    width: 100%;
+    max-width: 1920px;
+    background: #0d1813;
+    border: 1px solid #1e3a2e;
+    border-radius: 4px;
+    padding: 8px 12px;
+  }
+  #adv summary { cursor: pointer; color: #7ea08c; user-select: none; }
+  #advgrid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 6px 18px;
+    margin: 10px 0;
+  }
+  #advgrid label { justify-content: space-between; }
+  #advgrid label:has(input[type="checkbox"]) { justify-content: flex-start; }
+  #advgrid input[type="number"], #advgrid select { width: 5em; }
 </style>
 </head>
 <body>
   <h1>evo_boids — wasm</h1>
   <canvas id="canvas" width="1920" height="1080"></canvas>
+  <div id="bar">
+    <button id="pausebtn">Pause</button>
+    <button id="slower">&minus;</button>
+    <span id="speedlabel">speed 1x</span>
+    <button id="faster">+</button>
+    <button id="savecp">Save checkpoint</button>
+    <button id="loadcp">Load checkpoint</button>
+    <input id="cpfile" type="file" accept=".json" hidden>
+  </div>
   <div id="controls">
     <label>seed <input id="seed" type="number" value="42" min="0" step="1"></label>
     <label>population <input id="population" type="number" value="300" min="1" step="1"></label>
@@ -70,6 +99,11 @@
     <button id="restart">Restart</button>
     <span id="err"></span>
   </div>
+  <details id="adv">
+    <summary>advanced settings</summary>
+    <div id="advgrid"></div>
+    <button id="advreset">reset to defaults</button>
+  </details>
   <script src="evo_boids.js"></script>
   <script src="renderer.js"></script>
 </body>

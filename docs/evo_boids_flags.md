@@ -1,7 +1,27 @@
-# evo_boids — CLI reference (v0.16.0)
+# evo_boids — CLI reference (v0.17.0)
 
 Headless runner for the evolutionary boids simulation. Defaults reproduce the
 original behaviour, so any flag is an opt-in change.
+
+> **v0.17.0 — checkpoint / resume** (`--save-checkpoint`, `--load-checkpoint`,
+> `--checkpoint-every`). A checkpoint is the complete world: config, frame counter and
+> cumulative counters, **the rng engine state**, every creature (genome, position,
+> velocity, energy, timers, and the recurrent neuron outputs), food, predators, the
+> pheromone layer, and the rng-seeded ocean vortices and food-patch centres.
+>
+> **A resume continues the run bit-for-bit** in the serial build. Verified two ways:
+> `core_tests` runs 220 steps → checkpoint → 140 more, then reloads and runs 140, and
+> compares a deep fingerprint of every creature, predator, food item and pheromone cell;
+> and end to end through the CLI, where 600 steps in one go produces a byte-identical
+> final checkpoint to 300 + resume + 300. In an OpenMP build a resume is valid but not
+> bit-exact (per-thread rngs), and the binary says so on load.
+>
+> **Format is JSON**, chosen because the planned wasm build needs the browser to read
+> these and `JSON.parse` is built in. Floats are written `%.9g`, which round-trips every
+> float32 exactly, so it is as lossless as a binary dump while staying diffable and
+> hand-editable. **Editing the `config` block and resuming is the supported way to
+> intervene mid-run** — change the predator economy, metabolic rate or perception at
+> step 300 and watch whether the regime shifts. ~1.2 KB per creature.
 
 > **v0.16.0 — a perf cycle that actually shipped, plus reproducible floating point.**
 > Unlike the reverted v0.14.0 attempt, this one is measured: **1.17–1.47× faster at
@@ -338,6 +358,9 @@ open (headless runs pay nothing for it).
 | `--cluster-color M` | `epoch` | `epoch` colours points by death order (the ramp); `lineage` colours by clade (hashed founder id) so selective sweeps show as large same-colour clusters. |
 | `--wiring-log` | off | Headless: write `<name>.wiring.csv`, one row per log interval — the fraction of the live population wiring each of the 41 sensors as a source. Reveals which inputs selection recruits over the run. |
 | `--profile` | off | Headless: accumulate per-phase timings and print a build / parallel{sensor-gather, feedForward, apply} / serial split at end. Diagnostic only; gated so it never affects dynamics. Run it at your real N and core count before optimizing. |
+| `--save-checkpoint FILE` | — | Write the complete world state to `FILE` (JSON) at the end of the headless run. ~1.2 KB per creature (a 233-creature world is 270 KB; gzips to ~40 %). |
+| `--load-checkpoint FILE` | — | Resume from `FILE` instead of starting fresh. **In a serial build the continuation is bit-for-bit identical to the run that was interrupted** — verified end to end: 600 steps in one go produces the same bytes as 300 + resume + 300. Adopts the checkpoint's world size and config, so simulation flags on the resume command line are ignored (edit the file instead). |
+| `--checkpoint-every N` | 0 (off) | Also write `<base>.<frame>.json` every N steps, so a long run leaves a trail you can rewind to. Base is `--save-checkpoint`'s path if given, else `runs/<name>`. |
 | `--fast-tanh` | off | Replace `std::tanh` in the net with a Padé (7,6) rational, worst error 1.1e-4. Worth **1.2–1.3×** end-to-end, because every creature makes 24 `tanh` calls per step regardless of genome size — over half of `feedForward`'s cost. **Changes the numbers**: a chaotic system amplifies 1e-4 into different trajectories, so runs made with it are a separate numerical lineage and won't match the existing corpus. Measured over 12 seeds × 4000 steps, with and without predators, the outcome *distributions* (population, schooling, genome length, genetic diversity, species) are statistically indistinguishable — so it's sound for exploratory sweeps; re-confirm headline findings with it off. Recorded in the run sidecar. |
 
 **Death-cluster map.** Every time a creature dies, its network is projected (a fixed

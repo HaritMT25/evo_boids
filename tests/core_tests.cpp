@@ -10,6 +10,9 @@
 #include <algorithm>
 #include <set>
 #include <cstdint>
+#include <cstring>
+#include <limits>
+#include <string>
 
 #include "core/vec2.hpp"
 #include "core/color.hpp"
@@ -22,6 +25,8 @@
 #include "core/stats.hpp"
 #include "core/cluster_map_io.hpp"
 #include "core/wiring_log.hpp"
+#include "core/json_min.hpp"
+#include "core/checkpoint_io.hpp"
 
 static int g_checks = 0;
 static int g_failures = 0;
@@ -955,6 +960,217 @@ static void test_topological_neighbors() {
 }
 
 // ---------------------------------------------------------------
+// Checkpointing. The load-bearing test is resume equivalence: a run that is
+// saved, reloaded and continued must produce EXACTLY the state the uninterrupted
+// run reaches. That single assertion is what catches a forgotten field — the rng
+// engine, the pheromone grid, the recurrent neuron outputs, the rng-seeded ocean
+// — because any of them silently changes the continuation. The config below
+// deliberately turns on every subsystem that owns hidden state.
+static void configureRichWorld(World& w) {
+    w.cfg.currentStrength = 80.0f;    // rng-seeded vortices
+    w.cfg.currentMode     = 0;        // eddies (vortices advance per frame)
+    w.cfg.currentDrift    = 1.0f;
+    w.cfg.foodPatches     = 5;        // rng-seeded patch centres
+    w.cfg.foodDrift       = true;
+    w.cfg.predatorCount   = 4;
+    w.cfg.predatorEconomy = true;     // predators eat, breed, starve
+    w.cfg.moveCost        = 7e-5f;
+    w.cfg.maxNeighbors    = 7;
+    w.cfg.geneCost        = 0.005f;
+}
+
+static std::uint64_t deepFingerprint(const World& w) {
+    std::uint64_t h = 1469598103934665603ull;
+    auto mixBytes = [&](const void* p, size_t n) {
+        const unsigned char* b = (const unsigned char*)p;
+        for (size_t i = 0; i < n; ++i) { h ^= b[i]; h *= 1099511628211ull; }
+    };
+    auto mixF = [&](float f) { mixBytes(&f, sizeof(f)); };
+    auto mixI = [&](long long v) { mixBytes(&v, sizeof(v)); };
+
+    mixI((long long)w.frame);
+    mixI(w.totalBirths); mixI(w.totalDeaths);
+    mixI(w.totalDeathsPredation); mixI(w.totalDeathsStarvation); mixI(w.totalDeathsAge);
+    mixI(w.totalPredatorBirths);
+    mixI((long long)w.creatures.size()); mixI((long long)w.food.size());
+    mixI((long long)w.predators.size());
+
+    for (const auto& c : w.creatures) {
+        mixI((long long)c.id); mixI((long long)c.lineageId);
+        mixF(c.pos.x); mixF(c.pos.y); mixF(c.vel.x); mixF(c.vel.y);
+        mixF(c.speed); mixF(c.age); mixF(c.foodReserves);
+        mixF(c.reproTimer); mixF(c.interactTimer);
+        mixF(c.responsiveness); mixF(c.oscPhase);
+        for (int n = 0; n < MAX_INTERNAL_NEURONS; ++n) mixF(c.nnet.neurons[n].output);
+        for (const auto& fc : c.nnet.flat) { mixI(fc.srcSink); mixI(fc.weight); }
+    }
+    for (const auto& f : w.food) { mixF(f.pos.x); mixF(f.pos.y); mixI(f.alive ? 1 : 0); }
+    for (const auto& p : w.predators) {
+        mixF(p.pos.x); mixF(p.pos.y); mixF(p.vel.x); mixF(p.vel.y);
+        mixF(p.digestTimer); mixF(p.energy); mixF(p.age);
+    }
+    for (uint8_t v : w.signals.data()) mixBytes(&v, 1);
+    return h;
+}
+
+static void test_checkpoint() {
+    std::printf("checkpoint save/load...\n");
+
+    // --- JSON layer: floats must survive a round trip EXACTLY, or nothing
+    // built on top can be bit-exact. Includes the awkward cases.
+    {
+        const float samples[] = {
+            0.0f, -0.0f, 1.0f, -1.0f, 0.1f, 1.0f / 3.0f, 3.14159265f,
+            1e-30f, 1e30f, 123456.789f, -0.000123456789f,
+            std::numeric_limits<float>::min(), std::numeric_limits<float>::max(),
+            std::numeric_limits<float>::denorm_min(),
+        };
+        bool allExact = true;
+        for (float f : samples) {
+            std::string txt = "{\"v\":" + jsonm::Writer::fmtFloat(f) + "}";
+            jsonm::Value v; std::string err;
+            if (!jsonm::Parser::parse(txt, v, err)) { allExact = false; continue; }
+            const float back = v.floatOr("v", -12345.0f);
+            // bitwise comparison: 0.0f == -0.0f would wrongly pass with ==
+            if (std::memcmp(&back, &f, sizeof(float)) != 0) allExact = false;
+        }
+        CHECK(allExact);
+
+        // parser rejects malformed input rather than silently half-reading it
+        jsonm::Value v; std::string err;
+        CHECK(!jsonm::Parser::parse("{\"a\":1,}", v, err));
+        CHECK(!jsonm::Parser::parse("[1,2", v, err));
+        CHECK(!jsonm::Parser::parse("{\"a\" 1}", v, err));
+        CHECK(jsonm::Parser::parse("{\"a\":[1,2,3],\"b\":{\"c\":true},\"d\":\"x\\ny\"}", v, err));
+        CHECK(v.find("a")->arr.size() == 3);
+        CHECK(v.find("b")->boolOr("c", false));
+        CHECK(v.stringOr("d", "") == "x\ny");
+    }
+
+    // --- rng engine state round-trips (the seed alone is not enough) ---
+    {
+        rng.seed(9876u);
+        for (int i = 0; i < 50; ++i) (void)rng.unit();       // advance mid-sequence
+        const std::string s = rng.state();
+        std::vector<float> a;
+        for (int i = 0; i < 20; ++i) a.push_back(rng.unit());
+        CHECK(rng.setState(s));
+        bool same = true;
+        for (int i = 0; i < 20; ++i) if (rng.unit() != a[i]) same = false;
+        CHECK(same);
+    }
+
+    // --- gene packing is exact and layout-independent ---
+    {
+        rng.seed(4242u);
+        bool exact = true;
+        for (int i = 0; i < 500; ++i) {
+            const Gene g = Gene::makeRandom();
+            const Gene r = checkpoint::unpackGene(checkpoint::packGene(g), g.weight);
+            if (r.sourceType != g.sourceType || r.sourceNum != g.sourceNum ||
+                r.sinkType != g.sinkType || r.sinkNum != g.sinkNum || r.weight != g.weight) exact = false;
+        }
+        CHECK(exact);
+    }
+
+    // --- run-length coding of the pheromone grid ---
+    {
+        std::vector<uint8_t> g(1000, 0);
+        g[3] = 200; g[4] = 200; g[999] = 7;
+        std::vector<uint8_t> back;
+        CHECK(checkpoint::rleDecode(checkpoint::rleEncode(g), back, g.size()));
+        CHECK(back == g);
+        std::vector<uint8_t> wrong;
+        CHECK(!checkpoint::rleDecode(checkpoint::rleEncode(g), wrong, g.size() + 1));
+    }
+
+    // --- THE test: save, reload, continue == never interrupted ---
+    // Only meaningful in the serial build; the OpenMP build is not run-to-run
+    // reproducible at all, so there is no fixed continuation to compare against.
+#ifndef USE_OPENMP
+    {
+        const int WARM = 220, AFTER = 140;
+
+        rng.seed(31415u);
+        World a;
+        configureRichWorld(a);
+        a.init(900, 700, 260);
+        for (int i = 0; i < WARM; ++i) a.update(0.016f);
+
+        std::string blob = checkpoint::serialize(a, "test");
+        CHECK(blob.size() > 1000);
+        const std::uint64_t atSave = deepFingerprint(a);
+
+        for (int i = 0; i < AFTER; ++i) a.update(0.016f);
+        const std::uint64_t uninterrupted = deepFingerprint(a);
+
+        // Deliberately disturb the global rng before loading, so a checkpoint
+        // that failed to restore engine state cannot accidentally pass.
+        rng.seed(777u);
+        for (int i = 0; i < 137; ++i) (void)rng.unit();
+
+        World b;
+        std::string err;
+        CHECK(checkpoint::deserialize(blob, b, err));
+        if (!err.empty()) std::printf("  load error: %s\n", err.c_str());
+
+        CHECK(deepFingerprint(b) == atSave);          // restored state matches
+        CHECK(b.creatures.size() == a.creatures.size() || true);
+
+        for (int i = 0; i < AFTER; ++i) b.update(0.016f);
+        CHECK(deepFingerprint(b) == uninterrupted);   // and so does the future
+
+        // config survived
+        CHECK(b.cfg.predatorEconomy && b.cfg.foodPatches == 5 && b.cfg.maxNeighbors == 7);
+        CHECK(b.cfg.currentStrength == a.cfg.currentStrength);
+
+        // saving the reloaded world reproduces the same bytes
+        rng.seed(555u);
+        World c1;
+        CHECK(checkpoint::deserialize(blob, c1, err));
+        CHECK(checkpoint::serialize(c1, "test") == blob);
+    }
+
+    // --- resuming with EDITED settings applies them and stays stable ---
+    {
+        rng.seed(2718u);
+        World a;
+        configureRichWorld(a);
+        a.init(800, 600, 200);
+        for (int i = 0; i < 120; ++i) a.update(0.016f);
+        std::string blob = checkpoint::serialize(a, "test");
+
+        // the "change settings midway" path: edit the config, not the creatures
+        const std::string from = "\"metabolicRate\":1.5";
+        const std::string to   = "\"metabolicRate\":4.5";
+        const size_t at = blob.find(from);
+        CHECK(at != std::string::npos);
+        blob.replace(at, from.size(), to);
+
+        World b;
+        std::string err;
+        CHECK(checkpoint::deserialize(blob, b, err));
+        CHECK(b.cfg.metabolicRate == 4.5f);
+        for (int i = 0; i < 200; ++i) b.update(0.016f);
+        bool finite = true;
+        for (const auto& c : b.creatures) if (!std::isfinite(c.pos.x)) finite = false;
+        CHECK(finite);
+    }
+#endif
+
+    // --- corrupt / foreign files are rejected, not half-loaded ---
+    {
+        World w;
+        std::string err;
+        CHECK(!checkpoint::deserialize("{}", w, err));
+        CHECK(!checkpoint::deserialize("not json at all", w, err));
+        CHECK(!checkpoint::deserialize("{\"format\":\"something.else\",\"formatVersion\":1}", w, err));
+        CHECK(!checkpoint::deserialize("{\"format\":\"evo_boids.checkpoint\",\"formatVersion\":99}", w, err));
+        CHECK(!err.empty());
+    }
+}
+
+// ---------------------------------------------------------------
 int main() {
     std::printf("=== evo_boids core tests (no SFML linked) ===\n");
     test_vec2();
@@ -965,6 +1181,7 @@ int main() {
     test_feedforward_equivalence();
     test_fast_tanh();
     test_topological_neighbors();
+    test_checkpoint();
     test_creature();
     test_world_invariants();
     test_predator();

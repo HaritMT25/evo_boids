@@ -12,6 +12,7 @@
 #include "core/stats.hpp"
 #include "core/cluster_map_io.hpp"
 #include "core/wiring_log.hpp"
+#include "core/checkpoint_io.hpp"
 #include "render/sfml_renderer.hpp"  // the only translation unit pulling SFML
 
 // Set by CMake (project version). Falls back to "dev" for ad-hoc builds.
@@ -99,6 +100,11 @@ void printUsage(const char* prog) {
         "  --profile                 print a build/parallel/serial phase timing breakdown at end (headless)\n"
         "  --fast-tanh               approximate the neural activations (~1.2-1.3x faster, CHANGES\n"
         "                            results; exploratory sweeps only — see config.hpp)\n"
+        "  --save-checkpoint FILE    write the full world state to FILE (JSON) at end of run\n"
+        "  --load-checkpoint FILE    resume from FILE instead of starting fresh. In a serial\n"
+        "                            build the continuation is bit-for-bit identical. Edit the\n"
+        "                            'config' block in the file to change settings mid-run.\n"
+        "  --checkpoint-every N      also write <name>.<frame>.json every N steps\n"
         "  (In the live window: LEFT-CLICK a fish to watch its neural net fire in a top-right panel.)\n\n"
         "Log to CSV and then watch the result (omit --no-render):\n"
         "  " << prog << " --headless 50000 --name evolved_50k --log-every 2000\n\n"
@@ -112,8 +118,9 @@ void printUsage(const char* prog) {
 }  // namespace
 
 int main(int argc, char** argv) {
-    const int W = 1920;
-    const int H = 1080;
+    // Not const: resuming from a checkpoint adopts that world's dimensions.
+    int W = 1920;
+    int H = 1080;
 
     int         headlessSteps = 0;
     int         logEvery      = 1000;
@@ -123,6 +130,10 @@ int main(int argc, char** argv) {
     unsigned    seed          = 0;
     std::string csvPath;
     std::string runName;
+    std::string saveCheckpoint;    // --save-checkpoint FILE (written at end of run)
+    std::string loadCheckpoint;    // --load-checkpoint FILE (resume)
+    int         checkpointEvery = 0;   // --checkpoint-every N (0 = off)
+    std::string checkpointBase;        // prefix for the periodic files
 
     int       initialPopulation = 300;  // starting creature count
     SimConfig cfg;                       // all other tunable parameters
@@ -162,6 +173,9 @@ int main(int argc, char** argv) {
         else if (arg == "--newborn-energy")   cfg.newbornEnergy     = std::atof(next("--newborn-energy"));
         else if (arg == "--perception")       cfg.perceptionRadius  = std::atof(next("--perception"));
         else if (arg == "--interact-radius")  cfg.interactRadius    = std::atof(next("--interact-radius"));
+        else if (arg == "--save-checkpoint")  saveCheckpoint        = next("--save-checkpoint");
+        else if (arg == "--load-checkpoint")  loadCheckpoint        = next("--load-checkpoint");
+        else if (arg == "--checkpoint-every") checkpointEvery       = std::atoi(next("--checkpoint-every"));
         else if (arg == "--max-neighbors")    cfg.maxNeighbors      = std::atoi(next("--max-neighbors"));
         else if (arg == "--topological")      cfg.maxNeighbors      = 7;
         else if (arg == "--fast-tanh")        cfg.fastTanh          = true;
@@ -247,6 +261,18 @@ int main(int argc, char** argv) {
     fixOrder(cfg.genomeInitMin, cfg.genomeInitMax, "genome init");
     if (cfg.perceptionRadius < 1.0f) { std::cerr << "Note: perception clamped to 1.\n"; cfg.perceptionRadius = 1.0f; }
     if (cfg.maxNeighbors < 0)        { std::cerr << "Note: max-neighbors < 0 treated as 0 (unlimited).\n"; cfg.maxNeighbors = 0; }
+    if (checkpointEvery > 0) {
+        checkpointBase = !saveCheckpoint.empty() ? saveCheckpoint
+                       : (!runName.empty() ? ("runs/" + runName) : std::string("runs/checkpoint"));
+        // strip a trailing .json so the periodic files read name.<frame>.json
+        if (checkpointBase.size() > 5 && checkpointBase.compare(checkpointBase.size() - 5, 5, ".json") == 0)
+            checkpointBase.resize(checkpointBase.size() - 5);
+        std::filesystem::create_directories(std::filesystem::path(checkpointBase).parent_path());
+    }
+    if (!saveCheckpoint.empty()) {
+        const auto parent = std::filesystem::path(saveCheckpoint).parent_path();
+        if (!parent.empty()) std::filesystem::create_directories(parent);
+    }
     if (cfg.maxNeighbors > MAX_TOPOLOGICAL_NEIGHBORS) {
         std::cerr << "Note: max-neighbors clamped to " << MAX_TOPOLOGICAL_NEIGHBORS
                   << " (use 0 for unlimited/metric interaction).\n";
@@ -257,7 +283,31 @@ int main(int argc, char** argv) {
     // Init world with the chosen configuration.
     World world;
     world.cfg = cfg;
-    world.init(W, H, initialPopulation);
+
+    if (!loadCheckpoint.empty()) {
+        // Resuming replaces the whole world, including its config, so the flags
+        // on this command line are ignored EXCEPT the ones that don't live in a
+        // checkpoint (--headless, --name, logging). To change a simulation
+        // setting on resume, edit the "config" block inside the checkpoint —
+        // that is the supported way to intervene mid-run.
+        std::string err;
+        if (!checkpoint::load(loadCheckpoint, world, err)) {
+            std::cerr << "!! cannot resume from '" << loadCheckpoint << "': " << err << "\n";
+            return 1;
+        }
+        std::cout << "Resumed from " << loadCheckpoint
+                  << " at frame " << world.frame
+                  << " (" << world.creatures.size() << " creatures, "
+                  << world.predators.size() << " predators)\n";
+#ifdef USE_OPENMP
+        std::cerr << "Note: this is an OpenMP build, so the resumed run will NOT reproduce\n"
+                  << "      the original bit-for-bit. Build -DEVO_NO_OPENMP=ON for that.\n";
+#endif
+        W = world.width;
+        H = world.height;
+    } else {
+        world.init(W, H, initialPopulation);
+    }
 
     // --- Headless phase: pure CPU, fixed dt, no rendering ---
     if (headlessSteps > 0) {
@@ -406,13 +456,30 @@ int main(int argc, char** argv) {
             lastPredAge     = st.totalPredatorDeathsAge;
         };
 
+        // Periodic checkpoints are written to <name>.<frame>.json so a long run
+        // leaves a trail you can rewind to, rather than a single end state.
+        auto writeCheckpoint = [&](const std::string& path) {
+            std::string err;
+            if (!checkpoint::save(world, path, EVO_VERSION, err)) {
+                std::cerr << "!! checkpoint failed: " << err << "\n";
+                return false;
+            }
+            std::cout << "  checkpoint -> " << path << " (frame " << world.frame << ")\n";
+            return true;
+        };
+
         for (int i = 0; i < headlessSteps; ++i) {
             world.update(fixedDt);
             const int stepsDone = i + 1;
             if (stepsDone % logEvery == 0) sample(stepsDone);
+            if (checkpointEvery > 0 && stepsDone % checkpointEvery == 0) {
+                writeCheckpoint(checkpointBase + "." + std::to_string(world.frame) + ".json");
+            }
         }
         // Always capture the final state, even if it isn't on an interval boundary.
         if (headlessSteps % logEvery != 0) sample(headlessSteps);
+
+        if (!saveCheckpoint.empty() && !writeCheckpoint(saveCheckpoint)) return 1;
 
         const auto   endTime = std::chrono::steady_clock::now();
         const double total   = std::chrono::duration<double>(endTime - startTime).count();

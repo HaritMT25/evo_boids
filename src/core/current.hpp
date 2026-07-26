@@ -66,6 +66,39 @@ private:
 public:
     bool active() const { return strength_ > 0.0f; }
 
+    // --- Checkpoint access ---
+    // The eddy field's vortices are drawn from the rng in init(), so they cannot
+    // be regenerated at load time (the rng has moved on) — they must travel with
+    // the checkpoint or a resumed run gets a DIFFERENT ocean. Exposed as a flat
+    // float vector so the Vortex type stays private. `centers_` is deliberately
+    // not saved: advance(frame) recomputes it from the vortices and the frame.
+    static constexpr int VORTEX_FLOATS = 9;
+
+    std::vector<float> vortexState() const {
+        std::vector<float> v;
+        v.reserve(vortices_.size() * VORTEX_FLOATS);
+        for (const Vortex& x : vortices_) {
+            v.push_back(x.base.x); v.push_back(x.base.y); v.push_back(x.sign);
+            v.push_back(x.ax); v.push_back(x.ay);
+            v.push_back(x.fx); v.push_back(x.fy);
+            v.push_back(x.px); v.push_back(x.py);
+        }
+        return v;
+    }
+
+    bool restoreVortexState(const std::vector<float>& v) {
+        if (v.size() % VORTEX_FLOATS != 0) return false;
+        const size_t n = v.size() / VORTEX_FLOATS;
+        vortices_.resize(n);
+        centers_.resize(n);
+        for (size_t i = 0; i < n; ++i) {
+            const float* f = &v[i * VORTEX_FLOATS];
+            vortices_[i] = Vortex{ Vec2{f[0], f[1]}, f[2], f[3], f[4], f[5], f[6], f[7], f[8] };
+            centers_[i]  = Vec2{f[0], f[1]};   // refreshed by the next advance()
+        }
+        return true;
+    }
+
     void init(Mode mode, int worldW, int worldH, int count,
               float strength, float core, float drift, float gyreEps) {
         mode_ = mode; w_ = worldW; h_ = worldH;

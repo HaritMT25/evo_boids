@@ -65,6 +65,20 @@ public:
             if (v > 0) v = static_cast<uint8_t>(v * 0.97f);
         }
     }
+
+    // --- Checkpoint access ---
+    // The pheromone layer is live state, not a derived view: creatures emit into
+    // it, it decays every third frame, and three sensors read it. A checkpoint
+    // that skipped it would resume into a world where the trails had vanished.
+    const std::vector<uint8_t>& data() const { return grid_; }
+    int cellSize() const { return cellSize_; }
+    int cols() const { return cols_; }
+    int rows() const { return rows_; }
+    bool restore(const std::vector<uint8_t>& g) {
+        if (g.size() != grid_.size()) return false;   // geometry mismatch
+        grid_ = g;
+        return true;
+    }
 };
 
 
@@ -587,6 +601,15 @@ public:
     // --- read-only access to the current field (used by the renderer overlay) ---
     bool currentActive() const { return current_.active(); }
     Vec2 currentAt(Vec2 p) const { return current_.velocityAt(p); }
+
+    // --- Checkpoint access (see checkpoint_io.hpp) ---
+    // Both of these are seeded from the rng during init(), so a resumed run
+    // cannot regenerate them — they have to be restored verbatim or the world
+    // is subtly different (a different ocean, food patches in different places).
+    std::vector<float> currentVortexState() const { return current_.vortexState(); }
+    bool restoreCurrentVortexState(const std::vector<float>& v) { return current_.restoreVortexState(v); }
+    const std::vector<Vec2>& foodPatches() const { return foodPatches_; }
+    void restoreFoodPatches(std::vector<Vec2> p) { foodPatches_ = std::move(p); }
 
 private:
     // Spatial indices, reused across frames (see update()).

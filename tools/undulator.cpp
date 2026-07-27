@@ -85,9 +85,10 @@ struct Params {
 
     // Muscle stiffness must put the joint's natural frequency w_n = sqrt(k/I)
     // ABOVE the drive frequency w, or the joint cannot track its commanded
-    // curvature and the body barely bends (measured: k=900 => w_n=5.3 rad/s
-    // against a 12 rad/s drive => 27% of commanded amplitude and no thrust).
-    // k=10000 gives w_n=17.7 rad/s and 96% tracking.
+    // curvature and the body barely bends (measured 2026-07-27, --tune at the
+    // reference CN=0.60: k=900 => w_n=5.3 rad/s against a 12 rad/s drive => 9%
+    // of commanded amplitude and no thrust; k=10000 => w_n=17.7 rad/s and 88%
+    // tracking, 96% at the lighter CN=0.30 drag).
     double kSpring = 10000.0;  // muscle stiffness
     double kDamp   = 170.0;    // muscle damping (~15% of critical at kSpring)
     double CT      = 0.03;     // tangential drag coefficient

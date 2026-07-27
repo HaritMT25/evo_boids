@@ -403,13 +403,33 @@ in **C++20**.
     inflated the counter 2.2× unseen), CSV sentinel binding (the two new columns
     could be transposed, duplicated or zeroed with the whole suite green), and the
     nextId rejection above.
+  - **Sweep results (54 runs: {no-gate control} + T ∈ {16, 14} × {hard, soft W=4,
+    grace 60, both} × 6 seeds × 20k steps, serial `--no-render`; distributions as
+    median [min–max], population over the tail half):** control tail pop 402
+    [366–434], 2474 [2350–2623] births, comps 10 [4–12]. At **T=16** the hard gate
+    reproduces the 0.21.0 bistable collapse in one arm — tail pop 228 [50–440],
+    births 714 [9–1559]: floor seeds and survivor seeds under the same config,
+    which is exactly why single runs were never accepted as evidence. **Soft W=4
+    is the one mitigation that meets the success criterion**: tail pop 434
+    [372–479] — no seed near the floor — at births 1862 [1605–1968] (≈75% of
+    control, so the gate still bites), mitigated share 0.48 [0.42–0.72], comps 7
+    [6–8]. **Grace alone does not stabilize**: at T=16 it trades collapse for
+    boom-bust around a low population (tail pop 117 [61–274] vs final pop 365 —
+    the divergence IS the oscillation), share 0.08 [0.00–0.49]. Both together ≈
+    soft's stability (380 [364–401]) at a higher bypass share (0.64 [0.56–0.76]) —
+    at 16, grace adds share, not stability. At **T=14** nothing is healthy: hard is
+    dead (50 [50–50], ≤2 births), soft is bistable (tail 225 [50–446]), grace
+    hovers just off the floor (69 [66–85]) while carrying 0.94 [0.61–0.97] of all
+    births — the mitigation-carries-everything failure mode the flags doc warns
+    about. 14 stays effectively unviable, consistent with it sitting below the
+    embedding's own pair-distance floor (p05 ≈ 13–17). **In no arm do components
+    rise above control**: the mitigations restore viability, not the speciation
+    signature — the same direction as the 0.22.0 finding that gating concentrates
+    the pairing graph rather than splitting it. Raw runs + analysis:
+    `~/wasm_parity/sweep_mit/` with `analyze_mit.py` beside it.
   - Not done, deliberately: the browser stats array does not expose the two new
     counters (adding a slot changes the JS ABI); `json_min`'s nan/inf/null laxity
-    is parked as its own decision. **Next: the D7 mitigation sweep** — arms at
-    T ∈ {16, 14} × {hard, soft W=4, grace 60, both} × ≥6 seeds × 20k steps,
-    read off live count, birth rate, `repro_components` and the two attribution
-    columns; the success criterion is a population held off the floor withOUT the
-    mitigations carrying the whole birth rate.
+    is parked as its own decision.
 - **0.23.0 (the tier-1 body model — `--body-model` + `--body-mutation`; opt-in, off =
   byte-identical, fingerprint-verified vs 0.22.0/`640a32a` across 4 seeds × 5 modes).**
   Two heritable per-creature parameters, `Creature::bodySize` and `Creature::bodyElong`

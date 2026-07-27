@@ -18,6 +18,7 @@
 #include "current.hpp"
 #include "cluster_projection.hpp"
 #include "isolation.hpp"
+#include "repro_graph.hpp"
 
 struct Food {
     Vec2 pos;
@@ -192,6 +193,33 @@ public:
     long long totalDeathsLogged_ = 0;   // every death seen (not just kept)
     long long clusterStride_     = 1;   // keep a death iff (ordinal % stride == 0)
 
+    // ---- Pairing graph (see repro_graph.hpp for what it measures) ----
+    // Two structures, because the archive and the metric want opposite things.
+    //
+    // birthLog is the archival event log written to <stem>.births.csv: bounded
+    // and uniformly DECIMATED exactly like deathLog, so a million-step run stays
+    // in memory. Only populated when cfg.reproLog.
+    //
+    // reproWindow_ is the metric's data source: the last cfg.reproWindow pairs,
+    // UNDECIMATED, in a fixed-capacity ring. Decimation would be actively
+    // wrong here — dropping edges fragments a connected graph and would inflate
+    // the component count, which is the very thing being measured. Always
+    // maintained (two integer writes per event, no rng, no floats, not
+    // serialized), so the CSV column means the same thing in every run rather
+    // than being silently empty unless a flag was remembered.
+    struct BirthRecord {
+        long long index = 0;                     // event ordinal over the run (0-based)
+        std::uint64_t parent1 = 0, parent2 = 0;  // Creature::id of each of the pair
+        std::uint64_t lineage1 = 0, lineage2 = 0;
+        unsigned long long frame = 0;
+    };
+    std::vector<BirthRecord> birthLog;
+    long long totalBirthsLogged_ = 0;   // every event seen (not just kept)
+    long long reproStride_       = 1;   // keep an event iff (ordinal % stride == 0)
+
+    std::vector<repro::Edge> reproWindow_;
+    std::size_t reproWindowNext_ = 0;   // ring cursor
+
     // Stable identity counter (see Creature::id). Assigned single-threaded at every
     // creation site, so it never touches the parallel phase or the global rng — the
     // simulation stays byte-for-byte and deterministic regardless of ids.
@@ -247,6 +275,57 @@ public:
             deathLog.swap(kept);
             clusterStride_ = newStride;
         }
+    }
+
+    // Record one pairing event into the pairing graph. Called from the success
+    // path of doInteraction case 2, which runs in the single-threaded phase — so
+    // this is deterministic and thread-safe for the same reason logDeath is.
+    // Draws no random numbers and touches no simulation state.
+    void logBirth(const Creature& c1, const Creature& c2) {
+        // The metric window is always maintained; only the archive is opt-in.
+        const int cap = cfg.reproWindow > 0 ? cfg.reproWindow : 0;
+        if (cap > 0) {
+            // Guard, unreachable today (cfg is fixed before init() and a load
+            // builds a fresh World): if reproWindow ever shrinks on a live
+            // World, over-cap edges must not sit in the ring forever.
+            if ((int)reproWindow_.size() > cap) {
+                reproWindow_.resize((std::size_t)cap);
+                reproWindowNext_ = 0;
+            }
+            const repro::Edge e{c1.id, c2.id};
+            if ((int)reproWindow_.size() < cap) {
+                reproWindow_.push_back(e);
+            } else {
+                reproWindow_[reproWindowNext_] = e;
+                reproWindowNext_ = (reproWindowNext_ + 1) % (std::size_t)cap;
+            }
+        }
+
+        if (!cfg.reproLog) return;
+        const long long ordinal = totalBirthsLogged_++;
+        if (ordinal % reproStride_ != 0) return;            // decimated out
+        BirthRecord rec;
+        rec.index = ordinal;
+        rec.parent1 = c1.id;       rec.parent2 = c2.id;
+        rec.lineage1 = c1.lineageId; rec.lineage2 = c2.lineageId;
+        rec.frame = frame;
+        birthLog.push_back(rec);
+        if (cfg.reproLogMax > 0 && (int)birthLog.size() >= 2 * cfg.reproLogMax) {
+            // Halve: keep every other kept record, then require twice the spacing.
+            const long long newStride = reproStride_ * 2;
+            std::vector<BirthRecord> kept;
+            kept.reserve(birthLog.size() / 2 + 1);
+            for (const BirthRecord& b : birthLog)
+                if (b.index % newStride == 0) kept.push_back(b);
+            birthLog.swap(kept);
+            reproStride_ = newStride;
+        }
+    }
+
+    // Connected components of the pairing graph over the trailing window,
+    // counting only components with at least cfg.reproMinCluster members.
+    int reproComponents() const {
+        return repro::componentCount(reproWindow_, cfg.reproMinCluster);
     }
 
     // Runtime-tunable parameters (see SimConfig). Set World::cfg before init().
@@ -913,6 +992,7 @@ private:
                 newborns.back().lineageId = c1.lineageId;   // inherit maternal line
                 births++;
                 totalBirths++;
+                logBirth(c1, c2);
             }
             break;
         }

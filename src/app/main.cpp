@@ -12,6 +12,7 @@
 #include "core/stats.hpp"
 #include "core/cluster_map_io.hpp"
 #include "core/wiring_log.hpp"
+#include "core/birth_log.hpp"
 #include "core/checkpoint_io.hpp"
 #include "render/sfml_renderer.hpp"  // the only translation unit pulling SFML
 
@@ -43,12 +44,12 @@ void printUsage(const char* prog) {
         "                        pheromones and the long probe cross the world seam, and\n"
         "                        the boundary sensors read no-wall (default off; positions\n"
         "                        have always wrapped — this makes the SENSES wrap too)\n"
-        "  --repro-max-distance F  reproductive isolation: parents farther apart than F in\n"
-        "                        folded (source,sink) connectivity space cannot breed;\n"
+        "  --repro-max-distance F  match distance: a pair farther apart than F in the folded\n"
+        "                        (source,sink) connectivity space emits no successor;\n"
         "                        <0 = off (default off). Measured scale: unrelated genomes\n"
         "                        sit ~19.5 apart and in-run neighbour pairs ~18-20, so the\n"
         "                        live window is roughly 12-22 — below ~12 almost nothing\n"
-        "                        breeds and the population falls to the --min-pop floor\n"
+        "                        pairs and the live count falls to the --min-pop floor\n"
         "  --population N        starting creature count (default 300)\n"
         "  --min-pop N           reseed floor (default 50)\n"
         "  --max-pop N           hard birth cap, 0 = unlimited (default 0)\n"
@@ -107,6 +108,12 @@ void printUsage(const char* prog) {
         "  --cluster-pca             use PCA axes (per-run, variance-aligned) instead of the fixed random map\n"
         "  --cluster-color M         'epoch' (time, default) or 'lineage' (colour points by clade)\n"
         "  --wiring-log              write <name>.wiring.csv: per-sensor wiring fraction over time (headless)\n"
+        "  --repro-log               write <name>.births.csv: one row per pairing event (which two\n"
+        "                            records produced a successor) — the pairing graph (headless)\n"
+        "  --repro-log-max N         max pairing records kept in RAM; decimated above this (default 20000)\n"
+        "  --repro-window N          pairing events in the trailing graph window behind the\n"
+        "                            repro_components CSV column, 0 = disable it (default 2000)\n"
+        "  --repro-min-cluster N     ignore pairing-graph components smaller than N (default 3)\n"
         "  --profile                 print a build/parallel/serial phase timing breakdown at end (headless)\n"
         "  --fast-tanh               approximate the neural activations (~1.2-1.3x faster, CHANGES\n"
         "                            results; exploratory sweeps only — see config.hpp)\n"
@@ -232,6 +239,10 @@ int main(int argc, char** argv) {
         else if (arg == "--cluster-pca")             cfg.clusterPca          = true;
         else if (arg == "--cluster-color")         { std::string m = next("--cluster-color"); cfg.clusterColor = (m == "lineage") ? 1 : 0; }
         else if (arg == "--wiring-log")              cfg.wiringLog           = true;
+        else if (arg == "--repro-log")               cfg.reproLog            = true;
+        else if (arg == "--repro-log-max")           cfg.reproLogMax         = std::atoi(next("--repro-log-max"));
+        else if (arg == "--repro-window")            cfg.reproWindow         = std::max(0, std::atoi(next("--repro-window")));
+        else if (arg == "--repro-min-cluster")       cfg.reproMinCluster     = std::max(1, std::atoi(next("--repro-min-cluster")));
         else if (arg == "--profile")                 cfg.profile             = true;
         else if (arg == "--version") {
             std::cout << "evo_boids " << EVO_VERSION
@@ -373,7 +384,7 @@ int main(int argc, char** argv) {
         const auto  startTime = std::chrono::steady_clock::now();
 
         // Optional per-sensor wiring log (headless, opt-in). Separate file so the
-        // 31-col metrics CSV format is untouched.
+        // metrics CSV format is untouched.
         std::ofstream wiringCsv;
         if (world.cfg.wiringLog) {
             const std::string wpath = clusterStem + ".wiring.csv";
@@ -524,6 +535,22 @@ int main(int argc, char** argv) {
                     std::cout << "Wrote death-cluster map: " << spath
                               << " (+ " << cpath << ", " << world.deathLog.size()
                               << " of " << world.totalDeathsLogged_ << " deaths)\n";
+            }
+            // Reproduction-graph archive. Same headless-only rule as the cluster
+            // map: these are end-of-run analysis products, not live outputs.
+            if (world.cfg.reproLog) {
+                const std::string bpath = clusterStem + ".births.csv";
+                const std::filesystem::path bp(bpath);
+                if (bp.has_parent_path()) std::filesystem::create_directories(bp.parent_path());
+                std::ofstream bcsv(bpath);
+                if (bcsv) {
+                    const std::size_t n = birthlog::write(bcsv, world);
+                    bcsv.close();
+                    std::cout << "Wrote birth log: " << bpath << " (" << n
+                              << " of " << world.totalBirthsLogged_ << " births)\n";
+                } else {
+                    std::cerr << "Could not open " << bpath << " for writing.\n";
+                }
             }
             return 0;
         }

@@ -1542,6 +1542,270 @@ static void test_reproductive_isolation() {
     }
 }
 
+// ---------------------------------------------------------------
+// Reproduction graph (v0.22.0). Validated the way `species` was: against
+// constructed cases whose answer is known by hand, BEFORE it is trusted on
+// real runs.
+static void test_repro_graph() {
+    std::printf("reproduction graph: components, decimation, CSV column...\n");
+
+    // --- hand-built graphs with known answers ---
+    {
+        using repro::Edge;
+        // Empty graph: no edges, no vertices. Must report 0, not crash and not
+        // divide by zero — this is exactly what a gate tight enough to stop all
+        // breeding produces, so it is a real case, not a pathological one.
+        CHECK(repro::componentCount({}, 3) == 0);
+
+        // One well-mixed group: a 5-cycle. One component of 5 members.
+        const std::vector<Edge> ring = {{1,2},{2,3},{3,4},{4,5},{5,1}};
+        CHECK(repro::componentCount(ring, 3) == 1);
+        CHECK(repro::componentCount(ring, 5) == 1);
+        CHECK(repro::componentCount(ring, 6) == 0);   // no component that big
+
+        // Two mutually incompatible clusters that never exchange an edge.
+        const std::vector<Edge> split = {{1,2},{2,3},{3,1},  {10,11},{11,12},{12,10}};
+        CHECK(repro::componentCount(split, 3) == 2);
+
+        // Add a single bridging birth and the two collapse into one — this is
+        // the signal that reproductive isolation has BROKEN DOWN.
+        std::vector<Edge> bridged = split;
+        bridged.push_back({3, 10});
+        CHECK(repro::componentCount(bridged, 3) == 1);
+
+        // An isolated pair is a component of size 2, below the default floor of
+        // 3, so it must not inflate the count.
+        std::vector<Edge> withPair = ring;
+        withPair.push_back({90, 91});
+        CHECK(repro::componentCount(withPair, 3) == 1);
+        CHECK(repro::componentCount(withPair, 2) == 2);
+
+        // Order-independence: components are a property of the edge SET.
+        std::vector<Edge> shuffled = split;
+        std::reverse(shuffled.begin(), shuffled.end());
+        CHECK(repro::componentCount(shuffled, 3) == repro::componentCount(split, 3));
+
+        // Duplicate and self edges must not create phantom components.
+        std::vector<Edge> dupes = {{1,2},{1,2},{2,3},{3,3}};
+        CHECK(repro::componentCount(dupes, 3) == 1);
+    }
+
+    // --- the window is a ring: it holds the LAST N births, undecimated ---
+    // 1200 steps, not 600: `age > 5.0f` is a hard reproduction precondition and
+    // at dt 0.016 nothing can breed before step ~312, so a short run measures
+    // the warm-up rather than the ring.
+    // Serial-only: >64 is a whole-run birth count, which the OpenMP build's
+    // per-thread rngs do not pin (same guard as the fingerprint tests).
+#ifndef USE_OPENMP
+    {
+        rng.seed(80808u);
+        World w;
+        w.cfg.reproWindow = 64;
+        w.cfg.minPopulation = 0;
+        w.init(900, 700, 240);
+        for (int i = 0; i < 1200; ++i) w.update(0.016f);
+        CHECK(w.totalBirths > 64);                       // enough births to wrap
+        CHECK((int)w.reproWindow_.size() == 64);         // capped, not growing
+        CHECK(w.reproComponents() >= 0);
+    }
+#endif
+
+    // --- eviction: the ring holds the LAST N events, and old edges age OUT ---
+    // Drives logBirth directly with hand-built Creatures (it touches only the
+    // pairing structures — no sim state, no rng), so this is deterministic in
+    // both builds and pins push-until-cap, the overwrite position, cursor wrap
+    // and eviction: a broken cursor advance would keep the bridge below alive
+    // forever while every other test here still passed.
+    {
+        World w;
+        w.cfg.reproWindow = 4;
+        w.cfg.reproMinCluster = 3;
+        Creature ca, cb;
+        auto edge = [&](std::uint64_t ia, std::uint64_t ib) {
+            ca.id = ia; cb.id = ib;
+            w.logBirth(ca, cb);
+        };
+        edge(1, 2); edge(2, 3); edge(10, 11); edge(11, 12);   // ring now full
+        CHECK(w.reproComponents() == 2);          // {1,2,3} and {10,11,12}
+        edge(3, 10);                              // bridge; evicts (1,2)
+        CHECK(w.reproComponents() == 1);          // {2,3,10,11,12}
+        // Four more events replace the whole window; the bridge must age out.
+        edge(1, 2); edge(2, 3); edge(10, 11); edge(11, 12);
+        CHECK(w.reproComponents() == 2);          // split again: bridge evicted
+    }
+
+    // --- a real run's graph is connected; a sterilised run's is empty ---
+    {
+        const int STEPS = 600;
+        rng.seed(24680u);
+        World mixed;
+        mixed.cfg.minPopulation = 0;
+        mixed.init(900, 700, 220);
+        for (int i = 0; i < STEPS; ++i) mixed.update(0.016f);
+        CHECK(mixed.totalBirths > 0);
+        CHECK(mixed.reproComponents() >= 1);
+
+        rng.seed(24680u);
+        World sterile;
+        sterile.cfg.minPopulation = 0;
+        sterile.cfg.reproMaxDistance = 0.5f;   // nobody can breed
+        sterile.init(900, 700, 220);
+        for (int i = 0; i < STEPS; ++i) sterile.update(0.016f);
+        CHECK(sterile.totalBirths == 0);
+        CHECK(sterile.reproComponents() == 0);   // no edges => 0, reported sanely
+    }
+
+    // --- the archive log is bounded and decimates like the death log ---
+    // Serial-only for the same reason as the ring test: >64 is a whole-run
+    // count that OpenMP's per-thread rngs do not pin.
+#ifndef USE_OPENMP
+    {
+        rng.seed(31415u);
+        World w;
+        w.cfg.reproLog = true;
+        w.cfg.reproLogMax = 32;                  // tiny, to force several halvings
+        w.cfg.minPopulation = 0;
+        w.init(900, 700, 240);
+        for (int i = 0; i < 900; ++i) w.update(0.016f);
+        CHECK(w.totalBirthsLogged_ > 64);
+        CHECK((int)w.birthLog.size() < 2 * w.cfg.reproLogMax);   // stayed bounded
+        CHECK(w.reproStride_ >= 2);                               // did decimate
+        // Kept records must be exactly those on the current stride, in order.
+        bool strideOk = true, ordered = true;
+        long long prev = -1;
+        for (const World::BirthRecord& b : w.birthLog) {
+            if (b.index % w.reproStride_ != 0) strideOk = false;
+            if (b.index <= prev) ordered = false;
+            prev = b.index;
+            if (b.parent1 == 0 || b.parent2 == 0) strideOk = false;  // ids assigned
+        }
+        CHECK(strideOk);
+        CHECK(ordered);
+    }
+
+    // --- the whole apparatus is observational: fingerprints cannot move ---
+    // The always-on window, the opt-in archive and the component count draw no
+    // rng and touch no sim state; this is that claim as a test, not a
+    // code-reading exercise. Serial-only, like every whole-run comparison.
+    {
+        const int STEPS = 400;
+        auto fingerprintWith = [](int window, bool logOn) {
+            rng.seed(70707u);
+            World w;
+            w.cfg.minPopulation = 0;
+            w.cfg.reproWindow = window;
+            w.cfg.reproLog = logOn;
+            w.init(900, 700, 220);
+            for (int i = 0; i < STEPS; ++i) w.update(0.016f);
+            return deepFingerprint(w);
+        };
+        const std::uint64_t base = fingerprintWith(2000, false);
+        CHECK(fingerprintWith(0, false) == base);      // window off == default
+        CHECK(fingerprintWith(64, false) == base);     // window size irrelevant
+        CHECK(fingerprintWith(2000, true) == base);    // archive is write-only
+    }
+
+    // --- same seed twice with the archive on: identical records, not merely
+    // identical worlds ---
+    {
+        std::vector<World::BirthRecord> logs[2];
+        std::uint64_t fp[2] = {0, 0};
+        for (int rep = 0; rep < 2; ++rep) {
+            rng.seed(90909u);
+            World w;
+            w.cfg.minPopulation = 0;
+            w.cfg.reproLog = true;
+            w.init(900, 700, 240);
+            for (int i = 0; i < 900; ++i) w.update(0.016f);
+            fp[rep] = deepFingerprint(w);
+            logs[rep] = w.birthLog;
+        }
+        CHECK(fp[0] == fp[1]);
+        bool same = logs[0].size() == logs[1].size() && !logs[0].empty();
+        for (size_t i = 0; same && i < logs[0].size(); ++i)
+            same = logs[0][i].index == logs[1][i].index
+                && logs[0][i].parent1 == logs[1][i].parent1
+                && logs[0][i].parent2 == logs[1][i].parent2
+                && logs[0][i].lineage1 == logs[1][i].lineage1
+                && logs[0][i].lineage2 == logs[1][i].lineage2
+                && logs[0][i].frame == logs[1][i].frame;
+        CHECK(same);
+    }
+#endif
+
+    // --- checkpoints: the new fields round-trip, old checkpoints default, and
+    // a resume starts the window empty ---
+    {
+        rng.seed(42424u);
+        World a;
+        a.cfg.reproWindow = 777;
+        a.cfg.reproMinCluster = 5;
+        a.init(900, 700, 200);
+        for (int i = 0; i < 600; ++i) a.update(0.016f);
+        const std::string blob = checkpoint::serialize(a, "test");
+
+        // Round trip — into a World that has ALREADY RUN, which is exactly the
+        // case that catches stale pairing state surviving a load.
+        rng.seed(11111u);
+        World b;
+        b.cfg.minPopulation = 0;
+        b.init(900, 700, 220);
+        for (int i = 0; i < 900; ++i) b.update(0.016f);
+        CHECK(!b.reproWindow_.empty());       // the stale state actually exists
+        std::string err;
+        CHECK(checkpoint::deserialize(blob, b, err));
+        CHECK(b.cfg.reproWindow == 777);
+        CHECK(b.cfg.reproMinCluster == 5);
+        CHECK(b.reproWindow_.empty());        // the window is per-run state
+        CHECK(b.birthLog.empty());
+        CHECK(b.reproComponents() == 0);      // empty window reports 0, sanely
+
+        // A checkpoint written before v0.22.0 has neither key; loading it must
+        // fall back to the defaults rather than inventing values.
+        World c;
+        std::string legacy = blob;
+        for (const std::string key : {std::string("\"reproWindow\":777,"),
+                                      std::string("\"reproMinCluster\":5,")}) {
+            const size_t at = legacy.find(key);
+            CHECK(at != std::string::npos);
+            if (at != std::string::npos) legacy.erase(at, key.size());
+        }
+        std::string err2;
+        CHECK(checkpoint::deserialize(legacy, c, err2));
+        CHECK(c.cfg.reproWindow == 2000);
+        CHECK(c.cfg.reproMinCluster == 3);
+    }
+
+    // --- the CSV column is appended, not inserted ---
+    {
+        const std::string h = statsCsvHeader();
+        // Every pre-0.22.0 column keeps its index: the old header must be a
+        // prefix of the new one.
+        const std::string old =
+            "step,elapsed_s,steps_per_sec,population,food,"
+            "births_cum,deaths_cum,births_interval,deaths_interval,"
+            "avg_age,max_age,avg_energy,avg_speed,"
+            "avg_genome_len,genome_len_std,avg_responsiveness,avg_osc_period,"
+            "genetic_diversity,species,flow_align,"
+            "predator_pop,kills_interval,deaths_starvation,deaths_age,predator_align,"
+            "neighbor_align,neighbor_count,"
+            "predator_births_interval,predator_deaths_starv,predator_deaths_age,predator_avg_energy";
+        CHECK(h.rfind(old, 0) == 0);
+        CHECK(h.size() > old.size());
+        // species is still column 19 (1-based), as the whole corpus assumes.
+        int commas = 0; std::size_t at = 0;
+        while (at < h.size() && commas < 18) { if (h[at] == ',') ++commas; ++at; }
+        CHECK(h.compare(at, 7, "species") == 0);
+        // header and row must agree on field count
+        WorldStats s;
+        const std::string row = statsCsvRow(s, 0.0, 0.0, 0, 0, 0, 0, 0, 0, 0, 0);
+        CHECK(std::count(h.begin(), h.end(), ',') == std::count(row.begin(), row.end(), ','));
+        // The new column is the LAST header field, so a later append cannot
+        // silently order itself between repro_components and the row's tail.
+        CHECK(h.size() > 17 && h.compare(h.size() - 17, 17, ",repro_components") == 0);
+    }
+}
+
 int main() {
     std::printf("=== evo_boids core tests (no SFML linked) ===\n");
     test_portable_mt19937();
@@ -1563,6 +1827,7 @@ int main() {
     test_analysis_v012();
     test_schooling_metric();
     test_reproductive_isolation();
+    test_repro_graph();
 
     std::printf("---------------------------------------------\n");
     std::printf("%d checks, %d failures\n", g_checks, g_failures);

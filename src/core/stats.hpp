@@ -209,6 +209,21 @@ struct WorldStats {
     int   totalPredatorDeathsStarvation = 0;
     int   totalPredatorDeathsAge        = 0;
     float predatorAvgEnergy             = 0.0f;
+
+    // --- Pairing graph (v0.22.0) ---
+    // Connected components, with at least cfg.reproMinCluster members, of the
+    // graph whose edges are "these two Creatures produced one successor record"
+    // over the last cfg.reproWindow events. See repro_graph.hpp for why this
+    // exists: `species` above is a SimHash of the same folded connectivity
+    // vector that the match-distance gate thresholds, so it cannot evaluate that
+    // gate without circularity — and it is saturated anyway (measured: it tracks
+    // the live-set count one-to-one, i.e. it counts individual Creatures). This
+    // one is mechanism-level: an edge exists because an insertion happened.
+    //
+    // 0 means "no edges in the window", which is the honest report for a live
+    // set that has stopped pairing — read it alongside births_interval, not on
+    // its own.
+    int   reproComponents               = 0;
 };
 
 // Compute a snapshot from the current world state.
@@ -224,6 +239,9 @@ inline WorldStats computeStats(const World& w) {
     s.totalKills            = static_cast<int>(w.totalDeathsPredation);
     s.totalDeathsStarvation = static_cast<int>(w.totalDeathsStarvation);
     s.totalDeathsAge        = static_cast<int>(w.totalDeathsAge);
+
+    // Pairing graph over the trailing window (v0.22.0 — see repro_graph.hpp).
+    s.reproComponents = w.reproComponents();
 
     // Predator energy economy (Stage B). Cumulative births/deaths + instantaneous
     // mean energy. Mean energy is only meaningful when the economy is on (in Stage
@@ -379,7 +397,10 @@ inline std::string statsCsvHeader() {
            "genetic_diversity,species,flow_align,"
            "predator_pop,kills_interval,deaths_starvation,deaths_age,predator_align,"
            "neighbor_align,neighbor_count,"
-           "predator_births_interval,predator_deaths_starv,predator_deaths_age,predator_avg_energy";
+           "predator_births_interval,predator_deaths_starv,predator_deaths_age,predator_avg_energy,"
+           // APPENDED at the end (v0.22.0), never inserted: every existing column
+           // index stays stable, so the whole historical CSV corpus keeps parsing.
+           "repro_components";
 }
 
 inline std::string statsCsvRow(const WorldStats& s,
@@ -425,6 +446,7 @@ inline std::string statsCsvRow(const WorldStats& s,
       << predBirthsInterval << ','
       << predStarvInterval << ','
       << predAgeInterval << ','
-      << s.predatorAvgEnergy;
+      << s.predatorAvgEnergy << ','
+      << s.reproComponents;      // appended (v0.22.0) — see the header note
     return o.str();
 }

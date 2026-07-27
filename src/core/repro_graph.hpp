@@ -4,37 +4,39 @@
 #include <vector>
 
 // ----------------------------------------------------------------------------
-// The reproduction graph — the INDEPENDENT speciation measure.
+// The pairing graph — the INDEPENDENT grouping measure.
 //
 // Why this exists. The `species` column (stats.hpp) is a SimHash of the folded
-// connectivity vector, and the reproductive-isolation gate (isolation.hpp) is a
+// connectivity vector, and the match-distance gate (isolation.hpp) is a
 // distance threshold in that SAME folded space. Using one to evaluate the other
 // is circular: any gate defined by distance in a space, measured by a metric
-// over that space, reports clusters because you built them. (The research log
-// already flags the sibling trap: genome COLOUR is a 3-D shadow of the species
-// SimHash — the same vector — so it is not independent evidence either.)
+// over that space, reports groups because you built them in. (The research log
+// already flags the sibling trap: `Genome` COLOUR is a 3-D shadow of the
+// `species` SimHash — the same vector — so it is not independent evidence
+// either.)
 //
-// This measure is mechanism-level instead: an edge exists between two creatures
-// because they actually produced a child together. Nothing about it is computed
-// from genome space, so it cannot be circular with a genetic gate. Reproductive
-// isolation, if it is real, shows up here as the reproduction graph splitting
-// into components that never exchange an edge.
+// This measure is mechanism-level instead: an edge exists between two
+// `Creature`s because doInteraction case 2 actually emitted a successor record
+// from that pair. Nothing about it is computed from `Genome` space, so it
+// cannot be circular with a `Genome`-space gate. Separation, if it is real,
+// shows up here as the graph splitting into components that never exchange an
+// edge.
 //
 // Read the two columns TOGETHER. The interesting result is precisely where they
-// disagree — `species` can split while the graph stays connected (genetic drift
-// without isolation), and the graph can split while `species` stays at one
-// (isolation on a trait the SimHash is blind to).
+// disagree — `species` can split while the graph stays connected (drift in the
+// embedding with no change in who pairs with whom), and the graph can split
+// while `species` stays at one (separation on a trait the SimHash is blind to).
 // ----------------------------------------------------------------------------
 
 namespace repro {
 
-// One reproduction event, reduced to the only thing the graph needs.
+// One pairing event, reduced to the only thing the graph needs.
 struct Edge {
-    std::uint64_t a = 0, b = 0;   // Creature::id of the two parents
+    std::uint64_t a = 0, b = 0;   // Creature::id of the two records in the pair
 };
 
 // Number of connected components with at least `minMembers` members, over the
-// graph whose vertices are the creature ids appearing in `edges`.
+// graph whose vertices are the Creature ids appearing in `edges`.
 //
 // Union-find with path halving and union by size. O(E log E), dominated by the
 // sort that maps sparse 64-bit ids onto dense indices.
@@ -44,9 +46,9 @@ struct Edge {
 // union picks. No rng, no floats.
 //
 // Degenerate cases are the ones worth stating, because a gate tight enough to
-// stop all breeding produces them and the metric must stay readable rather than
+// stop all pairing produces them and the metric must stay readable rather than
 // dividing by zero: no edges at all => 0 vertices => 0 components. A single
-// isolated breeding pair is a component of size 2, so it is NOT counted at the
+// disconnected pair is a component of size 2, so it is NOT counted at the
 // default minMembers of 3 — that threshold is what keeps the metric from being
 // dominated by one-off pairings.
 inline int componentCount(const std::vector<Edge>& edges, int minMembers) {

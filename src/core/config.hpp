@@ -29,20 +29,20 @@ struct SimConfig {
     // a wrapped traveller feels a small velocity discontinuity at the seam).
     bool toroidal = false;
 
-    // --- Reproductive isolation (opt-in, off = byte-identical prior behaviour) ---
-    // Parents whose genomes are farther apart than this in the folded
-    // (source,sink) connectivity space cannot produce a child; every other
-    // reproduction precondition is unchanged. <0 = off, no genetic gate.
+    // --- Match distance (opt-in, off = byte-identical prior behaviour) ---
+    // A pair whose genomes are farther apart than this in the folded
+    // (source,sink) connectivity space emits no successor record; every other
+    // precondition in doInteraction case 2 is unchanged. <0 = off, no gate.
     // (Precedent for "negative means disabled": predatorMoveCost below.)
     //
     // The metric is genomeDistanceSq() in isolation.hpp — NOT genomeSimilarity(),
     // which is positionally aligned and collapses on a single indel (see the
     // comment there). Measured scale, so the number means something: unrelated
-    // random genomes sit ~19.5 apart, a child sits ~13.8 from a parent when the
-    // population is unstructured, and a mutated clone sits ~0. A threshold below
-    // the population's own pair distance stops essentially all breeding, so the
-    // interesting window is narrow and population-dependent — see the research
-    // log's v0.21.0 entry before picking a value.
+    // random genomes sit ~19.5 apart, a successor sits ~13.8 from its source when
+    // the live set is unstructured, and a mutated clone sits ~0. A threshold below
+    // the live set's own pair distance stops essentially all insertion, so the
+    // interesting window is narrow and load-dependent — see the research log's
+    // v0.21.0 entry before picking a value.
     float reproMaxDistance = -1.0f;
 
     // --- Population ---
@@ -194,6 +194,23 @@ struct SimConfig {
     // click-selected creature's neural net can be drawn "firing live". Off by
     // default (zero cost in headless); main turns it on when there is a window.
     bool captureActivations = false;
+    // Pairing graph — the INDEPENDENT grouping measure (repro_graph.hpp).
+    // The `species` column is a SimHash of the same folded connectivity vector
+    // the match-distance gate thresholds, so using it to evaluate the gate is
+    // circular; worse, it is empirically SATURATED (it tracks the live-set count
+    // almost one-to-one, i.e. it counts individual Creatures). An edge here
+    // exists because two Creatures actually produced a successor record
+    // together, which is mechanism-level and cannot be circular.
+    //
+    // reproWindow / reproMinCluster drive the always-on repro_components CSV
+    // column. reproLog / reproLogMax are the opt-in <stem>.births.csv archive,
+    // shaped exactly like clusterMap / clusterMax.
+    int  reproWindow     = 2000;  // trailing events in the graph (0 = disable the column)
+    int  reproMinCluster = 3;     // ignore components smaller than this (a one-off
+                                  // pairing is not a group)
+    bool reproLog        = false; // write <stem>.births.csv at end of run (headless)
+    int  reproLogMax     = 20000; // max event records kept in RAM (decimated above this)
+
     // Death-cluster map: log a 2-D projection of each dead creature's network and
     // write <name>.deaths.csv + <name>.cluster.svg at end of run. Off by default
     // (keeps default runs byte-for-byte and allocation-free). See world.hpp.
@@ -291,7 +308,11 @@ struct SimConfig {
                                       : std::to_string(predatorMeal))
           << " predatorMaxAge="   << (predatorMaxAge > 0.0f
                                       ? std::to_string(predatorMaxAge)
-                                      : std::string("immortal"));
+                                      : std::string("immortal")) << "\n"
+          << "reproWindow="       << reproWindow
+          << " reproMinCluster="  << reproMinCluster
+          << " reproLog="         << (reproLog ? "on" : "off")
+          << " reproLogMax="      << reproLogMax;
         return o.str();
     }
 };

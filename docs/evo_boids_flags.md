@@ -302,7 +302,7 @@ top-left corner — see context renderer note).
 | `--genome-init-min N` | 24 | Initial gene-count range (low). |
 | `--genome-init-max N` | 48 | Initial gene-count range (high). |
 | `--mutation F` | 1.0 | Multiplier on the per-birth mutation rate. |
-| **`--repro-max-distance F`** | **off (<0)** | **Reproductive isolation** (v0.21.0). Parents farther apart than `F` in the folded **(source,sink) connectivity space** cannot produce a child; every other reproduction precondition is unchanged, and an incompatible pair burns its interaction cooldown exactly as an under-energised pair already does. Uses `genomeDistanceSq()` (`src/core/isolation.hpp`) — **not** `genomeSimilarity()`, which is positionally aligned and collapses on a single indel. **Measured scale** (so the number means something): unrelated random genomes ≈ **19.5** apart; in-run pairs within `--interact-radius` sit at median **18–20** (p05 ≈ 13–17); a mutated clone ≈ **0**. So the live window is roughly **12–22** — above ~23 the gate is inert, below ~12 essentially nothing breeds and the population falls to the `--min-pop` floor. Off ⇒ byte-identical to before (fingerprint-verified, 4 seeds × 5 modes). Costs nothing when off (one float compare, no RNG draw). Requires `--genome-max ≤ 1024`. |
+| **`--repro-max-distance F`** | **off (<0)** | **Match distance** (v0.21.0). A pair farther apart than `F` in the folded **(source,sink) connectivity space** emits no successor record; every other precondition is unchanged, and an out-of-threshold pair burns its interaction cooldown exactly as an under-energised pair already does. Uses `genomeDistanceSq()` (`src/core/isolation.hpp`) — **not** `genomeSimilarity()`, which is positionally aligned and collapses on a single indel. **Measured scale** (so the number means something): unrelated random genomes ≈ **19.5** apart; in-run pairs within `--interact-radius` sit at median **18–20** (p05 ≈ 13–17); a mutated clone ≈ **0**. So the live window is roughly **12–22** — above ~23 the gate is inert, below ~12 essentially nothing pairs and the live count falls to the `--min-pop` floor. Off ⇒ byte-identical to before (fingerprint-verified, 4 seeds × 5 modes). Costs nothing when off (one float compare, no RNG draw). Requires `--genome-max ≤ 1024`. |
 
 ## Selection pressure
 
@@ -359,6 +359,10 @@ open (headless runs pay nothing for it).
 | `--cluster-pca` | off | Map axes = **PCA** over the death sketches (per-run, variance-aligned, fills the frame) instead of the fixed random projection. The deaths CSV keeps the stable random `x,y`; PCA is a view choice for the SVG only. |
 | `--cluster-color M` | `epoch` | `epoch` colours points by death order (the ramp); `lineage` colours by clade (hashed founder id) so selective sweeps show as large same-colour clusters. |
 | `--wiring-log` | off | Headless: write `<name>.wiring.csv`, one row per log interval — the fraction of the live population wiring each of the 41 sensors as a source. Reveals which inputs selection recruits over the run. |
+| `--repro-log` | off | Headless: write `<name>.births.csv`, one row per kept pairing event — `index,frame,parent1,parent2,lineage1,lineage2`. This is the **pairing graph**: an edge means those two creatures actually produced a successor record. Bounded and uniformly decimated exactly like the cluster map, so `index` is the true event ordinal and the stride is reported in the file header. |
+| `--repro-log-max N` | 20000 | Max pairing records kept in RAM; uniformly decimated above this. |
+| `--repro-window N` | 2000 | Trailing pairing events behind the always-on `repro_components` CSV column (0 disables the column). Undecimated on purpose — dropping edges fragments a connected graph and would inflate the very count being measured, which is why this is a separate ring buffer from the archive above. |
+| `--repro-min-cluster N` | 3 | Ignore pairing-graph components smaller than N. A one-off pairing is not a group; without this the count is dominated by isolated pairs. |
 | `--profile` | off | Headless: accumulate per-phase timings and print a build / parallel{sensor-gather, feedForward, apply} / serial split at end. Diagnostic only; gated so it never affects dynamics. Run it at your real N and core count before optimizing. |
 | `--save-checkpoint FILE` | — | Write the complete world state to `FILE` (JSON) at the end of the headless run. ~1.2 KB per creature (a 233-creature world is 270 KB; gzips to ~40 %). |
 | `--load-checkpoint FILE` | — | Resume from `FILE` instead of starting fresh. **In a serial build the continuation is bit-for-bit identical to the run that was interrupted** — verified end to end: 600 steps in one go produces the same bytes as 300 + resume + 300. Adopts the checkpoint's world size and config, so simulation flags on the resume command line are ignored (edit the file instead). |
@@ -378,6 +382,23 @@ random sketch is stored; the SVG plots either the fixed 2-D random map or, with
 - `<name>.deaths.csv` — `index,x,y,epoch,lineage,age,genome_len,cause` per kept death
   (`cause` ∈ p/s/a). Re-plot or analyse freely (PCA over x,y, group by lineage, etc.).
 
+**Pairing graph.** `--repro-log` → `<name>.births.csv`, plus the always-on
+`repro_components` CSV column (32nd, appended in v0.22.0 — every earlier column keeps
+its index). The column is the number of connected components with ≥ `--repro-min-cluster`
+members in the graph of which records paired with which, over the last `--repro-window`
+pairing events.
+
+Read it **instead of** `species`, not alongside it, when the question is group
+separation. `species` is a SimHash of the same folded connectivity vector that
+`--repro-max-distance` thresholds, so it cannot evaluate that gate without
+circularity — and it is **saturated** regardless: measured across every arm of the
+v0.21.0 sweep including the ungated control, it tracks the live-set count almost
+one-to-one (475 buckets for 480 creatures), i.e. at 16 hash bits it is counting
+individuals. `repro_components` is mechanism-level: an edge exists because an insertion
+happened, so it cannot be circular with a `Genome`-space gate. `0` means no edges in the
+window — the honest report for a live set that has stopped pairing; read it with
+`births_interval`.
+
 **Sensor-wiring frequency.** `--wiring-log` → `<name>.wiring.csv`: `step` plus one
 column per sensor (named), each the fraction of the population whose genome wires that
 sensor as a source. Plotting a column over time shows recruitment — e.g. the
@@ -390,7 +411,7 @@ sensors sitting near their random-chance baseline.
 > runs because the axes are data-dependent). Lineage = founder of the **maternal**
 > line (parent1 at each birth); crossover means a clade's genomes still recombine.
 
-## CSV columns (one row per `--log-every` interval) — **31 cols as of v0.10.0**
+## CSV columns (one row per `--log-every` interval) — **32 cols as of v0.22.0**
 
 `step, elapsed_s, steps_per_sec, population, food, births_cum, deaths_cum,
 births_interval, deaths_interval, avg_age, max_age, avg_energy, avg_speed,
@@ -398,7 +419,8 @@ avg_genome_len, genome_len_std, avg_responsiveness, avg_osc_period,
 genetic_diversity, species, flow_align,
 predator_pop, kills_interval, deaths_starvation, deaths_age, predator_align,
 neighbor_align, neighbor_count,
-predator_births_interval, predator_deaths_starv, predator_deaths_age, predator_avg_energy`
+predator_births_interval, predator_deaths_starv, predator_deaths_age, predator_avg_energy,
+repro_components`
 
 - `genetic_diversity`: RMS distance from the population mean in connectivity space
   (~14 scale, exact). Coupled to genome length. Not comparable to pre-rework CSVs.
@@ -408,6 +430,12 @@ predator_births_interval, predator_deaths_starv, predator_deaths_age, predator_a
 - `flow_align`: mean cosine of heading vs local flow. **+1** ride/surf, **−1** fight
   upstream, **0** crosswise *or* no current. **Read with `avg_speed`** (low speed =
   drifting; high+positive = surfing; high+negative = fighting).
+- `repro_components` (32nd, appended in v0.22.0): connected components with ≥
+  `--repro-min-cluster` members in the pairing graph over the last `--repro-window`
+  events — see the *Pairing graph* section above. **Restarts empty on checkpoint
+  resume** (the window is per-run state, like the death log), so the column needs up
+  to `--repro-window` post-resume pairing events before it is comparable to an
+  uninterrupted run's.
 
 **New in v0.9.0 (5 columns, appended last → existing column-by-name parsing is
 unaffected):**

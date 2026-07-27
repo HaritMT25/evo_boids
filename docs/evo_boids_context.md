@@ -87,11 +87,21 @@ in **C++20**.
 
 ---
 
-## 2. Current version: v0.21.0
+## 2. Current version: v0.22.0
 
-> **Banner matches the code.** `CMakeLists.txt` is at **0.21.0** — `--repro-max-distance`,
-> the opt-in reproductive-isolation gate (default off, fingerprint-verified
-> byte-identical; see the 0.21.0 history entry). Two findings from its sweep are
+> **Banner matches the code.** `CMakeLists.txt` is at **0.22.0** — the pairing graph:
+> `World::logBirth` records which two creatures produced each successor record, the
+> new always-on `repro_components` CSV column (32nd, appended — every existing
+> column index stable) counts connected components of that graph over a trailing
+> window, and `--repro-log` archives the events to `<stem>.births.csv`. All of it
+> observational — fingerprint-verified byte-identical to 0.21.0 at defaults; see the
+> 0.22.0 history entry. Measured on the sweep rerun: at NO tested threshold does the
+> gate split the pairing graph — components FALL as the gate tightens (12.5 control
+> → 3.3 at 16), so gating concentrates pairing into fewer clusters or collapses the
+> run; the speciation signature (components rising above control) was not observed.
+> 0.21.0 added `--repro-max-distance`, the opt-in match-distance gate (default off,
+> fingerprint-verified byte-identical; see the 0.21.0 history entry). Two findings
+> from its sweep are
 > load-bearing for everything downstream: the usable threshold window is narrow
 > and ends in a **bistable collapse at ~16** (below ~14 nothing breeds at all),
 > and the **`species` metric turns out to be saturated** — it tracks population
@@ -220,10 +230,11 @@ in **C++20**.
 
 
 ### What's in it (cumulative)
-- **CSV logging — now 31 cols** (predator economy columns added in 0.10.0). Through
-  0.9.1 it was 27 cols ending in **neighbor_count**; 0.10.0 appended
-  predator_births_interval, predator_deaths_starv, predator_deaths_age,
-  predator_avg_energy.
+- **CSV logging — now 32 cols** (`repro_components` appended in 0.22.0; predator
+  economy columns added in 0.10.0). Through 0.9.1 it was 27 cols ending in
+  **neighbor_count**; 0.10.0 appended predator_births_interval,
+  predator_deaths_starv, predator_deaths_age, predator_avg_energy; 0.22.0 appended
+  repro_components.
 - **Predator energy economy (Stage B)** behind `--predator-economy` (off by default):
   predators gain energy per capture (absorb victim reserves, or a fixed
   `--predator-meal`), burn `--predator-metabolism` + a kinetic move-cost, bud a child
@@ -306,6 +317,70 @@ in **C++20**.
   bug** (that grid is stale by the time `computeStats` runs; §10.5). Negligible at
   the populations run so far (it was never the cause of the slowdown — §10.5), but it
   removes the O(n²) cliff for large-N / Stage-B runs.
+- **0.22.0 (the pairing graph — `repro_components` CSV column + `--repro-log`;
+  observational only, fingerprint-verified byte-identical to 0.21.0 at defaults).**
+  The independent grouping measure the plan's §3.3 demanded: `World::logBirth`
+  records (c1.id, c2.id) on the success path of `doInteraction` case 2 (serial
+  phase, same thread-safety argument as `logDeath`; no rng, two integer writes).
+  Two structures, because the metric and the archive want opposite things: an
+  always-maintained UNDECIMATED ring of the last `--repro-window` (default 2000)
+  events feeds the new 32nd CSV column `repro_components` — connected components
+  with ≥ `--repro-min-cluster` (default 3) members, union-find in new
+  `repro_graph.hpp` (decimating this graph would fragment components and inflate
+  the very count being measured) — and `--repro-log` keeps a bounded, uniformly
+  decimated archive (`birth_log.hpp`, gate → ordinal → stride → halve-at-2x,
+  exactly the `logDeath` shape) written to `<stem>.births.csv` on headless runs.
+  - Checkpoints: `reproWindow`/`reproMinCluster` serialized (old files load with
+    the defaults 2000/3); the archive's decimation counters (`totalBirthsLogged`,
+    `reproStride`) serialized like the death log's; the window and archive
+    CONTENTS deliberately not (per-run analysis state, same rule as the death
+    log) — a resumed run restarts the window empty, so `repro_components` is
+    comparable to an uninterrupted run only after ≤ `reproWindow` post-resume
+    events. Stated in `checkpoint_io.hpp`'s not-saved list and the flags doc.
+  - Verified: byte identity vs 5f5f628 with everything at defaults — 20/20
+    step-for-step fingerprint cases (4 seeds x 5 config modes) PASS, checkpoint
+    differing by exactly the four new fields (2 config + 2 counters); ctest green
+    in both builds; native==wasm parity 13/13. New tests: constructed graphs
+    with known component counts (bridge-collapses-two-into-one, min-member
+    floor, duplicate/self edges), ring eviction driven directly through
+    `logBirth` (a bridge edge must age OUT of the window), the observational
+    claim as a test rather than a code-reading (window 0/64/2000, archive on/off
+    — all deepFingerprint-identical), same seed twice ⇒ identical archive
+    records, checkpoint round trip incl. a legacy file with both keys removed
+    and a load into an already-run World (stale window must clear), and the
+    header append pinned (species stays column 19; repro_components is the last
+    field).
+  - **MEASURED (sweep rerun: 6 arms x 6 seeds x 20k steps, serial,
+    `--no-render`; arms off/24/22/20/18/16): the speciation signature was NOT
+    observed at any threshold.** `repro_components` tail means: control
+    12.5±4.4, 24: 12.6±1.9, 22: 10.3±4.0, 20: 9.1±1.7, 18: 7.2±1.7, 16:
+    3.3±1.2. Noise floor stated: the control's own seed spread is 7.7–20.7, so
+    off/24/22 are indistinguishable, 20/18 sit at the edge of noise, and only
+    16 is unambiguous — and the direction is DOWN everywhere: components never
+    rise above control. Isolation would read as components RISING (groups that
+    stop exchanging edges); what gating actually does is thin the graph — fewer
+    eligible pairs ⇒ fewer clusters reaching 3 members inside the window — and
+    at 16 the §7.1 bistability reproduces on fresh seeds (3/6 at or near the
+    floor with 0–15 births/interval; 3/6 ABOVE control at 530–617): the
+    survivors are a SINGLE compatible breeding core (components 2.7–5.0 at
+    populations 530–617, vs the control's ~12 at ~480), i.e. the gate
+    concentrates pairing into one cluster rather than separating several. The
+    control's ~12 components are sampling fragmentation of a sparse 2000-event
+    graph, not latent population structure — read the column RELATIVE to a
+    control, not as an absolute.
+  - `species`/population ≈ 0.98–0.99 in EVERY arm including the arm-16
+    survivors (601 buckets / 617 creatures): the 0.21.0 saturation finding
+    reproduced with the new column running alongside — `species` counts
+    individuals, `repro_components` is the one that can move independently.
+  - Confound stated up front (plan §7.2): `GENETIC_SIM_NEAREST` /
+    `GENETIC_SIM_FWD` remain wired, so a future separation result must rule out
+    an acquired similarity-seeking policy before crediting the gate. Left wired
+    deliberately — changing the sensor set re-bases `geneCell` and the whole
+    historical corpus (see §5).
+  - Also in this commit: `logBirth` guards against a mid-run `reproWindow`
+    shrink (unreachable today, pinned anyway); `deserialize` clears pairing
+    state so an in-place reload cannot keep stale edges; the stale "31-col"
+    comment and the flags-doc column list updated to 32.
 - **0.21.0 (`--repro-max-distance` — reproductive isolation; opt-in, off =
   byte-identical, fingerprint-verified across 4 seeds x 5 config modes).**
   Parents whose genomes are farther apart than the threshold in the folded

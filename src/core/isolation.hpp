@@ -6,7 +6,7 @@
 #include "genome.hpp"
 
 // ----------------------------------------------------------------------------
-// Reproductive isolation — distance between two genomes in the SAME folded
+// Match distance — distance between two Genomes in the SAME folded
 // (source, sink) connectivity space that buildNeuralNet() wires, and that the
 // species SimHash (stats.hpp) and genome colour (genome_color.hpp) already
 // share via connectivity.hpp. Duplicate edges sum, exactly as they do in the
@@ -15,12 +15,12 @@
 // WHY NOT genomeSimilarity() (genome.hpp): it compares gene i to gene i, and
 // only sourceType/sinkType — two bits per gene, positionally aligned.
 // mutateGenome inserts, deletes and duplicates genes, so a SINGLE indel shifts
-// every downstream gene and collapses the score between a parent and its own
-// child. That is tolerable for the rough percept it feeds (GENETIC_SIM_NEAREST)
-// and useless as a reproductive gate. The fold below is permutation-invariant
-// and indel-robust, which is precisely what a gate needs. core_tests pins the
-// contrast directly, so the reason this function exists stays documented in the
-// test suite rather than only here.
+// every downstream gene and collapses the score between a Genome and a Genome
+// derived directly from it. That is tolerable for the rough percept it feeds
+// (GENETIC_SIM_NEAREST) and useless as an admission gate. The fold below is
+// permutation-invariant and indel-robust, which is precisely what a gate needs.
+// core_tests pins the contrast directly, so the reason this function exists
+// stays documented in the test suite rather than only here.
 //
 // DETERMINISM. This is sim-path code, so it obeys the project's rules:
 //   * no rng draws, ever — the gate must not perturb the draw sequence;

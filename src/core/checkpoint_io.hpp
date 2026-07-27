@@ -30,6 +30,13 @@
 //     to hundreds of thousands of entries. A run resumed from a checkpoint
 //     therefore produces a cluster map covering only the post-resume deaths.
 //     The counters that drive its decimation ARE saved, so it stays consistent.
+//   - the pairing graph (repro_graph.hpp): same rule as the death log. Neither
+//     the births archive (cfg.reproLog) nor the always-maintained trailing
+//     window behind the repro_components CSV column is world state; a resumed
+//     run restarts the window empty, so that column needs up to
+//     cfg.reproWindow post-resume pairing events before it is comparable to an
+//     uninterrupted run's. The archive's decimation counters ARE saved, like
+//     the death log's, so a resumed --repro-log run keeps consistent ordinals.
 //   - the phase profiler: diagnostics, reset per run by design.
 // ----------------------------------------------------------------------------
 #include <string>
@@ -96,6 +103,8 @@ inline void writeConfig(jsonm::Writer& w, const SimConfig& c) {
     w.beginObject();
     w.field("toroidal", c.toroidal);
     w.field("reproMaxDistance", c.reproMaxDistance);
+    w.field("reproWindow", c.reproWindow);
+    w.field("reproMinCluster", c.reproMinCluster);
     w.field("minPopulation", c.minPopulation);
     w.field("maxPopulation", c.maxPopulation);
     w.field("targetFood", c.targetFood);
@@ -158,6 +167,10 @@ inline void readConfig(const jsonm::Value& j, SimConfig& c) {
     // Absent in checkpoints written before v0.21.0; the default (-1 = gate off)
     // is what those runs actually used, so they resume unchanged.
     c.reproMaxDistance = o->floatOr("reproMaxDistance", c.reproMaxDistance);
+    // reproLog / reproLogMax are deliberately NOT serialized, matching deathLog:
+    // they select a per-run analysis output, not world state.
+    c.reproWindow = o->intOr("reproWindow", c.reproWindow);
+    c.reproMinCluster = o->intOr("reproMinCluster", c.reproMinCluster);
     c.minPopulation = o->intOr("minPopulation", c.minPopulation);
     c.maxPopulation = o->intOr("maxPopulation", c.maxPopulation);
     c.targetFood = o->intOr("targetFood", c.targetFood);
@@ -250,6 +263,8 @@ inline std::string serialize(const World& world, const char* engineVersion) {
     w.field("totalPredatorDeathsAge", world.totalPredatorDeathsAge);
     w.field("totalDeathsLogged", world.totalDeathsLogged_);
     w.field("clusterStride", world.clusterStride_);
+    w.field("totalBirthsLogged", world.totalBirthsLogged_);
+    w.field("reproStride", world.reproStride_);
     w.endObject();
     w.newline();
 
@@ -414,6 +429,13 @@ inline bool deserialize(const std::string& text, World& world, std::string& erro
     world.food.clear();
     world.predators.clear();
     world.creatures.clear();
+    // Pairing-graph state is per-run (see the header list): a resume starts the
+    // window and archive empty, with the counters restored below if present.
+    world.birthLog.clear();
+    world.reproWindow_.clear();
+    world.reproWindowNext_ = 0;
+    world.totalBirthsLogged_ = 0;
+    world.reproStride_ = 1;
 
     world.frame  = jw->ullOr("frame", 0);
     world.nextId_ = jw->ullOr("nextId", 1);
@@ -429,6 +451,8 @@ inline bool deserialize(const std::string& text, World& world, std::string& erro
         world.totalPredatorDeathsAge = jc->llOr("totalPredatorDeathsAge", 0);
         world.totalDeathsLogged_ = jc->llOr("totalDeathsLogged", 0);
         world.clusterStride_ = jc->llOr("clusterStride", 1);
+        world.totalBirthsLogged_ = jc->llOr("totalBirthsLogged", 0);
+        world.reproStride_ = jc->llOr("reproStride", 1);
     }
 
     // ocean + food patches

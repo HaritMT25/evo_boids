@@ -13,7 +13,7 @@
 // byte equality of two checkpoints == bit-for-bit identical simulations.
 // wasm/parity.sh runs the full matrix.
 //
-// Usage: parity_driver SEED STEPS [--rich] [--tri] [--toroidal]
+// Usage: parity_driver SEED STEPS [--rich] [--tri] [--toroidal] [--body-model]
 //                      [--repro-max-distance F] [--engine-version STR] [--trace N]
 //   --rich   turn on every hidden-state subsystem (mirrors the resume test's
 //            configureRichWorld: eddies, food patches + drift, 4 predators with
@@ -21,6 +21,11 @@
 //   --tri    triangular motion (exercises atan2f)
 //   --repro-max-distance  exercise the genetic reproduction gate (isolation.hpp):
 //            a sort + merge-join over folded genomes on the reproduction path
+//   --body-model  exercise the tier-1 body model (body_model.hpp): heritable
+//            size/elongation feeding the speed clamp, turn rate and metabolism,
+//            plus TWO rng draws per insertion — a dynamics knob that adds to the
+//            random stream, so §6.2 requires native==wasm proven with it on.
+//            bodyMutation stays at its 0.1 default.
 //   --trace  print "frame fingerprint" to stderr every N steps (divergence bisection)
 #include <cstdio>
 #include <cstdlib>
@@ -48,6 +53,17 @@ static uint64_t fingerprint(const World& w) {
         mix(&c.pos, sizeof c.pos);
         mix(&c.vel, sizeof c.vel);
         mix(&c.foodReserves, sizeof c.foodReserves);
+        // v0.23.0 body model, mirroring the deepFingerprint widening in
+        // tests/core_tests.cpp. This trace is the divergence-BISECTION tool —
+        // when parity.sh reports a byte mismatch, this is what says which step
+        // it started at — so it must cover every field the checkpoint carries
+        // or it points at the wrong step. Demonstrated: with the inherited
+        // bodyElong scaled by 1.5 the checkpoints differ, yet every line of the
+        // pre-widening trace was identical — the tool reported "no divergence"
+        // on a divergent run. Widened, it reports the first divergent step.
+        mix(&c.bodySize, sizeof c.bodySize);
+        mix(&c.bodyElong, sizeof c.bodyElong);
+        mix(c.body, sizeof c.body);
     }
     for (const auto& p : w.predators) {
         mix(&p.pos, sizeof p.pos);
@@ -75,7 +91,7 @@ int main(int argc, char** argv) {
 
     const unsigned seed = (unsigned)std::strtoul(argv[1], nullptr, 10);
     const long steps = std::strtol(argv[2], nullptr, 10);
-    bool rich = false, tri = false, tor = false;
+    bool rich = false, tri = false, tor = false, bodyModel = false;
     float reproMaxDistance = -1.0f;
     const char* engineVersion = "parity";
     long traceEvery = 0;
@@ -83,6 +99,7 @@ int main(int argc, char** argv) {
         if (!std::strcmp(argv[i], "--rich")) rich = true;
         else if (!std::strcmp(argv[i], "--tri")) tri = true;
         else if (!std::strcmp(argv[i], "--toroidal")) tor = true;
+        else if (!std::strcmp(argv[i], "--body-model")) bodyModel = true;
         else if (!std::strcmp(argv[i], "--repro-max-distance") && i + 1 < argc)
             reproMaxDistance = (float)std::atof(argv[++i]);
         else if (!std::strcmp(argv[i], "--engine-version") && i + 1 < argc) engineVersion = argv[++i];
@@ -108,6 +125,7 @@ int main(int argc, char** argv) {
     }
     if (tri) world.cfg.triangularMotion = true;
     if (tor) world.cfg.toroidal = true;
+    if (bodyModel) world.cfg.bodyModel = true;   // bodyMutation stays at 0.1
     world.cfg.reproMaxDistance = reproMaxDistance;
     world.init(1920, 1080, 300);
 

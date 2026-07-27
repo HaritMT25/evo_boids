@@ -45,6 +45,29 @@ run_case "toro_rich_s7" 7    2000 --rich --toroidal
 # ~23 would leave the gate inert and prove nothing about the new code path.
 run_case "iso_s42"     42    2000 --repro-max-distance 18
 run_case "iso_rich_s999" 999 2000 --rich --repro-max-distance 14
+# Tier-1 body model (body_model.hpp). This is a DYNAMICS knob that also ADDS TO
+# THE RANDOM STREAM (two rng.range draws per insertion), so the on-path needs
+# native==wasm proven independently of the off-path: a draw-count or draw-order
+# difference between the two builds would show up here and nowhere else.
+# body_s42 is the case with live morphology at the end (192 insertions, bodySize
+# spread 0.86-1.14 at step 2000). body_rich_s7 is the harsher one: --rich at 2000
+# steps collapses to the --min-pop floor under predation in EVERY seed (that is
+# pre-existing, not a body-model effect — plain --rich s7/s42 do it too), so its
+# survivors are reseeded founders back at 1.0. It still earns its place: 23
+# insertions happen along the way (peak bodySize spread 0.92-1.09 around step
+# 1000), and it exercises the body factors against predators/currents/patches
+# and through the reseed path, where founders must draw NOTHING.
+run_case "body_s42"      42   2000 --body-model
+run_case "body_rich_s7"  7    2000 --rich --body-model
+# body_tri_s42 exists because the other two body cases cannot see turnFactor at
+# all. turnFactor is the ONLY dynamical consumer of bodyElong, it multiplies
+# cfg.maxTurnRate, and cfg.maxTurnRate is read on the triangular-motion branch
+# only — so with --tri off, bodyElong is decorative and a turn factor wired to
+# the wrong parameter (or deleted outright) ships green through every other
+# case here. Measured at step 2000: 193 insertions, 471 alive, 186 of them off
+# the default body, bodyElong spread 0.856-1.138 — so the elongation term is
+# live and varying across the population when the compare happens.
+run_case "body_tri_s42"  42   2000 --tri --body-model
 run_case "long_s42"    42    10000
 
 if [ "$FAILED" = "1" ]; then

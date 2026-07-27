@@ -87,11 +87,17 @@ in **C++20**.
 
 ---
 
-## 2. Current version: v0.22.0
+## 2. Current version: v0.23.0
 
-> **Banner matches the code.** `CMakeLists.txt` is at **0.22.0** — the pairing graph:
+> **Banner matches the code.** `CMakeLists.txt` is at **0.23.0** — the tier-1 body
+> model: two heritable per-creature parameters, `bodySize` and `bodyElong` (both in
+> [0.5, 2.0], a SEPARATE parameter vector deliberately not derived from the neural
+> genome), modulate the existing speed / turn / metabolism model behind `--body-model`.
+> Opt-in, off = byte-identical (fingerprint-verified, 4 seeds × 5 modes; native==wasm
+> parity 16/16 incl. three body cases) — see the 0.23.0 history entry. No new sensor,
+> no CSV change (still 32 cols), BODY_LEN stays 6. 0.22.0 was the pairing graph:
 > `World::logBirth` records which two creatures produced each successor record, the
-> new always-on `repro_components` CSV column (32nd, appended — every existing
+> always-on `repro_components` CSV column (32nd, appended — every existing
 > column index stable) counts connected components of that graph over a trailing
 > window, and `--repro-log` archives the events to `<stem>.births.csv`. All of it
 > observational — fingerprint-verified byte-identical to 0.21.0 at defaults; see the
@@ -317,6 +323,76 @@ in **C++20**.
   bug** (that grid is stale by the time `computeStats` runs; §10.5). Negligible at
   the populations run so far (it was never the cause of the slowdown — §10.5), but it
   removes the O(n²) cliff for large-N / Stage-B runs.
+- **0.23.0 (the tier-1 body model — `--body-model` + `--body-mutation`; opt-in, off =
+  byte-identical, fingerprint-verified vs 0.22.0/`640a32a` across 4 seeds × 5 modes).**
+  Two heritable per-creature parameters, `Creature::bodySize` and `Creature::bodyElong`
+  (clamped to [0.5, 2.0], founders at exactly 1.0), modulating the EXISTING model
+  (`body_model.hpp`): speed ceiling × 2/(1+size), turn rate × 2/(1+elong) — bites only
+  under `--triangular-motion`, the sole consumer of `maxTurnRate` — metabolic burn ×
+  size, and drawn segment spacing × size·elong (visual only; `body[]` stays decorative).
+  No new physics, no new sensor, `BODY_LEN` stays 6 — no format break. Decisions, per
+  plan §4.3 and recorded here as it demands:
+  - **Separate parameter vector, not derived from the neural genome.** Attribution
+    ("did the body or the brain change?") and future body-model gating both need
+    morphology to vary independently of the wiring. Inheritance is mean-of-parents plus
+    one uniform jitter U(−F, +F) per parameter, clamped — a documented simplification
+    of the plan's "crossover + mutateGenome" sketch (no rejection loop, so the draw
+    COUNT is input-independent). No cellCost term: with `BODY_LEN` fixed there is no
+    varying cell count to price until tier 2; `massFactor` on `metabolicRate` is the
+    size price.
+  - **The rng stream is untouched with the flag off** (plan §4.3 option (a)): the only
+    new draws are exactly TWO `rng.range` per successful insertion (bodySize then
+    bodyElong), inside `if (cfg.bodyModel)`. Founders and reseeded creatures draw
+    nothing and stay 1.0/1.0 even with the flag ON — deliberate: the min-pop reseed
+    floor already pumps random genomes into a collapsing population (§7.1); it must not
+    pump extreme bodies too. Every archived run therefore stays reproducible.
+  - **`cfg.maxSpeed` becomes the ceiling of a DEFAULT body** (0.667×–1.333× at the
+    rails), and `OWN_SPEED` stays normalised by `cfg.maxSpeed` on purpose: a
+    speed-capped big body reads a permanently lower `OWN_SPEED`, a small one can read
+    above 1.0. That asymmetry is information a brain can evolve to use — and a new
+    sensor would re-base `geneCell`, `species`, genome colour and the cluster map for
+    the entire historical corpus (the §5 warning), so none was added.
+  - Checkpoints: `bodyModel`/`bodyMutation` config keys — validated on load (finite and
+    ≥ 0, else the load FAILS; the CLI, the browser `evo_init` and `deserialize` all
+    refuse the same values, so no entry point can smuggle a poisoned config in).
+    `bodySize`/`bodyElong` creature columns ALWAYS written, OPTIONAL on read (a
+    pre-0.23 file restores all-1.0, including one whose config block was hand-edited to
+    enable the flag), and enforced when present: both-or-neither, length-checked, every
+    value in [0.5, 2.0] via a NaN-rejecting compare (a hand-edited bodySize of −1 was
+    demonstrated to load pre-fix and yield inf speedFactor and negative metabolic
+    burn). 0.23 checkpoint FILES are therefore not byte-comparable to archived 0.22
+    files even with the flag off — the RUNS are bit-identical, the files differ by
+    exactly the additive fields.
+  - Verified: §6.1 byte identity vs `640a32a` — 20/20 step-for-step fingerprint cases
+    (seeds 42/7/999/31415 × default/`--rich`/`--tri`/`--toroidal`/
+    `--repro-max-distance 18`), checkpoint delta exactly the 2 config keys + 2 all-1.0
+    arrays, zero value diffs; plus an empirical draw-discipline proof — flag ON with
+    insertions suppressed (`--repro-max-distance 0.001`, reseed floor still firing) is
+    bit-identical to flag OFF, so no draw hides at init, reseed or on failed attempts.
+    core_tests **3071/0 serial, 3017/0 OpenMP**, both builds; the new checks include a
+    motion-only digest that isolates `turnFactor` from the speed/mass factors, an
+    asymmetric body (2.0, 0.5) that catches factor-to-wrong-parameter wiring, and a
+    distinct-parent case (parents recovered through the 0.22.0 birth records) that
+    kills copy-parent1 and sum-of-parents — each of these confirmed by mutation
+    testing (deleting the turn apply site, wiring it to bodySize, copying parent1, and
+    removing the checkpoint guards each produce failures; before the new checks all
+    four mutants shipped green). native==wasm parity **16/16**, three body cases:
+    `body_s42`, `body_rich_s7` (reseed path under predation, founders must draw
+    nothing), `body_tri_s42` (the turnFactor path — the only dynamical consumer of
+    bodyElong; without it half the body model had zero parity coverage).
+    `parity_driver`'s `--trace` fingerprint widened to mix bodySize/bodyElong/`body[]`
+    (a bodyElong divergence was demonstrated invisible to the old trace while the
+    checkpoints differed; this boundary's §6.1 matrix ran pre-widening, which stays
+    valid because parity.sh compares checkpoints, not traces). Draw ORDER (bodySize
+    first) is pinned by the cross-version §6.1 discipline, not by a unit test — stated
+    in the test comments.
+  - Operational note: editing a shell script over the UNC path
+    (`\\wsl.localhost\...`) silently drops its exec bit — `chmod 755` after any such
+    edit (bit us on `wasm/parity.sh`).
+  - Not done, deliberately: no body-model gating (plan §4.6 — needs the §7.1
+    mitigations first), no body sensor, no cellCost. Next: v0.24.0, the §7.1
+    mitigations (soft gate + refill grace), designed against the 0.21.0 sweep's
+    measured collapse at thresholds ≤ 16.
 - **0.22.0 (the pairing graph — `repro_components` CSV column + `--repro-log`;
   observational only, fingerprint-verified byte-identical to 0.21.0 at defaults).**
   The independent grouping measure the plan's §3.3 demanded: `World::logBirth`
@@ -1256,9 +1332,11 @@ hardcoded in `world.hpp`. **Now flags as of 0.8.0:** kinetic move cost (`--move-
 **Now flags as of 0.10.0:** the predator **Stage-B energy economy** — `--predator-economy`
 plus `--predator-metabolism / -move-cost / -repro-energy / -newborn-energy / -meal /
 -max-age` (§9/§12). Also new: the deterministic serial build (`-DEVO_NO_OPENMP=ON`).
+**Now flags as of 0.23.0:** the heritable body-size/elongation trait
+(`--body-model` + `--body-mutation` — the tier-1 body model; see the 0.23.0 entry).
 Still **code changes, not flags:** predator **Stage C** (a neural/evolving predator
 population — §9), logistic/density-dependent food regrowth, mutation-operator
-rebalancing, camouflage / spatially-varying background, a body-size trait, a
+rebalancing, camouflage / spatially-varying background, a
 per-creature spatial-structure snapshot / Moran's I, the renderer `setView` fix (§4),
 and in-life (Hebbian/NEAT) learning.
 

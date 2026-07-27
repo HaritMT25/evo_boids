@@ -3,6 +3,7 @@
 #include <chrono>
 #include <string>
 #include <cstdlib>
+#include <cmath>
 #include <memory>
 #include <algorithm>
 #include <fstream>
@@ -50,6 +51,15 @@ void printUsage(const char* prog) {
         "                        sit ~19.5 apart and in-run neighbour pairs ~18-20, so the\n"
         "                        live window is roughly 12-22 — below ~12 almost nothing\n"
         "                        pairs and the live count falls to the --min-pop floor\n"
+        "  --body-model          heritable body size + elongation (default off). Bigger =>\n"
+        "                        slower (speed x 2/(1+size)) and costlier (metabolism x size);\n"
+        "                        longer => turns worse (turn rate x 2/(1+elong), triangular\n"
+        "                        motion only). Founders start at 1.0; a child inherits the\n"
+        "                        parent mean plus a uniform jitter, clamped to [0.5, 2.0].\n"
+        "                        NOTE --max-speed then bounds a DEFAULT body: the ceiling\n"
+        "                        runs 0.67x (largest) to 1.33x (smallest) of it\n"
+        "  --body-mutation F     [body model] uniform mutation half-width per parameter per\n"
+        "                        birth, F >= 0 (default 0.1); 0 = inheritance with no drift\n"
         "  --population N        starting creature count (default 300)\n"
         "  --min-pop N           reseed floor (default 50)\n"
         "  --max-pop N           hard birth cap, 0 = unlimited (default 0)\n"
@@ -175,6 +185,8 @@ int main(int argc, char** argv) {
         else if (arg == "--no-render") noRender      = true;
         // --- simulation parameters (override SimConfig defaults) ---
         else if (arg == "--repro-max-distance") cfg.reproMaxDistance = std::atof(next("--repro-max-distance"));
+        else if (arg == "--body-model")       cfg.bodyModel         = true;
+        else if (arg == "--body-mutation")    cfg.bodyMutation      = std::atof(next("--body-mutation"));
         else if (arg == "--population")       initialPopulation     = std::atoi(next("--population"));
         else if (arg == "--min-pop")          cfg.minPopulation     = std::atoi(next("--min-pop"));
         else if (arg == "--max-pop")          cfg.maxPopulation     = std::atoi(next("--max-pop"));
@@ -284,6 +296,19 @@ int main(int argc, char** argv) {
     fixOrder(cfg.genomeInitMin, cfg.genomeInitMax, "genome init");
     if (cfg.perceptionRadius < 1.0f) { std::cerr << "Note: perception clamped to 1.\n"; cfg.perceptionRadius = 1.0f; }
     if (cfg.maxNeighbors < 0)        { std::cerr << "Note: max-neighbors < 0 treated as 0 (unlimited).\n"; cfg.maxNeighbors = 0; }
+    // A negative body-mutation half-width would make rng.range(lo,hi) run
+    // backwards — same draw, mirrored sign. Harmless numerically but it means
+    // something different from what the flag says, so refuse it rather than
+    // silently reinterpreting it. Non-finite is worse than wrong: std::atof
+    // parses "nan" and "inf", and rng.range(-inf, +inf) evaluates to NaN, which
+    // the clamp does NOT filter — every newborn body becomes NaN, poisons the
+    // speed/turn/metabolism factors, and lands in the checkpoint as a bare
+    // `nan` token that is not even valid JSON. The test is written negated
+    // because NaN compares false to everything, so `< 0.0f` waves it through.
+    if (!(cfg.bodyMutation >= 0.0f) || !std::isfinite(cfg.bodyMutation)) {
+        std::cerr << "Error: --body-mutation must be finite and >= 0 (got " << cfg.bodyMutation << ").\n";
+        return 1;
+    }
     // The genetic gate folds a genome into a fixed stack buffer. --genome-max is
     // an unbounded int, so refuse the combination rather than silently folding a
     // truncated genome and gating on a distance that means nothing.

@@ -15,6 +15,7 @@
 // after every sync and never cache them.
 #include <cstdint>
 #include <cstring>
+#include <cmath>
 #include <string>
 #include <vector>
 
@@ -95,6 +96,16 @@ EVO_EXPORT int evo_init(unsigned seed, int width, int height, int population,
         cfg.genomeMaxLength > isolation_detail::ISO_MAX_GENES) {
         g_error = "reproMaxDistance requires genomeMaxLength <= "
                 + std::to_string(isolation_detail::ISO_MAX_GENES);
+        return 0;
+    }
+    // Same refusal main.cpp makes, for the same reason and on the same terms:
+    // a negative half-width runs rng.range backwards, and a non-finite one
+    // makes rng.range yield NaN, which the inheritance clamp does not filter —
+    // every newborn body goes NaN. The config here arrives as parsed JSON, so
+    // both are reachable from the page. Reject rather than clamp, so the two
+    // frontends agree. Negated test: NaN compares false to everything.
+    if (!(cfg.bodyMutation >= 0.0f) || !std::isfinite(cfg.bodyMutation)) {
+        g_error = "bodyMutation must be finite and >= 0";
         return 0;
     }
 

@@ -44,7 +44,9 @@
 #include <fstream>
 #include <sstream>
 #include <cstdint>
+#include <cmath>
 #include "world.hpp"
+#include "body_model.hpp"   // BODY_PARAM_MIN/MAX for the body-column range check
 #include "json_min.hpp"
 
 namespace checkpoint {
@@ -103,6 +105,8 @@ inline void writeConfig(jsonm::Writer& w, const SimConfig& c) {
     w.beginObject();
     w.field("toroidal", c.toroidal);
     w.field("reproMaxDistance", c.reproMaxDistance);
+    w.field("bodyModel", c.bodyModel);
+    w.field("bodyMutation", c.bodyMutation);
     w.field("reproWindow", c.reproWindow);
     w.field("reproMinCluster", c.reproMinCluster);
     w.field("minPopulation", c.minPopulation);
@@ -167,6 +171,11 @@ inline void readConfig(const jsonm::Value& j, SimConfig& c) {
     // Absent in checkpoints written before v0.21.0; the default (-1 = gate off)
     // is what those runs actually used, so they resume unchanged.
     c.reproMaxDistance = o->floatOr("reproMaxDistance", c.reproMaxDistance);
+    // Absent in checkpoints written before v0.23.0. The default (gate off,
+    // 0.10 half-width) is what those runs actually used, so they resume
+    // unchanged — same pattern as reproMaxDistance above.
+    c.bodyModel = o->boolOr("bodyModel", c.bodyModel);
+    c.bodyMutation = o->floatOr("bodyMutation", c.bodyMutation);
     // reproLog / reproLogMax are deliberately NOT serialized, matching deathLog:
     // they select a per-run analysis output, not world state.
     c.reproWindow = o->intOr("reproWindow", c.reproWindow);
@@ -348,6 +357,11 @@ inline std::string serialize(const World& world, const char* engineVersion) {
     w.key("responsiveness"); w.beginArray(); for (const auto& c : cs) w.value(c.responsiveness); w.endArray();
     w.key("oscPeriod"); w.beginArray(); for (const auto& c : cs) w.value(c.oscPeriod); w.endArray();
     w.key("oscPhase"); w.beginArray(); for (const auto& c : cs) w.value(c.oscPhase); w.endArray();
+    // Body model (v0.23.0). ALWAYS written, even with cfg.bodyModel off, so a
+    // checkpoint is a complete record of world state regardless of which flags
+    // produced it. On the read side they are OPTIONAL — see deserialize().
+    w.key("bodySize"); w.beginArray(); for (const auto& c : cs) w.value(c.bodySize); w.endArray();
+    w.key("bodyElong"); w.beginArray(); for (const auto& c : cs) w.value(c.bodyElong); w.endArray();
     w.newline();
 
     // Recurrent state. The net itself is rebuilt from the genome, but these
@@ -421,6 +435,23 @@ inline bool deserialize(const std::string& text, World& world, std::string& erro
 
     // Config first: init() sizes the spatial grids from cfg.perceptionRadius.
     readConfig(j, world.cfg);
+
+    // The config block is hand-editable by design, so it is also the one place
+    // a value can enter the engine without passing a frontend. The only legal
+    // writers of bodyMutation are main.cpp's --body-mutation and evo_wasm's
+    // evo_init, and BOTH refuse negative and non-finite values — so a
+    // checkpoint carrying one is corrupt or hand-edited, never something this
+    // engine wrote. Reject rather than clamp, so all three load paths agree on
+    // what is legal. Negated test: NaN compares false to everything, and
+    // json_min parses the bare `nan` and `inf` tokens, so a plain `< 0.0f`
+    // check would wave both straight through into rng.range — which then
+    // returns NaN and turns every newborn body into NaN.
+    // (Validated here rather than in readConfig, which has no error channel and
+    // is also used for partial and older config schemas.)
+    if (!(world.cfg.bodyMutation >= 0.0f) || !std::isfinite(world.cfg.bodyMutation)) {
+        error = "config 'bodyMutation' must be finite and >= 0";
+        return false;
+    }
 
     // Build an empty world of the right geometry, then overwrite every piece of
     // state. init() draws from the rng (vortices, food patches), which is
@@ -548,6 +579,51 @@ inline bool deserialize(const std::string& text, World& world, std::string& erro
             jsonm::readInts(*jcs, "genes", genes, (size_t)-1);
         if (!ok) { error = "malformed 'creatures' arrays (length mismatch?)"; return false; }
 
+        // Body model (v0.23.0): OPTIONAL on read, but only BOTH-OR-NEITHER, and
+        // only in range. A pre-0.23 checkpoint has neither array, and the
+        // creatures it describes ran with no body model, so the right
+        // restoration is the neutral 1.0/1.0 — not a load failure. That case is
+        // still supported verbatim, including a pre-0.23 file whose bodyModel
+        // config key was hand-added.
+        //
+        // Everything else is a corrupt file. serialize() writes both columns
+        // unconditionally, so exactly one present is a shape no writer in any
+        // version produces. And the sole writer of the VALUES is the
+        // inheritance step, which clamps to [BODY_PARAM_MIN, BODY_PARAM_MAX] —
+        // so an out-of-range value can only come from truncation, corruption or
+        // hand editing, and it is not survivable: bodySize = -1 loaded fine,
+        // made speedFactor 2/(1+-1) = +inf, and ran the creature on a negative
+        // metabolic burn (it gains energy by existing). Rejecting at the door
+        // keeps that out of the sim instead of silently renormalising a file
+        // the user believes was restored faithfully.
+        //
+        // The range test is written negated because NaN compares false to every
+        // comparison, so `v < MIN || v > MAX` would wave a NaN column straight
+        // through; `!(v >= MIN && v <= MAX)` catches it.
+        std::vector<float> bodySz, bodyEl;
+        const bool hasBodySz = jcs->find("bodySize")  != nullptr;
+        const bool hasBodyEl = jcs->find("bodyElong") != nullptr;
+        if (hasBodySz != hasBodyEl) {
+            error = "checkpoint has only one of 'bodySize'/'bodyElong' (both or neither)";
+            return false;
+        }
+        if (hasBodySz && !jsonm::readFloats(*jcs, "bodySize", bodySz, n)) {
+            error = "malformed 'bodySize' array (length mismatch?)"; return false;
+        }
+        if (hasBodyEl && !jsonm::readFloats(*jcs, "bodyElong", bodyEl, n)) {
+            error = "malformed 'bodyElong' array (length mismatch?)"; return false;
+        }
+        for (float v : bodySz) {
+            if (!(v >= BODY_PARAM_MIN && v <= BODY_PARAM_MAX)) {
+                error = "'bodySize' value out of range [0.5, 2]"; return false;
+            }
+        }
+        for (float v : bodyEl) {
+            if (!(v >= BODY_PARAM_MIN && v <= BODY_PARAM_MAX)) {
+                error = "'bodyElong' value out of range [0.5, 2]"; return false;
+            }
+        }
+
         size_t needed = 0;
         for (long long L : glen) {
             if (L < 0) { error = "negative genome length"; return false; }
@@ -573,6 +649,8 @@ inline bool deserialize(const std::string& text, World& world, std::string& erro
             c.responsiveness = resp[i];
             c.oscPeriod = oscP[i];
             c.oscPhase = oscPh[i];
+            c.bodySize  = hasBodySz ? bodySz[i] : 1.0f;
+            c.bodyElong = hasBodyEl ? bodyEl[i] : 1.0f;
 
             c.genome.clear();
             c.genome.reserve((size_t)glen[i]);

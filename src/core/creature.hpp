@@ -33,6 +33,16 @@ struct Creature {
     float oscPeriod = 34.0f;      // oscillator period
     float oscPhase = 0.0f;        // current oscillator phase
 
+    // --- Tier-1 body model (v0.23.0; see body_model.hpp) -------------------
+    // Heritable morphology, held OUTSIDE the neural genome on purpose so the
+    // body can vary independently of the wiring. Both default to 1.0, which
+    // makes every derived factor exactly 1.0 and every apply site bit-identical
+    // to the pre-0.23 code. They only ever move when SimConfig::bodyModel is on
+    // (the inheritance step in World::doInteraction is the sole writer; a
+    // founder or a reseeded creature keeps the default).
+    float bodySize  = 1.0f;   // mass / scale proxy, clamped to [0.5, 2.0]
+    float bodyElong = 1.0f;   // elongation,         clamped to [0.5, 2.0]
+
     Genome genome;
     NeuralNet nnet;
 
@@ -90,7 +100,14 @@ struct Creature {
             float dx = body[i].x - body[i - 1].x;
             float dy = body[i].y - body[i - 1].y;
             float dist = std::sqrt(dx * dx + dy * dy);
-            float segLen = 4.0f;
+            // Visual only — body[] feeds the renderer and the checkpoint, and no
+            // sensor reads it. A bigger/longer creature draws a longer trail.
+            // At the defaults this is 4.0f * 1.0f * 1.0f, which IEEE-754
+            // evaluates to exactly 4.0f, so the off-path geometry is unchanged.
+            // (Creature::init()'s initial spacing stays a flat 4.0f: the body
+            // parameters are assigned after construction, and updateBody catches
+            // the trail up on the next step.)
+            float segLen = 4.0f * bodySize * bodyElong;
             if (dist > segLen) {
                 float ratio = segLen / dist;
                 body[i].x = body[i - 1].x + dx * ratio;

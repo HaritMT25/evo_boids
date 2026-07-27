@@ -11,6 +11,7 @@
 #include "vec2.hpp"
 #include "portable_math.hpp"
 #include "creature.hpp"
+#include "body_model.hpp"
 #include "predator.hpp"
 #include "quadtree.hpp"
 #include "spatial_grid.hpp"
@@ -379,6 +380,9 @@ public:
             creatures.push_back(makeRandomCreature(pos, cfg.genomeInitMin, cfg.genomeInitMax));
             creatures.back().id = nextId_++;
             creatures.back().lineageId = creatures.back().id;   // a new founder line
+            // Body model: founders keep the default 1.0/1.0 and draw NOTHING,
+            // even with cfg.bodyModel on. Body diversity is produced by the
+            // per-insertion mutation, not by the spawn (see doInteraction).
         }
 
         // Predators: a fixed handful dropped at random positions with a random
@@ -534,6 +538,17 @@ public:
             // Apply responsiveness scaling
             float resp = c.responsiveness;
 
+            // Tier-1 body model (body_model.hpp). A bigger body has a lower
+            // speed ceiling; the std::max keeps lo <= hi for the std::clamp
+            // calls below, because clamp with lo > hi is undefined behaviour and
+            // a large enough bodySize would otherwise push the ceiling under
+            // cfg.minSpeed. Computed unconditionally: with cfg.bodyModel off
+            // every creature's bodySize is 1.0f, so speedFactor is exactly 1.0f,
+            // cfg.maxSpeed * 1.0f is exactly cfg.maxSpeed, and the max() picks
+            // it — bit-identical to the pre-0.23 expression (proved by the §6.1
+            // fingerprint harness, not merely asserted here).
+            const float effMax = std::max(cfg.minSpeed, cfg.maxSpeed * speedFactor(c));
+
           if (cfg.triangularMotion) {
             // --- Triangular action space: forward drive throttles turn authority ---
             // drive in [0,1] from MOVE_FORWARD; turn in [-1,1] from STEER_X. The
@@ -544,12 +559,16 @@ public:
             float turnEff = turn * (1.0f - drive) * resp;
 
             float theta = evomath::atan2f(c.vel.y, c.vel.x);
-            theta += turnEff * cfg.maxTurnRate * dt;
+            // Body model: a longer body turns worse. The parenthesisation is
+            // load-bearing — (maxTurnRate * turnFactor) is exactly maxTurnRate
+            // when turnFactor is 1.0f, so the product with turnEff and dt keeps
+            // the original association and the original bits.
+            theta += turnEff * (cfg.maxTurnRate * turnFactor(c)) * dt;
             c.vel.x = evomath::cosf(theta);
             c.vel.y = evomath::sinf(theta);
 
-            c.speed = std::clamp(cfg.minSpeed + drive * (cfg.maxSpeed - cfg.minSpeed),
-                                 cfg.minSpeed, cfg.maxSpeed);
+            c.speed = std::clamp(cfg.minSpeed + drive * (effMax - cfg.minSpeed),
+                                 cfg.minSpeed, effMax);
 
             c.lastMoveDir = c.vel;
             c.pos.x += c.vel.x * c.speed * dt;
@@ -578,7 +597,7 @@ public:
             if (vlen > 0.001f) { c.vel.x /= vlen; c.vel.y /= vlen; }
 
             c.speed += speedAdj * 50.0f * dt;
-            c.speed = std::clamp(c.speed, cfg.minSpeed, cfg.maxSpeed);
+            c.speed = std::clamp(c.speed, cfg.minSpeed, effMax);   // body model: size caps speed
 
             c.lastMoveDir = c.vel;
 
@@ -616,7 +635,10 @@ public:
             // genomes must earn their length), plus an optional kinetic cost so
             // thrust isn't free — moveCost*speed^2 makes fast movement (e.g.
             // fighting a current) expensive and gives an interior optimal speed.
-            c.foodReserves -= dt * (cfg.metabolicRate
+            // Body model: the FIXED burn scales with mass, so a big body pays
+            // for its size every second. The gene-cost term is deliberately
+            // untouched — that one prices the genome, not the body.
+            c.foodReserves -= dt * (cfg.metabolicRate * massFactor(c)
                                     + cfg.geneCost * (float)c.genome.size()
                                     + cfg.moveCost * c.speed * c.speed);
             c.reproTimer -= dt;
@@ -730,6 +752,10 @@ public:
                 creatures.push_back(makeRandomCreature(pos, cfg.genomeInitMin, cfg.genomeInitMax));
                 creatures.back().id = nextId_++;
                 creatures.back().lineageId = creatures.back().id;   // new founder line
+                // Body model: a reseeded founder is 1.0/1.0 and draws nothing.
+                // Deliberate — the reseed floor already acts as a pump for
+                // random founders when a population is collapsing (§7.1), and
+                // giving it extreme bodies too would make that worse.
             }
         }
 
@@ -990,6 +1016,35 @@ private:
                                           m.y - baby.vel.y * bi * 4.0f };
                 }
                 newborns.back().lineageId = c1.lineageId;   // inherit maternal line
+
+                // --- Tier-1 body inheritance (v0.23.0) --------------------
+                // THE RANDOM STREAM IS DEFINED HERE. Read before editing:
+                //
+                //  * Draws happen ONLY under cfg.bodyModel. With the flag off
+                //    this block draws nothing, so the pre-0.23 rng sequence —
+                //    and therefore every archived run — is untouched.
+                //  * EXACTLY TWO rng.range draws per successful insertion, in
+                //    this order: bodySize first, then bodyElong. rng.range is a
+                //    single engine draw with no rejection, so the draw COUNT is
+                //    independent of the values; that is what lets native and
+                //    wasm stay bit-identical. Do not swap the order, do not add
+                //    a Gaussian, do not add a resample-until-in-range loop —
+                //    each of those breaks the parity contract.
+                //  * Position in the sequence: AFTER the lineageId assignment,
+                //    BEFORE logBirth. doInteraction runs in the single-threaded
+                //    phase, so this shares the one global rng safely.
+                //  * Blend is the plain parent mean plus a uniform jitter, then
+                //    clamped, so a child can never leave [0.5, 2.0] no matter
+                //    what the parents are.
+                if (cfg.bodyModel) {
+                    Creature& nb = newborns.back();
+                    nb.bodySize  = std::clamp(0.5f * (c1.bodySize + c2.bodySize)
+                                              + rng.range(-cfg.bodyMutation, cfg.bodyMutation),
+                                              BODY_PARAM_MIN, BODY_PARAM_MAX);
+                    nb.bodyElong = std::clamp(0.5f * (c1.bodyElong + c2.bodyElong)
+                                              + rng.range(-cfg.bodyMutation, cfg.bodyMutation),
+                                              BODY_PARAM_MIN, BODY_PARAM_MAX);
+                }
                 births++;
                 totalBirths++;
                 logBirth(c1, c2);

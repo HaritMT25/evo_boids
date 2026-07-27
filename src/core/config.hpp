@@ -45,6 +45,27 @@ struct SimConfig {
     // v0.21.0 entry before picking a value.
     float reproMaxDistance = -1.0f;
 
+    // --- Tier-1 body model (opt-in, off = byte-identical prior behaviour) ---
+    // Two heritable per-creature parameters (Creature::bodySize/bodyElong) that
+    // modulate the existing speed / turn / metabolism model — see
+    // body_model.hpp for the factors and why they are exact at the defaults.
+    // With it on, maxSpeed below stops being a hard cap and becomes the ceiling
+    // of a DEFAULT body (a small body's ceiling reaches 1.333 * maxSpeed).
+    //
+    // bodyModel is a HARD master switch, not just a scaling of 0: it is what
+    // gates the two rng draws per insertion. With it off the body parameters
+    // never leave 1.0 and the random stream is bit-for-bit the pre-0.23 one, so
+    // every run in the existing corpus stays reproducible. Founders and reseeded
+    // creatures always start at 1.0 even with the flag ON (diversity comes from
+    // mutation, and it keeps the --min-pop reseed floor from injecting extreme
+    // bodies into a struggling population).
+    bool  bodyModel    = false;
+    // Uniform mutation half-width applied to each parameter at each insertion:
+    // child = clamp(mean(parents) + U(-bodyMutation, +bodyMutation), 0.5, 2.0).
+    // Uniform, not Gaussian, and no rejection loop — the draw COUNT has to be
+    // input-independent or the two builds' random streams diverge.
+    float bodyMutation = 0.10f;
+
     // --- Population ---
     int minPopulation = 50;   // reseed floor: random creatures injected below this
     int maxPopulation = 0;    // hard birth cap (0 = unlimited)
@@ -254,6 +275,8 @@ struct SimConfig {
           << "reproMaxDistance="  << (reproMaxDistance < 0.0f
                                       ? std::string("off (no genetic gate)")
                                       : std::to_string(reproMaxDistance)) << "\n"
+          << "bodyModel="         << (bodyModel ? "on (heritable size/elongation)" : "off")
+          << " bodyMutation="     << bodyMutation << "\n"
           << "minPopulation="     << minPopulation
           << " maxPopulation="    << maxPop << "\n"
           << "targetFood="        << targetFood

@@ -36,7 +36,9 @@
       ["mutationMultiplier", 1, { step: 0.1 }], ["genomeInitMin", 24], ["genomeInitMax", 48],
       ["genomeMinLength", 16], ["genomeMaxLength", 80],
       ["reproMaxDistance", -1, { step: 0.5, label: "repro max distance (-1 = off)",
-                                 title: "genetic reproduction gate; -1 disables it" }]
+                                 title: "genetic reproduction gate; -1 disables it" }],
+      ["bodyMutation", 0.1, { step: 0.01, min: 0, label: "body mutation (body model on)",
+                              title: "uniform half-width per body parameter per birth" }]
     ]],
     ["predators", [
       ["predatorSpeed", 110], ["predatorPerception", 150], ["predatorCaptureRadius", 14],
@@ -63,6 +65,8 @@
     predatorEconomy: { d: "Predators eat, breed and starve (Stage B) instead of being immortal.", t: "try: on with 3-4 predators" },
     toroidal: { d: "Senses wrap across the world seam — no walls, no sensory dead zone at edges.", t: "try: on; cures the wall-hugger phenotype" },
     reproMaxDistance: { d: "Reproductive isolation: parents farther apart than this in wiring space cannot breed (-1 = off).", t: "try: 18 bites gently, 14 hard; below 12 breeding stops" },
+    bodyModel: { d: "Heritable body size + elongation: bigger = slower and costlier, longer = turns worse.", t: "try: on; founders start at 1.0 and bodies drift from births" },
+    bodyMutation: { d: "Body-model only: uniform jitter half-width added to each inherited body parameter.", t: "try: 0.1 default; 0 freezes drift, 0.3 explores fast" },
     targetFood: { d: "Baseline food count the world regrows toward (hard cap 2x).", t: "try: 300 scarcity, 1200 abundance" },
     foodSpawnBase: { d: "Mean food items spawned per step.", t: "try: 2-12; higher = richer world" },
     foodSpawnAmp: { d: "Sinusoidal swing of food abundance around the base rate.", t: "try: 0 for a steady food supply" },
@@ -148,6 +152,9 @@
       input = document.createElement("input");
       input.type = "number";
       input.step = opt.step !== undefined ? String(opt.step) : "any";
+      /* A lower bound the engine actually enforces: evo_init refuses the value
+         rather than clamping it, so the spinner must not offer it. */
+      if (opt.min !== undefined) input.min = String(opt.min);
       input.value = String(def);
     }
     input.id = "adv_" + key;
@@ -200,6 +207,7 @@
     var foodPatches = intVal("foodPatches", 0);
     var currentStrength = floatVal("currentStrength", 0);
     if (el("toroidal").checked) cfg.toroidal = true;
+    if (el("bodyModel").checked) cfg.bodyModel = true;
     if (predators !== 0) cfg.predatorCount = predators;
     if (el("predatorEconomy").checked) cfg.predatorEconomy = true;
     if (currentStrength !== 0) cfg.currentStrength = currentStrength;
@@ -685,7 +693,7 @@
   }
   drawerEl.addEventListener("scroll", hideTip);
   /* basic (static-HTML) parameter labels, resolved via their input ids */
-  ["seed", "population", "toroidal", "predators", "foodPatches", "currentStrength", "predatorEconomy"]
+  ["seed", "population", "toroidal", "bodyModel", "predators", "foodPatches", "currentStrength", "predatorEconomy"]
     .forEach(function (id) {
       var l = el(id).closest("label");
       if (l) attachTip(l, id);

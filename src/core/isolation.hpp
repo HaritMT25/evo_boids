@@ -140,3 +140,35 @@ inline float genomeDistanceSq(const Genome& a, const Genome& b) {
 inline float genomeDistance(const Genome& a, const Genome& b) {
     return std::sqrt(genomeDistanceSq(a, b));
 }
+
+// Soft gate (v0.24.0): does a pair at folded distance `d` clear a threshold
+// `maxDist` (T) widened by a linear ramp of width `softWidth` (W), given the
+// uniform `u` in [0, 1) the CALLER drew?
+//
+//   accept  iff  u * W < (T + W) - d
+//
+// The three properties the gate is built on:
+//   * d <= T always accepts. u < 1 strictly (rng.unit() tops out at 1 - 2^-24),
+//     so u*W < W <= (T + W) - d.
+//   * d >= T + W never accepts, even at u == 0: the right-hand side is <= 0.
+//   * in between, acceptance is linear in d — a ramp replacing the cliff at T.
+//
+// The first two hold EXACTLY when T + W is representable, which every value in
+// the live window is (T and W are read off a 0.5-step spinner and the whole
+// scale sits below 32, where quarters are exact). When it is not, fl(T + W)
+// carries an error e of up to half an ulp of T + W — under 1e-6 at this scale —
+// and the rails move by that much: at d within e of T, a draw within e/W of 1
+// rejects. That is a deterministic, platform-independent corner (pure float
+// arithmetic, so native and wasm agree on it bit for bit), it needs d to equal
+// T to the last bit, and it is why the rails are stated against the fold's
+// resolution rather than as absolutes.
+//
+// DETERMINISM. Pure math: the caller supplies u, so this function draws
+// NOTHING and does not violate this file's no-rng contract — the single
+// rng.unit() per gate evaluation lives at the call site in world.hpp, where
+// the draw discipline can be read next to the branch it feeds. No division and
+// no transcendental: only +, -, * and a compare, all IEEE-exact and therefore
+// bit-identical between native and wasm.
+inline bool softGateAccepts(float d, float maxDist, float softWidth, float u) {
+    return u * softWidth < (maxDist + softWidth) - d;
+}

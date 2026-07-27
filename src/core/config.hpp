@@ -45,6 +45,37 @@ struct SimConfig {
     // v0.21.0 entry before picking a value.
     float reproMaxDistance = -1.0f;
 
+    // --- Match-distance mitigations (opt-in; both are INERT unless
+    // reproMaxDistance >= 0, and both off = byte-identical prior behaviour) ---
+    //
+    // Soft gate: the width of a linear acceptance ramp ABOVE reproMaxDistance,
+    // in the same folded-connectivity units. With T = reproMaxDistance and
+    // W = reproSoftWidth > 0 a pair at distance d is admitted iff
+    // u * W < (T + W) - d for one fresh uniform draw u (softGateAccepts,
+    // isolation.hpp): d <= T still always breeds, d >= T + W never does, and
+    // the cliff at T becomes a ramp in between. <= 0 = off = the exact v0.21
+    // hard threshold, which draws NOTHING; with W > 0 every gate evaluation
+    // draws exactly one uniform, so the random stream — and every archived
+    // gated run — is only perturbed when the knob is actually on. Why it
+    // exists: the measured window is narrow and collapse is bistable at T ~ 16
+    // and total below ~14, so a hard cliff there admits nothing at all while a
+    // ramp keeps a low but nonzero pairing rate either side of it.
+    float reproSoftWidth = 0.0f;
+
+    // Refill grace: a FOUNDER younger than this bypasses the gate entirely —
+    // no fold, no draw — if either partner qualifies. Founder means
+    // lineageId == id, which is true of the initial spawn and of every
+    // reseed-floor injection and never of a child (it inherits the maternal
+    // line), so this needs no new creature state: lineageId and age are both
+    // serialized already. <= 0 = off, and <= 5 is inert as well because
+    // doInteraction requires age > 5 before the gate is reached at all.
+    // Why it exists: under a tight gate the --min-pop reseed floor becomes a
+    // diversity pump that cannot reproduce — random founders sit ~19.5 from
+    // everyone, so they eat, never pair, and pin the population on the floor.
+    // Grace lets a fresh founder enter the pool once; its descendants are
+    // gated like everyone else from birth.
+    float reproGracePeriod = 0.0f;
+
     // --- Tier-1 body model (opt-in, off = byte-identical prior behaviour) ---
     // Two heritable per-creature parameters (Creature::bodySize/bodyElong) that
     // modulate the existing speed / turn / metabolism model — see
@@ -275,6 +306,12 @@ struct SimConfig {
           << "reproMaxDistance="  << (reproMaxDistance < 0.0f
                                       ? std::string("off (no genetic gate)")
                                       : std::to_string(reproMaxDistance)) << "\n"
+          << "reproSoftWidth="    << (reproSoftWidth <= 0.0f
+                                      ? std::string("off (hard gate)")
+                                      : std::to_string(reproSoftWidth))
+          << " reproGracePeriod=" << (reproGracePeriod <= 0.0f
+                                      ? std::string("off (no founder grace)")
+                                      : std::to_string(reproGracePeriod)) << "\n"
           << "bodyModel="         << (bodyModel ? "on (heritable size/elongation)" : "off")
           << " bodyMutation="     << bodyMutation << "\n"
           << "minPopulation="     << minPopulation

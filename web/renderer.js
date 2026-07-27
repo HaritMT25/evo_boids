@@ -37,6 +37,10 @@
       ["genomeMinLength", 16], ["genomeMaxLength", 80],
       ["reproMaxDistance", -1, { step: 0.5, label: "repro max distance (-1 = off)",
                                  title: "genetic reproduction gate; -1 disables it" }],
+      ["reproSoftWidth", 0, { step: 0.5, min: 0, label: "repro soft width (0 = hard gate)",
+                              title: "acceptance ramp above the gate distance; needs the gate on" }],
+      ["reproGracePeriod", 0, { step: 10, min: 0, label: "repro grace (0 = off)",
+                                title: "young founders skip the gate; needs the gate on" }],
       ["bodyMutation", 0.1, { step: 0.01, min: 0, label: "body mutation (body model on)",
                               title: "uniform half-width per body parameter per birth" }]
     ]],
@@ -65,6 +69,8 @@
     predatorEconomy: { d: "Predators eat, breed and starve (Stage B) instead of being immortal.", t: "try: on with 3-4 predators" },
     toroidal: { d: "Senses wrap across the world seam — no walls, no sensory dead zone at edges.", t: "try: on; cures the wall-hugger phenotype" },
     reproMaxDistance: { d: "Reproductive isolation: parents farther apart than this in wiring space cannot breed (-1 = off).", t: "try: 18 bites gently, 14 hard; below 12 breeding stops" },
+    reproSoftWidth: { d: "Softens the isolation gate into a ramp: past the gate distance breeding fades out over this width instead of stopping dead (0 = hard cliff).", t: "try: 4-5 with the gate at 14-16; needs the gate on" },
+    reproGracePeriod: { d: "Founders — the first generation and every reseeded refill — ignore the gate while younger than this, so a fresh genome can breed once (0 = off).", t: "try: 60; 5 or below does nothing (breeding already needs age > 5)" },
     bodyModel: { d: "Heritable body size + elongation: bigger = slower and costlier, longer = turns worse.", t: "try: on; founders start at 1.0 and bodies drift from births" },
     bodyMutation: { d: "Body-model only: uniform jitter half-width added to each inherited body parameter.", t: "try: 0.1 default; 0 freezes drift, 0.3 explores fast" },
     targetFood: { d: "Baseline food count the world regrows toward (hard cap 2x).", t: "try: 300 scarcity, 1200 abundance" },
@@ -152,8 +158,9 @@
       input = document.createElement("input");
       input.type = "number";
       input.step = opt.step !== undefined ? String(opt.step) : "any";
-      /* A lower bound the engine actually enforces: evo_init refuses the value
-         rather than clamping it, so the spinner must not offer it. */
+      /* A lower bound the spinner has no reason to go below: either evo_init
+         refuses the value rather than clamping it (bodyMutation), or everything
+         under the bound is a synonym for it (a <=0 knob that means "off"). */
       if (opt.min !== undefined) input.min = String(opt.min);
       input.value = String(def);
     }

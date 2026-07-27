@@ -108,6 +108,17 @@ EVO_EXPORT int evo_init(unsigned seed, int width, int height, int population,
         g_error = "bodyMutation must be finite and >= 0";
         return 0;
     }
+    // Same refusal main.cpp makes for the gate knobs, so the frontends agree
+    // there too. Negative is legal and means off (the reproMaxDistance
+    // convention); non-finite is not: every comparison against NaN is false, so
+    // a NaN soft width rejects EVERY pair while still burning a draw, and a NaN
+    // threshold ARMS the gate (NaN < 0 is false) and then refuses everything —
+    // both the opposite of what the knob advertises.
+    if (!std::isfinite(cfg.reproSoftWidth) || !std::isfinite(cfg.reproGracePeriod) ||
+        !std::isfinite(cfg.reproMaxDistance)) {
+        g_error = "reproMaxDistance, reproSoftWidth and reproGracePeriod must be finite (negative = off)";
+        return 0;
+    }
 
     // Always capture per-creature sensor/action activations for the neural
     // inspector. Dynamics-neutral (a pure memcpy in World::update, no rng),

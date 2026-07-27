@@ -87,15 +87,25 @@ in **C++20**.
 
 ---
 
-## 2. Current version: v0.23.0
+## 2. Current version: v0.24.0
 
-> **Banner matches the code.** `CMakeLists.txt` is at **0.23.0** — the tier-1 body
+> **Banner matches the code.** `CMakeLists.txt` is at **0.24.0** — the §7.1
+> mitigations: `--repro-soft-width` turns the match-distance cliff into a linear
+> acceptance ramp (exactly one unconditional rng draw per gate evaluation when
+> active), and `--repro-grace` lets young FOUNDERS (`lineageId == id` — the initial
+> spawn and every `--min-pop` reseed, never a child) bypass the gate entirely, so an
+> injected genome can enter the pool once instead of pinning the population to the
+> reseed floor. Two always-on CSV columns (33/34: `grace_births_cum`,
+> `soft_births_cum`) attribute every mitigated birth. Both knobs off by default =
+> byte-identical (fingerprint-verified vs 0.23.0, 4 seeds × 6 modes incl. a
+> hard-gated and a body-model one; native==wasm parity 19/19) — see the 0.24.0
+> history entry. 0.23.0 was the tier-1 body
 > model: two heritable per-creature parameters, `bodySize` and `bodyElong` (both in
 > [0.5, 2.0], a SEPARATE parameter vector deliberately not derived from the neural
-> genome), modulate the existing speed / turn / metabolism model behind `--body-model`.
-> Opt-in, off = byte-identical (fingerprint-verified, 4 seeds × 5 modes; native==wasm
+> genome), modulating the existing speed / turn / metabolism model behind `--body-model`;
+> opt-in, off = byte-identical (fingerprint-verified, 4 seeds × 5 modes; native==wasm
 > parity 16/16 incl. three body cases) — see the 0.23.0 history entry. No new sensor,
-> no CSV change (still 32 cols), BODY_LEN stays 6. 0.22.0 was the pairing graph:
+> no CSV change in 0.23, BODY_LEN stays 6. 0.22.0 was the pairing graph:
 > `World::logBirth` records which two creatures produced each successor record, the
 > always-on `repro_components` CSV column (32nd, appended — every existing
 > column index stable) counts connected components of that graph over a trailing
@@ -236,11 +246,13 @@ in **C++20**.
 
 
 ### What's in it (cumulative)
-- **CSV logging — now 32 cols** (`repro_components` appended in 0.22.0; predator
+- **CSV logging — now 34 cols** (`grace_births_cum` + `soft_births_cum` appended in
+  0.24.0 — cumulative mitigation attribution, difference between rows before reading
+  them against `births_interval`; `repro_components` appended in 0.22.0; predator
   economy columns added in 0.10.0). Through 0.9.1 it was 27 cols ending in
   **neighbor_count**; 0.10.0 appended predator_births_interval,
   predator_deaths_starv, predator_deaths_age, predator_avg_energy; 0.22.0 appended
-  repro_components.
+  repro_components; 0.24.0 appended the two attribution columns.
 - **Predator energy economy (Stage B)** behind `--predator-economy` (off by default):
   predators gain energy per capture (absorb victim reserves, or a fixed
   `--predator-meal`), burn `--predator-metabolism` + a kinetic move-cost, bud a child
@@ -323,6 +335,81 @@ in **C++20**.
   bug** (that grid is stale by the time `computeStats` runs; §10.5). Negligible at
   the populations run so far (it was never the cause of the slowdown — §10.5), but it
   removes the O(n²) cliff for large-N / Stage-B runs.
+- **0.24.0 (the §7.1 mitigations — `--repro-soft-width` + `--repro-grace`; opt-in,
+  off = byte-identical, fingerprint-verified vs 0.23.0/`f2447bf` across 4 seeds × 6
+  modes incl. `--repro-max-distance 18` and `--body-model`).** Built against the
+  0.21.0 sweep's MEASURED failure, not an anticipated one: the usable threshold
+  window ends in bistable collapse at T ≈ 16 (below ~14 nothing breeds at all), and
+  under a tight gate the `--min-pop` reseed floor becomes a diversity pump that
+  cannot reproduce. Two independent, composable mitigations:
+  - **The soft gate** (`--repro-soft-width W`): with the gate armed and `W > 0`, a
+    pair at distance `d` is admitted iff `u·W < (T + W) − d` for one fresh uniform
+    `u` — `d ≤ T` always breeds, `d ≥ T + W` never does, linear in between. The draw
+    is taken UNCONDITIONALLY, once per gate evaluation, whatever `d` is (the same
+    count-independence rule the body model's two draws follow); the hard path
+    (`W ≤ 0`) keeps the literal v0.21 `dsq <= T*T` — no sqrt, no draw — so every
+    archived gated run stays byte-identical. Soft ON is a new random stream by
+    design. Float corner, documented in `softGateAccepts` (isolation.hpp): the
+    `d ≤ T` rail is exact only when `fl(T+W) == T+W`; rail 2 (`d ≥ T+W` rejects) was
+    proven exact by an exhaustive nextafterf sweep, and the practical impact of
+    rail 1 is nil (needs `d == T` to the last bit and `u` within `e/W` of 1).
+    Measured at seed 42, T=16, 2000 steps: **1** insertion hard vs **55** at `W=5`,
+    53 of them above the hard threshold.
+  - **Founder grace** (`--repro-grace P`): a creature with `lineageId == id` and
+    `age < P` bypasses the gate — no distance fold, no draw — if EITHER partner
+    qualifies. Founders are the initial spawn and every reseed-floor injection;
+    a child inherits the maternal lineage and can never qualify. ZERO new creature
+    state (`lineageId` and `age` were already serialized). `P ≤ 5` is inert
+    (insertion already requires `age > 5`). Measured at seed 999, T=13, 2000 steps:
+    **0** insertions without it vs **197** with `P=60`, all via the bypass.
+  - **Attribution, so the D7 sweep can tell which mitigation did what:** World
+    counters `totalGraceBirths` / `totalSoftBirths` (soft counts ONLY births the
+    hard gate would have refused, `dsq > T²` — a pair inside T that happened to be
+    draw-accepted needed no help), serialized with the other counters, surfaced as
+    appended CSV columns 33/34 `grace_births_cum` / `soft_births_cum`. Cumulative:
+    difference between rows before reading against `births_interval`.
+  - Checkpoints: 2 config keys + 2 counters, optional on read (a pre-0.24 file
+    loads with mitigations off and attribution 0 — what that run actually did).
+    Gate knobs are validated FINITE at the CLI and `evo_init` (now including
+    `--repro-max-distance` itself: a NaN threshold silently arms a gate that
+    rejects every pair); the checkpoint reader deliberately does NOT re-validate
+    the gate knobs (a non-finite value cannot poison creature state — unlike
+    `bodyMutation`, which it does validate). New reader check: `nextId` must
+    exceed every restored creature id — grace makes `lineageId == id`
+    dynamics-bearing, so a stale `nextId` (previously cosmetic duplicate ids)
+    would let newborns reuse live ids and breed as fake founders.
+  - Verified: §6.1 byte identity vs `f2447bf` — 24/24 (4 seeds × 6 modes), re-run
+    12/12 after the review-driven test hardening; checkpoint delta exactly the 4
+    additive keys (and the T=18 hard-gated checkpoint shows 18 births on BOTH
+    sides — the restructured gate reproduces v0.21 exactly). An instrumented
+    draw-count build measured the discipline directly: soft = exactly one draw per
+    evaluation (196/196), grace/hard/off = zero. A 3000-step soft+grace run is
+    byte-identical across two executions (364 births = 341 grace + 20 soft + 3
+    plain — both mitigations demonstrably live). core_tests **3162/0 serial,
+    3069/0 OpenMP**; native==wasm parity **19/19**, three mitigation cases:
+    `soft_s42`, `grace_s999`, and `soft_body_s42` — the one configuration where
+    both stream-adding mechanisms interleave inside a single insertion (one gate
+    draw, then two body draws), where a draw-order regression would be hardest to
+    bisect.
+  - The review was adversarial and mutation-tested. The shipped code survived
+    every behavioural mutant; where a mutant survived the SUITE, the tests were
+    hardened, each new assertion validated against the exact mutant it kills:
+    draw-discipline guards (a draw-only-in-the-band "optimisation" and a
+    grace-after-draw reorder both shipped green before them — either would have
+    silently invalidated every archived soft-gate run), a 4000-step
+    either-partner-graced arm (`||`→`&&` removed 48% of births in a long run while
+    every short test stayed green, because no graced-founder × child pair can
+    exist before ~10 s of sim time), a soft-attribution arm (`viaSoft = true`
+    inflated the counter 2.2× unseen), CSV sentinel binding (the two new columns
+    could be transposed, duplicated or zeroed with the whole suite green), and the
+    nextId rejection above.
+  - Not done, deliberately: the browser stats array does not expose the two new
+    counters (adding a slot changes the JS ABI); `json_min`'s nan/inf/null laxity
+    is parked as its own decision. **Next: the D7 mitigation sweep** — arms at
+    T ∈ {16, 14} × {hard, soft W=4, grace 60, both} × ≥6 seeds × 20k steps,
+    read off live count, birth rate, `repro_components` and the two attribution
+    columns; the success criterion is a population held off the floor withOUT the
+    mitigations carrying the whole birth rate.
 - **0.23.0 (the tier-1 body model — `--body-model` + `--body-mutation`; opt-in, off =
   byte-identical, fingerprint-verified vs 0.22.0/`640a32a` across 4 seeds × 5 modes).**
   Two heritable per-creature parameters, `Creature::bodySize` and `Creature::bodyElong`

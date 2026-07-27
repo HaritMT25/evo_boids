@@ -14,13 +14,20 @@
 // wasm/parity.sh runs the full matrix.
 //
 // Usage: parity_driver SEED STEPS [--rich] [--tri] [--toroidal] [--body-model]
-//                      [--repro-max-distance F] [--engine-version STR] [--trace N]
+//                      [--repro-max-distance F] [--repro-soft-width F]
+//                      [--repro-grace F] [--engine-version STR] [--trace N]
 //   --rich   turn on every hidden-state subsystem (mirrors the resume test's
 //            configureRichWorld: eddies, food patches + drift, 4 predators with
 //            economy, move cost, topological cap 7, gene cost)
 //   --tri    triangular motion (exercises atan2f)
 //   --repro-max-distance  exercise the genetic reproduction gate (isolation.hpp):
 //            a sort + merge-join over folded genomes on the reproduction path
+//   --repro-soft-width  widen that gate into a linear acceptance ramp. Needs
+//            --repro-max-distance >= 0 to do anything, and ADDS TO THE RANDOM
+//            STREAM (one rng.unit per gate evaluation), so like --body-model it
+//            needs native==wasm proven on its own path.
+//   --repro-grace  young founders bypass the gate. Needs --repro-max-distance
+//            >= 0; draws nothing, but it changes WHICH pairs breed.
 //   --body-model  exercise the tier-1 body model (body_model.hpp): heritable
 //            size/elongation feeding the speed clamp, turn rate and metabolism,
 //            plus TWO rng draws per insertion — a dynamics knob that adds to the
@@ -93,6 +100,7 @@ int main(int argc, char** argv) {
     const long steps = std::strtol(argv[2], nullptr, 10);
     bool rich = false, tri = false, tor = false, bodyModel = false;
     float reproMaxDistance = -1.0f;
+    float reproSoftWidth = 0.0f, reproGracePeriod = 0.0f;
     const char* engineVersion = "parity";
     long traceEvery = 0;
     for (int i = 3; i < argc; ++i) {
@@ -102,6 +110,10 @@ int main(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--body-model")) bodyModel = true;
         else if (!std::strcmp(argv[i], "--repro-max-distance") && i + 1 < argc)
             reproMaxDistance = (float)std::atof(argv[++i]);
+        else if (!std::strcmp(argv[i], "--repro-soft-width") && i + 1 < argc)
+            reproSoftWidth = (float)std::atof(argv[++i]);
+        else if (!std::strcmp(argv[i], "--repro-grace") && i + 1 < argc)
+            reproGracePeriod = (float)std::atof(argv[++i]);
         else if (!std::strcmp(argv[i], "--engine-version") && i + 1 < argc) engineVersion = argv[++i];
         else if (!std::strcmp(argv[i], "--trace") && i + 1 < argc) traceEvery = std::strtol(argv[++i], nullptr, 10);
         else { std::fprintf(stderr, "unknown arg %s\n", argv[i]); return 2; }
@@ -127,6 +139,8 @@ int main(int argc, char** argv) {
     if (tor) world.cfg.toroidal = true;
     if (bodyModel) world.cfg.bodyModel = true;   // bodyMutation stays at 0.1
     world.cfg.reproMaxDistance = reproMaxDistance;
+    world.cfg.reproSoftWidth   = reproSoftWidth;
+    world.cfg.reproGracePeriod = reproGracePeriod;
     world.init(1920, 1080, 300);
 
     const auto t0 = std::chrono::steady_clock::now();

@@ -51,6 +51,17 @@ void printUsage(const char* prog) {
         "                        sit ~19.5 apart and in-run neighbour pairs ~18-20, so the\n"
         "                        live window is roughly 12-22 — below ~12 almost nothing\n"
         "                        pairs and the live count falls to the --min-pop floor\n"
+        "  --repro-soft-width F  [needs --repro-max-distance >= 0] widen the gate into a\n"
+        "                        linear acceptance ramp F wide above the threshold: a pair\n"
+        "                        at distance d is admitted with probability 1 below the\n"
+        "                        threshold, 0 at threshold+F, linear between. <=0 = off =\n"
+        "                        the hard cliff (default off). ON adds one rng draw per\n"
+        "                        gate evaluation, so it is a different random stream\n"
+        "  --repro-grace F       [needs --repro-max-distance >= 0] founders (the initial\n"
+        "                        spawn and every --min-pop reseed) bypass the gate while\n"
+        "                        younger than F seconds, so a refilled creature can breed\n"
+        "                        once before the gate applies; <=0 = off (default off),\n"
+        "                        and <=5 is inert too (reproduction already needs age > 5)\n"
         "  --body-model          heritable body size + elongation (default off). Bigger =>\n"
         "                        slower (speed x 2/(1+size)) and costlier (metabolism x size);\n"
         "                        longer => turns worse (turn rate x 2/(1+elong), triangular\n"
@@ -185,6 +196,8 @@ int main(int argc, char** argv) {
         else if (arg == "--no-render") noRender      = true;
         // --- simulation parameters (override SimConfig defaults) ---
         else if (arg == "--repro-max-distance") cfg.reproMaxDistance = std::atof(next("--repro-max-distance"));
+        else if (arg == "--repro-soft-width")  cfg.reproSoftWidth    = std::atof(next("--repro-soft-width"));
+        else if (arg == "--repro-grace")       cfg.reproGracePeriod  = std::atof(next("--repro-grace"));
         else if (arg == "--body-model")       cfg.bodyModel         = true;
         else if (arg == "--body-mutation")    cfg.bodyMutation      = std::atof(next("--body-mutation"));
         else if (arg == "--population")       initialPopulation     = std::atoi(next("--population"));
@@ -307,6 +320,25 @@ int main(int argc, char** argv) {
     // because NaN compares false to everything, so `< 0.0f` waves it through.
     if (!(cfg.bodyMutation >= 0.0f) || !std::isfinite(cfg.bodyMutation)) {
         std::cerr << "Error: --body-mutation must be finite and >= 0 (got " << cfg.bodyMutation << ").\n";
+        return 1;
+    }
+    // A NEGATIVE soft width or grace period is not an error — like
+    // --repro-max-distance, anything <= 0 means off. Non-finite is different:
+    // std::atof parses "nan" and "inf", and both silently inverts the soft
+    // gate's meaning (every comparison against NaN is false, so a NaN width
+    // rejects EVERY pair while still burning a draw; an infinite width does the
+    // same via inf < inf) — the opposite of the "wider = more permissive"
+    // contract the flag advertises. Refuse them the way --body-mutation does,
+    // and for the same reason: silently meaning something else is worse than
+    // stopping. The threshold has the same hole with the opposite signs: a NaN
+    // --repro-max-distance ARMS the gate (NaN < 0 is false) and then rejects
+    // every pair (dsq <= NaN*NaN is false), silently pinning the run to the
+    // --min-pop floor with no diagnostic; +inf arms a gate that admits
+    // everything while claiming to gate. Refuse all three.
+    if (!std::isfinite(cfg.reproSoftWidth) || !std::isfinite(cfg.reproGracePeriod) ||
+        !std::isfinite(cfg.reproMaxDistance)) {
+        std::cerr << "Error: --repro-max-distance, --repro-soft-width and --repro-grace"
+                     " must be finite (negative = off).\n";
         return 1;
     }
     // The genetic gate folds a genome into a fixed stack buffer. --genome-max is

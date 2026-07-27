@@ -996,6 +996,11 @@ static std::uint64_t deepFingerprint(const World& w) {
 
     mixI((long long)w.frame);
     mixI(w.totalBirths); mixI(w.totalDeaths);
+    // v0.24.0 gate-attribution counters. Serialized, so a checkpoint that
+    // dropped them has to fail resume equivalence here rather than silently
+    // resetting a run's attribution to zero. Widening changes no expected value
+    // (every use is a comparison between two runs).
+    mixI(w.totalGraceBirths); mixI(w.totalSoftBirths);
     mixI(w.totalDeathsPredation); mixI(w.totalDeathsStarvation); mixI(w.totalDeathsAge);
     mixI(w.totalPredatorBirths);
     mixI((long long)w.creatures.size()); mixI((long long)w.food.size());
@@ -1819,9 +1824,42 @@ static void test_repro_graph() {
         WorldStats s;
         const std::string row = statsCsvRow(s, 0.0, 0.0, 0, 0, 0, 0, 0, 0, 0, 0);
         CHECK(std::count(h.begin(), h.end(), ',') == std::count(row.begin(), row.end(), ','));
-        // The new column is the LAST header field, so a later append cannot
-        // silently order itself between repro_components and the row's tail.
-        CHECK(h.size() > 17 && h.compare(h.size() - 17, 17, ",repro_components") == 0);
+        // repro_components keeps the index it was appended at (32nd, 1-based),
+        // and anything appended later goes strictly AFTER it — otherwise a
+        // v0.22.0 CSV and a current one disagree about column 32.
+        commas = 0; at = 0;
+        while (at < h.size() && commas < 31) { if (h[at] == ',') ++commas; ++at; }
+        CHECK(h.compare(at, 16, "repro_components") == 0);
+        // The v0.24.0 columns are the last two header fields, so a later append
+        // cannot silently order itself ahead of them and desync from the row.
+        const std::string tail = ",grace_births_cum,soft_births_cum";
+        CHECK(h.size() > tail.size() &&
+              h.compare(h.size() - tail.size(), tail.size(), tail) == 0);
+
+        // Position alone is not enough: bind header NAME to row VALUE, so a
+        // transposed, duplicated or dropped emit in statsCsvRow fails here
+        // rather than silently mis-attributing a sweep read off these columns.
+        // All four sentinels are distinct, so any permutation of them is
+        // caught. (The all-zero WorldStats above cannot see any of that.)
+        WorldStats sv;
+        sv.totalBirths = 999; sv.reproComponents = 111;
+        sv.totalGraceBirths = 222; sv.totalSoftBirths = 333;
+        const std::string vrow = statsCsvRow(sv, 0.0, 0.0, 0, 0, 0, 0, 0, 0, 0, 0);
+        auto field = [](const std::string& s, int col) {   // 1-based CSV column
+            std::size_t from = 0;
+            for (int c = 1; c < col; ++c) {
+                from = s.find(',', from);
+                if (from == std::string::npos) return std::string();
+                ++from;
+            }
+            const std::size_t to = s.find(',', from);
+            return s.substr(from, to == std::string::npos ? std::string::npos
+                                                          : to - from);
+        };
+        CHECK(field(vrow, 6)  == "999");   // births_cum
+        CHECK(field(vrow, 32) == "111");   // repro_components
+        CHECK(field(vrow, 33) == "222");   // grace_births_cum
+        CHECK(field(vrow, 34) == "333");   // soft_births_cum
     }
 }
 
@@ -2451,6 +2489,494 @@ static void test_body_model() {
 #endif
 }
 
+// ---------------------------------------------------------------
+// Match-distance mitigations (v0.24.0): the soft acceptance ramp
+// (cfg.reproSoftWidth) and the founder grace window (cfg.reproGracePeriod).
+//
+// Two things have to be proven here, and the second is the harder one:
+//   * the mitigations do what they claim — they admit pairs the hard gate
+//     refuses, and they say WHICH mechanism admitted each one;
+//   * with either knob off the gate is bit-for-bit the v0.21 gate. The soft
+//     ramp is the only gate path in the tree that draws, so an accidental draw
+//     on an off-path would silently invalidate every archived gated run, and
+//     nothing but a fingerprint comparison catches that.
+// ---------------------------------------------------------------
+static void test_repro_mitigations() {
+    std::printf("gate mitigations: soft ramp + founder grace...\n");
+
+    // The largest value rng.unit() can return: (2^24 - 1) * 2^-24. The "d <= T
+    // always accepts" rail rests on u being strictly below 1, so the grid tests
+    // that exact value rather than something near it.
+    const float UMAX = (float)0xFFFFFFu * 0x1p-24f;
+
+    // --- softGateAccepts: the two rails, over a grid ---------------------
+    {
+        const float Ts[] = {0.5f, 8.0f, 13.0f, 16.0f, 20.0f};
+        const float Ws[] = {0.25f, 1.0f, 4.0f, 5.0f, 12.0f};
+        const float us[] = {0.0f, 0.25f, 0.5f, 0.999999881f, UMAX};
+        bool insideAlways = true, outsideNever = true;
+        for (float T : Ts) {
+            for (float W : Ws) {
+                const float inside[]  = {0.0f, 0.5f * T, T};
+                const float outside[] = {T + W, T + W + 0.5f, 1.0e3f};
+                for (float u : us) {
+                    for (float d : inside)
+                        if (!softGateAccepts(d, T, W, u)) insideAlways = false;
+                    for (float d : outside)
+                        if (softGateAccepts(d, T, W, u)) outsideNever = false;
+                }
+            }
+        }
+        CHECK(insideAlways);   // inside the threshold the gate is unconditional
+        CHECK(outsideNever);   // past threshold+width nothing gets through
+    }
+
+    // --- softGateAccepts: it really is a RAMP ----------------------------
+    // Both halves are needed: a gate that always accepted mid-band, or always
+    // rejected, would satisfy the two rails above and be no ramp at all.
+    {
+        const float T = 16.0f, W = 5.0f, mid = T + 0.5f * W;
+        CHECK(softGateAccepts(mid, T, W, 0.0f));
+        CHECK(!softGateAccepts(mid, T, W, UMAX));
+
+        // Monotone in u at fixed d, and monotone in d at fixed u: once it flips
+        // to reject it must never flip back, and the sweep must actually cross.
+        bool monotoneU = true, crossedU = false;
+        for (int i = 0; i <= 1000; ++i) {
+            const bool acc = softGateAccepts(mid, T, W, (float)i * 0.001f);
+            if (crossedU && acc) monotoneU = false;
+            if (!acc) crossedU = true;
+        }
+        CHECK(monotoneU);
+        CHECK(crossedU);
+
+        bool monotoneD = true, crossedD = false;
+        for (int i = 0; i <= 1000; ++i) {
+            const float d = T - 1.0f + (float)i * (W + 2.0f) * 0.001f;
+            const bool acc = softGateAccepts(d, T, W, 0.5f);
+            if (crossedD && acc) monotoneD = false;
+            if (!acc) crossedD = true;
+        }
+        CHECK(monotoneD);
+        CHECK(crossedD);
+    }
+
+    // --- a vanishing width collapses onto the hard comparison ------------
+    // The soft gate is a generalisation of the hard one, not a different rule:
+    // outside the band of width W above the threshold the two agree for every
+    // draw, and W here is narrow enough that no sampled distance lands in it.
+    // W is a power of two so that T + W is exact — see the rounding note on
+    // softGateAccepts for why the rails need that.
+    {
+        const float T = 16.0f, W = 0.0625f;
+        bool agrees = true;
+        for (int i = 0; i <= 128; ++i) {
+            const float d = (float)i * 0.25f;
+            for (float u : {0.0f, 0.25f, 0.75f, UMAX})
+                if (softGateAccepts(d, T, W, u) != (d <= T)) agrees = false;
+        }
+        CHECK(agrees);
+    }
+
+    // --- reproGraced: the predicate, directly -----------------------------
+    {
+        Creature founder;
+        founder.id = 7; founder.lineageId = 7;   // lineage starts at itself
+        founder.age = 3.0f;
+        CHECK(World::reproGraced(founder, 10.0f));
+        founder.age = 12.0f;
+        CHECK(!World::reproGraced(founder, 10.0f));   // window has closed
+        founder.age = 10.0f;
+        CHECK(!World::reproGraced(founder, 10.0f));   // the bound is strict
+        founder.age = 3.0f;
+        CHECK(!World::reproGraced(founder, 0.0f));    // 0 = off
+        CHECK(!World::reproGraced(founder, -1.0f));   // negative = off, not an error
+
+        // A child carries its mother's lineage, so lineageId != id and it is
+        // never graced however young it is — grace is for injected genomes.
+        Creature child;
+        child.id = 8; child.lineageId = 7; child.age = 0.0f;
+        CHECK(!World::reproGraced(child, 10.0f));
+    }
+
+    // --- lineageId == id really does mean "founder" ------------------------
+    // The whole reason grace needs no new creature state. Every creature is a
+    // founder at init; once insertions have happened, some are not.
+    {
+        rng.seed(24680u);
+        World w;
+        w.cfg.minPopulation = 0;
+        w.init(900, 700, 220);
+        bool allFounders = true;
+        for (const Creature& c : w.creatures)
+            if (c.lineageId != c.id) allFounders = false;
+        CHECK(allFounders);
+        for (int i = 0; i < 600; ++i) w.update(0.016f);
+        CHECK(w.totalBirths > 0);
+        int descendants = 0;
+        for (const Creature& c : w.creatures)
+            if (c.lineageId != c.id) ++descendants;
+        CHECK(descendants > 0);
+    }
+
+    // Whole-run comparisons below are serial-build only, for the reason the
+    // isolation, toroidal and checkpoint tests give: the OpenMP parallel phase
+    // draws from per-thread RNGs and a fixed seed does not pin the run.
+#ifndef USE_OPENMP
+    // --- both knobs off is bit-for-bit the v0.21 hard gate ----------------
+    // The load-bearing no-op proof: <=0 must mean "off" for BOTH spellings
+    // (0 and negative), and the off-path must not touch the rng sequence.
+    {
+        const int STEPS = 600;
+        auto fingerprintOf = [&](float T, float W, float G, long long& births) {
+            rng.seed(24680u);
+            World w;
+            w.cfg.minPopulation = 0;
+            w.cfg.reproMaxDistance = T;
+            w.cfg.reproSoftWidth   = W;
+            w.cfg.reproGracePeriod = G;
+            w.init(900, 700, 220);
+            for (int i = 0; i < STEPS; ++i) w.update(0.016f);
+            births = w.totalBirths;
+            return deepFingerprint(w);
+        };
+
+        long long bZero = 0, bNeg = 0;
+        const std::uint64_t hardZero = fingerprintOf(18.0f,  0.0f,  0.0f, bZero);
+        const std::uint64_t hardNeg  = fingerprintOf(18.0f, -1.0f, -1.0f, bNeg);
+        CHECK(hardZero == hardNeg);
+        CHECK(bZero > 0);            // the control must actually breed
+
+        // Both knobs are inert without the gate: with no threshold there is
+        // nothing to soften and nothing to be exempt from.
+        long long bOff = 0, bOffKnobs = 0;
+        const std::uint64_t off      = fingerprintOf(-1.0f, 0.0f,  0.0f, bOff);
+        const std::uint64_t offKnobs = fingerprintOf(-1.0f, 5.0f, 60.0f, bOffKnobs);
+        CHECK(off == offKnobs);
+        CHECK(bOff > 0);
+        CHECK(off != hardZero);      // the gate at 18 does bite, so this is a real test
+    }
+
+    // --- the soft ramp admits the band the hard gate refuses --------------
+    // T is below the breeding floor (nothing pairs at 8), so every insertion
+    // here is one the hard gate refused and the ramp let through — which is
+    // exactly what totalSoftBirths claims to count.
+    {
+        const int STEPS = 600;
+        rng.seed(24680u);
+        World soft;
+        soft.cfg.minPopulation = 0;
+        soft.cfg.reproMaxDistance = 8.0f;
+        soft.cfg.reproSoftWidth = 12.0f;
+        soft.init(900, 700, 220);
+        for (int i = 0; i < STEPS; ++i) soft.update(0.016f);
+        CHECK(soft.totalBirths > 0);
+        CHECK(soft.totalSoftBirths > 0);
+        CHECK(soft.totalSoftBirths <= soft.totalBirths);
+        CHECK(soft.totalGraceBirths == 0);   // grace is off
+
+        rng.seed(24680u);
+        World hard;
+        hard.cfg.minPopulation = 0;
+        hard.cfg.reproMaxDistance = 8.0f;
+        hard.init(900, 700, 220);
+        for (int i = 0; i < STEPS; ++i) hard.update(0.016f);
+        CHECK(hard.totalBirths == 0);
+    }
+
+    // --- grace rescues a population the gate has locked out ---------------
+    {
+        const int STEPS = 600;
+        rng.seed(24680u);
+        World graced;
+        graced.cfg.minPopulation = 0;
+        graced.cfg.reproMaxDistance = 8.0f;
+        graced.cfg.reproGracePeriod = 10000.0f;   // every founder, all run
+        graced.init(900, 700, 220);
+        for (int i = 0; i < STEPS; ++i) graced.update(0.016f);
+        CHECK(graced.totalBirths > 0);
+        CHECK(graced.totalGraceBirths > 0);
+        CHECK(graced.totalGraceBirths <= graced.totalBirths);
+        CHECK(graced.totalSoftBirths == 0);       // the ramp is off, and grace
+                                                  // bypasses before any draw
+
+        // Same threshold without grace: nothing at all (the control for the
+        // claim above — 8 is far below the live set's own pair distance).
+        rng.seed(24680u);
+        World hard;
+        hard.cfg.minPopulation = 0;
+        hard.cfg.reproMaxDistance = 8.0f;
+        hard.init(900, 700, 220);
+        for (int i = 0; i < STEPS; ++i) hard.update(0.016f);
+        CHECK(hard.totalBirths == 0);
+
+        // A plain hard-gated run attributes nothing, however much it breeds.
+        rng.seed(24680u);
+        World plain;
+        plain.cfg.minPopulation = 0;
+        plain.cfg.reproMaxDistance = 18.0f;
+        plain.init(900, 700, 220);
+        for (int i = 0; i < STEPS; ++i) plain.update(0.016f);
+        CHECK(plain.totalBirths > 0);
+        CHECK(plain.totalGraceBirths == 0);
+        CHECK(plain.totalSoftBirths == 0);
+    }
+
+    // --- determinism with both knobs on, and they are not a no-op ---------
+    // The rich arm collapses onto the --min-pop floor, so the creatures being
+    // graced there are RESEED founders, not the initial spawn — the §7.1 case
+    // the mitigation was built for.
+    {
+        const int STEPS = 600;
+        auto richRun = [&](float W, float G) {
+            rng.seed(50505u);
+            World w;
+            configureRichWorld(w);
+            w.cfg.reproMaxDistance = 16.0f;
+            w.cfg.reproSoftWidth   = W;
+            w.cfg.reproGracePeriod = G;
+            w.init(900, 700, 240);
+            for (int i = 0; i < STEPS; ++i) w.update(0.016f);
+            return w;
+        };
+        const World a = richRun(5.0f, 60.0f);
+        const World b = richRun(5.0f, 60.0f);
+        const World h = richRun(0.0f,  0.0f);
+        CHECK(deepFingerprint(a) == deepFingerprint(b));
+        CHECK(deepFingerprint(a) != deepFingerprint(h));   // live, not a no-op
+        CHECK(a.totalGraceBirths > 0);
+        CHECK(a.totalBirths > h.totalBirths);
+        CHECK(h.totalGraceBirths == 0 && h.totalSoftBirths == 0);
+    }
+
+    // --- "EITHER partner graced" is load-bearing — run long enough to see it
+    // Every arm above stays under ~16 s of sim time, where no graced-founder ×
+    // ungraced-CHILD pair can exist yet (children appear after t≈5 and cannot
+    // breed before t≈10), so an && in place of the || in reproGatePasses was
+    // invisible to all of them — and the founder × established-resident pair
+    // is precisely the §7.1 case grace exists for. 4000 steps (64 s) makes
+    // those pairings the common case: measured 433 births shipped vs 225 under
+    // the && mutant, so the threshold below separates them cleanly.
+    {
+        rng.seed(24680u);
+        World w;
+        w.cfg.minPopulation = 0;
+        w.cfg.reproMaxDistance = 13.0f;
+        w.cfg.reproGracePeriod = 60.0f;
+        w.init(900, 700, 220);
+        for (int i = 0; i < 4000; ++i) w.update(0.016f);
+        CHECK(w.totalBirths > 300);
+        CHECK(w.totalGraceBirths > 300);
+    }
+
+    // --- attribution is honest: soft counts ONLY hard-refused pairs --------
+    // A threshold inside the live window with a narrow ramp: most accepted
+    // pairs sit inside T and needed no help, a few came through the ramp. If
+    // viaSoft were set for every draw-accepted pair, soft would equal
+    // births − grace; it must stay strictly below. (The T=8 arm above cannot
+    // see this — below the breeding floor soft == births by construction.)
+    {
+        rng.seed(4242u);
+        World w;
+        configureRichWorld(w);
+        w.cfg.reproMaxDistance = 18.0f;
+        w.cfg.reproSoftWidth   = 4.0f;
+        w.init(900, 700, 240);
+        for (int i = 0; i < 1200; ++i) w.update(0.016f);
+        CHECK(w.totalSoftBirths > 0);
+        CHECK(w.totalSoftBirths < w.totalBirths - w.totalGraceBirths);
+    }
+
+    // --- the draw discipline itself, pinned -------------------------------
+    // reproMaxDistance = 1e6 arms the gate but never bites, so accept/reject
+    // decisions are identical across each pair of runs below and ONLY the
+    // draw count can differ. Shape precedent: the v0.21 permissive-gate test
+    // in test_reproductive_isolation. These three are what stop a future
+    // "optimise away the predetermined draw" or "draw before the grace check"
+    // refactor from silently invalidating every archived soft-gate run.
+    {
+        auto run = [&](float W, float G, std::string* rngStateOut) {
+            rng.seed(13579u);
+            World w;
+            w.cfg.minPopulation    = 0;
+            w.cfg.reproMaxDistance = 1.0e6f;
+            w.cfg.reproSoftWidth   = W;
+            w.cfg.reproGracePeriod = G;
+            w.init(900, 700, 220);
+            for (int i = 0; i < 500; ++i) w.update(0.016f);
+            if (rngStateOut) *rngStateOut = rng.state();
+            return w;
+        };
+        // (a) grace draws NOTHING: with the hard gate accepting everything,
+        // grace on/off leaves the engine in the same state and produces the
+        // same births. deepFingerprint is NOT compared here — it mixes the
+        // attribution counters, which legitimately differ (0 vs graced).
+        std::string sOff, sOn;
+        const World gOff = run(0.0f, 0.0f, &sOff);
+        const World gOn  = run(0.0f, 1.0e6f, &sOn);
+        CHECK(gOff.totalBirths > 0);
+        CHECK(gOn.totalGraceBirths > 0);       // grace really engaged
+        CHECK(sOff == sOn);
+        CHECK(gOff.totalBirths == gOn.totalBirths);
+        // (b) the soft draw is UNCONDITIONAL: every pair is inside T, so the
+        // ramp changes no decision — only the stream. The runs must diverge.
+        const World w5 = run(5.0f, 0.0f, nullptr);
+        CHECK(deepFingerprint(gOff) != deepFingerprint(w5));
+        // (c) grace bypasses BEFORE the draw: with the ramp on, gracing
+        // everyone removes one draw per gate evaluation. Divergence again.
+        const World sGrace = run(5.0f, 1.0e6f, nullptr);
+        CHECK(deepFingerprint(w5) != deepFingerprint(sGrace));
+    }
+#endif
+
+    // --- checkpoint: config keys and both counters survive a round trip ---
+    {
+        rng.seed(60606u);
+        World a;
+        a.cfg.reproMaxDistance = 15.0f;
+        a.cfg.reproSoftWidth   = 4.0f;
+        a.cfg.reproGracePeriod = 8.0f;   // short enough that founders age out
+                                         // and the ramp admits pairs too
+        a.init(900, 700, 200);
+        for (int i = 0; i < 800; ++i) a.update(0.016f);
+        CHECK(a.totalSoftBirths > 0);
+        CHECK(a.totalGraceBirths > 0);
+
+        // The CSV plumbing must read what the world counted — a dropped copy
+        // in computeStats zeroes a column while the checkpoint counter stays
+        // right, and nothing else ever compares the two. (The sentinel test in
+        // the stats block pins statsCsvRow; this pins computeStats.)
+        const WorldStats live = computeStats(a);
+        CHECK(live.totalGraceBirths == (int)a.totalGraceBirths);
+        CHECK(live.totalSoftBirths  == (int)a.totalSoftBirths);
+
+        const std::string blob = checkpoint::serialize(a, "test");
+        World b;
+        std::string err;
+        CHECK(checkpoint::deserialize(blob, b, err));
+        CHECK(bitEq(b.cfg.reproSoftWidth, 4.0f));
+        CHECK(bitEq(b.cfg.reproGracePeriod, 8.0f));
+        CHECK(b.totalSoftBirths == a.totalSoftBirths);
+        CHECK(b.totalGraceBirths == a.totalGraceBirths);
+
+        // A checkpoint written before v0.24.0 carries none of the four keys.
+        // Loading it must leave the mitigations off and the attribution at 0,
+        // which is what that run actually did — not invent values.
+        auto stripKey = [](std::string& s, const char* name) {
+            const std::string k = std::string("\"") + name + "\":";
+            const size_t at = s.find(k);
+            if (at == std::string::npos) return false;
+            size_t end = s.find_first_of(",}", at + k.size());
+            if (end == std::string::npos) return false;
+            if (s[end] == ',') ++end;          // take the separator with it
+            s.erase(at, end - at);
+            return true;
+        };
+        std::string legacy = blob;
+        CHECK(stripKey(legacy, "reproSoftWidth"));
+        CHECK(stripKey(legacy, "reproGracePeriod"));
+        CHECK(stripKey(legacy, "totalGraceBirths"));
+        CHECK(stripKey(legacy, "totalSoftBirths"));
+        World c;
+        std::string err2;
+        CHECK(checkpoint::deserialize(legacy, c, err2));
+        CHECK(bitEq(c.cfg.reproSoftWidth, 0.0f));
+        CHECK(bitEq(c.cfg.reproGracePeriod, 0.0f));
+        CHECK(c.totalGraceBirths == 0);
+        CHECK(c.totalSoftBirths == 0);
+        CHECK(bitEq(c.cfg.reproMaxDistance, 15.0f));   // untouched keys survive
+        CHECK(c.totalBirths == a.totalBirths);
+    }
+
+    // --- resume equivalence with the mitigations active -------------------
+    // The load-bearing checkpoint assertion, on the mitigation path: save, keep
+    // going, reload, keep going, and the two futures must be identical. The
+    // fingerprint covers both counters, so a dropped one fails here.
+#ifndef USE_OPENMP
+    {
+        rng.seed(1357911u);
+        World a;
+        configureRichWorld(a);
+        a.cfg.reproMaxDistance = 16.0f;
+        a.cfg.reproSoftWidth   = 6.0f;
+        a.cfg.reproGracePeriod = 8.0f;
+        a.init(900, 700, 200);
+        for (int i = 0; i < 1000; ++i) a.update(0.016f);
+        CHECK(a.totalGraceBirths > 0);
+        CHECK(a.totalSoftBirths > 0);
+
+        const std::string blob = checkpoint::serialize(a, "test");
+        const std::uint64_t atSave = deepFingerprint(a);
+        for (int i = 0; i < 300; ++i) a.update(0.016f);
+        const std::uint64_t uninterrupted = deepFingerprint(a);
+
+        World b;
+        std::string err;
+        CHECK(checkpoint::deserialize(blob, b, err));
+        CHECK(deepFingerprint(b) == atSave);
+        for (int i = 0; i < 300; ++i) b.update(0.016f);
+        CHECK(deepFingerprint(b) == uninterrupted);
+        CHECK(atSave != uninterrupted);
+    }
+#endif
+
+    // --- nextId is now dynamics-bearing, so the reader polices it ---------
+    // reproGraced() reads lineageId == id; a newborn reusing a live id would
+    // be a fake founder that bypasses the gate. Pre-0.24 a stale nextId was
+    // merely cosmetic (duplicate ids), which is why nothing checked it before.
+    {
+        rng.seed(60607u);
+        World a;
+        a.cfg.reproMaxDistance = 15.0f;
+        a.cfg.reproGracePeriod = 8.0f;
+        a.init(900, 700, 200);
+        for (int i = 0; i < 200; ++i) a.update(0.016f);
+        const std::string blob = checkpoint::serialize(a, "test");
+
+        World ok;
+        std::string err;
+        CHECK(checkpoint::deserialize(blob, ok, err));
+
+        // Key removed entirely: ullOr defaults it to 1, which collides with
+        // every live id — must refuse, and for the nextId reason rather than
+        // an incidental parse error.
+        std::string noKey = blob;
+        const std::string k = "\"nextId\":";
+        std::size_t at = noKey.find(k);
+        CHECK(at != std::string::npos);
+        if (at != std::string::npos) {
+            // nextId is the LAST key in its object ("...,"nextId":N}"), so the
+            // separator to take is the LEADING comma — taking a trailing one
+            // would leave ",}" and fail parsing, which rejects the file for
+            // the wrong reason and proves nothing about the nextId check.
+            std::size_t from = at;
+            std::size_t end = noKey.find_first_of(",}", at + k.size());
+            CHECK(end != std::string::npos);
+            if (end != std::string::npos && noKey[end] == ',') ++end;
+            else if (from > 0 && noKey[from - 1] == ',') --from;
+            noKey.erase(from, end - from);
+            World b;
+            std::string e2;
+            CHECK(!checkpoint::deserialize(noKey, b, e2));
+            CHECK(e2.find("nextId") != std::string::npos);
+        }
+
+        // Key present but stale (at or below a live id): refused too.
+        std::string stale = blob;
+        at = stale.find(k);
+        CHECK(at != std::string::npos);
+        if (at != std::string::npos) {
+            const std::size_t end = stale.find_first_of(",}", at + k.size());
+            CHECK(end != std::string::npos);
+            stale = stale.substr(0, at) + "\"nextId\":1" + stale.substr(end);
+            World b;
+            std::string e2;
+            CHECK(!checkpoint::deserialize(stale, b, e2));
+            CHECK(e2.find("nextId") != std::string::npos);
+        }
+    }
+}
+
 int main() {
     std::printf("=== evo_boids core tests (no SFML linked) ===\n");
     test_portable_mt19937();
@@ -2474,6 +3000,7 @@ int main() {
     test_reproductive_isolation();
     test_repro_graph();
     test_body_model();
+    test_repro_mitigations();
 
     std::printf("---------------------------------------------\n");
     std::printf("%d checks, %d failures\n", g_checks, g_failures);

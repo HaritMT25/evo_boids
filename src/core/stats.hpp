@@ -224,6 +224,16 @@ struct WorldStats {
     // set that has stopped pairing — read it alongside births_interval, not on
     // its own.
     int   reproComponents               = 0;
+
+    // --- Match-distance mitigations (v0.24.0) ---
+    // Cumulative, like totalBirths, and both a SUBSET of it: births that only
+    // happened because a founder was inside its grace window, and births the
+    // hard gate at the same threshold would have refused but the soft ramp
+    // admitted. Always reported (0 when the mitigations are off) so a sweep can
+    // tell a rescued population apart from one the gate never bit, and tell
+    // which of the two mechanisms did the rescuing.
+    int   totalGraceBirths              = 0;
+    int   totalSoftBirths               = 0;
 };
 
 // Compute a snapshot from the current world state.
@@ -233,6 +243,8 @@ inline WorldStats computeStats(const World& w) {
     s.food        = static_cast<int>(w.food.size());
     s.totalBirths = w.totalBirths;
     s.totalDeaths = w.totalDeaths;
+    s.totalGraceBirths = static_cast<int>(w.totalGraceBirths);
+    s.totalSoftBirths  = static_cast<int>(w.totalSoftBirths);
 
     // Predator bookkeeping (instantaneous count + cumulative death-cause totals).
     s.predatorPop           = static_cast<int>(w.predators.size());
@@ -400,7 +412,10 @@ inline std::string statsCsvHeader() {
            "predator_births_interval,predator_deaths_starv,predator_deaths_age,predator_avg_energy,"
            // APPENDED at the end (v0.22.0), never inserted: every existing column
            // index stays stable, so the whole historical CSV corpus keeps parsing.
-           "repro_components";
+           "repro_components,"
+           // Appended for the same reason (v0.24.0). Cumulative, like
+           // births_cum, and both subsets of it; 0 unless the mitigations are on.
+           "grace_births_cum,soft_births_cum";
 }
 
 inline std::string statsCsvRow(const WorldStats& s,
@@ -447,6 +462,8 @@ inline std::string statsCsvRow(const WorldStats& s,
       << predStarvInterval << ','
       << predAgeInterval << ','
       << s.predatorAvgEnergy << ','
-      << s.reproComponents;      // appended (v0.22.0) — see the header note
+      << s.reproComponents << ','   // appended (v0.22.0) — see the header note
+      << s.totalGraceBirths << ','  // appended (v0.24.0) — likewise
+      << s.totalSoftBirths;
     return o.str();
 }

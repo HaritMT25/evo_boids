@@ -45,6 +45,21 @@ run_case "toro_rich_s7" 7    2000 --rich --toroidal
 # ~23 would leave the gate inert and prove nothing about the new code path.
 run_case "iso_s42"     42    2000 --repro-max-distance 18
 run_case "iso_rich_s999" 999 2000 --rich --repro-max-distance 14
+# Gate mitigations (v0.24.0). Both are set INSIDE the measured collapse zone,
+# where the hard gate at the same threshold is what they have to be compared
+# against, and both are verified to fire rather than assumed to:
+#   soft_s42   T=16 W=5  -> 55 insertions, 53 of them ABOVE the hard threshold
+#              (measured at step 2000; the same seed and T with W=0 makes 1
+#              insertion). The soft ramp is the only path in the tree that draws
+#              on the gate — exactly one rng.unit per gate evaluation — so a
+#              draw-count or draw-order difference between native and wasm shows
+#              up here and nowhere else.
+#   grace_s999 T=13 grace=60 -> 197 insertions, ALL 197 via the founder bypass
+#              (the same seed and T without grace makes 0: 13 is below the
+#              breeding floor, which is the point). It draws nothing; what it
+#              proves is that both builds pick the same pairs to exempt.
+run_case "soft_s42"    42    2000 --repro-max-distance 16 --repro-soft-width 5
+run_case "grace_s999"  999   2000 --repro-max-distance 13 --repro-grace 60
 # Tier-1 body model (body_model.hpp). This is a DYNAMICS knob that also ADDS TO
 # THE RANDOM STREAM (two rng.range draws per insertion), so the on-path needs
 # native==wasm proven independently of the off-path: a draw-count or draw-order
@@ -68,6 +83,14 @@ run_case "body_rich_s7"  7    2000 --rich --body-model
 # the default body, bodyElong spread 0.856-1.138 — so the elongation term is
 # live and varying across the population when the compare happens.
 run_case "body_tri_s42"  42   2000 --tri --body-model
+# The ONE configuration where both stream-adding mechanisms interleave inside a
+# single insertion: the soft gate's one rng.unit() per evaluation, then the body
+# model's two rng.range draws on success. Every other case exercises them in
+# isolation, so a draw-ORDER regression between the two — which is exactly the
+# kind of bug that is hardest to bisect after the fact — would surface here and
+# nowhere else. Measured at step 2000: 55 insertions, 54 of them soft-admitted,
+# bodySize spread 0.902-1.117 (53 creatures off the default body).
+run_case "soft_body_s42" 42   2000 --repro-max-distance 16 --repro-soft-width 5 --body-model
 run_case "long_s42"    42    10000
 
 if [ "$FAILED" = "1" ]; then

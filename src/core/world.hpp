@@ -159,6 +159,19 @@ public:
     long long totalBirths = 0;  // cumulative over the whole run (never reset)
     long long totalDeaths = 0;  // cumulative over the whole run (never reset)
 
+    // Attribution for the two match-distance mitigations (v0.24.0), cumulative
+    // and both <= totalBirths. Without them a rescued population cannot be
+    // attributed to grace vs the soft ramp, and that attribution is the whole
+    // point of running the mitigation sweep. Both stay 0 on every run with the
+    // knobs off, including a hard-gated one.
+    //   totalGraceBirths: the gate was bypassed because a partner was a young
+    //     founder (see reproGraced).
+    //   totalSoftBirths:  the soft draw admitted a pair the HARD gate at the
+    //     same threshold would have refused (dsq > T*T). A pair inside T that
+    //     the soft draw happened to accept is not counted — it needed no help.
+    long long totalGraceBirths = 0;
+    long long totalSoftBirths  = 0;
+
     // Cumulative deaths split by cause (sum == totalDeaths). "prey deaths up" is
     // meaningless until you know which kind, so the logger differences these into
     // per-interval predation / starvation / age columns.
@@ -251,6 +264,20 @@ public:
         std::printf("  -- inside parallel (thread-summed CPU, share of parallel work) --\n");
         std::printf("     sensor-gather %5.1f%%   feedForward %5.1f%%   apply/metab %5.1f%%\n",
                     cpu(prof.gatherNs), cpu(prof.ffNs), cpu(prof.applyNs));
+    }
+
+    // Is this creature inside its founder grace window (cfg.reproGracePeriod)?
+    // A founder is a creature whose lineage starts at itself, which is exactly
+    // lineageId == id: both spawn sites (init and the --min-pop reseed floor)
+    // set it that way, ids are unique, and a child always inherits the maternal
+    // lineageId — so no creature field and no checkpoint column has to be added
+    // to ask this question. gracePeriod <= 0 is off; anything <= 5 is off in
+    // practice too, since doInteraction requires age > 5 before the gate runs.
+    //
+    // Public and static so the predicate can be tested directly rather than
+    // only through whole-run behaviour.
+    static bool reproGraced(const Creature& c, float gracePeriod) {
+        return gracePeriod > 0.0f && c.lineageId == c.id && c.age < gracePeriod;
     }
 
     // Record one death into the cluster map (no-op unless cfg.clusterMap). Called
@@ -929,6 +956,52 @@ private:
         }
     }
 
+    // The reproduction gate, as one predicate. Called as the LAST conjunct of
+    // the case-2 precondition (see the comment at the call site for why the
+    // gate lives there at all), so "returned true" == "an insertion happens"
+    // and the out-flags can drive the attribution counters directly.
+    //
+    // The precedence below is load-bearing, because it defines when a draw
+    // happens:
+    //   1. gate off (T < 0)      accept. No fold, no draw — the default corpus.
+    //   2. either partner graced accept. No fold, no draw: grace is a bypass,
+    //                            not a widening, so it costs nothing and can
+    //                            never be overruled by an unlucky draw.
+    //   3. fold the pair         dsq = genomeDistanceSq (the expensive part,
+    //                            reached only when the gate is armed).
+    //   4. hard gate (W <= 0)    the EXACT v0.21 comparison, and NO draw. Every
+    //                            archived --repro-max-distance run has to stay
+    //                            byte-identical, so this expression may not
+    //                            acquire a sqrt, a division or a draw.
+    //   5. soft gate (W > 0)     sqrt, then EXACTLY ONE rng.unit(), taken
+    //                            UNCONDITIONALLY before the comparison. The
+    //                            draw count per gate evaluation must not depend
+    //                            on d — the same rule the body model's two
+    //                            draws follow — or native and wasm desync on
+    //                            the first pair that lands on the other side of
+    //                            a branch.
+    bool reproGatePasses(const Creature& c1, const Creature& c2,
+                         bool& viaGrace, bool& viaSoft) {
+        viaGrace = false;
+        viaSoft  = false;
+        const float T = cfg.reproMaxDistance;
+        if (T < 0.0f) return true;
+        if (reproGraced(c1, cfg.reproGracePeriod) ||
+            reproGraced(c2, cfg.reproGracePeriod)) {
+            viaGrace = true;
+            return true;
+        }
+        const float dsq = genomeDistanceSq(c1.genome, c2.genome);
+        const float W = cfg.reproSoftWidth;
+        if (W <= 0.0f) return dsq <= T * T;
+        const float u = rng.unit();
+        if (!softGateAccepts(std::sqrt(dsq), T, W, u)) return false;
+        // Only a birth the hard gate would have REFUSED is a soft birth; a pair
+        // already inside T needed no help from the ramp.
+        viaSoft = (dsq > T * T);
+        return true;
+    }
+
     void doInteraction(Creature& c1, Creature& c2, std::vector<Creature>& newborns) {
         float s1[NUM_SENSES], s2[NUM_SENSES];
         std::memset(s1, 0, sizeof(s1));
@@ -969,12 +1042,22 @@ private:
             break;
         }
         case 2: {
-            // The genetic gate (cfg.reproMaxDistance) is the LAST conjunct on
+            // The genetic gate (reproGatePasses, above) is the LAST conjunct on
             // purpose: it is the only expensive one, and every cheap
-            // precondition short-circuits ahead of it. With the gate off the
-            // first comparison is false and genomeDistanceSq is never called,
-            // so the off-path costs one float compare and — critically — draws
-            // no random numbers, leaving the rng sequence untouched.
+            // precondition short-circuits ahead of it. With the gate off it
+            // returns on one float compare, never folding a genome and —
+            // critically — never drawing, so the rng sequence is untouched.
+            //
+            // THE RANDOM STREAM IS DEFINED HERE, alongside the body-model draws
+            // below. Only the soft ramp (cfg.reproSoftWidth > 0) draws, and
+            // then it draws exactly one uniform per evaluation of this conjunct
+            // whatever the pair's distance is; the hard gate, the grace bypass
+            // and the off-path draw nothing at all, which is what keeps the
+            // v0.21/0.22 gated runs and the whole default corpus byte-identical.
+            // Because the gate is the last conjunct, reaching it means every
+            // other precondition already held, so "gate passed" and "insertion
+            // happened" are the same event and viaGrace/viaSoft can be counted
+            // inside the branch without a second evaluation.
             //
             // Gating HERE rather than in the partner-selection loop is
             // deliberate: the caller consumes both creatures' interactTimer
@@ -986,14 +1069,13 @@ private:
             // would change iteration order as well); if that variant is ever
             // wanted it goes in as a separate flag and gets measured against
             // this one, not swapped in silently.
+            bool viaGrace = false, viaSoft = false;
             if (c1.foodReserves > cfg.reproEnergy && c2.foodReserves > cfg.reproEnergy &&
                 c1.reproTimer <= 0.0f && c2.reproTimer <= 0.0f &&
                 c1.age > 5.0f && c2.age > 5.0f &&
                 (cfg.maxPopulation <= 0 ||
                  (int)creatures.size() + (int)newborns.size() < cfg.maxPopulation) &&
-                (cfg.reproMaxDistance < 0.0f ||
-                 genomeDistanceSq(c1.genome, c2.genome)
-                     <= cfg.reproMaxDistance * cfg.reproMaxDistance)) {
+                reproGatePasses(c1, c2, viaGrace, viaSoft)) {
                 c1.foodReserves -= 12.0f;
                 c2.foodReserves -= 12.0f;
                 c1.reproTimer = cfg.reproCooldown;
@@ -1047,6 +1129,8 @@ private:
                 }
                 births++;
                 totalBirths++;
+                if (viaGrace) totalGraceBirths++;
+                if (viaSoft)  totalSoftBirths++;
                 logBirth(c1, c2);
             }
             break;

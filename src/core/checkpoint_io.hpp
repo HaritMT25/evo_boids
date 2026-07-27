@@ -105,6 +105,8 @@ inline void writeConfig(jsonm::Writer& w, const SimConfig& c) {
     w.beginObject();
     w.field("toroidal", c.toroidal);
     w.field("reproMaxDistance", c.reproMaxDistance);
+    w.field("reproSoftWidth", c.reproSoftWidth);
+    w.field("reproGracePeriod", c.reproGracePeriod);
     w.field("bodyModel", c.bodyModel);
     w.field("bodyMutation", c.bodyMutation);
     w.field("reproWindow", c.reproWindow);
@@ -171,6 +173,12 @@ inline void readConfig(const jsonm::Value& j, SimConfig& c) {
     // Absent in checkpoints written before v0.21.0; the default (-1 = gate off)
     // is what those runs actually used, so they resume unchanged.
     c.reproMaxDistance = o->floatOr("reproMaxDistance", c.reproMaxDistance);
+    // Absent in checkpoints written before v0.24.0; the defaults (both
+    // mitigations off) are what those runs actually used, so they resume
+    // unchanged — same pattern as reproMaxDistance above. Negative values are
+    // legal and mean off, exactly as they do on the command line.
+    c.reproSoftWidth = o->floatOr("reproSoftWidth", c.reproSoftWidth);
+    c.reproGracePeriod = o->floatOr("reproGracePeriod", c.reproGracePeriod);
     // Absent in checkpoints written before v0.23.0. The default (gate off,
     // 0.10 half-width) is what those runs actually used, so they resume
     // unchanged — same pattern as reproMaxDistance above.
@@ -263,6 +271,8 @@ inline std::string serialize(const World& world, const char* engineVersion) {
     w.key("counters");
     w.beginObject();
     w.field("totalBirths", world.totalBirths);
+    w.field("totalGraceBirths", world.totalGraceBirths);
+    w.field("totalSoftBirths", world.totalSoftBirths);
     w.field("totalDeaths", world.totalDeaths);
     w.field("totalDeathsPredation", world.totalDeathsPredation);
     w.field("totalDeathsStarvation", world.totalDeathsStarvation);
@@ -473,6 +483,10 @@ inline bool deserialize(const std::string& text, World& world, std::string& erro
 
     if (const jsonm::Value* jc = j.find("counters")) {
         world.totalBirths = jc->llOr("totalBirths", 0);
+        // Absent in checkpoints written before v0.24.0; 0 is the true count for
+        // a run that had no mitigations to attribute anything to.
+        world.totalGraceBirths = jc->llOr("totalGraceBirths", 0);
+        world.totalSoftBirths = jc->llOr("totalSoftBirths", 0);
         world.totalDeaths = jc->llOr("totalDeaths", 0);
         world.totalDeathsPredation = jc->llOr("totalDeathsPredation", 0);
         world.totalDeathsStarvation = jc->llOr("totalDeathsStarvation", 0);
@@ -630,6 +644,22 @@ inline bool deserialize(const std::string& text, World& world, std::string& erro
             needed += (size_t)L * 2;
         }
         if (genes.size() != needed) { error = "'genes' length does not match 'genomeLengths'"; return false; }
+
+        // nextId must exceed every restored id. Before v0.24.0 a stale nextId
+        // merely minted duplicate ids downstream (cosmetic); reproGraced()
+        // reads lineageId == id, so a newborn reusing a live id can now
+        // satisfy the founder predicate and bypass the reproduction gate. A
+        // hand-edited or truncated file must not be able to create fake
+        // founders — same reject-rather-than-repair rule as the
+        // bodySize/bodyElong range check above.
+        if (n > 0) {
+            unsigned long long maxId = 0;
+            for (long long v : id)
+                if ((unsigned long long)v > maxId) maxId = (unsigned long long)v;
+            if ((unsigned long long)world.nextId_ <= maxId) {
+                error = "'nextId' must exceed every creature id"; return false;
+            }
+        }
 
         world.creatures.resize(n);
         size_t gi = 0;

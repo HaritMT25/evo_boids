@@ -709,6 +709,75 @@ in **C++20**.
 
 ## 3. Empirical results (don't re-derive these)
 
+### Tier-2 undulation go/no-go — the undulator harness (2026-07-27, `tools/undulator.cpp`)
+*(Standalone, untracked by CMake and never linked into the sim:
+`g++ -O2 -std=c++20 -ffp-contract=off tools/undulator.cpp -o undulator`, then
+`./undulator --tune --converge --grid --cost`. Rebuilt from the repo file and rerun
+2026-07-27; every figure below is from that run. The question, asked BEFORE paying for a
+tier-2 format break: is travelling-wave locomotion **reachable, climbable, affordable**?)*
+
+- **What the harness is.** A chain of N point masses joined by distance constraints;
+  semi-implicit Euler + Gauss–Seidel constraint relaxation (PBD-style), velocities rebuilt
+  from the projected positions. Muscles are **internal** angular springs at each interior
+  joint, driving it toward a travelling-wave target curvature `phi*(j,t) = A·sin(wt − k·j)`;
+  the three-particle force triple **sums to zero by construction**, so muscles apply no net
+  force to the body — any forward motion must come from the fluid. Drag is anisotropic per
+  segment at **`CN/CT = 20`**, and *that anisotropy is the entire physical basis of thrust*.
+  **Reference gait** (all figures unless stated): A 0.45 rad, w 12 rad/s, k 0.35 rad/joint,
+  20 cells, 16 substeps, 4 relax, kSpring 10000.
+- **Falsification first — all four PASS.** A harness that reports thrust for the wrong
+  reason is worse than no harness, so belief is gated on these, not on the grid:
+  **T1 zero drag** → com moved (8.95e-10, 6.26e-11), i.e. muscles apply no net force;
+  **T2 isotropic drag** → **+0.0000 BL/s** (anisotropy is *necessary*);
+  **T3 anisotropic drag** → **+0.2902 BL/s** with gait tracking 88% (0.396 of 0.450 rad
+  commanded) (*sufficient*); **T4 reversed wave** → **−0.2930 BL/s** (thrust tracks the
+  wave, not a bias).
+- **Why the gait diagnostic exists — the trap.** The harness's *first* version reported
+  "no thrust anywhere on the grid", which reads exactly like an honest negative result and
+  would have killed tier-2 on a bug. It was a **sign error in the muscle force triple** that
+  folded every joint to ±pi. The commanded-vs-achieved amplitude readout and the four tests
+  above are what turn a plausible NO-GO into a checkable one — keep them in any variant.
+- **Q1 — reachable? YES, and converged** (steps=1200, substeps 2 → 128):
+  `0.2708, 0.2786, 0.2856, 0.2902, 0.2927, 0.2941, 0.2948` BL/s — **monotone and smooth**,
+  settling at **~0.29 BL/s**; the reference 16 substeps is within 1.6% of 128. The zero-drag
+  |L| residual falls to **0.083 × I·w·A** at 128 substeps. So the thrust is physical, not an
+  integrator artifact.
+- **Muscle authority is the binding constraint** (tune sweep at CN 0.60). Joint natural
+  frequency w_n = sqrt(kSpring/I) must sit **above** the drive w or the body barely bends:
+  kSpring 900 → w_n 5.3 rad/s, 9% tracking, +0.003 BL/s; 3000 → 31%, +0.016;
+  **10000 → w_n 17.7 rad/s, 88%, +0.291 — the sweet spot**; 30000 → 188% (overshoot),
+  +0.243; 100000 → 249%, **−0.058** (backwards); 300000 → 150%, +0.476 but erratic across
+  drag columns (over-amplitude, not a usable operating point). This is also *why* Q3 fails:
+  stiff muscles are what force the substepping.
+- **Q2 — climbable? YES at k ≥ 0.5 rad/joint.** There the A × w plane holds a **broad smooth
+  plateau of 0.2–0.38 BL/s** across most cells (best +0.375 at k 0.80, A 0.45, w 24) — a
+  gradient a search can walk, not an isolated spike. At k 0.10–0.20 the surface is **ragged
+  with sign flips**: reachable in principle, not climbable there.
+- **Q3 — affordable? NO at 20-cell fidelity.** Reference gait: **0.291 BL/s at 37.65 µs per
+  creature per step** (this machine, today; an earlier session measured ~46 µs for the same
+  config — the µs figures move ~±20% between sessions, the physics reproduces exactly).
+  Against the **~1.5 µs whole-creature** baseline below, that is **~25–30× the entire
+  current per-creature budget**, not the ~5% the plan estimated (which assumed ~100 flops
+  and no substepping). Cost table, the rows that matter: 20 cells / 8 substeps / kSpring
+  4000 / w 8 → 0.092 BL/s at **21.3 µs** (swims slowly, still ~14×); **8 cells / 2 substeps
+  / kSpring 600 / w 4 (k scaled 0.875) → 0.081 BL/s at 0.96 µs** — swims, at ~64% of the
+  whole-creature budget, i.e. **~2× total per-creature cost**. **Every other cheap row does
+  not swim** (<0.05 BL/s cutoff), so the 8-cell row is the single cheap survivor, an entry
+  point rather than a representative sample.
+- **GRADED VERDICT.** Q1 reachable **YES** (~0.29 BL/s, converged, falsification-tested).
+  Q2 climbable **YES** at k ≥ 0.5 (broad smooth plateau, not a spike). Q3 affordable **NO at
+  20-cell fidelity** (~25–30× budget; muscle stiffness w_n > drive w forces the 16 substeps)
+  — **but** an 8-cell soft-gait configuration swims at ~2× total per-creature cost with
+  ~3.6× slower thrust, so **tier-2 is not dead**. The escalation decision (plan §3.5 — a
+  *capability* decision) therefore **moves to Phase 5 planning as a body-size / fidelity
+  trade**, with the 8-cell configuration as the entry point.
+- **Open — not run: the §4.4 gait-maintenance test.** Initialise the live set with
+  hand-written undulation controllers *inside the real sim* and see whether selection
+  **maintains** the gait. Maintenance is strictly easier than discovery, so its failure
+  would be conclusive. Worth running before any tier-2 build.
+
+*Line numbers/figures measured 2026-07-27 on the v0.22.0 tree.*
+
 ### (NEW) Performance facts — measured on real hardware, don't re-derive these
 *(8-core WSL, gcc 13, `-O3 -march=native -ffp-contract=off`, serial build unless stated.
 Method: 156-run sweep = a 5×3 population × perception grid plus 24 randomised SimConfigs,
@@ -1115,6 +1184,10 @@ flag for the biology; the speed is a wash.
 3. **NEAT-style complexification** — last; only once there's escalating demand.
 - **Camouflage + spatial background** and **body-size** fold in around Stage B/C (the
   speciation phase), after a stable energy-coupled predator.
+- **Phase 4 verdict is in** (§3 tier-2 undulation entry): undulation is **reachable** and
+  **climbable**, 20-cell fidelity is **unaffordable** (~25–30× budget), an 8-cell soft gait
+  swims at **~2× budget** — so tier-2 escalation is now a **Phase 5 body-size / fidelity
+  trade**, not a yes/no. The gait-maintenance test (§4.4) is still open.
 
 ### Open questions — RESOLVED this session (were "not yet decided")
 1. **Detection asymmetry → made a tunable flag.** `--predator-perception` default

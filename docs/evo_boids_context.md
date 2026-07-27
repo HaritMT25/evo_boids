@@ -87,9 +87,16 @@ in **C++20**.
 
 ---
 
-## 2. Current version: v0.20.0
+## 2. Current version: v0.21.0
 
-> **Banner matches the code.** `CMakeLists.txt` is at **0.20.0** (frontend parity:
+> **Banner matches the code.** `CMakeLists.txt` is at **0.21.0** — `--repro-max-distance`,
+> the opt-in reproductive-isolation gate (default off, fingerprint-verified
+> byte-identical; see the 0.21.0 history entry). Two findings from its sweep are
+> load-bearing for everything downstream: the usable threshold window is narrow
+> and ends in a **bistable collapse at ~16** (below ~14 nothing breeds at all),
+> and the **`species` metric turns out to be saturated** — it tracks population
+> almost one-to-one and so cannot measure speciation at all, which is why the
+> reproduction graph is a prerequisite rather than a nicety. 0.20.0 was frontend parity:
 > native window gains [T] turbo + [S] checkpoint and the fixed-dt loop; unified
 > `img/rocks.jpg` background — see the 0.20.0 history entry). 0.19.0 adds `--toroidal`
 > (opt-in wrap-around perception — see the 0.19.0 history entry; default off,
@@ -299,6 +306,76 @@ in **C++20**.
   bug** (that grid is stale by the time `computeStats` runs; §10.5). Negligible at
   the populations run so far (it was never the cause of the slowdown — §10.5), but it
   removes the O(n²) cliff for large-N / Stage-B runs.
+- **0.21.0 (`--repro-max-distance` — reproductive isolation; opt-in, off =
+  byte-identical, fingerprint-verified across 4 seeds x 5 config modes).**
+  Parents whose genomes are farther apart than the threshold in the folded
+  (source,sink) connectivity space cannot produce a child. New
+  `src/core/isolation.hpp`: `genomeDistanceSq()` folds a genome into
+  (cell, summed weight) pairs via the existing `geneCell()` embedding, then
+  merge-joins. Permutation-invariant and indel-robust — the two properties
+  `genomeSimilarity()` lacks, and the reason it was NOT used (it compares gene
+  *i* to gene *i* and only sourceType/sinkType, so one indel shifts every
+  downstream gene; measured: a single duplicate-insert drops it to **0.654**
+  while the new distance moves only **2.0**). The gate is the last conjunct of
+  the existing precondition `if` in `doInteraction` case 2, so an incompatible
+  pair burns its interaction cooldown exactly as an under-energised pair already
+  does — no new semantic. Off-path costs one float compare and draws no rng.
+  - **Determinism detail worth recording.** The fold sorts on the PAIR
+    (cell, weight), not on cell alone. Sorting on cell alone leaves genes
+    sharing a cell in genome order, their weights are then summed in that order,
+    and float addition is not associative — so a permuted genome would fold to a
+    different vector and distance-to-self would stop being 0. Ordering by the
+    pair makes equal elements bit-identical in both fields, so the sorted array
+    is a function of the input multiset alone: same answer from any input order
+    and from any sort algorithm. Same argument the topological tie-break uses.
+    `d(a,b) == d(b,a)` holds bitwise (IEEE subtraction is exactly antisymmetric).
+  - **Measured distance scale** (this is what makes the flag usable): unrelated
+    random genomes **19.5** apart; in-run pairs within `--interact-radius`
+    median **18-20**, p05 **13-17** (3 seeds x 20k steps, sampled every 5k);
+    a mutated clone **~0**. Local and global pair distances track each other
+    closely — the population is near-panmictic in genome space.
+  - **THE SWEEP (8 thresholds x 8 seeds x 20k steps, serial, `--no-render`).**
+    Control noise floor: population 479.7 +- 16.1, births 2481 +- 80,
+    species 475 +- 15 (**~3.2% cv**) — differences smaller than that are not
+    results. Threshold 24: inert, within noise of control. 22: births -3%
+    (noise edge). 20: births **-10%**, diversity 13.7 -> 12.6 (outside noise).
+    18: births **-23%**, population -6%. **16: BIMODAL** — 4/8 seeds collapse to
+    the `--min-pop` floor (tail population 50-126), 4/8 establish a compatible
+    breeding cluster and end at or ABOVE control (456-617). 14 and 12: total
+    sterilisation, **every** seed pinned at the floor of 50 with 0-2 births
+    across 20k steps. So the live window is narrow and sharply bounded:
+    **inert above ~22, graded 20-18, bistable at 16, dead at <=14.**
+  - **§7.1's collapse mechanism is confirmed and is a positive feedback.** In the
+    dead arms `genetic_diversity` goes back UP (13.7-13.9, i.e. control level)
+    while the population sits at the floor: the reseed floor is injecting
+    genetically random founders, which are incompatible with everyone and with
+    each other, so they eat, never breed, and keep the population pinned. The
+    gate does not merely reduce births, it converts the reseed floor from a
+    safety net into a diversity pump that cannot reproduce.
+  - **SURPRISE, and it matters more than the gate: the `species` column is
+    saturated and cannot measure speciation.** Across every arm INCLUDING the
+    control, species count tracks population almost one-to-one (control 475
+    species / 480 creatures; one run 659 / 693). At 16 SimHash bits the metric is
+    effectively a near-injective hash of the genome — it is counting
+    individuals, not species, and always has been. It therefore cannot detect
+    reproductive isolation even in principle, and no threshold sweep against it
+    means anything. This is exactly the circularity §3.3 of the plan warned
+    about, arriving by a different route, and it is why the reproduction graph
+    (0.22.0) is a prerequisite for calling any of this speciation rather than an
+    optional extra. Pre-existing property, not caused by this change.
+  - Verified: core_tests **2847/0** in both builds (20 new checks: exact
+    permutation invariance, bitwise symmetry, self-zero, agreement with a dense
+    STATS_DIM reference, the genomeSimilarity contrast, permissive-gate-is-a-noop
+    bit equality, tight-gate-blocks-all, gate-is-selective-not-just-restrictive,
+    determinism under the rich config, checkpoint round trip incl. a pre-0.21.0
+    file with the key removed); byte identity vs 3a10fc6 with the flag off
+    (20/20 step-for-step fingerprint cases, checkpoint differing by exactly the
+    one new config line); native==wasm parity **13/13** including two new cases
+    that exercise the gate at thresholds which actually bite (18 and 14).
+  - Not done, deliberately: the §7.1 mitigations (soft/probabilistic gate,
+    exempting reseeded founders). The sweep now says exactly where they would be
+    needed — at and below 16 — so they can be built against measured collapse
+    rather than an anticipated one.
 - **0.20.0 (frontend parity: native window == web page).** App/frontend only —
   zero core changes. The native windowed phase gains the web's controls: **[T]**
   toggles turbo (flat-out fixed-dt stepping in ~200 ms adaptive chunks, window

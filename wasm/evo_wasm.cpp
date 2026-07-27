@@ -88,6 +88,15 @@ EVO_EXPORT int evo_init(unsigned seed, int width, int height, int population,
         g_error = "bad world dimensions or population";
         return 0;
     }
+    // Same refusal main.cpp makes: the genetic gate folds a genome into a fixed
+    // stack buffer, so an oversized genomeMaxLength would silently gate on a
+    // truncated genome. Reject rather than clamp, so the two frontends agree.
+    if (cfg.reproMaxDistance >= 0.0f &&
+        cfg.genomeMaxLength > isolation_detail::ISO_MAX_GENES) {
+        g_error = "reproMaxDistance requires genomeMaxLength <= "
+                + std::to_string(isolation_detail::ISO_MAX_GENES);
+        return 0;
+    }
 
     // Always capture per-creature sensor/action activations for the neural
     // inspector. Dynamics-neutral (a pure memcpy in World::update, no rng),

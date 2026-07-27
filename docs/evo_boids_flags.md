@@ -302,6 +302,7 @@ top-left corner — see context renderer note).
 | `--genome-init-min N` | 24 | Initial gene-count range (low). |
 | `--genome-init-max N` | 48 | Initial gene-count range (high). |
 | `--mutation F` | 1.0 | Multiplier on the per-birth mutation rate. |
+| **`--repro-max-distance F`** | **off (<0)** | **Reproductive isolation** (v0.21.0). Parents farther apart than `F` in the folded **(source,sink) connectivity space** cannot produce a child; every other reproduction precondition is unchanged, and an incompatible pair burns its interaction cooldown exactly as an under-energised pair already does. Uses `genomeDistanceSq()` (`src/core/isolation.hpp`) — **not** `genomeSimilarity()`, which is positionally aligned and collapses on a single indel. **Measured scale** (so the number means something): unrelated random genomes ≈ **19.5** apart; in-run pairs within `--interact-radius` sit at median **18–20** (p05 ≈ 13–17); a mutated clone ≈ **0**. So the live window is roughly **12–22** — above ~23 the gate is inert, below ~12 essentially nothing breeds and the population falls to the `--min-pop` floor. Off ⇒ byte-identical to before (fingerprint-verified, 4 seeds × 5 modes). Costs nothing when off (one float compare, no RNG draw). Requires `--genome-max ≤ 1024`. |
 
 ## Selection pressure
 

@@ -43,6 +43,12 @@ void printUsage(const char* prog) {
         "                        pheromones and the long probe cross the world seam, and\n"
         "                        the boundary sensors read no-wall (default off; positions\n"
         "                        have always wrapped — this makes the SENSES wrap too)\n"
+        "  --repro-max-distance F  reproductive isolation: parents farther apart than F in\n"
+        "                        folded (source,sink) connectivity space cannot breed;\n"
+        "                        <0 = off (default off). Measured scale: unrelated genomes\n"
+        "                        sit ~19.5 apart and in-run neighbour pairs ~18-20, so the\n"
+        "                        live window is roughly 12-22 — below ~12 almost nothing\n"
+        "                        breeds and the population falls to the --min-pop floor\n"
         "  --population N        starting creature count (default 300)\n"
         "  --min-pop N           reseed floor (default 50)\n"
         "  --max-pop N           hard birth cap, 0 = unlimited (default 0)\n"
@@ -161,6 +167,7 @@ int main(int argc, char** argv) {
         else if (arg == "--seed")    { seed = static_cast<unsigned>(std::strtoul(next("--seed"), nullptr, 10)); haveSeed = true; }
         else if (arg == "--no-render") noRender      = true;
         // --- simulation parameters (override SimConfig defaults) ---
+        else if (arg == "--repro-max-distance") cfg.reproMaxDistance = std::atof(next("--repro-max-distance"));
         else if (arg == "--population")       initialPopulation     = std::atoi(next("--population"));
         else if (arg == "--min-pop")          cfg.minPopulation     = std::atoi(next("--min-pop"));
         else if (arg == "--max-pop")          cfg.maxPopulation     = std::atoi(next("--max-pop"));
@@ -266,6 +273,15 @@ int main(int argc, char** argv) {
     fixOrder(cfg.genomeInitMin, cfg.genomeInitMax, "genome init");
     if (cfg.perceptionRadius < 1.0f) { std::cerr << "Note: perception clamped to 1.\n"; cfg.perceptionRadius = 1.0f; }
     if (cfg.maxNeighbors < 0)        { std::cerr << "Note: max-neighbors < 0 treated as 0 (unlimited).\n"; cfg.maxNeighbors = 0; }
+    // The genetic gate folds a genome into a fixed stack buffer. --genome-max is
+    // an unbounded int, so refuse the combination rather than silently folding a
+    // truncated genome and gating on a distance that means nothing.
+    if (cfg.reproMaxDistance >= 0.0f &&
+        cfg.genomeMaxLength > isolation_detail::ISO_MAX_GENES) {
+        std::cerr << "Error: --repro-max-distance needs --genome-max <= "
+                  << isolation_detail::ISO_MAX_GENES << " (got " << cfg.genomeMaxLength << ").\n";
+        return 1;
+    }
     if (checkpointEvery > 0) {
         checkpointBase = !saveCheckpoint.empty() ? saveCheckpoint
                        : (!runName.empty() ? ("runs/" + runName) : std::string("runs/checkpoint"));

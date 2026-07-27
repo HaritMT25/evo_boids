@@ -34,7 +34,9 @@
     ]],
     ["genome", [
       ["mutationMultiplier", 1, { step: 0.1 }], ["genomeInitMin", 24], ["genomeInitMax", 48],
-      ["genomeMinLength", 16], ["genomeMaxLength", 80]
+      ["genomeMinLength", 16], ["genomeMaxLength", 80],
+      ["reproMaxDistance", -1, { step: 0.5, label: "repro max distance (-1 = off)",
+                                 title: "genetic reproduction gate; -1 disables it" }]
     ]],
     ["predators", [
       ["predatorSpeed", 110], ["predatorPerception", 150], ["predatorCaptureRadius", 14],
@@ -60,6 +62,7 @@
     currentStrength: { d: "Peak ocean-flow speed in world units/sec (0 = still water).", t: "try: 80 with eddies = a lively ocean" },
     predatorEconomy: { d: "Predators eat, breed and starve (Stage B) instead of being immortal.", t: "try: on with 3-4 predators" },
     toroidal: { d: "Senses wrap across the world seam — no walls, no sensory dead zone at edges.", t: "try: on; cures the wall-hugger phenotype" },
+    reproMaxDistance: { d: "Reproductive isolation: parents farther apart than this in wiring space cannot breed (-1 = off).", t: "try: 18 bites gently, 14 hard; below 12 breeding stops" },
     targetFood: { d: "Baseline food count the world regrows toward (hard cap 2x).", t: "try: 300 scarcity, 1200 abundance" },
     foodSpawnBase: { d: "Mean food items spawned per step.", t: "try: 2-12; higher = richer world" },
     foodSpawnAmp: { d: "Sinusoidal swing of food abundance around the base rate.", t: "try: 0 for a steady food supply" },

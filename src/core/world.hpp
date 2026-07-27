@@ -17,6 +17,7 @@
 #include "config.hpp"
 #include "current.hpp"
 #include "cluster_projection.hpp"
+#include "isolation.hpp"
 
 struct Food {
     Vec2 pos;
@@ -863,11 +864,31 @@ private:
             break;
         }
         case 2: {
+            // The genetic gate (cfg.reproMaxDistance) is the LAST conjunct on
+            // purpose: it is the only expensive one, and every cheap
+            // precondition short-circuits ahead of it. With the gate off the
+            // first comparison is false and genomeDistanceSq is never called,
+            // so the off-path costs one float compare and — critically — draws
+            // no random numbers, leaving the rng sequence untouched.
+            //
+            // Gating HERE rather than in the partner-selection loop is
+            // deliberate: the caller consumes both creatures' interactTimer
+            // regardless of what doInteraction decided, so a reproduction that
+            // fails on insufficient energy already burns the cooldown. An
+            // incompatible pair now behaves exactly like an under-energised
+            // one, which introduces no new semantic. Skipping incompatible
+            // partners in the candidate loop would be a different rule (it
+            // would change iteration order as well); if that variant is ever
+            // wanted it goes in as a separate flag and gets measured against
+            // this one, not swapped in silently.
             if (c1.foodReserves > cfg.reproEnergy && c2.foodReserves > cfg.reproEnergy &&
                 c1.reproTimer <= 0.0f && c2.reproTimer <= 0.0f &&
                 c1.age > 5.0f && c2.age > 5.0f &&
                 (cfg.maxPopulation <= 0 ||
-                 (int)creatures.size() + (int)newborns.size() < cfg.maxPopulation)) {
+                 (int)creatures.size() + (int)newborns.size() < cfg.maxPopulation) &&
+                (cfg.reproMaxDistance < 0.0f ||
+                 genomeDistanceSq(c1.genome, c2.genome)
+                     <= cfg.reproMaxDistance * cfg.reproMaxDistance)) {
                 c1.foodReserves -= 12.0f;
                 c2.foodReserves -= 12.0f;
                 c1.reproTimer = cfg.reproCooldown;

@@ -39,6 +39,12 @@ run_case "rich_s31415" 31415 2000 --rich
 run_case "tri_s42"     42    2000 --tri
 run_case "toro_s42"    42    2000 --toroidal
 run_case "toro_rich_s7" 7    2000 --rich --toroidal
+# Genetic reproduction gate (isolation.hpp). Both thresholds are chosen to
+# actually BITE — in-run neighbour pairs sit ~18-20 apart, so 18 blocks roughly
+# half of attempted births and 14 blocks nearly all of them. A threshold above
+# ~23 would leave the gate inert and prove nothing about the new code path.
+run_case "iso_s42"     42    2000 --repro-max-distance 18
+run_case "iso_rich_s999" 999 2000 --rich --repro-max-distance 14
 run_case "long_s42"    42    10000
 
 if [ "$FAILED" = "1" ]; then

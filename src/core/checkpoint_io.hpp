@@ -95,6 +95,7 @@ inline void writeConfig(jsonm::Writer& w, const SimConfig& c) {
     w.key("config");
     w.beginObject();
     w.field("toroidal", c.toroidal);
+    w.field("reproMaxDistance", c.reproMaxDistance);
     w.field("minPopulation", c.minPopulation);
     w.field("maxPopulation", c.maxPopulation);
     w.field("targetFood", c.targetFood);
@@ -154,6 +155,9 @@ inline void readConfig(const jsonm::Value& j, SimConfig& c) {
     const jsonm::Value* o = j.find("config");
     if (!o || !o->isObject()) return;
     c.toroidal = o->boolOr("toroidal", c.toroidal);
+    // Absent in checkpoints written before v0.21.0; the default (-1 = gate off)
+    // is what those runs actually used, so they resume unchanged.
+    c.reproMaxDistance = o->floatOr("reproMaxDistance", c.reproMaxDistance);
     c.minPopulation = o->intOr("minPopulation", c.minPopulation);
     c.maxPopulation = o->intOr("maxPopulation", c.maxPopulation);
     c.targetFood = o->intOr("targetFood", c.targetFood);

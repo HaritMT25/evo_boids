@@ -29,6 +29,22 @@ struct SimConfig {
     // a wrapped traveller feels a small velocity discontinuity at the seam).
     bool toroidal = false;
 
+    // --- Reproductive isolation (opt-in, off = byte-identical prior behaviour) ---
+    // Parents whose genomes are farther apart than this in the folded
+    // (source,sink) connectivity space cannot produce a child; every other
+    // reproduction precondition is unchanged. <0 = off, no genetic gate.
+    // (Precedent for "negative means disabled": predatorMoveCost below.)
+    //
+    // The metric is genomeDistanceSq() in isolation.hpp — NOT genomeSimilarity(),
+    // which is positionally aligned and collapses on a single indel (see the
+    // comment there). Measured scale, so the number means something: unrelated
+    // random genomes sit ~19.5 apart, a child sits ~13.8 from a parent when the
+    // population is unstructured, and a mutated clone sits ~0. A threshold below
+    // the population's own pair distance stops essentially all breeding, so the
+    // interesting window is narrow and population-dependent — see the research
+    // log's v0.21.0 entry before picking a value.
+    float reproMaxDistance = -1.0f;
+
     // --- Population ---
     int minPopulation = 50;   // reseed floor: random creatures injected below this
     int maxPopulation = 0;    // hard birth cap (0 = unlimited)
@@ -218,6 +234,9 @@ struct SimConfig {
             (maxPopulation > 0) ? std::to_string(maxPopulation) : std::string("unlimited");
         std::ostringstream o;
         o << "toroidal="          << (toroidal ? "on (wrap-around senses)" : "off (bounded plane)") << "\n"
+          << "reproMaxDistance="  << (reproMaxDistance < 0.0f
+                                      ? std::string("off (no genetic gate)")
+                                      : std::to_string(reproMaxDistance)) << "\n"
           << "minPopulation="     << minPopulation
           << " maxPopulation="    << maxPop << "\n"
           << "targetFood="        << targetFood

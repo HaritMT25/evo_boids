@@ -13,11 +13,14 @@
 // byte equality of two checkpoints == bit-for-bit identical simulations.
 // wasm/parity.sh runs the full matrix.
 //
-// Usage: parity_driver SEED STEPS [--rich] [--tri] [--engine-version STR] [--trace N]
+// Usage: parity_driver SEED STEPS [--rich] [--tri] [--toroidal]
+//                      [--repro-max-distance F] [--engine-version STR] [--trace N]
 //   --rich   turn on every hidden-state subsystem (mirrors the resume test's
 //            configureRichWorld: eddies, food patches + drift, 4 predators with
 //            economy, move cost, topological cap 7, gene cost)
 //   --tri    triangular motion (exercises atan2f)
+//   --repro-max-distance  exercise the genetic reproduction gate (isolation.hpp):
+//            a sort + merge-join over folded genomes on the reproduction path
 //   --trace  print "frame fingerprint" to stderr every N steps (divergence bisection)
 #include <cstdio>
 #include <cstdlib>
@@ -73,12 +76,15 @@ int main(int argc, char** argv) {
     const unsigned seed = (unsigned)std::strtoul(argv[1], nullptr, 10);
     const long steps = std::strtol(argv[2], nullptr, 10);
     bool rich = false, tri = false, tor = false;
+    float reproMaxDistance = -1.0f;
     const char* engineVersion = "parity";
     long traceEvery = 0;
     for (int i = 3; i < argc; ++i) {
         if (!std::strcmp(argv[i], "--rich")) rich = true;
         else if (!std::strcmp(argv[i], "--tri")) tri = true;
         else if (!std::strcmp(argv[i], "--toroidal")) tor = true;
+        else if (!std::strcmp(argv[i], "--repro-max-distance") && i + 1 < argc)
+            reproMaxDistance = (float)std::atof(argv[++i]);
         else if (!std::strcmp(argv[i], "--engine-version") && i + 1 < argc) engineVersion = argv[++i];
         else if (!std::strcmp(argv[i], "--trace") && i + 1 < argc) traceEvery = std::strtol(argv[++i], nullptr, 10);
         else { std::fprintf(stderr, "unknown arg %s\n", argv[i]); return 2; }
@@ -102,6 +108,7 @@ int main(int argc, char** argv) {
     }
     if (tri) world.cfg.triangularMotion = true;
     if (tor) world.cfg.toroidal = true;
+    world.cfg.reproMaxDistance = reproMaxDistance;
     world.init(1920, 1080, 300);
 
     const auto t0 = std::chrono::steady_clock::now();

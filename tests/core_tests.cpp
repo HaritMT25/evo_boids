@@ -1337,6 +1337,211 @@ static void test_portable_mt19937() {
 }
 
 // ---------------------------------------------------------------
+// ---------------------------------------------------------------
+// Reproductive isolation (v0.21.0): the genome-distance metric and the
+// reproduction gate built on it.
+//
+// The metric's whole reason for existing is that genomeSimilarity() is
+// positionally aligned and therefore useless as a gate, so the contrast against
+// it is asserted here rather than only described in a comment.
+static void test_reproductive_isolation() {
+    std::printf("reproductive isolation: metric properties + gate...\n");
+
+    // --- metric properties, over many random genomes ---
+    {
+        rng.seed(31337u);
+        bool selfZero = true, symmetric = true, permInvariant = true, nonNegative = true;
+        for (int t = 0; t < 300; ++t) {
+            Genome a = makeRandomGenome(16, 80);
+            Genome b = makeRandomGenome(16, 80);
+
+            if (genomeDistanceSq(a, a) != 0.0f) selfZero = false;
+            // Bitwise symmetry, not approximate: the merge must be
+            // order-independent, and IEEE subtraction is exactly antisymmetric.
+            if (genomeDistanceSq(a, b) != genomeDistanceSq(b, a)) symmetric = false;
+            if (genomeDistanceSq(a, b) < 0.0f) nonNegative = false;
+
+            // Permutation invariance must be EXACT. It only holds because the
+            // fold sorts on (cell, weight) rather than on cell alone; sorting on
+            // cell alone would sum a cell's duplicate weights in genome order
+            // and float addition is not associative.
+            Genome shuffled = a;
+            for (int k = (int)shuffled.size() - 1; k > 0; --k)
+                std::swap(shuffled[k], shuffled[rng.intRange(0, k)]);
+            if (genomeDistanceSq(a, shuffled) != 0.0f) permInvariant = false;
+        }
+        CHECK(selfZero);
+        CHECK(symmetric);
+        CHECK(permInvariant);
+        CHECK(nonNegative);
+    }
+
+    // --- the sparse merge-join agrees with a dense reference ---
+    // Independent oracle: materialise both genomes as full STATS_DIM vectors and
+    // difference them directly. Catches any merge-join indexing mistake.
+    {
+        rng.seed(4242u);
+        bool matchesDense = true;
+        for (int t = 0; t < 60; ++t) {
+            Genome a = makeRandomGenome(16, 80), b = makeRandomGenome(16, 80);
+            std::vector<float> va(STATS_DIM, 0.0f), vb(STATS_DIM, 0.0f);
+            for (const Gene& g : a) va[geneCell(g)] += g.weightAsFloat();
+            for (const Gene& g : b) vb[geneCell(g)] += g.weightAsFloat();
+            double ref = 0.0;
+            for (int i = 0; i < STATS_DIM; ++i) {
+                const double d = (double)va[i] - (double)vb[i];
+                ref += d * d;
+            }
+            // Tolerance, not equality: the reference sums in genome order and in
+            // double, the implementation in canonical order and in float.
+            if (!approx((float)ref, genomeDistanceSq(a, b), 1e-2f)) matchesDense = false;
+        }
+        CHECK(matchesDense);
+    }
+
+    // --- indel robustness, and the contrast that justifies the new function ---
+    {
+        rng.seed(909090u);
+        double meanSim = 0.0, meanDist = 0.0;
+        const int N = 200;
+        for (int t = 0; t < N; ++t) {
+            Genome g = makeRandomGenome(24, 48);
+            Genome ins = g;
+            const int pos = rng.intRange(0, (int)ins.size() - 1);
+            ins.insert(ins.begin() + pos, ins[pos]);   // one duplicate gene, in place
+            meanSim  += genomeSimilarity(g, ins);
+            meanDist += genomeDistance(g, ins);
+        }
+        meanSim /= N; meanDist /= N;
+        // genomeSimilarity COLLAPSES on a single indel: every gene downstream of
+        // the insertion is compared against its neighbour instead of itself.
+        CHECK(meanSim < 0.75f);
+        // The connectivity-space distance barely moves — one duplicated edge.
+        CHECK(meanDist < 4.0f);
+        // And unrelated genomes are far away on the same scale, so the metric
+        // genuinely discriminates rather than being uniformly small.
+        rng.seed(909091u);
+        double meanUnrelated = 0.0;
+        for (int t = 0; t < N; ++t)
+            meanUnrelated += genomeDistance(makeRandomGenome(24, 48), makeRandomGenome(24, 48));
+        meanUnrelated /= N;
+        CHECK(meanUnrelated > 4.0f * meanDist);
+    }
+
+    // The next two blocks compare WHOLE RUNS, which only the serial build
+    // promises to reproduce — under OpenMP the parallel phase draws from
+    // per-thread RNGs and a fixed seed does not pin the run. Same guard the
+    // topological, checkpoint and toroidal tests use.
+#ifndef USE_OPENMP
+    // --- a permissive gate is exactly a no-op ---
+    // Threshold far above the largest achievable distance must reproduce the
+    // ungated run bit for bit: the gate consumes no rng and changes no order.
+    {
+        const int STEPS = 400;
+        rng.seed(24680u);
+        World off;
+        off.cfg.minPopulation = 0;
+        off.init(900, 700, 220);
+        for (int i = 0; i < STEPS; ++i) off.update(0.016f);
+
+        rng.seed(24680u);
+        World wide;
+        wide.cfg.minPopulation = 0;
+        wide.cfg.reproMaxDistance = 1.0e6f;
+        wide.init(900, 700, 220);
+        for (int i = 0; i < STEPS; ++i) wide.update(0.016f);
+
+        CHECK(deepFingerprint(off) == deepFingerprint(wide));
+        CHECK(off.totalBirths == wide.totalBirths);
+        CHECK(off.totalBirths > 0);          // the control must actually breed
+    }
+#endif
+
+    // The remaining checks are build-independent: they assert only that births
+    // do or do not happen, which the gate decides identically in both builds.
+
+    // --- a tight gate stops reproduction entirely ---
+    {
+        const int STEPS = 400;
+        rng.seed(24680u);
+        World tight;
+        tight.cfg.minPopulation = 0;
+        tight.cfg.reproMaxDistance = 0.5f;   // far below any random pair distance
+        tight.init(900, 700, 220);
+        for (int i = 0; i < STEPS; ++i) tight.update(0.016f);
+        CHECK(tight.totalBirths == 0);
+    }
+
+    // --- the gate is SELECTIVE, not merely restrictive ---
+    // Same tight threshold, but the population is two hand-planted clones
+    // instead of 220 unrelated genomes. Within-clone pairs are at distance 0 and
+    // must breed; a run of all-distinct genomes at the same threshold bred
+    // nothing (above). That contrast is the actual claim: births track genome
+    // distance, not the threshold alone.
+    {
+        const int STEPS = 400;
+        rng.seed(13579u);
+        World two;
+        two.cfg.minPopulation = 0;
+        two.cfg.reproMaxDistance = 0.5f;
+        two.init(900, 700, 220);
+        Genome clusterA = makeRandomGenome(24, 48);
+        Genome clusterB = makeRandomGenome(24, 48);
+        CHECK(genomeDistance(clusterA, clusterB) > 10.0f);   // genuinely far apart
+        for (size_t i = 0; i < two.creatures.size(); ++i) {
+            two.creatures[i].genome = (i % 2 == 0) ? clusterA : clusterB;
+            buildNeuralNet(two.creatures[i].genome, two.creatures[i].nnet);
+        }
+        for (int i = 0; i < STEPS; ++i) two.update(0.016f);
+        CHECK(two.totalBirths > 0);
+    }
+
+    // --- determinism with the gate on (serial build only, as above) ---
+#ifndef USE_OPENMP
+    {
+        const int STEPS = 300;
+        std::uint64_t fp[2] = {0, 0};
+        for (int rep = 0; rep < 2; ++rep) {
+            rng.seed(50505u);
+            World w;
+            configureRichWorld(w);           // predators, currents, patches too
+            w.cfg.reproMaxDistance = 18.0f;  // a threshold that actually bites
+            w.init(900, 700, 240);
+            for (int i = 0; i < STEPS; ++i) w.update(0.016f);
+            fp[rep] = deepFingerprint(w);
+        }
+        CHECK(fp[0] == fp[1]);
+    }
+#endif
+
+    // --- the gate survives a checkpoint round trip ---
+    {
+        rng.seed(60606u);
+        World a;
+        a.cfg.reproMaxDistance = 16.5f;
+        a.init(900, 700, 200);
+        for (int i = 0; i < 120; ++i) a.update(0.016f);
+        const std::string blob = checkpoint::serialize(a, "test");
+        World b;
+        std::string err;
+        CHECK(checkpoint::deserialize(blob, b, err));
+        CHECK(b.cfg.reproMaxDistance == 16.5f);
+
+        // A checkpoint written before v0.21.0 has no such key; loading it must
+        // leave the gate off rather than inventing a value.
+        World c;
+        c.cfg.reproMaxDistance = -1.0f;
+        std::string legacy = blob;
+        const std::string key = "\"reproMaxDistance\":16.5,";
+        const size_t at = legacy.find(key);
+        CHECK(at != std::string::npos);
+        if (at != std::string::npos) legacy.erase(at, key.size());
+        std::string err2;
+        CHECK(checkpoint::deserialize(legacy, c, err2));
+        CHECK(c.cfg.reproMaxDistance < 0.0f);
+    }
+}
+
 int main() {
     std::printf("=== evo_boids core tests (no SFML linked) ===\n");
     test_portable_mt19937();
@@ -1357,6 +1562,7 @@ int main() {
     test_inspection_and_cluster();
     test_analysis_v012();
     test_schooling_metric();
+    test_reproductive_isolation();
 
     std::printf("---------------------------------------------\n");
     std::printf("%d checks, %d failures\n", g_checks, g_failures);

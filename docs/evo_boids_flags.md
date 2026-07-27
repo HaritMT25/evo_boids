@@ -1,7 +1,22 @@
-# evo_boids — CLI reference (v0.17.0)
+# evo_boids — CLI reference (v0.24.0)
 
 Headless runner for the evolutionary boids simulation. Defaults reproduce the
 original behaviour, so any flag is an opt-in change.
+
+> **v0.24.0 — gate mitigations** (`--repro-soft-width`, `--repro-grace`; see the
+> reproduction section): the match-distance cliff becomes a linear acceptance ramp,
+> and young founders — the initial spawn and every `--min-pop` reseed — get a
+> gate-free window so an injected genome can enter the pool instead of pinning the
+> population to the floor. Two attribution CSV columns (33/34) say which mitigation
+> carried each birth. **v0.23.0 — tier-1 body model** (`--body-model`,
+> `--body-mutation`): heritable size and elongation modulating the existing
+> speed/turn/metabolism model. **v0.21.0–v0.22.0** — the match-distance gate
+> (`--repro-max-distance`) and the pairing graph (`repro_components`,
+> `--repro-log`). **v0.18.0–v0.20.0** — the WebAssembly build with native == wasm
+> byte-identical checkpoints (`wasm/parity.sh`, 19 cases), toroidal perception and
+> frontend parity. Every one of these is opt-in and fingerprint-verified
+> byte-identical when off; the per-version history with measurements lives in
+> `docs/evo_boids_context.md`.
 
 > **v0.17.0 — checkpoint / resume** (`--save-checkpoint`, `--load-checkpoint`,
 > `--checkpoint-every`). A checkpoint is the complete world: config, frame counter and

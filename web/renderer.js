@@ -8,6 +8,22 @@
   var WORLD_W = DEFAULT_W, WORLD_H = DEFAULT_H; /* may change on checkpoint load */
   var RADII = [5, 3.5, 3, 2.5, 2, 1.5];
   var SEG_ALPHA = [255, 225, 195, 165, 135, 105].map(function (a) { return a / 255; });
+  /* Drawn radius = RADII[seg] * bodyScale(bodySize), floored at MIN_RADIUS so a
+   * small body still has a visible tail. bodySize is core-clamped to [0.5, 2],
+   * but its realised standing spread is narrow (sd ~0.08 about 1.0), so a plain
+   * multiply would separate two typical neighbours by a couple of tenths of a
+   * pixel. tanh gives slope BODY_SPAN*BODY_GAIN = 2 where the population
+   * actually sits and saturates at +/-BODY_SPAN, so the rails stay sane — a 2.0
+   * body draws 1.4x, not 2x. tanh(0) is exactly 0, so a default 1.0 body
+   * multiplies by exactly 1.0 and draws the pixels it always did. */
+  var BODY_GAIN = 5, BODY_SPAN = 0.4, MIN_RADIUS = 1;
+  /* Same formula as SfmlRenderer::drawCreatures — the two frontends must match. */
+  function bodyScale(b) {
+    if (!(b > 0)) return 1;  /* absent buffer (older wasm blob) or NaN */
+    return 1 + BODY_SPAN * Math.tanh(BODY_GAIN * (b - 1));
+  }
+  /* evo_inspect_info(): id, speed, foodReserves, age, bodySize, bodyElong. */
+  var INSPECT_INFO_LEN = 6;
   var CUR_TAIL = "rgba(110,170,215," + (60 / 255).toFixed(4) + ")";
   var CUR_HEAD = "rgba(150,205,235," + (130 / 255).toFixed(4) + ")";
   var RING_STYLE = "rgba(255,235,120," + (230 / 255).toFixed(4) + ")";
@@ -272,6 +288,10 @@
     var s = {
       n: n, fc: fc, pc: pc, selIdx: selIdx,
       segs: new Float32Array(Module.HEAPF32.buffer, Module._evo_creature_segments(), n * 12),
+      /* N*2 alongside segs, same creature order; absent from pre-0.24 blobs */
+      body: Module._evo_body_params
+              ? new Float32Array(Module.HEAPF32.buffer, Module._evo_body_params(), n * 2)
+              : null,
       colors: new Uint8Array(Module.HEAPU8.buffer, Module._evo_creature_colors(), n * 3),
       food: new Float32Array(Module.HEAPF32.buffer, Module._evo_food_xy(), fc * 2),
       preds: new Float32Array(Module.HEAPF32.buffer, Module._evo_predator_data(), pc * 3),
@@ -286,7 +306,7 @@
                                    s.curCols * s.curRows * 2);
     }
     if (selIdx >= 0) {
-      s.info = new Float64Array(Module.HEAPF64.buffer, Module._evo_inspect_info(), 4);
+      s.info = new Float64Array(Module.HEAPF64.buffer, Module._evo_inspect_info(), INSPECT_INFO_LEN);
       s.sensors = new Float32Array(Module.HEAPF32.buffer, Module._evo_inspect_sensors(), 41);
       s.hidden = new Float32Array(Module.HEAPF32.buffer, Module._evo_inspect_hidden(), 12);
       s.actions = new Float32Array(Module.HEAPF32.buffer, Module._evo_inspect_actions(), 12);
@@ -357,7 +377,14 @@
     ctx.fillText("Fish #" + Math.round(s.info[0]) + "   spd " + Math.round(s.info[1]) +
                  "   E " + Math.round(s.info[2]) + "   age " + Math.round(s.info[3]),
                  px + 12, py + 19);
+    /* Body params get their own line at the panel foot — appended to the title
+     * they would run past the 340px panel. Always drawn: the page has no view of
+     * cfg.bodyModel, and a fixed 1.00 / 1.00 is itself the readout for a run
+     * with the model off. */
     ctx.font = "11px monospace";
+    ctx.fillStyle = "rgba(190,205,210," + (220 / 255).toFixed(4) + ")";
+    ctx.fillText("body " + s.info[4].toFixed(2) + "   elong " + s.info[5].toFixed(2),
+                 px + 12, py + ph - 8);
     ctx.fillStyle = "rgba(150,175,180," + (200 / 255).toFixed(4) + ")";
     var hy = yTop - 18 + 11; /* text top at yTop-18, ~11px to baseline */
     ctx.fillText("in", xS - 8, hy);
@@ -409,10 +436,12 @@
 
     for (var c = 0; c < s.n; c++) {
       var rgb = s.colors[3 * c] + "," + s.colors[3 * c + 1] + "," + s.colors[3 * c + 2];
+      var bs = bodyScale(s.body ? s.body[2 * c] : 1);
       for (var seg = 0; seg < 6; seg++) {
         ctx.fillStyle = "rgba(" + rgb + "," + SEG_ALPHA[seg] + ")";
         ctx.beginPath();
-        ctx.arc(s.segs[12 * c + 2 * seg], s.segs[12 * c + 2 * seg + 1], RADII[seg], 0, TAU);
+        ctx.arc(s.segs[12 * c + 2 * seg], s.segs[12 * c + 2 * seg + 1],
+                Math.max(MIN_RADIUS, RADII[seg] * bs), 0, TAU);
         ctx.fill();
       }
     }

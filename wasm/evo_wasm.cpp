@@ -42,6 +42,7 @@ std::string g_checkpoint;
 std::string g_defaultConfig;
 
 std::vector<float>   g_segments;   // N*12: 6 body segments x,y
+std::vector<float>   g_bodyParams; // N*2: bodySize, bodyElong
 std::vector<uint8_t> g_colors;     // N*3
 std::vector<double>  g_ids;        // N
 std::vector<float>   g_food;       // F*2
@@ -147,6 +148,7 @@ EVO_EXPORT void evo_sync() {
     const size_t n = w.creatures.size();
 
     g_segments.resize(n * 12);
+    g_bodyParams.resize(n * 2);
     g_colors.resize(n * 3);
     g_ids.resize(n);
     for (size_t i = 0; i < n; ++i) {
@@ -155,6 +157,10 @@ EVO_EXPORT void evo_sync() {
             g_segments[i * 12 + s * 2 + 0] = c.body[s].x;
             g_segments[i * 12 + s * 2 + 1] = c.body[s].y;
         }
+        // Filled in the same pass as the segments so the two buffers can never
+        // disagree about creature order or count.
+        g_bodyParams[i * 2 + 0] = c.bodySize;
+        g_bodyParams[i * 2 + 1] = c.bodyElong;
         g_colors[i * 3 + 0] = c.color.r;
         g_colors[i * 3 + 1] = c.color.g;
         g_colors[i * 3 + 2] = c.color.b;
@@ -209,6 +215,10 @@ EVO_EXPORT void evo_sync() {
 
 EVO_EXPORT int evo_creature_count()             { return g_world ? (int)g_world->creatures.size() : 0; }
 EVO_EXPORT const float* evo_creature_segments() { return g_segments.data(); }
+// N*2 (bodySize, bodyElong), creature order identical to evo_creature_segments.
+// Separate buffer, not extra columns: the segments stride of 12 is relied on by
+// every reader.
+EVO_EXPORT const float* evo_body_params()       { return g_bodyParams.data(); }
 EVO_EXPORT const uint8_t* evo_creature_colors() { return g_colors.data(); }
 EVO_EXPORT const double* evo_creature_ids()     { return g_ids.data(); }
 EVO_EXPORT int evo_food_count()                 { return g_world ? (int)g_world->food.size() : 0; }
@@ -270,7 +280,9 @@ EVO_EXPORT const char* evo_last_error() { return g_error.c_str(); }
 // drawNeuralOverlay): lastSensors / neuron outputs / lastActions, and the
 // flattened connection list decoded via asGene().
 namespace {
-double g_inspInfo[4] = {};                 // id, speed, foodReserves, age
+// 6 doubles, in this order — web/renderer.js reads INSPECT_INFO_LEN of them and
+// the two must be changed together.
+double g_inspInfo[6] = {};                 // id, speed, foodReserves, age, bodySize, bodyElong
 std::vector<float> g_inspSensors;          // NUM_SENSES
 std::vector<float> g_inspHidden;           // MAX_INTERNAL_NEURONS
 std::vector<float> g_inspActions;          // NUM_ACTIONS
@@ -285,6 +297,8 @@ EVO_EXPORT int evo_inspect(int index) {
     g_inspInfo[1] = (double)c.speed;
     g_inspInfo[2] = (double)c.foodReserves;
     g_inspInfo[3] = (double)c.age;
+    g_inspInfo[4] = (double)c.bodySize;
+    g_inspInfo[5] = (double)c.bodyElong;
 
     g_inspSensors.assign(c.lastSensors, c.lastSensors + NUM_SENSES);
     g_inspActions.assign(c.lastActions, c.lastActions + NUM_ACTIONS);

@@ -115,10 +115,25 @@ void SfmlRenderer::drawCreatures(const std::vector<Creature>& creatures) {
     const float texSize = 1024.0f;
     int idx = 0;
 
+    // Segment radius scales with the heritable bodySize (the same formula
+    // web/renderer.js bodyScale() uses — the two frontends must look alike).
+    // bodySize is core-clamped to [0.5, 2] but its realised standing spread is
+    // narrow (sd ~0.08 about 1.0), so a plain multiply would separate two
+    // typical neighbours by a couple of tenths of a pixel. tanh gives slope
+    // kBodySpan*kBodyGain = 2 where the population actually sits and saturates
+    // at +/-kBodySpan, so the rails stay sane: a 2.0 body draws 1.4x, not 2x.
+    // tanh(0) is exactly 0, so a default 1.0 body multiplies by exactly 1 and
+    // the pre-body-model picture is unchanged. kMinRadius keeps the tail
+    // segment of a small body visible.
+    const float kBodyGain = 5.0f, kBodySpan = 0.4f, kMinRadius = 1.0f;
+
     for (const auto& c : creatures) {
+        const float bodyScale = 1.0f + kBodySpan * std::tanh(kBodyGain * (c.bodySize - 1.0f));
         for (int s = 0; s < Creature::BODY_LEN; ++s) {
             float rad = (s == 0) ? 5.0f : 4.0f - s * 0.5f;
             if (rad < 1.5f) rad = 1.5f;
+            rad *= bodyScale;
+            if (rad < kMinRadius) rad = kMinRadius;
 
             float px = c.body[s].x;
             float py = c.body[s].y;
@@ -406,6 +421,18 @@ void SfmlRenderer::drawNeuralOverlay(const Creature& c) {
         t.setFillColor(sf::Color(220, 235, 240, 235));
         t.setPosition(panelX + 12.0f, panelY + 8.0f);
         window_.draw(t);
+
+        // Body params on their own line at the panel foot — appended to the
+        // title they would run past the 340px panel. Always drawn, so a run
+        // with the body model off reads as a fixed 1.00 / 1.00 rather than as
+        // a missing field. Mirrors the web inspector.
+        std::ostringstream body;
+        body << "body " << std::fixed << std::setprecision(2) << c.bodySize
+             << "   elong " << c.bodyElong;
+        sf::Text bt(body.str(), font_, 11);
+        bt.setFillColor(sf::Color(190, 205, 210, 220));
+        bt.setPosition(panelX + 12.0f, panelY + panelH - 20.0f);
+        window_.draw(bt);
 
         sf::Text colhdr("in", font_, 11);
         colhdr.setFillColor(sf::Color(150, 175, 180, 200));

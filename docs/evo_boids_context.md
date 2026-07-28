@@ -299,6 +299,18 @@ in **C++20**.
 `core_tests`: **2065 checks, 0 failures** after all of the above (OpenMP *and* serial).
 
 ### Version history (why each bump)
+- *(no bump)* **render: body size is drawn and reported** — the second half of the §3
+  body-model dead-end finding. Both renderers scale their six segment radii by
+  `1 + 0.4·tanh(5·(bodySize − 1))` (tanh so the contrast is doubled where the population
+  actually sits, sd ≈ 0.08 about 1.0, while a 2.0 body saturates at 1.4× rather than 2×
+  and a small one keeps a ≥1 px tail). `tanh(0)` is exactly 0, so a default body
+  multiplies by exactly 1.0 and every pre-existing picture is pixel-identical. The web
+  path gets the values from a new **additive** export `evo_body_params()` (N×2, filled in
+  the same loop as the segments so ordering can never diverge) — the `N*12` segment
+  stride is documented and relied on, so it was not widened. `evo_inspect_info()` went
+  4 → 6 doubles and both frontends now print `body / elong`. Renderers and the browser
+  shim only: `src/core` byte-identical, the two `parity_driver` builds share an md5,
+  7 seed/mode checkpoints match, ctest 3162/0 and 3069/0 unchanged, parity 19/19.
 - 0.3.0 — `--version` + metrics rework (diversity/species).
 - 0.4.0 — `SimConfig` (runtime params).
 - 0.5.0 — `--gene-cost` + CSV flushing for `tail -f`.

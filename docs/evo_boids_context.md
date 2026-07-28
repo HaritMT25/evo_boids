@@ -500,6 +500,14 @@ in **C++20**.
     mitigations first), no body sensor, no cellCost. Next: v0.24.0, the §7.1
     mitigations (soft gate + refill grace), designed against the 0.21.0 sweep's
     measured collapse at thresholds ≤ 16.
+  - **FOLLOW-UP (2026-07-27, same day): this model cannot evolve size — see the §3
+    entry "The tier-1 body model cannot evolve size".** Measured: bodies shrink
+    monotonically to the 0.5 rail and the 2.0 rail is unreachable, for two independent
+    reasons — blending inheritance pins the spread at sd = 0.816·`bodyMutation` (12 sd
+    short of the top rail at the default), and size is a pure tax with no compensating
+    benefit anywhere in the sim. The flag as shipped measures the COST of size, not the
+    evolution of it. Nothing here is wrong — every claim in this entry still holds — but
+    the feature does not do what its name suggests to a reader.
 - **0.22.0 (the pairing graph — `repro_components` CSV column + `--repro-log`;
   observational only, fingerprint-verified byte-identical to 0.21.0 at defaults).**
   The independent grouping measure the plan's §3.3 demanded: `World::logBirth`
@@ -891,6 +899,116 @@ in **C++20**.
 ---
 
 ## 3. Empirical results (don't re-derive these)
+
+### The tier-1 body model cannot evolve size — a measured dead end (2026-07-27, v0.23.0)
+
+*(Prompted by the plainest possible bug report — "they aren't mutating bigger bodies" —
+after watching a `--body-model` run in the browser. The observation is correct, and the
+truth is worse than the report: **the model as shipped can only shrink.** Probes in
+`~/wasm_parity/` — `body_probe.cpp`, `body_probe2.cpp`, `op_probe.cpp`, `bodyfit.cpp`,
+`bodycomp.cpp`; native serial, stock defaults, 4–5 seeds each, up to 100k steps.)*
+
+- **The headline.** With `--body-model` on, mean `bodySize` falls **monotonically in every
+  seed** — 1.000 → ~0.94 at 20k steps → **0.55 at 100k**, then sits against the 0.5 rail
+  (occupied on 36–42% of steps at the default `--body-mutation 0.1`). The 2.0 rail is
+  **never reached**: scanning every one of 100,000 steps, the largest body ever seen was
+  **1.187** at M=0.1 and **1.669** at M=0.3. Only at M=1.0 (10× the default) is 2.0 ever
+  touched, and even there the mean is 0.53–0.55 with ~63% of the population pinned at the
+  *low* rail — the big bodies are transient mutational spray that gets culled.
+
+- **Cause 1: blending inheritance is a variance sink, not a random walk.**
+  `child = mean(parents) + U(−M, +M)` halves the standing deviation every generation and
+  re-injects only `M²/3`, so the spread equilibrates at **sd = M·√(2/3) = 0.816·M**,
+  *independent of run length*. Measured operator-only (no World, no selection): **0.0815 /
+  0.2428 / 0.5405** at M = 0.1 / 0.3 / 1.0 against theory 0.0816 / 0.2449 / 0.8165 (the
+  M=1.0 value is trimmed by the clamp). Equilibrium is reached in **~5 generations** from
+  zero variance and never grows again. At the shipped default the 2.0 rail is therefore
+  **12 sd** from the mean. Confirmed independently on a neutral build (all three factors
+  forced to `1.0f`, inheritance and both rng draws intact): across 5 seeds × 60k steps the
+  largest body that ever appeared was **1.28**. *Even in a world where size costs nothing,
+  no big bodies appear.* This is the dominant cause, and it would bite regardless of the
+  fitness landscape.
+
+- **Cause 2: size is a pure tax with no revenue line.** An exhaustive grep found exactly
+  three dynamical consumers of `bodySize`/`bodyElong`, and every one is a cost or inert:
+  speed ceiling `max(minSpeed, maxSpeed·2/(1+size))` (150 → **100** px/s at the top rail),
+  metabolic burn `metabolicRate·size` (1.5 → **3.0**/s), and `turnFactor`, which is applied
+  only inside `if (cfg.triangularMotion)` and so is **dead at defaults**. Because
+  `geneCost` and `moveCost` both default to 0, metabolism is *100% of the standing energy
+  budget* — a body at 2.0 does not add a penalty, it **doubles the entire budget**.
+  Forage-efficiency index (`speedFactor/massFactor`, normalised): **2.667 / 1.000 / 0.333**
+  at size 0.5 / 1.0 / 2.0. Checked and found to contain **no** size term: food pickup
+  (fixed `pickupRadius`, fixed `foodEnergy`), predator perception and capture (both fixed),
+  `SHARE` (flat 50/50), `FIGHT` (age × `rng.unit()` only), reproduction (flat 12/parent,
+  flat `reproEnergy`), the whole sensor enum (no morphological sense), and collision (does
+  not exist). `body[]` is still read only by the renderers and the checkpoint.
+
+- **`bodyElong` is an accidental, perfect neutral control** — same operator, same rng
+  draws, same clamp, zero dynamical effect at defaults. Seed the founders spread over
+  [0.5, 2.0] and both traits' spread collapses to the operator equilibrium (~0.08) by
+  ~30k steps, but only `bodySize`'s **mean** moves (1.235 → **0.536**); `bodyElong`'s mean
+  stays frozen where the founders left it (1.256 → 1.309). **The operator destroys the
+  variance; selection moves the mean.** Cleanest separation of the two causes in the data.
+
+- **Direct competition settles it.** 150 founders pinned at 0.7 vs 150 at 1.4,
+  `--body-mutation 0`, `--min-pop 0`: the big phenotype is **extinct in 4/4 seeds within
+  ~4–5 generations** (~200 sim-seconds). Realised gradient over 43,102 non-founder deaths:
+  `corr(bodySize, insertions)` = **−0.080, negative in 5/5 live seeds**, against −0.004 and
+  mixed-sign on the neutral build. Lifetime insertions by size bin: **2.27** (0.50–0.75),
+  **1.96** (0.75–1.00), **1.65** (1.00–1.25). Note 1.4 is *not lethal* — its monoculture
+  never went extinct (4,610 births vs 6,872 for a 0.7 monoculture, 88% vs 74% starvation
+  deaths) — it is simply outcompeted.
+
+- **A trap for the next reader:** `corr(bodySize, meanFoodReserves)` is **+0.078**, the one
+  positive correlation in the data. It is an artifact of *low fecundity*, not an advantage —
+  big creatures reproduce less, each insertion costs a flat 12, so their unspent reserves
+  sit higher. The neutral control gives +0.007. Do not read it as "big bodies are doing
+  fine." Related: in the competition test the big cohort's **`lineageId`s survive** long
+  after the big phenotype is gone (38–118 of ~800 at 40k steps), because `lineageId` is
+  inherited from parent 1 while `bodySize` is blended — anyone scoring cohort success by
+  lineage would conclude big survived. It did not.
+
+- **Things that do NOT fix it.** Raising `--body-mutation` makes them shrink *faster*
+  (mean 0.609/0.617 by 30k at M=0.3/0.6; the gradient strengthens to −0.183/−0.327).
+  `--move-cost` is the only mechanism in the tree that could in principle pay for size (a
+  lower ceiling means less quadratic kinetic burn; analytic break-even ≈ 1.2e-4) and it
+  does **not** work in practice: under kinetic pressure the network chooses to move slowly,
+  so the ceiling stops binding and the creature pays the metabolic doubling without ever
+  collecting the saving (measured at `--move-cost 0.0002`: mean still falls to 0.92/0.88).
+  `--triangular-motion` makes it *worse* (0.828/0.806 at 40k) — `turnFactor` becomes a
+  third tax.
+
+- **The only upward force in the entire model is a boundary artifact.** [0.5, 2.0] is
+  asymmetric about the 1.0 start (its midpoint is 1.25), so clamp reflection alone biases
+  the mean **up** at large M — visible on the neutral build (mean 1.053 / 1.188 at M =
+  0.3 / 0.6) and reproduced in-sim by `bodyElong`. It appears only at mutation rates ~10×
+  the default, and the live model's downward slide is fighting it, which makes the
+  selection signal *stronger* than the raw trace suggests.
+
+- **Correction to `body_model.hpp`.** The comment justifying the clamps says an "unbounded
+  random walk would eventually park the whole population at an extreme." Blending
+  inheritance is **not** a random walk — it is mean-reverting with a fixed equilibrium sd.
+  The clamp is not what prevents parking at an extreme; the halving is. And the population
+  parks at an extreme regardless, at the **low** rail, for a reason no clamp can help with.
+
+- **Why it looked like nothing was happening at all.** ~3,800 steps per generation ≈ 61
+  sim-seconds ≈ **one real minute** at 60 fps, so five minutes of watching is ~5
+  generations — enough for a founder spread to collapse, but only ~0.08 of mean drift.
+  Compounding that, **neither renderer read `bodySize`** (both used fixed per-segment radius
+  tables; the sole on-screen effect was the *spacing* of six same-sized dots, and the trail
+  really does reach that spacing — measured from checkpoints, <1% of creatures fall short),
+  and **no numeric readout existed anywhere** — not the HUD, not the inspector, not the
+  native window. The only way to read a body size was to download a checkpoint. Fixed
+  immediately after this finding (see the render entry in the version history).
+
+- **What would actually make size evolvable** (none of it done; each is a behavioural
+  change and so needs its own opt-in flag, §6.1 byte-identity proof, a parity case and a
+  measured sweep): give size something to *buy* — `pickupRadius` scaled by `bodySize` (a
+  bigger mouth; note this feeds the hot-path spatial query, so it needs a perf review), a
+  `bodySize` term in `FIGHT`, or size-dependent predator capture — and/or stop the variance
+  sink by inheriting from one parent instead of blending, or mutating in log space. Until
+  one of those exists, **`--body-model` measures the cost of size, not the evolution of
+  it**, and no result from it should be described as morphological evolution.
 
 ### Tier-2 undulation go/no-go — the undulator harness (2026-07-27, `tools/undulator.cpp`)
 *(Standalone, untracked by CMake and never linked into the sim:

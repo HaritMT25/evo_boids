@@ -590,12 +590,26 @@
   var governorOn = true;
   var govNote = "";
   var governed = false;   /* the governor has changed this run */
-  /* Frames ignored after a (re)start: the first ~2 s include JIT warm-up and
-   * buffer growth, which would otherwise read as "this machine is too slow". */
-  var WARMUP_FRAMES = 120, warmup = WARMUP_FRAMES;
+  /* Time ignored after a (re)start: JIT warm-up and buffer growth would
+   * otherwise read as "this machine is too slow". Measured in time, not
+   * frames — an overloaded page draws few frames, and waiting for N of them
+   * is exactly the stutter this exists to avoid. */
+  var WARMUP_MS = 1500, warmupUntil = 0;
+  /* Step cost grows faster than the creature count (more creatures = denser
+   * water = more neighbours each): fitting wasm/bench.sh's single-threaded
+   * column, cost ~ N^1.4. Sizing the cut with that exponent instead of a
+   * linear one avoids cutting far deeper than needed. */
+  var COST_EXPONENT = 1.4;
   function resetGovernor() {
     workEma = 0; overFrames = 0; underFrames = 0; govNote = ""; governed = false;
-    warmup = WARMUP_FRAMES;
+    warmupUntil = performance.now() + WARMUP_MS;
+  }
+  /* After any action: forget the moving average (it still remembers the
+   * frames before the action and would trigger a second, too-deep cut) and
+   * let the page run half a second before judging again. */
+  function settle() {
+    workEma = 0;
+    warmupUntil = performance.now() + 500;
   }
   function applyCap() {
     if (!Module || !Module._evo_set_param) return;
@@ -603,21 +617,25 @@
     withCString("maxPopulation", function (ptr) { return Module._evo_set_param(ptr, eff); });
   }
   function govern(workMs, pop) {
-    if (warmup > 0) { warmup--; return; }
+    if (performance.now() < warmupUntil) return;
     workEma = workEma ? workEma * 0.9 + workMs * 0.1 : workMs;
     if (!governorOn || paused || turboState !== "live" || bench) return;
     if (workEma > BUDGET_MS) { overFrames++; underFrames = 0; }
     else if (workEma < BUDGET_MS * 0.5) { underFrames++; overFrames = 0; }
     else { overFrames = 0; underFrames = 0; }
-    if (overFrames >= 30) {
+    /* ~0.5 s of evidence normally; far over budget, a handful of frames */
+    if (overFrames >= (workEma > 2 * BUDGET_MS ? 8 : 30)) {
       overFrames = 0;
+      var ema = workEma;  /* settle() clears it; size the cut first */
+      settle();
       if (simSpeed > 1) {
         setSpeed(simSpeed - 1);
         govNote = "speed lowered to " + simSpeed + "x to hold 60 fps";
       } else if (!autoCap || pop <= autoCap * 1.02) {
         /* only tighten once the population has come down to the last cap */
-        var target = Math.max(MIN_CAP, Math.floor(pop * (BUDGET_MS * 0.8) / workEma));
-        if (!autoCap || target < autoCap) {
+        var target = Math.max(MIN_CAP, Math.floor(
+          pop * Math.pow((BUDGET_MS * 0.8) / ema, 1 / COST_EXPONENT)));
+        if (Number.isFinite(target) && target < pop && (!autoCap || target < autoCap)) {
           autoCap = target;
           applyCap();
           var removed = Module._evo_cull_to ? Module._evo_cull_to(autoCap) : 0;
@@ -629,6 +647,7 @@
       }
     } else if (underFrames >= 180 && autoCap && pop >= autoCap * 0.95) {
       underFrames = 0;
+      settle();
       autoCap = Math.round(autoCap * 1.15);
       applyCap();
       govNote = "population cap raised to " + autoCap;
@@ -823,7 +842,7 @@
       return;
     }
     selectedId = null;
-    warmup = WARMUP_FRAMES;  /* a load is a restart as far as frame timing goes */
+    warmupUntil = performance.now() + WARMUP_MS;  /* a load is a restart for frame timing */
     workEma = 0;
     var w = Module._evo_width(), h = Module._evo_height();
     if (w !== WORLD_W || h !== WORLD_H) {

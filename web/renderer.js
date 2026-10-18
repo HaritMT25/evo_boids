@@ -137,7 +137,7 @@
     fastTanh: { d: "~1.25x faster tanh approximation — changes the numbers.", t: "try: off to reproduce native runs" },
     maxPopulation: { d: "Birth cap: no births while the population is at or above it (0 = none). Applies live.", t: "try: 0; the frame-budget governor may set a lower one" },
     minPopulation: { d: "Reseed floor: random founders are added when the population falls below it. Applies live.", t: "try: 50 (the default)" },
-    governor: { d: "When a frame takes too long, lower the speed, then cap births so the population shrinks to what this machine can run at 60 fps. Nothing is culled.", t: "try: on; off to see the uncapped run (it may stutter)" }
+    governor: { d: "When frames take too long: first lower the speed, then remove creatures at random (no trait favoured) and cap births at what this machine can run at 60 fps. The status line reports each step; a governed run no longer replays from its seed.", t: "try: on; off to see the uncapped run (it may stutter)" }
   };
 
   var ASSETS = window.EVO_ASSETS;
@@ -701,7 +701,7 @@
    * Keep the tab visible while it runs (hidden tabs throttle rAF).
    * ?bench&threads=0 measures the single-threaded module on an isolated page. */
   var bench = /[?&]bench(=|&|$)/.test(location.search) ? { results: [] } : null;
-  var BENCH_NS = [250, 500, 1000, 1500, 2000, 3000, 4000, 6000, 8000];
+  var BENCH_NS = [250, 500, 1000, 1500, 2000, 3000, 4000, 6000, 8000, 10000, 12000, 16000];
   var BENCH_WARM = 90, BENCH_MEASURE = 300;
   function benchNext() {
     var b = bench;

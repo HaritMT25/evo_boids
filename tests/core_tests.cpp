@@ -2840,8 +2840,14 @@ static void test_repro_mitigations() {
                                          // and the ramp admits pairs too
         a.init(900, 700, 200);
         for (int i = 0; i < 800; ++i) a.update(0.016f);
+#ifdef EVO_DETERMINISTIC
+        // Properties of THIS seeded trajectory. A threaded build does not
+        // replay it, and in some of its runs no ramp-admitted birth happens
+        // within 800 steps (seen in the pool build: 1 run in ~8), so there the
+        // counters are only round-tripped below, whatever their values.
         CHECK(a.totalSoftBirths > 0);
         CHECK(a.totalGraceBirths > 0);
+#endif
 
         // The CSV plumbing must read what the world counted — a dropped copy
         // in computeStats zeroes a column while the checkpoint counter stays

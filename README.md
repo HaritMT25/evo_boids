@@ -108,6 +108,17 @@ Checks run in each:
 
 Safari on macOS/iOS has not been tested.
 
+### Phones and touch screens
+
+The page adapts to small and touch screens. A desktop browser with a mouse, in a landscape window, gets the layout above unchanged.
+
+- **World shape.** In portrait, or on any touch screen, a start or restart creates a world with the area of 1920×1080 but the shape of the screen, so it fills the screen instead of a 16:9 strip. Food density and crowding stay the same. Rotating the device keeps the running world, and a "fit to screen" button restarts it with a fitted one. A checkpoint keeps its own size, and `?bench` always uses 1920×1080.
+- **Inspector.** On screens 700 px wide or less, and on touch screens, the selected fish's network is drawn in a panel docked to the screen edge away from the fish, with 11–12 px text, instead of on the canvas. The on-canvas HUD is left out there; the status line carries the essentials.
+- **Touch.** A tap selects the nearest fish within about 24 CSS px. Tapping a parameter's name (marked ⓘ) shows its explanation. Inputs use 16 px text, so iOS does not zoom the page on focus, and buttons and rows are at least 44 px tall.
+- **Load.** Touch devices start with 200 creatures (single-threaded) or 400 (threaded), on at most 4 threads; `?nthreads=N` overrides the thread count. The threaded module still pre-spawns min(cores, 8) − 1 workers. The frame-budget governor works as everywhere else.
+
+So far this is measured in emulation only: Playwright's iPhone 13 profile in WebKit 26.6 and its Pixel 7 profile in Chrome 155, portrait and landscape. The world covers 95% of the screen in all four cases (before: 31%, 26%, 75% and 69%). No real phone has been tested, so frame rate, battery use, memory, and whether the threaded module starts on iOS are unmeasured.
+
 ### Deploy (Vercel, static)
 
 ```bash

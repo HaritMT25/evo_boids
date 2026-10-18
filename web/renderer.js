@@ -158,6 +158,26 @@
   var errEl = el("err");
   var statusEl = el("status");
 
+  /* Compact screens (phones, touch devices, narrow windows): the world-space
+   * overlays — HUD text, inspector panel — shrink with the canvas until they
+   * are unreadable, so there the inspector is a DOM panel laid out in CSS px
+   * and the HUD is left to the status line. Elsewhere the canvas versions
+   * stay, matching the native SFML window. */
+  var compactMQ = window.matchMedia("(max-width: 700px), (pointer: coarse)");
+  var coarseMQ = window.matchMedia("(pointer: coarse)");
+  /* Kind of the last pointer seen. Hover tooltips are for the mouse; a touch
+   * tap on a parameter name toggles its tooltip instead (attachTip), and a
+   * touch tap selects a fish from farther away (the canvas click handler). */
+  var lastPointer = "mouse";
+  ["pointerover", "pointerdown"].forEach(function (type) {
+    window.addEventListener(type, function (e) { lastPointer = e.pointerType || "mouse"; }, true);
+  });
+  /* CSS px per world unit at the canvas's current on-screen size. */
+  function cssPerWorld() {
+    var r = canvas.getBoundingClientRect();
+    return r.width > 0 ? r.width / canvas.width : 1;
+  }
+
   /* The wasm heap. In the threaded module it is a growable SharedArrayBuffer,
    * and a growth triggered on another thread leaves Module.HEAP* pointing at
    * the old, shorter buffer — so views are always cut from wasmMemory.buffer,
@@ -295,15 +315,38 @@
     return r;
   }
 
+  /* World size for a (re)start. A landscape screen with a mouse keeps the
+   * native 1920x1080. A portrait screen, or any touch screen, gets a world of
+   * the same area (so food density and crowding stay the same) shaped like
+   * the stage, so the world fills a phone instead of a 16:9 strip across it.
+   * A loaded checkpoint carries its own size. */
+  function fittedWorld() {
+    var r = el("stage").getBoundingClientRect();
+    var aspect = r.width / r.height;
+    if (!(aspect > 0) || (aspect >= 1 && !coarseMQ.matches)) return [DEFAULT_W, DEFAULT_H];
+    aspect = Math.max(0.4, Math.min(2.5, aspect));
+    var w = Math.round(Math.sqrt(DEFAULT_W * DEFAULT_H * aspect));
+    return [w, Math.round(DEFAULT_W * DEFAULT_H / w)];
+  }
+  /* After a rotation the running world keeps its shape (letterboxed); on a
+   * compact screen a button offers to restart with a fitted one. */
+  function updateFitButton() {
+    var f = fittedWorld(), a = f[0] / f[1], b = WORLD_W / WORLD_H;
+    el("fitbtn").hidden = !!bench || !compactMQ.matches || Math.max(a, b) / Math.min(a, b) < 1.15;
+  }
+
   function restart() {
     if (!Module) return false;
     if (guardTurbo()) return false;
     clearError();
     var f = readForm();
-    WORLD_W = DEFAULT_W; WORLD_H = DEFAULT_H;
+    var size = fittedWorld();
+    WORLD_W = size[0]; WORLD_H = size[1];
     if (canvas.width !== WORLD_W) canvas.width = WORLD_W;
     if (canvas.height !== WORLD_H) canvas.height = WORLD_H;
-    return initWorld(f.seed, f.population, f.cfg);
+    var ok = initWorld(f.seed, f.population, f.cfg);
+    updateFitButton();
+    return ok;
   }
   function initWorld(seed, population, cfg) {
     var ok;
@@ -391,6 +434,38 @@
     var x = (drawerEl.getBoundingClientRect().left - cr.left) * (canvas.width / cr.width);
     return Math.min(WORLD_W, x);
   }
+  /* The network: 1. connections, under 2. the nodes. sen/hid/act map a node
+   * index to its [x, y]; g is the 2D context to draw into. Shared by the
+   * canvas inspector and the compact screens' DOM one. */
+  function drawNet(g, s, sen, hid, act, rSen, rNode) {
+    g.lineWidth = 1;
+    for (var k = 0; k < s.connCount; k++) {
+      var o = k * 5;
+      var srcSen = s.conns[o] !== 0;
+      var srcNum = s.conns[o + 1] | 0;
+      var sinkAct = s.conns[o + 2] !== 0;
+      var sinkNum = s.conns[o + 3] | 0;
+      var w = s.conns[o + 4];
+      var a = srcSen ? sen(srcNum) : hid(srcNum);
+      var b = sinkAct ? act(sinkNum) : hid(sinkNum);
+      var srcAct = srcSen ? s.sensors[srcNum] : s.hidden[srcNum];
+      var mag = Math.min(1, Math.abs(w) * Math.abs(srcAct) * 1.5);
+      var alpha = ((25 + Math.round(180 * mag)) / 255).toFixed(4);
+      g.strokeStyle = (w >= 0 ? "rgba(120,200,130," : "rgba(210,120,120,") + alpha + ")";
+      g.beginPath(); g.moveTo(a[0], a[1]); g.lineTo(b[0], b[1]); g.stroke();
+    }
+    function node(p, r, v) {
+      g.fillStyle = activationColor(v);
+      g.beginPath(); g.arc(p[0], p[1], r, 0, TAU); g.fill();
+      g.strokeStyle = "rgba(0,0,0," + (160 / 255).toFixed(4) + ")";
+      g.lineWidth = 1;
+      g.stroke();
+    }
+    var i;
+    for (i = 0; i < 41; i++) node(sen(i), rSen, s.sensors[i]);
+    for (i = 0; i < 12; i++) node(hid(i), rNode, s.hidden[i]);
+    for (i = 0; i < 12; i++) node(act(i), rNode, s.actions[i]);
+  }
   function drawInspector(s) {
     var pw = 340, ph = 560, py = 44;
     /* top-right by default; with the drawer open, just left of its edge
@@ -405,37 +480,10 @@
     var yTop = py + 46, yBot = py + ph - 22;
     var i;
 
-    /* 1. connections first, under nodes */
-    ctx.lineWidth = 1;
-    for (var k = 0; k < s.connCount; k++) {
-      var o = k * 5;
-      var srcSen = s.conns[o] !== 0;
-      var srcNum = s.conns[o + 1] | 0;
-      var sinkAct = s.conns[o + 2] !== 0;
-      var sinkNum = s.conns[o + 3] | 0;
-      var w = s.conns[o + 4];
-      var ax = srcSen ? xS : xH;
-      var ay = srcSen ? colY(srcNum, 41, yTop, yBot) : colY(srcNum, 12, yTop, yBot);
-      var bx = sinkAct ? xA : xH;
-      var by = colY(sinkNum, 12, yTop, yBot);
-      var srcAct = srcSen ? s.sensors[srcNum] : s.hidden[srcNum];
-      var mag = Math.min(1, Math.abs(w) * Math.abs(srcAct) * 1.5);
-      var alpha = ((25 + Math.round(180 * mag)) / 255).toFixed(4);
-      ctx.strokeStyle = (w >= 0 ? "rgba(120,200,130," : "rgba(210,120,120,") + alpha + ")";
-      ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
-    }
-
-    /* 2. nodes */
-    function node(x, y, r, v) {
-      ctx.fillStyle = activationColor(v);
-      ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fill();
-      ctx.strokeStyle = "rgba(0,0,0," + (160 / 255).toFixed(4) + ")";
-      ctx.lineWidth = 1;
-      ctx.stroke();
-    }
-    for (i = 0; i < 41; i++) node(xS, colY(i, 41, yTop, yBot), 3, s.sensors[i]);
-    for (i = 0; i < 12; i++) node(xH, colY(i, 12, yTop, yBot), 5, s.hidden[i]);
-    for (i = 0; i < 12; i++) node(xA, colY(i, 12, yTop, yBot), 5, s.actions[i]);
+    drawNet(ctx, s,
+            function (n) { return [xS, colY(n, 41, yTop, yBot)]; },
+            function (n) { return [xH, colY(n, 12, yTop, yBot)]; },
+            function (n) { return [xA, colY(n, 12, yTop, yBot)]; }, 3, 5);
 
     /* 3. text */
     ctx.font = "13px monospace";
@@ -460,6 +508,88 @@
     ctx.font = "10px monospace";
     ctx.fillStyle = "rgba(190,205,210," + (220 / 255).toFixed(4) + ")";
     for (i = 0; i < 12; i++) ctx.fillText(ACTION_NAMES[i], xA + 8, colY(i, 12, yTop, yBot) + 3);
+  }
+
+  /* ---- compact screens: the inspector as a docked DOM panel ----
+   * The same network, drawn in CSS px at devicePixelRatio, so its text stays
+   * at 11 px however small the world is on screen. The panel docks to the
+   * screen edge away from the selected fish (top/bottom in portrait,
+   * left/right in landscape) and moves only when the fish swims under it. */
+  var inspEl = el("inspector"), inetCanvas = el("inetc"), inetCtx = inetCanvas.getContext("2d");
+  var inspDock = "", inspTitle = "", inspSub = "";
+  function hidePanel() {
+    if (!inspDock) return;
+    inspDock = "";
+    inspEl.className = "";
+    document.body.removeAttribute("data-dock");
+  }
+  function dockPanel(fx, fy) {  /* the selected fish, in CSS px */
+    var portrait = window.innerHeight >= window.innerWidth;
+    if (inspDock && (inspDock === "top" || inspDock === "bottom") === portrait) {
+      var r = inspEl.getBoundingClientRect(), m = 24;
+      if (fx < r.left - m || fx > r.right + m || fy < r.top - m || fy > r.bottom + m) return;
+    }
+    var want = portrait ? (fy > window.innerHeight / 2 ? "top" : "bottom")
+                        : (fx > window.innerWidth / 2 ? "left" : "right");
+    if (want !== inspDock) {
+      inspDock = want;
+      inspEl.className = want;
+      document.body.setAttribute("data-dock", want);  /* moves the status line clear */
+    }
+  }
+  function drawPanel(s) {
+    var cr = canvas.getBoundingClientRect(), c = cr.width / canvas.width;
+    dockPanel(cr.left + s.segs[12 * s.selIdx] * c, cr.top + s.segs[12 * s.selIdx + 1] * c);
+    var title = "Fish #" + Math.round(s.info[0]) + " · spd " + Math.round(s.info[1]) +
+                " · E " + Math.round(s.info[2]) + " · age " + Math.round(s.info[3]);
+    var sub = "body " + s.info[4].toFixed(2) + " · elong " + s.info[5].toFixed(2) +
+              " · gen " + Math.round(s.info[6]);
+    if (title !== inspTitle) el("ititle").textContent = inspTitle = title;
+    if (sub !== inspSub) el("isub").textContent = inspSub = sub;
+
+    var box = inetCanvas.parentNode, w = box.clientWidth, h = box.clientHeight;
+    if (w < 60 || h < 60) return;
+    var dpr = window.devicePixelRatio || 1;
+    var bw = Math.round(w * dpr), bh = Math.round(h * dpr);
+    if (inetCanvas.width !== bw) inetCanvas.width = bw;
+    if (inetCanvas.height !== bh) inetCanvas.height = bh;
+    var g = inetCtx, i, sen, hid, act;
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.clearRect(0, 0, w, h);
+    g.font = "11px monospace";
+    var headStyle = "rgba(150,175,180," + (200 / 255).toFixed(4) + ")";
+    var nameStyle = "rgba(190,205,210," + (220 / 255).toFixed(4) + ")";
+    if (w > h * 1.2) {
+      /* wide panel: rows in / hidden / out, top to bottom; the output names
+       * sit under the out row, alternating between two lines so they fit */
+      var m = 14, yIn = 24, yOut = h - 40, yHid = (yIn + yOut) / 2;
+      var x12 = function (n) { return m + 18 + (w - 2 * m - 36) * n / 11; };
+      sen = function (n) { return [m + (w - 2 * m) * n / 40, yIn]; };
+      hid = function (n) { return [x12(n), yHid]; };
+      act = function (n) { return [x12(n), yOut]; };
+      drawNet(g, s, sen, hid, act, Math.min(3, (w - 2 * m) / 40 * 0.4), 5);
+      g.fillStyle = headStyle;
+      g.fillText("in", m - 2, yIn - 10);
+      g.fillText("hidden", m - 2, yHid - 10);
+      g.fillText("out", m - 2, yOut - 10);
+      g.fillStyle = nameStyle;
+      g.textAlign = "center";
+      for (i = 0; i < 12; i++) g.fillText(ACTION_NAMES[i], x12(i), yOut + (i % 2 ? 32 : 18));
+      g.textAlign = "left";
+    } else {
+      /* tall panel: columns, like the canvas inspector */
+      var yTop = 26, yBot = h - 10, xS = 16, xA = w - 64, xH = (xS + xA) / 2;
+      sen = function (n) { return [xS, colY(n, 41, yTop, yBot)]; };
+      hid = function (n) { return [xH, colY(n, 12, yTop, yBot)]; };
+      act = function (n) { return [xA, colY(n, 12, yTop, yBot)]; };
+      drawNet(g, s, sen, hid, act, Math.min(3, (yBot - yTop) / 40 * 0.4), 5);
+      g.fillStyle = headStyle;
+      g.fillText("in", xS - 6, yTop - 12);
+      g.fillText("hidden", xH - 20, yTop - 12);
+      g.fillText("out", xA - 10, yTop - 12);
+      g.fillStyle = nameStyle;
+      for (i = 0; i < 12; i++) g.fillText(ACTION_NAMES[i], xA + 8, colY(i, 12, yTop, yBot) + 4);
+    }
   }
 
   /* Scene layer (background, currents, food, creatures, predators): WebGL2
@@ -548,13 +678,21 @@
   }
 
   function drawOverlays(s) {
+    var compact = compactMQ.matches;
     if (s.selIdx >= 0) {
+      /* on compact screens the ring keeps a ~14 CSS px radius on screen */
+      var k = compact ? Math.max(1, 0.9 / cssPerWorld()) : 1;
       ctx.strokeStyle = RING_STYLE;
-      ctx.lineWidth = 2;
+      ctx.lineWidth = 2 * k;
       ctx.beginPath();
-      ctx.arc(s.segs[12 * s.selIdx], s.segs[12 * s.selIdx + 1], 16, 0, TAU);
+      ctx.arc(s.segs[12 * s.selIdx], s.segs[12 * s.selIdx + 1], 16 * k, 0, TAU);
       ctx.stroke();
     }
+    if (compact) {  /* no HUD: the status line says what it would */
+      if (s.selIdx >= 0) drawPanel(s); else hidePanel();
+      return;
+    }
+    hidePanel();
 
     var st = s.stats, fmt = function (v) { return String(Math.round(v)); };
     ctx.font = "14px monospace";
@@ -583,8 +721,12 @@
    * the status line says so, and the governor can be switched off. */
   var BUDGET_MS = 12;
   var MIN_CAP = 60;
-  /* Starting population per module (README.md, "Benchmarks"). */
+  /* Starting population per module (README.md, "Benchmarks"). Touch devices
+   * (phones, tablets) start lighter, on at most TOUCH_THREADS threads, to go
+   * easier on battery and heat; the governor still fits the run to the
+   * device, and the drawer can raise the population. */
   var DEFAULT_POP_SINGLE = 300, DEFAULT_POP_THREADED = 600;
+  var TOUCH_POP_SINGLE = 200, TOUCH_POP_THREADED = 400, TOUCH_THREADS = 4;
   var workEma = 0, overFrames = 0, underFrames = 0;
   var userCap = 0, autoCap = 0;
   var governorOn = true;
@@ -677,6 +819,7 @@
   /* ---- status line (DOM, readable at any canvas scale) ---- */
   var fpsFrames = 0, fpsT0 = 0, fps = 0;
   var stepEma = 0;   /* ms per sim step, for the status line */
+  var everSelected = false;  /* compact screens hint at selecting until then */
   function updateStatus(st) {
     if (!statusEl) return;
     var mode = threaded
@@ -693,6 +836,11 @@
     if (cap) parts.push("cap " + cap + (autoCap && cap === autoCap ? " (auto)" : ""));
     if (govNote) parts.push(govNote);
     if (governed) parts.push("governed run: not replayable from its seed");
+    if (compactMQ.matches) {  /* no canvas HUD here (drawOverlays) */
+      if (simSpeed > 1) parts.splice(1, 0, "speed " + simSpeed + "x");
+      if (paused) parts.splice(1, 0, "paused");
+      if (!everSelected) parts.push((coarseMQ.matches ? "tap" : "click") + " a fish to see its brain");
+    }
     statusEl.textContent = parts.filter(Boolean).join("  ·  ");
     statusEl.title = threaded ? "running the pthreads module: fast, NOT reproducible from the seed"
                               : "running the single-threaded module (" + threadWhy + "): reproducible from the seed";
@@ -870,6 +1018,7 @@
       WORLD_W = w; WORLD_H = h;
       canvas.width = w; canvas.height = h;
     }
+    updateFitButton();
     showNote("(checkpoint loaded)");
   }
 
@@ -943,6 +1092,9 @@
   function drawTurboOverlay() {
     var pw = 560, ph = 170;
     var px = (WORLD_W - pw) / 2, py = (WORLD_H - ph) / 2;
+    /* compact screens: scaled up about the world's centre to stay readable */
+    var k = compactMQ.matches ? Math.max(1, Math.min(0.7 / cssPerWorld(), WORLD_W * 0.96 / pw)) : 1;
+    ctx.setTransform(k, 0, 0, k, WORLD_W / 2 * (1 - k), WORLD_H / 2 * (1 - k));
     ctx.fillStyle = "rgba(10,22,30," + (205 / 255).toFixed(4) + ")";
     ctx.fillRect(px, py, pw, ph);
     ctx.strokeStyle = "rgba(90,140,150," + (220 / 255).toFixed(4) + ")";
@@ -968,7 +1120,8 @@
       ctx.fillStyle = "rgba(150,175,180," + (200 / 255).toFixed(4) + ")";
       ctx.fillText("stopping — syncing back to live…", cx, py + 150);
     }
-    ctx.textAlign = "left"; /* restore default for the HUD */
+    ctx.textAlign = "left"; /* restore defaults for the HUD */
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
   }
 
   /* ---- input ---- */
@@ -980,13 +1133,17 @@
     var n = Module._evo_creature_count();
     var segs = new Float32Array(heap(), Module._evo_creature_segments(), n * 12);
     var ids = new Float64Array(heap(), Module._evo_creature_ids(), n);
-    var best = -1, bestD2 = 25 * 25;
+    /* the mouse picks within 25 world px; a finger within ~24 CSS px, which
+     * on a phone-sized canvas is several times farther */
+    var reach = lastPointer === "mouse" ? 25 : Math.max(25, 24 * canvas.width / rect.width);
+    var best = -1, bestD2 = reach * reach;
     for (var i = 0; i < n; i++) {
       var dx = segs[12 * i] - wx, dy = segs[12 * i + 1] - wy;
       var d2 = dx * dx + dy * dy;
       if (d2 <= bestD2) { bestD2 = d2; best = i; }
     }
     selectedId = best >= 0 ? ids[best] : null;
+    if (best >= 0) everSelected = true;
   });
 
   window.addEventListener("keydown", function (e) {
@@ -1049,33 +1206,61 @@
   tipEl.appendChild(tipTry);
   document.body.appendChild(tipEl);
   var tipTimer = 0;
+  var tipFor = null;  /* the label whose tip is showing */
   function hideTip() {
     clearTimeout(tipTimer);
     tipEl.style.display = "none";
+    tipFor = null;
   }
   function showTip(labelEl, tip) {
     tipDesc.textContent = tip.d;
     tipTry.textContent = tip.t;
     tipEl.style.display = "block";
-    /* to the LEFT of the drawer (outside its clipping), centred on the label */
+    tipFor = labelEl;
     var dr = drawerEl.getBoundingClientRect();
     var lr = labelEl.getBoundingClientRect();
-    var left = Math.max(6, dr.left - 10 - tipEl.offsetWidth);
-    var top = lr.top + lr.height / 2 - tipEl.offsetHeight / 2;
+    var left, top;
+    if (dr.left >= tipEl.offsetWidth + 16) {
+      /* to the LEFT of the drawer (outside its clipping), centred on the label */
+      left = Math.max(6, dr.left - 10 - tipEl.offsetWidth);
+      top = lr.top + lr.height / 2 - tipEl.offsetHeight / 2;
+    } else {
+      /* no room beside a wide drawer (phones): over it, below the label, or
+       * above it near the bottom of the screen */
+      left = dr.left + 8;
+      top = lr.bottom + 4;
+      if (top + tipEl.offsetHeight > window.innerHeight - 6) top = lr.top - 4 - tipEl.offsetHeight;
+    }
     top = Math.max(6, Math.min(top, window.innerHeight - tipEl.offsetHeight - 6));
     tipEl.style.left = left + "px";
     tipEl.style.top = top + "px";
   }
+  /* Mouse: the tip shows on hover. Touch: tapping the parameter's name
+   * toggles it (and does not toggle the checkbox or focus the input). */
   function attachTip(labelEl, key) {
     var tip = TIPS[key];
     if (!tip) return;
     labelEl.addEventListener("mouseenter", function () {
+      if (lastPointer !== "mouse") return;
       clearTimeout(tipTimer);
       tipTimer = setTimeout(function () { showTip(labelEl, tip); }, 150);
     });
-    labelEl.addEventListener("mouseleave", hideTip);
+    labelEl.addEventListener("mouseleave", function () {
+      if (lastPointer === "mouse") hideTip();
+    });
+    var name = labelEl.querySelector(".lt");
+    if (name) name.addEventListener("click", function (e) {
+      if (lastPointer === "mouse") return;
+      e.preventDefault();
+      if (tipFor === labelEl) hideTip();
+      else showTip(labelEl, tip);
+    });
   }
   drawerEl.addEventListener("scroll", hideTip);
+  /* a touch anywhere but on a parameter name closes an open tip */
+  document.addEventListener("pointerdown", function (e) {
+    if (tipFor && e.pointerType !== "mouse" && !(e.target.closest && e.target.closest(".lt"))) hideTip();
+  });
   /* basic (static-HTML) parameter labels, resolved via their input ids */
   ["seed", "population", "toroidal", "bodyModel", "predators", "foodPatches", "currentStrength", "predatorEconomy", "governor"]
     .forEach(function (id) {
@@ -1095,6 +1280,13 @@
     else if (turboState === "turbo") exitTurbo();
   });
   btn("advreset", resetAdvanced);
+  btn("iclose", function () { selectedId = null; });
+  btn("fitbtn", restart);
+  var fitTimer = 0;
+  window.addEventListener("resize", function () {
+    clearTimeout(fitTimer);
+    fitTimer = setTimeout(function () { if (Module) updateFitButton(); }, 250);
+  });
   btn("savecp", saveCheckpoint);
   btn("loadcp", function () { if (guardTurbo()) return; el("cpfile").click(); });
   el("cpfile").addEventListener("change", function () {
@@ -1134,12 +1326,16 @@
     moduleUrls = { js: r.js, wasm: r.wasm };
     if (Module._evo_stats_len) STATS_LEN = Module._evo_stats_len();
     /* Thread count: ?nthreads=N, else every pre-spawned worker plus this
-     * thread (EvoLoader.poolThreads() — the -sPTHREAD_POOL_SIZE formula). */
+     * thread (EvoLoader.poolThreads() — the -sPTHREAD_POOL_SIZE formula),
+     * at most TOUCH_THREADS on a touch device. */
     var nt = parseInt(new URLSearchParams(location.search).get("nthreads"), 10);
-    if (threaded) Module._evo_set_threads(nt > 0 ? Math.min(nt, EvoLoader.poolThreads()) : EvoLoader.poolThreads());
+    var touch = coarseMQ.matches;
+    var pool = EvoLoader.poolThreads();
+    if (threaded) Module._evo_set_threads(nt > 0 ? Math.min(nt, pool) : (touch ? Math.min(TOUCH_THREADS, pool) : pool));
     /* The single-threaded module starts with fewer creatures (see the
      * benchmark in README.md); either default can be changed in the drawer. */
-    el("population").value = String(threaded ? DEFAULT_POP_THREADED : DEFAULT_POP_SINGLE);
+    el("population").value = String(threaded ? (touch ? TOUCH_POP_THREADED : DEFAULT_POP_THREADED)
+                                             : (touch ? TOUCH_POP_SINGLE : DEFAULT_POP_SINGLE));
     el("turbobtn").title = threaded
       ? "run headless in a worker at full speed — no rendering, keeps running in background tabs; the hand-off is exact, but a threaded run is not reproducible"
       : "run headless in a worker at full speed — no rendering, keeps running in background tabs; toggling is bit-exact";

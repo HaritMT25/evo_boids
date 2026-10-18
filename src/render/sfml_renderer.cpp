@@ -268,6 +268,7 @@ void SfmlRenderer::drawHud(const HudInfo& hud) {
         << "  Births: " << hud.births
         << "  Deaths: " << hud.deaths
         << "  AvgGenome: " << std::fixed << std::setprecision(1) << hud.avgGenome
+        << "  Gen: " << hud.genMax << " (avg " << hud.genMean << ")"
         << "  Speed: " << hud.simSpeed << "x"
         << "  FPS: " << hud.fps;
     if (hud.paused) out << "  [PAUSED]";
@@ -428,7 +429,8 @@ void SfmlRenderer::drawNeuralOverlay(const Creature& c) {
         // a missing field. Mirrors the web inspector.
         std::ostringstream body;
         body << "body " << std::fixed << std::setprecision(2) << c.bodySize
-             << "   elong " << c.bodyElong;
+             << "   elong " << c.bodyElong
+             << "   gen " << c.generation;
         sf::Text bt(body.str(), font_, 11);
         bt.setFillColor(sf::Color(190, 205, 210, 220));
         bt.setPosition(panelX + 12.0f, panelY + panelH - 20.0f);

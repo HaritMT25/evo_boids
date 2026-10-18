@@ -1,0 +1,38 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "native",
+      "displayName": "Native, OpenMP (fast, not reproducible)",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+    },
+    {
+      "name": "native-serial",
+      "displayName": "Native, single-threaded (deterministic)",
+      "binaryDir": "${sourceDir}/build_serial",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "EVO_NO_OPENMP": "ON" }
+    },
+    {
+      "name": "wasm-st",
+      "displayName": "Browser module, single-threaded (deterministic) -> web/evo_boids.{js,wasm}",
+      "binaryDir": "${sourceDir}/build_wasm_st",
+      "toolchainFile": "$env{EMSDK}/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "EVO_POOL_THREADS": "OFF" }
+    },
+    {
+      "name": "wasm-mt",
+      "displayName": "Browser module, pthreads (needs cross-origin isolation) -> web/evo_boids_mt.{js,wasm}",
+      "binaryDir": "${sourceDir}/build_wasm_mt",
+      "toolchainFile": "$env{EMSDK}/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "EVO_POOL_THREADS": "ON" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "native", "configurePreset": "native" },
+    { "name": "native-serial", "configurePreset": "native-serial" },
+    { "name": "wasm-st", "configurePreset": "wasm-st" },
+    { "name": "wasm-mt", "configurePreset": "wasm-mt" }
+  ]
+}

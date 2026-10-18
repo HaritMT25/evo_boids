@@ -1,7 +1,13 @@
-# evo_boids — CLI reference (v0.24.0)
+# evo_boids — CLI reference (v0.25.0)
 
 Headless runner for the evolutionary boids simulation. Defaults reproduce the
 original behaviour, so any flag is an opt-in change.
+
+> **v0.25.0 — browser build** (no new CLI flags): a threaded WebAssembly module
+> alongside the single-threaded one, a static Vercel deploy, and a per-creature
+> `generation` count (founders 0, a newborn is max(source records) + 1; shown in the
+> HUD and the inspector, written to checkpoints, not to the CSV). Simulation output
+> is byte-identical to v0.24.0 apart from that one checkpoint column. See README.md.
 
 > **v0.24.0 — gate mitigations** (`--repro-soft-width`, `--repro-grace`; see the
 > reproduction section): the match-distance cliff becomes a linear acceptance ramp,
@@ -15,8 +21,8 @@ original behaviour, so any flag is an opt-in change.
 > `--repro-log`). **v0.18.0–v0.20.0** — the WebAssembly build with native == wasm
 > byte-identical checkpoints (`wasm/parity.sh`, 19 cases), toroidal perception and
 > frontend parity. Every one of these is opt-in and fingerprint-verified
-> byte-identical when off; the per-version history with measurements lives in
-> `docs/evo_boids_context.md`.
+> byte-identical when off; the per-version history with measurements is kept in the
+> project's research log (not published with the repository).
 
 > **v0.17.0 — checkpoint / resume** (`--save-checkpoint`, `--load-checkpoint`,
 > `--checkpoint-every`). A checkpoint is the complete world: config, frame counter and
@@ -137,18 +143,16 @@ Check what you're running at any time:
 ## Workflow
 
 ```bash
-# 1) Rebuild ONLY when you have new code from Claude (a fresh tarball in Downloads).
-#    NOTE: rebuild_evo.sh wipes ~/evo_boids — never run it while a sim is live.
-#    After it runs, re-enter the dir: `cd ~/evo_boids/build` (the old shell cwd is a
-#    now-deleted inode → otherwise "./evo_boids: No such file or directory").
-~/rebuild_evo.sh
+# 1) Build (after pulling new code). Do not rebuild while a sim from this build
+#    directory is running.
+cmake -S . -B build && cmake --build build -j
 
 # 2) Run (no rebuild needed between runs — just change flags).
-cd ~/evo_boids/build
+cd build
 ./evo_boids --headless 1000000 --name evolved_1M --log-every 2000 --gene-cost 0.02 --no-render
 
-# 3) Pull a run's data into Windows (safe mid-run; CSV stays current to ~5 rows).
-cp ~/evo_boids/build/runs/evolved_1M.csv ~/evo_boids/build/runs/evolved_1M.config.txt /mnt/c/Users/harit/Downloads/
+# 3) Copy a run's data elsewhere (safe mid-run; the CSV stays current to ~5 rows).
+cp runs/evolved_1M.csv runs/evolved_1M.config.txt /path/to/analysis/
 ```
 
 `--name X` writes `runs/X.csv` plus `runs/X.config.txt` (a sidecar recording the
@@ -564,9 +568,7 @@ the context file, §10.)
   Stage B**, where the coupled oscillator adds its own sensitivity on top of the RNG
   non-determinism. (Older noise-floor note still holds: genome-length / species swing
   run-to-run even at fixed seed — don't over-read small deltas.)
-- **Build type & speed:** the binary is built **`-O3`** (Release). `rebuild_evo.sh`
-  configures with explicit `-DCMAKE_BUILD_TYPE=Release` and prints the build type +
-  `CXX_FLAGS` after configuring, so optimization is never ambiguous. (Note: a *blank*
+- **Build type & speed:** the binary is built **`-O3`** (Release). (Note: a *blank*
   `CMAKE_BUILD_TYPE` in `CMakeCache.txt` is cosmetic — the CMakeLists defaults to
   Release via a normal variable and still emits `-O3`.) If a run is unexpectedly slow,
   it's almost always **(a)** the config (≈4000 food at `--target-food 2000` ⇒ ~6× more

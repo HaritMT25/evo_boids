@@ -388,8 +388,8 @@ int main(int argc, char** argv) {
                   << " at frame " << world.frame
                   << " (" << world.creatures.size() << " creatures, "
                   << world.predators.size() << " predators)\n";
-#ifdef USE_OPENMP
-        std::cerr << "Note: this is an OpenMP build, so the resumed run will NOT reproduce\n"
+#ifndef EVO_DETERMINISTIC
+        std::cerr << "Note: this is a multi-threaded build, so the resumed run will NOT reproduce\n"
                   << "      the original bit-for-bit. Build -DEVO_NO_OPENMP=ON for that.\n";
 #endif
         W = world.width;
@@ -710,6 +710,9 @@ int main(int argc, char** argv) {
         hud.births     = world.births;
         hud.deaths     = world.deaths;
         hud.avgGenome  = avgGenome;
+        const GenerationSpan gen = generationSpan(world);
+        hud.genMean    = (float)gen.mean;
+        hud.genMax     = gen.max;
         hud.simSpeed   = simSpeed;
         hud.fps        = fps;
         hud.paused     = paused;

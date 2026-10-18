@@ -21,7 +21,7 @@
 // arithmetic — with -ffp-contract=off they evaluate identically on every
 // IEEE-754 target. Switching native code from glibc to these shifted
 // trajectories once at v0.18.0 (a numerical-lineage break, same framing
-// as -ffp-contract=off in 0.16.0); see docs/evo_boids_context.md.
+// as -ffp-contract=off in 0.16.0); see the research log.
 //
 // musl licence: MIT. Original notices preserved below.
 // ============================================================

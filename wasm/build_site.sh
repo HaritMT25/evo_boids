@@ -17,8 +17,8 @@ cd "$(dirname "$0")/.."
 
 OUT=dist
 SRC=(web/evo_boids.js web/evo_boids.wasm web/evo_boids_mt.js web/evo_boids_mt.wasm
-     web/loader.js web/gl_renderer.js web/renderer.js web/worker.js img/rocks.jpg
-     web/index.html web/vercel.json)
+     web/loader.js web/gl_renderer.js web/randomizer.js web/renderer.js web/guide.js
+     web/worker.js img/rocks.jpg web/index.html web/vercel.json)
 for f in "${SRC[@]}"; do
     [ -f "$f" ] || { echo "missing $f — build the wasm-st and wasm-mt presets first" >&2; exit 1; }
 done
@@ -42,10 +42,11 @@ publish() {
 ST=$(publish web/evo_boids.js);       ST_WASM=$(publish web/evo_boids.wasm)
 MT=$(publish web/evo_boids_mt.js);    MT_WASM=$(publish web/evo_boids_mt.wasm)
 LOADER=$(publish web/loader.js);      RENDERER=$(publish web/renderer.js)
-GLR=$(publish web/gl_renderer.js)
+GLR=$(publish web/gl_renderer.js);    RAND=$(publish web/randomizer.js)
+GUIDE=$(publish web/guide.js)
 WORKER=$(publish web/worker.js);      BG=$(publish img/rocks.jpg)
 
-# Rewrite the EVO_ASSETS block and the two <script src> tags. Fails loudly if
+# Rewrite the EVO_ASSETS block and the <script src> tags. Fails loudly if
 # index.html no longer has the shape this expects.
 python3 - "$OUT/index.html" <<PY
 import re, sys
@@ -60,7 +61,9 @@ out, n1 = re.subn(r'window\.EVO_ASSETS = \{.*?\};', lambda m: assets, src, count
 out, n2 = re.subn(r'<script src="loader\.js"></script>', '<script src="$LOADER"></script>', out, count=1)
 out, n3 = re.subn(r'<script src="renderer\.js"></script>', '<script src="$RENDERER"></script>', out, count=1)
 out, n4 = re.subn(r'<script src="gl_renderer\.js"></script>', '<script src="$GLR"></script>', out, count=1)
-assert (n1, n2, n3, n4) == (1, 1, 1, 1), ("index.html changed shape", n1, n2, n3, n4)
+out, n5 = re.subn(r'<script src="randomizer\.js"></script>', '<script src="$RAND"></script>', out, count=1)
+out, n6 = re.subn(r'<script src="guide\.js"></script>', '<script src="$GUIDE"></script>', out, count=1)
+assert (n1, n2, n3, n4, n5, n6) == (1, 1, 1, 1, 1, 1), ("index.html changed shape", n1, n2, n3, n4, n5, n6)
 open(sys.argv[1], "w").write(out)
 PY
 

@@ -23,7 +23,11 @@ for f in "${SRC[@]}"; do
     [ -f "$f" ] || { echo "missing $f — build the wasm-st and wasm-mt presets first" >&2; exit 1; }
 done
 
-rm -rf "$OUT"
+# Clear the previous build but keep dist/.vercel: that is the Vercel project
+# link (`vercel link --cwd dist`), and losing it would make the next deploy
+# set up a new project.
+mkdir -p "$OUT"
+find "$OUT" -mindepth 1 -maxdepth 1 ! -name .vercel -exec rm -rf {} +
 mkdir -p "$OUT/assets"
 
 # hashed copy: prints the published path, relative to dist/

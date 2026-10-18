@@ -98,9 +98,11 @@ Tested in Chrome 155 on Windows 11. Firefox and Safari have not been tested.
 ### Deploy (Vercel, static)
 
 ```bash
-wasm/build_site.sh               # -> dist/: index.html, content-hashed assets, vercel.json
-vercel deploy dist               # preview
-vercel deploy dist --prod        # production
+wasm/build_site.sh                                  # -> dist/: index.html, hashed assets, vercel.json
+vercel project add evo-boids                        # once: create the project
+vercel link --cwd dist --project evo-boids --yes    # once: link dist/ to it (kept across rebuilds)
+vercel deploy --cwd dist                            # preview deployment
+vercel deploy --cwd dist --prod                     # production
 ```
 
 `dist/vercel.json` sets:

@@ -213,6 +213,19 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
+  /* Wide screens: the open menu sits beside the world instead of over it,
+   * so a change can be watched (renderer.js setDrawer toggles the class). */
+  body { transition: padding-right 0.2s ease; }
+  @media (min-width: 960px) {
+    body.menu-open { padding-right: 366px; }
+    body.menu-open #status { right: 378px; }
+  }
+  /* settings that need another one switched on (renderer.js updateNeeds) */
+  label.inert { opacity: 0.5; }
+  .needs { grid-column: 1 / -1; font-size: 10px; color: #8fb89f; }
+  .needs:empty { display: none; }
+  /* settings changed since the last restart */
+  #restart.pending { background: #2f6b4a; border-color: #9fd3b0; color: #eaf6ee; font-weight: bold; }
   /* narrow (portrait phone) screens: wrap instead of cutting the line off */
   @media (max-width: 600px) {
     #status { white-space: normal; line-height: 1.5; right: 12px; }
@@ -296,6 +309,47 @@
     /* parameter names are tapped for their explanation (renderer.js attachTip) */
     .lt::after { content: " \24D8"; color: #6f927e; }
   }
+  #randombtn { font-weight: bold; }
+  #randnote { font-size: 11px; color: #9fd3b0; line-height: 1.45; }
+  #randnote:empty { display: none; }
+  /* First-visit guide (web/guide.js). The shade is a huge shadow around the
+   * spotlight and never takes clicks, so the page stays usable mid-tour. */
+  #guide { position: fixed; inset: 0; z-index: 50; pointer-events: none; }
+  #guide .spot {
+    position: fixed;
+    border-radius: 8px;
+    box-shadow: 0 0 0 200vmax rgba(0,0,0,0.55);
+    outline: 2px solid #9fd3b0;
+    outline-offset: 0;
+    transition: left .2s ease, top .2s ease, width .2s ease, height .2s ease;
+  }
+  #guide .spot.none { outline: 0; }
+  #guide .card {
+    position: fixed;
+    pointer-events: auto;
+    width: min(340px, calc(100vw - 24px));
+    background: #0f1f18;
+    border: 1px solid #3a6a4e;
+    border-radius: 8px;
+    padding: 14px 16px 12px;
+    color: #d5e5da;
+    line-height: 1.5;
+    box-shadow: 0 8px 30px rgba(0,0,0,0.5);
+  }
+  #guide h2 { font-size: 14px; font-weight: bold; color: #9fd3b0; margin-bottom: 6px; }
+  #guide p { margin-bottom: 4px; }
+  #guide kbd {
+    border: 1px solid #3a6a4e;
+    border-bottom-width: 2px;
+    border-radius: 3px;
+    padding: 0 4px;
+    background: #10201a;
+    font: inherit;
+  }
+  #guide .nav { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+  #guide .count { flex: 1; color: #6f927e; font-size: 11px; }
+  #guide .skip { background: none; border: 0; color: #8fa89a; text-decoration: underline; padding: 4px 6px; }
+  #guide .next { font-weight: bold; }
   #modeline { color: #6f927e; font-size: 11px; }
   #credit { margin-top: auto; padding-top: 8px; font-size: 11px; color: #5f7d6c; }
   #credit a { color: #7ea08c; }
@@ -339,6 +393,11 @@
   <button id="menubtn" aria-label="open controls">&#9776;</button>
   <div id="drawer">
     <h1>evo_boids — wasm</h1>
+    <div class="row" id="quick">
+      <button id="randombtn" title="draw a setup from ranges that worked in our experiments, and restart">&#127922; Randomize</button>
+      <button id="guidebtn" title="replay the first-visit tour">? Guide</button>
+    </div>
+    <p id="randnote"></p>
     <div id="bar">
       <fieldset>
         <legend>playback</legend>
@@ -401,6 +460,8 @@
   </script>
   <script src="loader.js"></script>
   <script src="gl_renderer.js"></script>
+  <script src="randomizer.js"></script>
   <script src="renderer.js"></script>
+  <script src="guide.js"></script>
 </body>
 </html>

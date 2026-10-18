@@ -87,6 +87,7 @@ Page options:
 | `?nthreads=N` | sets the thread count |
 | `?bench` | runs the frame-rate benchmark below |
 | `?gl=0` | forces canvas 2D drawing instead of WebGL2 |
+| `?guide=0` / `?guide=1` | never / always start the first-visit guide on load |
 
 Browser requirements:
 - **WebAssembly.**
@@ -118,6 +119,42 @@ The page adapts to small and touch screens. A desktop browser with a mouse, in a
 - **Load.** Touch devices start with 200 creatures (single-threaded) or 400 (threaded), on at most 4 threads; `?nthreads=N` overrides the thread count. The threaded module still pre-spawns min(cores, 8) − 1 workers. The frame-budget governor works as everywhere else.
 
 So far this is measured in emulation only: Playwright's iPhone 13 profile in WebKit 26.6 and its Pixel 7 profile in Chrome 155, portrait and landscape. The world covers 95% of the screen in all four cases (before: 31%, 26%, 75% and 69%). No real phone has been tested, so frame rate, battery use, memory, and whether the threaded module starts on iOS are unmeasured.
+
+### 🎲 Randomize and the first-visit guide
+
+**🎲 Randomize** (top of the ☰ menu) draws a whole setup, restarts, and lists what it picked. Every value also lands in the form, so you can tweak it and press Restart.
+
+Each value is drawn from a range. The range comes from the experiments (`docs/evo_boids_flags.md`, the research log) where one exists, and otherwise from the "try:" suggestions in the settings' explanations. `web/randomizer.js` lists every range next to its source. Knobs that only work together are drawn together:
+- **Currents** come with patchy, drifting food and a thrust cost. Fish only fight or ride a current when food is patchy and swimming costs energy.
+- **Predators** come in the experiments' arena: abundant uniform food and a population cap, so predation, not starvation, does the selecting.
+- **The predator economy's meal** is set relative to what a hunt costs, using the break-even formula from the flags doc. The factor's range was measured for browser-length runs (below).
+- **The match gate** only comes with its soft ramp; hard, it collapses the population below a threshold of ~16.
+
+Measured headless: the single-threaded module under Node, 20,000–30,000 steps per setup (about 5.5–8 simulated minutes). A setup counts as healthy when the fish never sink to the reseed floor and, with predators, the predators are still alive at the end.
+
+1. **First check, 48 random setups.** Predators were the weak spot. Drawing the meal on its own (12–16, the docs' values) left 9 of 13 economy setups unhealthy: they boomed then crashed, or the predators starved. One setup with 4 scripted hunters also collapsed. Every setup without predators was healthy (34/34).
+2. **Two sweeps, 4 setups per value, 30,000 steps:**
+
+   | meal ÷ break-even | result |
+   |---|---|
+   | 0.9 | predators starve (4/4) |
+   | 1.0, 1.1 | both sides alive (8/8) |
+   | 1.2 | boom, then crash (predators gone in 2/4; prey crashed in 1) |
+   | 1.3 | prey collapse (3/4) |
+
+   Scripted hunters in the arena: 3, 4 and 5 all healthy (12/12).
+3. **Final check of the shipped ranges, 48 fresh setups:** all healthy. Predators were alive in all 28 predator worlds, with 3–70 economy predators at the end.
+
+Uncapped rich-food setups reached ~2,400 fish headless; in the browser, the frame-budget governor sizes that to the device.
+
+**First-visit guide.** A first visit gets a one-minute spotlight tour:
+- what you're looking at, a fish's brain, and the status line
+- the keyboard (with a mouse only)
+- the ☰ menu, 🎲 Randomize, playback (including what Turbo's "headless" means), settings, and checkpoints
+
+**Settings.** On screens 960 px wide or more, the open menu sits beside the world rather than over it, so a change can be watched. Settings that only matter while another one is on, such as patch radius without food patches or eddy count without a current, are dimmed with the reason. Changes other than the ones marked *live* turn the Restart button into **Restart to apply**.
+
+The tour's text adapts to touch screens. The page stays usable during the tour. "? Guide" in the menu replays it, and it's remembered in `localStorage`; `?guide=0` / `?guide=1` override that.
 
 ### Deploy (Vercel, static)
 

@@ -66,6 +66,8 @@
     ]],
     ["predators", [
       ["predatorSpeed", 110], ["predatorPerception", 150], ["predatorCaptureRadius", 14],
+      ["predatorCooldown", 3, { step: 0.5, min: 0 }],
+      ["predatorMeal", -1, { step: 0.5, label: "predator meal (-1 = absorb prey)" }],
       ["predatorMetabolism", 2], ["predatorReproEnergy", 60], ["predatorMaxAge", 0]
     ]],
     ["currents", [
@@ -127,6 +129,8 @@
     predatorSpeed: { d: "Predator cruise speed.", t: "try: 110 vs prey max 150 = escapable" },
     predatorPerception: { d: "Predator's prey-detection radius; above prey's 80 = ambush edge.", t: "try: 80 for symmetric sight" },
     predatorCaptureRadius: { d: "Contact distance at which a prey is caught.", t: "try: 10-20 around the default 14" },
+    predatorCooldown: { d: "Seconds a predator digests after a catch before it can catch again — caps its kill rate.", t: "try: 3-5; 5 eases the chase" },
+    predatorMeal: { d: "Energy a predator gains per catch (economy on). -1 = it absorbs the prey's whole reserve, which lets predators explode.", t: "try: 1.0-1.1 × break-even, which is cooldown × (metabolism + thrust cost × 110²): ≈6 at the defaults, ≈8.5 with thrust cost 7e-5" },
     predatorMetabolism: { d: "Predator energy burn per second (economy on); prey burn 1.5.", t: "try: 2-3; higher = must hunt more" },
     predatorReproEnergy: { d: "Energy a predator needs to bud a child (economy on).", t: "try: 40-80; higher = slower breeding" },
     predatorMaxAge: { d: "Predator death age; 0 = immortal until starved.", t: "try: 0, or 120 to age them out" },
@@ -322,7 +326,9 @@
    * A loaded checkpoint carries its own size. */
   function fittedWorld() {
     var r = el("stage").getBoundingClientRect();
-    var aspect = r.width / r.height;
+    /* the stage's width with the menu closed (on wide screens the open
+     * menu narrows it): body padding is 6 px a side */
+    var aspect = (document.documentElement.clientWidth - 12) / r.height;
     if (!(aspect > 0) || (aspect >= 1 && !coarseMQ.matches)) return [DEFAULT_W, DEFAULT_H];
     aspect = Math.max(0.4, Math.min(2.5, aspect));
     var w = Math.round(Math.sqrt(DEFAULT_W * DEFAULT_H * aspect));
@@ -351,7 +357,41 @@
     if (canvas.height !== WORLD_H) canvas.height = WORLD_H;
     var ok = initWorld(f.seed, f.population, f.cfg);
     updateFitButton();
+    setPending(false);
+    el("randnote").textContent = "";  /* randomize() fills it in after a pick */
     return ok;
+  }
+
+  /* ---- 🎲 Randomize: a whole setup drawn from tested ranges ----
+   * The ranges, and the rules that keep coupled knobs together, live in
+   * web/randomizer.js. This fills the form with the draw (everything else
+   * back to its default), restarts, and lists what it picked. */
+  var BASIC_DEFAULTS = { toroidal: false, bodyModel: false, predators: 0,
+                         predatorEconomy: false, foodPatches: 0, currentStrength: 0 };
+  var basePop = 0;   /* this device's default population; set at boot */
+  function setField(input, v) {
+    if (input.type === "checkbox") input.checked = !!v;
+    else input.value = String(v);
+  }
+  function randomize() {
+    if (!Module || !window.EvoRandom || guardTurbo()) return;
+    var pick = EvoRandom.draw(Math.random, basePop);
+    resetAdvanced();
+    Object.keys(BASIC_DEFAULTS).forEach(function (id) {
+      setField(el(id), id in pick.form ? pick.form[id] : BASIC_DEFAULTS[id]);
+    });
+    Object.keys(pick.adv).forEach(function (key) {
+      var input = el("adv_" + key);
+      if (input) setField(input, pick.adv[key]);
+    });
+    el("population").value = String(pick.population);
+    el("seed").value = String((Math.random() * 0x100000000) >>> 0);
+    updateNeeds();
+    if (restart()) {
+      el("randnote").textContent = "Picked: " + pick.population + " fish" +
+        (pick.labels.length ? " · " + pick.labels.join(" · ") : " · the default world") +
+        ". Every setting is in the form below.";
+    }
   }
   function initWorld(seed, population, cfg) {
     var ok;
@@ -471,11 +511,16 @@
     for (i = 0; i < 12; i++) node(hid(i), rNode, s.hidden[i]);
     for (i = 0; i < 12; i++) node(act(i), rNode, s.actions[i]);
   }
+  /* Canvas inspector panel, in world px: top-right by default; with the
+   * drawer open, just left of its edge (follows it while it slides), never
+   * off the canvas's left side. */
+  var INSP_W = 340, INSP_H = 560, INSP_Y = 44;
+  function inspectorX() {
+    return Math.max(12, Math.min(WORLD_W - INSP_W - 12, drawerLeftInCanvas() - INSP_W - 12));
+  }
   function drawInspector(s) {
-    var pw = 340, ph = 560, py = 44;
-    /* top-right by default; with the drawer open, just left of its edge
-     * (follows it while it slides), never off the canvas's left side */
-    var px = Math.max(12, Math.min(WORLD_W - pw - 12, drawerLeftInCanvas() - pw - 12));
+    var pw = INSP_W, ph = INSP_H, py = INSP_Y;
+    var px = inspectorX();
     ctx.fillStyle = "rgba(10,22,30," + (205 / 255).toFixed(4) + ")";
     ctx.fillRect(px, py, pw, ph);
     ctx.strokeStyle = "rgba(90,140,150," + (220 / 255).toFixed(4) + ")";
@@ -1029,6 +1074,7 @@
     }
     worldFitted = false;
     updateFitButton();
+    el("randnote").textContent = "";  /* the 🎲 pick no longer describes this world */
     showNote("(checkpoint loaded)");
   }
 
@@ -1140,21 +1186,29 @@
     var rect = canvas.getBoundingClientRect();
     var wx = (e.clientX - rect.left) * (canvas.width / rect.width);
     var wy = (e.clientY - rect.top) * (canvas.height / rect.height);
-    var n = Module._evo_creature_count();
-    var segs = new Float32Array(heap(), Module._evo_creature_segments(), n * 12);
-    var ids = new Float64Array(heap(), Module._evo_creature_ids(), n);
     /* the mouse picks within 25 world px; a finger within ~24 CSS px, which
      * on a phone-sized canvas is several times farther */
     var reach = lastPointer === "mouse" ? 25 : Math.max(25, 24 * canvas.width / rect.width);
-    var best = -1, bestD2 = reach * reach;
+    var best = nearestFish(wx, wy, reach * reach);
+    selectedId = best >= 0 ? fishId(best) : null;
+    if (best >= 0) everSelected = true;
+  });
+  /* Index of the creature whose head is nearest (wx, wy), at most
+   * sqrt(maxD2) away, or -1. Ties go to the later creature. */
+  function nearestFish(wx, wy, maxD2) {
+    var n = Module._evo_creature_count();
+    var segs = new Float32Array(heap(), Module._evo_creature_segments(), n * 12);
+    var best = -1, bestD2 = maxD2;
     for (var i = 0; i < n; i++) {
       var dx = segs[12 * i] - wx, dy = segs[12 * i + 1] - wy;
       var d2 = dx * dx + dy * dy;
       if (d2 <= bestD2) { bestD2 = d2; best = i; }
     }
-    selectedId = best >= 0 ? ids[best] : null;
-    if (best >= 0) everSelected = true;
-  });
+    return best;
+  }
+  function fishId(index) {
+    return new Float64Array(heap(), Module._evo_creature_ids(), index + 1)[index];
+  }
 
   window.addEventListener("keydown", function (e) {
     /* Escape always closes the drawer, regardless of what has focus —
@@ -1197,6 +1251,7 @@
   var drawerEl = el("drawer"), menuBtn = el("menubtn");
   function setDrawer(open) {
     drawerEl.classList.toggle("open", open);
+    document.body.classList.toggle("menu-open", open);
     menuBtn.textContent = open ? "✕" : "☰";
     if (!open) hideTip();
   }
@@ -1289,9 +1344,63 @@
     if (turboState === "live") enterTurbo();
     else if (turboState === "turbo") exitTurbo();
   });
-  btn("advreset", resetAdvanced);
+  btn("advreset", function () { resetAdvanced(); setPending(true); updateNeeds(); });
   btn("iclose", function () { selectedId = null; });
+
+  /* Settings that only matter while another one is on are dimmed, with the
+   * reason under their name; they still save and restart as usual. */
+  function hasPredators() { return intVal("predators", 0) > 0; }
+  function hasCurrent() { return floatVal("currentStrength", 0) > 0; }
+  var NEEDS = [
+    [["adv_foodPatchRadius"], "needs food patches > 0", function () { return intVal("foodPatches", 0) > 0; }],
+    [["adv_foodDrift", "adv_currentMode", "adv_currentDrift"], "needs a current (strength > 0)", hasCurrent],
+    [["adv_currentEddies", "adv_currentCore"], "needs a current in eddies mode",
+      function () { return hasCurrent() && el("adv_currentMode").value === "0"; }],
+    [["predatorEconomy", "adv_predatorSpeed", "adv_predatorPerception", "adv_predatorCaptureRadius",
+      "adv_predatorCooldown"], "needs predators > 0", hasPredators],
+    [["adv_predatorMeal", "adv_predatorMetabolism", "adv_predatorReproEnergy", "adv_predatorMaxAge"],
+      "needs predators with predator economy on", function () { return hasPredators() && el("predatorEconomy").checked; }],
+    [["adv_maxTurnRate"], "needs triangular motion on", function () { return el("adv_triangularMotion").checked; }],
+    [["adv_reproSoftWidth", "adv_reproGracePeriod"], "needs repro max distance ≥ 0",
+      function () { return floatVal("adv_reproMaxDistance", -1) >= 0; }],
+    [["adv_bodyMutation"], "needs body model on", function () { return el("bodyModel").checked; }]
+  ];
+  function updateNeeds() {
+    NEEDS.forEach(function (rule) {
+      var on = rule[2]();
+      rule[0].forEach(function (id) {
+        var label = el(id).closest("label");
+        var hint = label.querySelector(".needs");
+        if (!hint) {
+          hint = document.createElement("span");
+          hint.className = "needs";
+          label.appendChild(hint);
+        }
+        label.classList.toggle("inert", !on);
+        hint.textContent = on ? "" : rule[1];
+      });
+    });
+  }
+  /* Everything but the live settings applies on Restart: say so as soon as
+   * one changes, so a change never looks ignored. */
+  function setPending(on) {
+    var b = el("restart");
+    b.classList.toggle("pending", on);
+    b.textContent = on ? "Restart to apply" : "Restart";
+  }
+  function onEdit(e) {
+    var t = e.target;
+    updateNeeds();
+    if (!t || !t.id || (t.id.indexOf("adv_") === 0 && LIVE[t.id.slice(4)])) return;  /* applies by itself */
+    setPending(true);
+  }
+  ["controls", "adv"].forEach(function (id) {
+    el(id).addEventListener("input", onEdit);   /* while typing */
+    el(id).addEventListener("change", onEdit);  /* checkboxes, selects, spinners */
+  });
   btn("fitbtn", restart);
+  btn("randombtn", randomize);
+  btn("guidebtn", function () { if (window.EvoGuide) EvoGuide.start(); });
   var fitTimer = 0;
   window.addEventListener("resize", function () {
     clearTimeout(fitTimer);
@@ -1322,7 +1431,40 @@
   });
 
   buildAdvancedUI();
+  updateNeeds();
   setSpeed(simSpeed);
+
+  /* ---- hooks for the first-visit guide (web/guide.js) ---- */
+  var guideFish = null;   /* the fish the guide selected, released after its step */
+  window.EvoApp = {
+    ready: false,   /* the world is running; "evo:ready" fires on window then */
+    touch: function () { return coarseMQ.matches; },
+    setDrawer: setDrawer,
+    /* Selects a fish for the guide to show, unless one is selected: the one
+     * nearest a point left of centre, clear of the desktop inspector. Leaves
+     * everSelected alone, so the "tap a fish" hint stays until the visitor
+     * picks one. */
+    inspectSomeFish: function () {
+      if (!Module || turboState !== "live") return false;
+      if (selectedId !== null) return true;
+      var best = nearestFish(WORLD_W * 0.35, WORLD_H * 0.5, Infinity);
+      if (best < 0) return false;
+      selectedId = guideFish = fishId(best);
+      return true;
+    },
+    releaseFish: function () {
+      if (guideFish !== null && selectedId === guideFish) selectedId = null;
+      guideFish = null;
+    },
+    /* CSS rect of the inspector being shown, or null */
+    inspectorRect: function () {
+      if (selectedId === null || turboState !== "live") return null;
+      if (compactMQ.matches) return inspDock ? inspEl.getBoundingClientRect() : null;
+      var cr = canvas.getBoundingClientRect(), c = cr.width / canvas.width;
+      return { left: cr.left + inspectorX() * c, top: cr.top + INSP_Y * c,
+               width: INSP_W * c, height: INSP_H * c };
+    }
+  };
 
   /* ---- boot ---- */
   if (!window.EvoLoader || !ASSETS) {
@@ -1344,8 +1486,9 @@
     if (threaded) Module._evo_set_threads(nt > 0 ? Math.min(nt, pool) : (touch ? Math.min(TOUCH_THREADS, pool) : pool));
     /* The single-threaded module starts with fewer creatures (see the
      * benchmark in README.md); either default can be changed in the drawer. */
-    el("population").value = String(threaded ? (touch ? TOUCH_POP_THREADED : DEFAULT_POP_THREADED)
-                                             : (touch ? TOUCH_POP_SINGLE : DEFAULT_POP_SINGLE));
+    basePop = threaded ? (touch ? TOUCH_POP_THREADED : DEFAULT_POP_THREADED)
+                       : (touch ? TOUCH_POP_SINGLE : DEFAULT_POP_SINGLE);
+    el("population").value = String(basePop);
     el("turbobtn").title = threaded
       ? "run headless in a worker at full speed — no rendering, keeps running in background tabs; the hand-off is exact, but a threaded run is not reproducible"
       : "run headless in a worker at full speed — no rendering, keeps running in background tabs; toggling is bit-exact";
@@ -1361,6 +1504,10 @@
       clearError();
     }
     requestAnimationFrame(frame);
+    if (!bench) {
+      window.EvoApp.ready = true;
+      window.dispatchEvent(new Event("evo:ready"));
+    }
   }).catch(function (err) {
     showError("failed to load wasm module: " + err);
   });

@@ -1,0 +1,54 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  native:
+    name: native (${{ matrix.variant }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: serial
+            flags: -DEVO_NO_OPENMP=ON
+          - variant: openmp
+            flags: ""
+          - variant: thread-pool
+            flags: -DEVO_POOL_THREADS=ON
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install SFML (window app)
+        run: sudo apt-get update -q && sudo apt-get install -y -q libsfml-dev
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release ${{ matrix.flags }}
+      - name: Build
+        run: cmake --build build -j
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+  wasm:
+    name: wasm (build, freshness, parity)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          # The version the committed web/*.wasm were built with; the
+          # freshness check below only means something with the same one.
+          version: 6.0.4
+      - name: Build both browser modules
+        run: bash wasm/build_wasm.sh
+      - name: Committed modules match the sources
+        run: |
+          if ! git diff --quiet -- web/; then
+            git status --short web/
+            echo "::error::web/*.js / *.wasm are stale: run wasm/build_wasm.sh and commit the result"
+            exit 1
+          fi
+      - name: Native serial == wasm, bit for bit
+        run: bash wasm/parity.sh
+      - name: Static site assembles
+        run: bash wasm/build_site.sh

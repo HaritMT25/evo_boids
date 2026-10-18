@@ -121,13 +121,17 @@ So far this is measured in emulation only: Playwright's iPhone 13 profile in Web
 
 ### Deploy (Vercel, static)
 
+Live at https://evo-boids.vercel.app/.
+
 ```bash
 wasm/build_site.sh                                  # -> dist/: index.html, hashed assets, vercel.json
 vercel project add evo-boids                        # once: create the project
 vercel link --cwd dist --project evo-boids --yes    # once: link dist/ to it (kept across rebuilds)
-vercel deploy --cwd dist                            # preview deployment
-vercel deploy --cwd dist --prod                     # production
+vercel build --prod --cwd dist                      # -> dist/.vercel/output, headers included
+vercel deploy --prebuilt --prod --cwd dist          # production (drop both --prod for a preview)
 ```
+
+Deploy the prebuilt output. A plain `vercel deploy --cwd dist`, which builds on Vercel's side, went live on 2026-10-18 without any of the `vercel.json` headers: no COOP/COEP, so the page ran single-threaded. The same files built locally with `vercel build` keep them. After a deploy, check that `curl -sI https://evo-boids.vercel.app/` shows `cross-origin-opener-policy: same-origin`.
 
 `dist/vercel.json` sets:
 - COOP/COEP on every path (the Turbo worker and the pthread workers need them too)

@@ -93,7 +93,20 @@ Browser requirements:
 - **WebGL2**, optional: without it the fish are drawn with canvas 2D, which is slower at high counts.
 - **Cross-origin isolation** for the threaded module: Chrome 92+, Firefox 79+ and Safari 15.2+ support it. Anywhere else, the page runs the single-threaded module.
 
-Tested in Chrome 155 on Windows 11. Firefox and Safari have not been tested.
+Tested on Windows 11 in:
+- Chrome 155
+- Playwright's Firefox 155 build
+- Playwright's WebKit 26.6 build, which is Safari's engine but not Safari itself
+
+Checks run in each:
+- the threaded module and WebGL2 drawing on the isolated page
+- `?threads=0` and `?gl=0`
+- the single-threaded fallback without isolation headers
+- running inside a cross-origin iframe
+- Turbo on and off
+- checkpoint download
+
+Safari on macOS/iOS has not been tested.
 
 ### Deploy (Vercel, static)
 

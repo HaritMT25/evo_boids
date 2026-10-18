@@ -600,15 +600,33 @@
    * column, cost ~ N^1.4. Sizing the cut with that exponent instead of a
    * linear one avoids cutting far deeper than needed. */
   var COST_EXPONENT = 1.4;
+  /* Frames must actually be late, not just busy: work over budget can still
+   * fit in a frame (seen in headless Firefox, whose software WebGL makes the
+   * per-frame JS ~14 ms while it holds 60 fps). intervalEma tracks the time
+   * between frames; displayMs is the display's interval, taken as the
+   * shortest one seen and never above 60 Hz's, so a page that is overloaded
+   * from its first frame is still recognised as late. */
+  var intervalEma = 0, lastFrameAt = 0, displayMs = 1000 / 60;
+  function trackInterval(now) {
+    if (lastFrameAt) {
+      var iv = now - lastFrameAt;
+      intervalEma = intervalEma ? intervalEma * 0.9 + iv * 0.1 : iv;
+      if (intervalEma < displayMs) displayMs = Math.max(4, intervalEma);
+    }
+    lastFrameAt = now;
+  }
+  function framesLate() { return intervalEma > displayMs * 1.2; }
   function resetGovernor() {
     workEma = 0; overFrames = 0; underFrames = 0; govNote = ""; governed = false;
+    intervalEma = 0;
     warmupUntil = performance.now() + WARMUP_MS;
   }
-  /* After any action: forget the moving average (it still remembers the
+  /* After any action: forget the moving averages (they still remember the
    * frames before the action and would trigger a second, too-deep cut) and
    * let the page run half a second before judging again. */
   function settle() {
     workEma = 0;
+    intervalEma = 0;
     warmupUntil = performance.now() + 500;
   }
   function applyCap() {
@@ -620,7 +638,7 @@
     if (performance.now() < warmupUntil) return;
     workEma = workEma ? workEma * 0.9 + workMs * 0.1 : workMs;
     if (!governorOn || paused || turboState !== "live" || bench) return;
-    if (workEma > BUDGET_MS) { overFrames++; underFrames = 0; }
+    if (workEma > BUDGET_MS && framesLate()) { overFrames++; underFrames = 0; }
     else if (workEma < BUDGET_MS * 0.5) { underFrames++; overFrames = 0; }
     else { overFrames = 0; underFrames = 0; }
     /* ~0.5 s of evidence normally; far over budget, a handful of frames */
@@ -700,6 +718,7 @@
         var per = (t1 - t0) / stepped;
         stepEma = stepEma ? stepEma * 0.9 + per * 0.1 : per;
       }
+      trackInterval(now);
       govern(t2 - t0, s.n);
       if (bench) benchFrame(now, t1 - t0, t2 - t1, s.n);
       fpsFrames++;

@@ -152,7 +152,9 @@ Uncapped rich-food setups reached ~2,400 fish headless; in the browser, the fram
 - the keyboard (with a mouse only)
 - the ☰ menu, 🎲 Randomize, playback (including what Turbo's "headless" means), settings, and checkpoints
 
-The text adapts to touch screens. The page stays usable during the tour. "? Guide" in the menu replays it, and it's remembered in `localStorage`; `?guide=0` / `?guide=1` override that.
+**Settings.** On screens 960 px wide or more, the open menu sits beside the world rather than over it, so a change can be watched. Settings that only matter while another one is on, such as patch radius without food patches or eddy count without a current, are dimmed with the reason. Changes other than the ones marked *live* turn the Restart button into **Restart to apply**.
+
+The tour's text adapts to touch screens. The page stays usable during the tour. "? Guide" in the menu replays it, and it's remembered in `localStorage`; `?guide=0` / `?guide=1` override that.
 
 ### Deploy (Vercel, static)
 

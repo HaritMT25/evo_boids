@@ -326,7 +326,9 @@
    * A loaded checkpoint carries its own size. */
   function fittedWorld() {
     var r = el("stage").getBoundingClientRect();
-    var aspect = r.width / r.height;
+    /* the stage's width with the menu closed (on wide screens the open
+     * menu narrows it): body padding is 6 px a side */
+    var aspect = (document.documentElement.clientWidth - 12) / r.height;
     if (!(aspect > 0) || (aspect >= 1 && !coarseMQ.matches)) return [DEFAULT_W, DEFAULT_H];
     aspect = Math.max(0.4, Math.min(2.5, aspect));
     var w = Math.round(Math.sqrt(DEFAULT_W * DEFAULT_H * aspect));
@@ -355,6 +357,7 @@
     if (canvas.height !== WORLD_H) canvas.height = WORLD_H;
     var ok = initWorld(f.seed, f.population, f.cfg);
     updateFitButton();
+    setPending(false);
     el("randnote").textContent = "";  /* randomize() fills it in after a pick */
     return ok;
   }
@@ -383,6 +386,7 @@
     });
     el("population").value = String(pick.population);
     el("seed").value = String((Math.random() * 0x100000000) >>> 0);
+    updateNeeds();
     if (restart()) {
       el("randnote").textContent = "Picked: " + pick.population + " fish" +
         (pick.labels.length ? " · " + pick.labels.join(" · ") : " · the default world") +
@@ -1247,6 +1251,7 @@
   var drawerEl = el("drawer"), menuBtn = el("menubtn");
   function setDrawer(open) {
     drawerEl.classList.toggle("open", open);
+    document.body.classList.toggle("menu-open", open);
     menuBtn.textContent = open ? "✕" : "☰";
     if (!open) hideTip();
   }
@@ -1339,8 +1344,60 @@
     if (turboState === "live") enterTurbo();
     else if (turboState === "turbo") exitTurbo();
   });
-  btn("advreset", resetAdvanced);
+  btn("advreset", function () { resetAdvanced(); setPending(true); updateNeeds(); });
   btn("iclose", function () { selectedId = null; });
+
+  /* Settings that only matter while another one is on are dimmed, with the
+   * reason under their name; they still save and restart as usual. */
+  function hasPredators() { return intVal("predators", 0) > 0; }
+  function hasCurrent() { return floatVal("currentStrength", 0) > 0; }
+  var NEEDS = [
+    [["adv_foodPatchRadius"], "needs food patches > 0", function () { return intVal("foodPatches", 0) > 0; }],
+    [["adv_foodDrift", "adv_currentMode", "adv_currentDrift"], "needs a current (strength > 0)", hasCurrent],
+    [["adv_currentEddies", "adv_currentCore"], "needs a current in eddies mode",
+      function () { return hasCurrent() && el("adv_currentMode").value === "0"; }],
+    [["predatorEconomy", "adv_predatorSpeed", "adv_predatorPerception", "adv_predatorCaptureRadius",
+      "adv_predatorCooldown"], "needs predators > 0", hasPredators],
+    [["adv_predatorMeal", "adv_predatorMetabolism", "adv_predatorReproEnergy", "adv_predatorMaxAge"],
+      "needs predators with predator economy on", function () { return hasPredators() && el("predatorEconomy").checked; }],
+    [["adv_maxTurnRate"], "needs triangular motion on", function () { return el("adv_triangularMotion").checked; }],
+    [["adv_reproSoftWidth", "adv_reproGracePeriod"], "needs repro max distance ≥ 0",
+      function () { return floatVal("adv_reproMaxDistance", -1) >= 0; }],
+    [["adv_bodyMutation"], "needs body model on", function () { return el("bodyModel").checked; }]
+  ];
+  function updateNeeds() {
+    NEEDS.forEach(function (rule) {
+      var on = rule[2]();
+      rule[0].forEach(function (id) {
+        var label = el(id).closest("label");
+        var hint = label.querySelector(".needs");
+        if (!hint) {
+          hint = document.createElement("span");
+          hint.className = "needs";
+          label.appendChild(hint);
+        }
+        label.classList.toggle("inert", !on);
+        hint.textContent = on ? "" : rule[1];
+      });
+    });
+  }
+  /* Everything but the live settings applies on Restart: say so as soon as
+   * one changes, so a change never looks ignored. */
+  function setPending(on) {
+    var b = el("restart");
+    b.classList.toggle("pending", on);
+    b.textContent = on ? "Restart to apply" : "Restart";
+  }
+  function onEdit(e) {
+    var t = e.target;
+    updateNeeds();
+    if (!t || !t.id || (t.id.indexOf("adv_") === 0 && LIVE[t.id.slice(4)])) return;  /* applies by itself */
+    setPending(true);
+  }
+  ["controls", "adv"].forEach(function (id) {
+    el(id).addEventListener("input", onEdit);   /* while typing */
+    el(id).addEventListener("change", onEdit);  /* checkboxes, selects, spinners */
+  });
   btn("fitbtn", restart);
   btn("randombtn", randomize);
   btn("guidebtn", function () { if (window.EvoGuide) EvoGuide.start(); });
@@ -1374,6 +1431,7 @@
   });
 
   buildAdvancedUI();
+  updateNeeds();
   setSpeed(simSpeed);
 
   /* ---- hooks for the first-visit guide (web/guide.js) ---- */

@@ -213,6 +213,19 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
+  /* Wide screens: the open menu sits beside the world instead of over it,
+   * so a change can be watched (renderer.js setDrawer toggles the class). */
+  body { transition: padding-right 0.2s ease; }
+  @media (min-width: 960px) {
+    body.menu-open { padding-right: 366px; }
+    body.menu-open #status { right: 378px; }
+  }
+  /* settings that need another one switched on (renderer.js updateNeeds) */
+  label.inert { opacity: 0.5; }
+  .needs { grid-column: 1 / -1; font-size: 10px; color: #8fb89f; }
+  .needs:empty { display: none; }
+  /* settings changed since the last restart */
+  #restart.pending { background: #2f6b4a; border-color: #9fd3b0; color: #eaf6ee; font-weight: bold; }
   /* narrow (portrait phone) screens: wrap instead of cutting the line off */
   @media (max-width: 600px) {
     #status { white-space: normal; line-height: 1.5; right: 12px; }

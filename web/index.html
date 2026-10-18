@@ -194,6 +194,11 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
+  /* narrow (portrait phone) screens: wrap instead of cutting the line off;
+   * the letterboxed 16:9 canvas leaves room below it */
+  @media (max-width: 600px) {
+    #status { white-space: normal; line-height: 1.5; right: 12px; }
+  }
   #modeline { color: #6f927e; font-size: 11px; }
   .livetag {
     margin-left: 6px;

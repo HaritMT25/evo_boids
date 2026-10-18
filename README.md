@@ -133,6 +133,11 @@ Every asset is same-origin, so cross-origin isolation holds. There are no server
 wasm/parity.sh                   # native serial == wasm, byte for byte
 ```
 
+CI (`.github/workflows/ci.yml`) runs on every push:
+- the test suite in the serial, OpenMP and thread-pool builds
+- a rebuild of both browser modules, which must match the committed `web/*.wasm`
+- `wasm/parity.sh`
+
 ## Benchmarks
 
 All numbers were measured on one machine on 2026-10-18:

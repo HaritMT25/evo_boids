@@ -19,7 +19,7 @@ jobs:
           - variant: thread-pool
             flags: -DEVO_POOL_THREADS=ON
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install SFML (window app)
         run: sudo apt-get update -q && sudo apt-get install -y -q libsfml-dev
       - name: Configure
@@ -33,9 +33,10 @@ jobs:
     name: wasm (build, freshness, parity)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: mymindstorm/setup-emsdk@v14
+      - uses: actions/checkout@v7
+      - uses: mymindstorm/setup-emsdk@v16
         with:
+          actions-cache-folder: emsdk-cache
           # The version the committed web/*.wasm were built with; the
           # freshness check below only means something with the same one.
           version: 6.0.4

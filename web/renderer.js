@@ -328,11 +328,15 @@
     var w = Math.round(Math.sqrt(DEFAULT_W * DEFAULT_H * aspect));
     return [w, Math.round(DEFAULT_W * DEFAULT_H / w)];
   }
-  /* After a rotation the running world keeps its shape (letterboxed); on a
-   * compact screen a button offers to restart with a fitted one. */
+  /* After a rotation or resize the running world keeps its shape
+   * (letterboxed). A button offers to restart with a fitted one on compact
+   * screens, and wherever the world was, or would now be, fitted; a
+   * landscape desktop window running the native 1920x1080 never shows it. */
+  var worldFitted = false;  /* the running world came from fittedWorld(), not the default */
   function updateFitButton() {
     var f = fittedWorld(), a = f[0] / f[1], b = WORLD_W / WORLD_H;
-    el("fitbtn").hidden = !!bench || !compactMQ.matches || Math.max(a, b) / Math.min(a, b) < 1.15;
+    var fits = compactMQ.matches || worldFitted || f[0] !== DEFAULT_W || f[1] !== DEFAULT_H;
+    el("fitbtn").hidden = !!bench || !fits || Math.max(a, b) / Math.min(a, b) < 1.15;
   }
 
   function restart() {
@@ -342,6 +346,7 @@
     var f = readForm();
     var size = fittedWorld();
     WORLD_W = size[0]; WORLD_H = size[1];
+    worldFitted = WORLD_W !== DEFAULT_W || WORLD_H !== DEFAULT_H;
     if (canvas.width !== WORLD_W) canvas.width = WORLD_W;
     if (canvas.height !== WORLD_H) canvas.height = WORLD_H;
     var ok = initWorld(f.seed, f.population, f.cfg);
@@ -538,17 +543,21 @@
     }
   }
   function drawPanel(s) {
+    /* layout reads first, DOM writes last, so a frame never forces a
+     * synchronous reflow (except right after a rare dock change) */
     var cr = canvas.getBoundingClientRect(), c = cr.width / canvas.width;
     dockPanel(cr.left + s.segs[12 * s.selIdx] * c, cr.top + s.segs[12 * s.selIdx + 1] * c);
+    var box = inetCanvas.parentNode, w = box.clientWidth, h = box.clientHeight;
+    if (w >= 60 && h >= 60) drawPanelNet(s, w, h);
     var title = "Fish #" + Math.round(s.info[0]) + " · spd " + Math.round(s.info[1]) +
                 " · E " + Math.round(s.info[2]) + " · age " + Math.round(s.info[3]);
     var sub = "body " + s.info[4].toFixed(2) + " · elong " + s.info[5].toFixed(2) +
               " · gen " + Math.round(s.info[6]);
     if (title !== inspTitle) el("ititle").textContent = inspTitle = title;
     if (sub !== inspSub) el("isub").textContent = inspSub = sub;
-
-    var box = inetCanvas.parentNode, w = box.clientWidth, h = box.clientHeight;
-    if (w < 60 || h < 60) return;
+  }
+  /* the panel's network, in a w x h CSS px box */
+  function drawPanelNet(s, w, h) {
     var dpr = window.devicePixelRatio || 1;
     var bw = Math.round(w * dpr), bh = Math.round(h * dpr);
     if (inetCanvas.width !== bw) inetCanvas.width = bw;
@@ -1018,6 +1027,7 @@
       WORLD_W = w; WORLD_H = h;
       canvas.width = w; canvas.height = h;
     }
+    worldFitted = false;
     updateFitButton();
     showNote("(checkpoint loaded)");
   }

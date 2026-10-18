@@ -254,6 +254,8 @@ inline std::string serialize(const World& world, const char* engineVersion) {
     // loaded; it just cannot promise an identical continuation.
 #ifdef USE_OPENMP
     w.field("determinism", "openmp-build (resume is NOT bit-exact)");
+#elif defined(EVO_POOL_THREADS)
+    w.field("determinism", "threaded build (resume is NOT bit-exact)");
 #else
     w.field("determinism", "serial build (resume is bit-exact)");
 #endif
@@ -351,6 +353,10 @@ inline std::string serialize(const World& world, const char* engineVersion) {
     w.key("id"); w.beginArray(); for (const auto& c : cs) w.value((unsigned long long)c.id); w.endArray();
     w.key("lineageId"); w.beginArray(); for (const auto& c : cs) w.value((unsigned long long)c.lineageId); w.endArray();
     w.key("alive"); w.beginArray(); for (const auto& c : cs) w.value((int)(c.alive ? 1 : 0)); w.endArray();
+    w.newline();
+    // Generation depth (display-only). ALWAYS written; OPTIONAL on read (a
+    // pre-generation checkpoint restores every creature at 0).
+    w.key("generation"); w.beginArray(); for (const auto& c : cs) w.value((unsigned long long)c.generation); w.endArray();
     w.newline();
     w.key("posX"); w.beginArray(); for (const auto& c : cs) w.value(c.pos.x); w.endArray();
     w.key("posY"); w.beginArray(); for (const auto& c : cs) w.value(c.pos.y); w.endArray();
@@ -638,6 +644,17 @@ inline bool deserialize(const std::string& text, World& world, std::string& erro
             }
         }
 
+        // Generation (display-only): optional, so pre-generation checkpoints
+        // still load (every creature at 0). Present means well-formed.
+        std::vector<long long> gens;
+        const bool hasGen = jcs->find("generation") != nullptr;
+        if (hasGen && !jsonm::readInts(*jcs, "generation", gens, n)) {
+            error = "malformed 'generation' array (length mismatch?)"; return false;
+        }
+        for (long long v : gens) {
+            if (v < 0 || v > (long long)UINT32_MAX) { error = "'generation' value out of range"; return false; }
+        }
+
         size_t needed = 0;
         for (long long L : glen) {
             if (L < 0) { error = "negative genome length"; return false; }
@@ -667,6 +684,7 @@ inline bool deserialize(const std::string& text, World& world, std::string& erro
             Creature& c = world.creatures[i];
             c.id = (std::uint64_t)id[i];
             c.lineageId = (std::uint64_t)lineage[i];
+            c.generation = hasGen ? (std::uint32_t)gens[i] : 0u;
             c.alive = alive[i] != 0;
             c.pos = Vec2{posX[i], posY[i]};
             c.vel = Vec2{velX[i], velY[i]};

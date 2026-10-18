@@ -22,8 +22,8 @@
     if (!(b > 0)) return 1;  /* absent buffer (older wasm blob) or NaN */
     return 1 + BODY_SPAN * Math.tanh(BODY_GAIN * (b - 1));
   }
-  /* evo_inspect_info(): id, speed, foodReserves, age, bodySize, bodyElong. */
-  var INSPECT_INFO_LEN = 6;
+  /* evo_inspect_info(): id, speed, foodReserves, age, bodySize, bodyElong, generation. */
+  var INSPECT_INFO_LEN = 7;
   var CUR_TAIL = "rgba(110,170,215," + (60 / 255).toFixed(4) + ")";
   var CUR_HEAD = "rgba(150,205,235," + (130 / 255).toFixed(4) + ")";
   var RING_STYLE = "rgba(255,235,120," + (230 / 255).toFixed(4) + ")";
@@ -40,6 +40,10 @@
       ["metabolicRate", 1.5], ["moveCost", 0, { step: 0.00001 }],
       ["geneCost", 0, { step: 0.001 }], ["maxAge", 120],
       ["reproEnergy", 20], ["newbornEnergy", 25]
+    ]],
+    ["population", [
+      ["maxPopulation", 0, { step: 1, min: 0, label: "population cap (0 = none)" }],
+      ["minPopulation", 50, { step: 1, min: 0, label: "reseed floor" }]
     ]],
     ["motion", [
       ["minSpeed", 30], ["maxSpeed", 150], ["maxTurnRate", 4], ["triangularMotion", false]
@@ -74,6 +78,13 @@
   ];
   /* Flat view: readAdvanced/resetAdvanced iterate every key regardless of section. */
   var ADV = ADV_SECTIONS.reduce(function (acc, sec) { return acc.concat(sec[1]); }, []);
+  /* Keys the running world accepts mid-run (evo_set_param's whitelist in
+   * wasm/evo_wasm.cpp). Editing one applies immediately; every other key
+   * applies on Restart. */
+  var LIVE = { maxPopulation: 1, minPopulation: 1, targetFood: 1, foodSpawnBase: 1,
+               foodSpawnAmp: 1, foodEnergy: 1, metabolicRate: 1, moveCost: 1, geneCost: 1,
+               maxAge: 1, reproEnergy: 1, newbornEnergy: 1, mutationMultiplier: 1,
+               minSpeed: 1, maxSpeed: 1 };
 
   /* Hover info per parameter: d = what it is, t = suggested values (docs/evo_boids_flags.md). */
   var TIPS = {
@@ -123,10 +134,18 @@
     currentEddies: { d: "Number of vortices in eddies mode.", t: "try: 3-8 around the default 5" },
     currentCore: { d: "Eddy radius — the distance of peak flow speed.", t: "try: 100-250 around the default 150" },
     currentDrift: { d: "How fast the flow field evolves (0 = static).", t: "try: 0.5-2 around the default 1" },
-    fastTanh: { d: "~1.25x faster tanh approximation — changes the numbers.", t: "try: off to reproduce native runs" }
+    fastTanh: { d: "~1.25x faster tanh approximation — changes the numbers.", t: "try: off to reproduce native runs" },
+    maxPopulation: { d: "Birth cap: no births while the population is at or above it (0 = none). Applies live.", t: "try: 0; the frame-budget governor may set a lower one" },
+    minPopulation: { d: "Reseed floor: random founders are added when the population falls below it. Applies live.", t: "try: 50 (the default)" },
+    governor: { d: "When a frame takes too long, lower the speed, then cap births so the population shrinks to what this machine can run at 60 fps. Nothing is culled.", t: "try: on; off to see the uncapped run (it may stutter)" }
   };
 
+  var ASSETS = window.EVO_ASSETS;
   var Module = null;
+  var threaded = false;      /* which module EvoLoader picked */
+  var threadWhy = "";
+  var moduleUrls = null;     /* {js, wasm} of the loaded module, for the Turbo worker */
+  var STATS_LEN = 9;         /* replaced by _evo_stats_len() once loaded */
   var paused = false;
   var simSpeed = 1;
   var selectedId = null;
@@ -134,9 +153,18 @@
   var canvas = document.getElementById("canvas");
   var ctx = canvas.getContext("2d", { alpha: false });
   var bgImage = new Image();  /* background texture — shared with the native app (img/rocks.jpg) */
-  bgImage.src = "../img/rocks.jpg";
+  bgImage.src = ASSETS.background;
   function el(id) { return document.getElementById(id); }
   var errEl = el("err");
+  var statusEl = el("status");
+
+  /* The wasm heap. In the threaded module it is a growable SharedArrayBuffer,
+   * and a growth triggered on another thread leaves Module.HEAP* pointing at
+   * the old, shorter buffer — so views are always cut from wasmMemory.buffer,
+   * which reflects the current length. Re-created per frame, never cached. */
+  function heap() {
+    return Module.wasmMemory ? Module.wasmMemory.buffer : Module.HEAPU8.buffer;
+  }
 
   function showError(msg) { errEl.textContent = msg; errEl.style.color = "#e05a5a"; }
   function showNote(msg) { errEl.textContent = msg; errEl.style.color = "#8fa89a"; }
@@ -184,10 +212,29 @@
     var text = document.createElement("span");
     text.className = "lt";
     text.textContent = opt.label || key;
+    if (LIVE[key]) {
+      var tag = document.createElement("span");
+      tag.className = "livetag";
+      tag.textContent = "live";
+      text.appendChild(tag);
+      input.addEventListener("change", function () { applyLive(key, def, input); });
+    }
     label.appendChild(text);  /* name left, control in the right-aligned column */
     label.appendChild(input);
     attachTip(label, key);
     return label;
+  }
+  /* Push one live-capable knob into the running world. maxPopulation goes
+   * through the governor so a user cap and the frame-budget cap combine. */
+  function applyLive(key, def, input) {
+    if (!Module || turboState !== "live") return;
+    var v = parseFloat(input.value);
+    if (!Number.isFinite(v)) v = def;
+    if (key === "maxPopulation") { userCap = Math.max(0, Math.round(v)); applyCap(); return; }
+    if (!Module._evo_set_param) return;
+    var ok = withCString(key, function (ptr) { return Module._evo_set_param(ptr, v); });
+    if (ok) showNote("(" + key + " = " + v + ", live)");
+    else showError(Module.UTF8ToString(Module._evo_last_error()));
   }
   function buildAdvancedUI() {
     var root = el("advgrid"); /* now a vertical stack of section fieldsets */
@@ -256,16 +303,22 @@
     WORLD_W = DEFAULT_W; WORLD_H = DEFAULT_H;
     if (canvas.width !== WORLD_W) canvas.width = WORLD_W;
     if (canvas.height !== WORLD_H) canvas.height = WORLD_H;
+    return initWorld(f.seed, f.population, f.cfg);
+  }
+  function initWorld(seed, population, cfg) {
     var ok;
-    if (Object.keys(f.cfg).length > 0) {
-      ok = withCString(JSON.stringify(f.cfg), function (ptr) {
-        return Module._evo_init(f.seed, WORLD_W, WORLD_H, f.population, ptr);
+    if (Object.keys(cfg).length > 0) {
+      ok = withCString(JSON.stringify(cfg), function (ptr) {
+        return Module._evo_init(seed, WORLD_W, WORLD_H, population, ptr);
       });
     } else {
-      ok = Module._evo_init(f.seed, WORLD_W, WORLD_H, f.population, 0);
+      ok = Module._evo_init(seed, WORLD_W, WORLD_H, population, 0);
     }
     selectedId = null;
-    if (!ok) showError("evo_init failed — check parameters");
+    userCap = cfg.maxPopulation || 0;
+    autoCap = 0;
+    resetGovernor();
+    if (!ok) showError("evo_init failed: " + Module.UTF8ToString(Module._evo_last_error()));
     return !!ok;
   }
 
@@ -273,7 +326,7 @@
   function resolveSelection() {
     if (selectedId === null) return -1;
     var n = Module._evo_creature_count();
-    var ids = new Float64Array(Module.HEAPF64.buffer, Module._evo_creature_ids(), n);
+    var ids = new Float64Array(heap(), Module._evo_creature_ids(), n);
     var idx = -1;
     for (var i = 0; i < n; i++) if (ids[i] === selectedId) { idx = i; break; }
     if (idx >= 0 && !Module._evo_inspect(idx)) idx = -1;
@@ -287,31 +340,31 @@
     var pc = Module._evo_predator_count();
     var s = {
       n: n, fc: fc, pc: pc, selIdx: selIdx,
-      segs: new Float32Array(Module.HEAPF32.buffer, Module._evo_creature_segments(), n * 12),
+      segs: new Float32Array(heap(), Module._evo_creature_segments(), n * 12),
       /* N*2 alongside segs, same creature order; absent from pre-0.24 blobs */
       body: Module._evo_body_params
-              ? new Float32Array(Module.HEAPF32.buffer, Module._evo_body_params(), n * 2)
+              ? new Float32Array(heap(), Module._evo_body_params(), n * 2)
               : null,
-      colors: new Uint8Array(Module.HEAPU8.buffer, Module._evo_creature_colors(), n * 3),
-      food: new Float32Array(Module.HEAPF32.buffer, Module._evo_food_xy(), fc * 2),
-      preds: new Float32Array(Module.HEAPF32.buffer, Module._evo_predator_data(), pc * 3),
-      stats: new Float64Array(Module.HEAPF64.buffer, Module._evo_stats(), 9),
+      colors: new Uint8Array(heap(), Module._evo_creature_colors(), n * 3),
+      food: new Float32Array(heap(), Module._evo_food_xy(), fc * 2),
+      preds: new Float32Array(heap(), Module._evo_predator_data(), pc * 3),
+      stats: new Float64Array(heap(), Module._evo_stats(), STATS_LEN),
       curActive: Module._evo_current_active() !== 0,
       curGrid: null, curCols: 0, curRows: 0
     };
     if (s.curActive) {
       s.curCols = Module._evo_current_cols();
       s.curRows = Module._evo_current_rows();
-      s.curGrid = new Float32Array(Module.HEAPF32.buffer, Module._evo_current_grid(),
+      s.curGrid = new Float32Array(heap(), Module._evo_current_grid(),
                                    s.curCols * s.curRows * 2);
     }
     if (selIdx >= 0) {
-      s.info = new Float64Array(Module.HEAPF64.buffer, Module._evo_inspect_info(), INSPECT_INFO_LEN);
-      s.sensors = new Float32Array(Module.HEAPF32.buffer, Module._evo_inspect_sensors(), 41);
-      s.hidden = new Float32Array(Module.HEAPF32.buffer, Module._evo_inspect_hidden(), 12);
-      s.actions = new Float32Array(Module.HEAPF32.buffer, Module._evo_inspect_actions(), 12);
+      s.info = new Float64Array(heap(), Module._evo_inspect_info(), INSPECT_INFO_LEN);
+      s.sensors = new Float32Array(heap(), Module._evo_inspect_sensors(), 41);
+      s.hidden = new Float32Array(heap(), Module._evo_inspect_hidden(), 12);
+      s.actions = new Float32Array(heap(), Module._evo_inspect_actions(), 12);
       s.connCount = Module._evo_inspect_conn_count();
-      s.conns = new Float32Array(Module.HEAPF32.buffer, Module._evo_inspect_conns(), s.connCount * 5);
+      s.conns = new Float32Array(heap(), Module._evo_inspect_conns(), s.connCount * 5);
     }
     return s;
   }
@@ -328,8 +381,21 @@
     return v >= 0 ? "rgb(" + hot + "," + mid + "," + lo + ")"
                   : "rgb(" + lo + "," + mid + "," + hot + ")";
   }
+  /* Canvas x of the drawer's left edge (WORLD_W when it is closed or off the
+   * canvas). The drawer is a fixed overlay on the right; the inspector's
+   * default home is the canvas's top-right, so it has to step aside. */
+  function drawerLeftInCanvas() {
+    if (!drawerEl.classList.contains("open")) return WORLD_W;
+    var cr = canvas.getBoundingClientRect();
+    if (cr.width <= 0) return WORLD_W;
+    var x = (drawerEl.getBoundingClientRect().left - cr.left) * (canvas.width / cr.width);
+    return Math.min(WORLD_W, x);
+  }
   function drawInspector(s) {
-    var px = WORLD_W - 340 - 12, py = 44, pw = 340, ph = 560;
+    var pw = 340, ph = 560, py = 44;
+    /* top-right by default; with the drawer open, just left of its edge
+     * (follows it while it slides), never off the canvas's left side */
+    var px = Math.max(12, Math.min(WORLD_W - pw - 12, drawerLeftInCanvas() - pw - 12));
     ctx.fillStyle = "rgba(10,22,30," + (205 / 255).toFixed(4) + ")";
     ctx.fillRect(px, py, pw, ph);
     ctx.strokeStyle = "rgba(90,140,150," + (220 / 255).toFixed(4) + ")";
@@ -383,7 +449,8 @@
      * with the model off. */
     ctx.font = "11px monospace";
     ctx.fillStyle = "rgba(190,205,210," + (220 / 255).toFixed(4) + ")";
-    ctx.fillText("body " + s.info[4].toFixed(2) + "   elong " + s.info[5].toFixed(2),
+    ctx.fillText("body " + s.info[4].toFixed(2) + "   elong " + s.info[5].toFixed(2) +
+                 "   gen " + Math.round(s.info[6]),
                  px + 12, py + ph - 8);
     ctx.fillStyle = "rgba(150,175,180," + (200 / 255).toFixed(4) + ")";
     var hy = yTop - 18 + 11; /* text top at yTop-18, ~11px to baseline */
@@ -395,7 +462,33 @@
     for (i = 0; i < 12; i++) ctx.fillText(ACTION_NAMES[i], xA + 8, colY(i, 12, yTop, yBot) + 3);
   }
 
+  /* Scene layer (background, currents, food, creatures, predators): WebGL2
+   * when available (web/gl_renderer.js; one instanced draw per kind), else the
+   * 2D path below. Both read the same constants, so they draw the same scene;
+   * ?gl=0 forces 2D. Overlays (ring, HUD, inspector) are always 2D, on top. */
+  var LOOK = {
+    radii: RADII, segAlpha: SEG_ALPHA, minRadius: MIN_RADIUS, bodyScale: bodyScale,
+    clear: [0x0F / 255, 0x1E / 255, 0x19 / 255],
+    food: [0x97 / 255, 0xC6 / 255, 0x32 / 255],
+    predDigesting: [150 / 255, 60 / 255, 60 / 255],
+    predHunting: [220 / 255, 50 / 255, 50 / 255],
+    curTail: [110 / 255, 170 / 255, 215 / 255, 60 / 255],
+    curHead: [150 / 255, 205 / 255, 235 / 255, 130 / 255]
+  };
+  var glScene = null;
+  if (window.EvoGL && new URLSearchParams(location.search).get("gl") !== "0") {
+    glScene = EvoGL.create(WORLD_W, WORLD_H, bgImage, LOOK);
+  }
+
   function draw(s) {
+    if (glScene) glScene.resize(WORLD_W, WORLD_H);  /* world size changes on checkpoint load */
+    var layer = glScene ? glScene.draw(s, WORLD_W, WORLD_H) : null;
+    if (layer) ctx.drawImage(layer, 0, 0);
+    else drawScene2D(s);
+    drawOverlays(s);
+  }
+
+  function drawScene2D(s) {
     ctx.fillStyle = "#0F1E19";
     ctx.fillRect(0, 0, WORLD_W, WORLD_H);
     /* Background texture under everything, cover-scaled to the world (works at
@@ -452,7 +545,9 @@
       ctx.arc(s.preds[3 * p], s.preds[3 * p + 1], 6.5, 0, TAU);
       ctx.fill();
     }
+  }
 
+  function drawOverlays(s) {
     if (s.selIdx >= 0) {
       ctx.strokeStyle = RING_STYLE;
       ctx.lineWidth = 2;
@@ -467,23 +562,222 @@
     ctx.fillText(
       "pop " + fmt(st[0]) + "  food " + fmt(st[1]) + "  pred " + fmt(st[2]) +
       "  frame " + fmt(st[3]) + "  births " + fmt(st[4]) + "  deaths " + fmt(st[5]) +
-      "  gLen " + st[8].toFixed(1) + "  speed " + simSpeed + "x" + (paused ? " [PAUSED]" : ""),
+      "  gLen " + st[8].toFixed(1) +
+      (STATS_LEN > 10 ? "  gen " + fmt(st[10]) + " (avg " + st[9].toFixed(1) + ")" : "") +
+      "  speed " + simSpeed + "x" + (paused ? " [PAUSED]" : ""),
       10, 18);
     ctx.fillText("[Space] pause  [Up/Down] speed  [R] restart  [click] inspect", 10, 36);
 
     if (s.selIdx >= 0) drawInspector(s); /* last: above HUD */
   }
 
-  function frame() {
+  /* ---- frame budget: degrade agent count rather than stutter ----
+   * workMs = step + sync + draw for one frame. When its moving average stays
+   * over BUDGET_MS (of a 16.7 ms frame), first the speed steps back toward 1x;
+   * at 1x a target count is sized from the measured cost per creature, the
+   * surplus is removed uniformly at random (_evo_cull_to: favours no trait),
+   * and a birth cap (maxPopulation) holds it there. A birth cap alone is too
+   * slow — it only bites as creatures die, which takes up to maxAge (120 sim
+   * seconds). With sustained headroom and the population pressing on the cap,
+   * the cap is raised again. A governed run no longer replays from its seed;
+   * the status line says so, and the governor can be switched off. */
+  var BUDGET_MS = 12;
+  var MIN_CAP = 60;
+  /* Starting population per module (README.md, "Benchmarks"). */
+  var DEFAULT_POP_SINGLE = 300, DEFAULT_POP_THREADED = 600;
+  var workEma = 0, overFrames = 0, underFrames = 0;
+  var userCap = 0, autoCap = 0;
+  var governorOn = true;
+  var govNote = "";
+  var governed = false;   /* the governor has changed this run */
+  /* Frames ignored after a (re)start: the first ~2 s include JIT warm-up and
+   * buffer growth, which would otherwise read as "this machine is too slow". */
+  var WARMUP_FRAMES = 120, warmup = WARMUP_FRAMES;
+  function resetGovernor() {
+    workEma = 0; overFrames = 0; underFrames = 0; govNote = ""; governed = false;
+    warmup = WARMUP_FRAMES;
+  }
+  function applyCap() {
+    if (!Module || !Module._evo_set_param) return;
+    var eff = userCap > 0 && autoCap > 0 ? Math.min(userCap, autoCap) : (userCap || autoCap);
+    withCString("maxPopulation", function (ptr) { return Module._evo_set_param(ptr, eff); });
+  }
+  function govern(workMs, pop) {
+    if (warmup > 0) { warmup--; return; }
+    workEma = workEma ? workEma * 0.9 + workMs * 0.1 : workMs;
+    if (!governorOn || paused || turboState !== "live" || bench) return;
+    if (workEma > BUDGET_MS) { overFrames++; underFrames = 0; }
+    else if (workEma < BUDGET_MS * 0.5) { underFrames++; overFrames = 0; }
+    else { overFrames = 0; underFrames = 0; }
+    if (overFrames >= 30) {
+      overFrames = 0;
+      if (simSpeed > 1) {
+        setSpeed(simSpeed - 1);
+        govNote = "speed lowered to " + simSpeed + "x to hold 60 fps";
+      } else if (!autoCap || pop <= autoCap * 1.02) {
+        /* only tighten once the population has come down to the last cap */
+        var target = Math.max(MIN_CAP, Math.floor(pop * (BUDGET_MS * 0.8) / workEma));
+        if (!autoCap || target < autoCap) {
+          autoCap = target;
+          applyCap();
+          var removed = Module._evo_cull_to ? Module._evo_cull_to(autoCap) : 0;
+          selectedId = null;  /* the inspected creature may be gone */
+          governed = true;
+          govNote = (removed ? "removed " + removed + " at random, " : "") +
+                    "capped at " + autoCap + " to hold 60 fps";
+        }
+      }
+    } else if (underFrames >= 180 && autoCap && pop >= autoCap * 0.95) {
+      underFrames = 0;
+      autoCap = Math.round(autoCap * 1.15);
+      applyCap();
+      govNote = "population cap raised to " + autoCap;
+    }
+  }
+
+  /* ---- status line (DOM, readable at any canvas scale) ---- */
+  var fpsFrames = 0, fpsT0 = 0, fps = 0;
+  var stepEma = 0;   /* ms per sim step, for the status line */
+  function updateStatus(st) {
+    if (!statusEl) return;
+    var mode = threaded
+      ? "threaded × " + (Module._evo_threads ? Module._evo_threads() : "?")
+      : "single-threaded";
+    var parts = [
+      fps + " fps",
+      Math.round(st[0]) + " agents",
+      STATS_LEN > 10 ? "gen " + Math.round(st[10]) + " (avg " + st[9].toFixed(1) + ")" : "",
+      stepEma ? stepEma.toFixed(2) + " ms/step" : "",
+      mode
+    ];
+    var cap = userCap > 0 && autoCap > 0 ? Math.min(userCap, autoCap) : (userCap || autoCap);
+    if (cap) parts.push("cap " + cap + (autoCap && cap === autoCap ? " (auto)" : ""));
+    if (govNote) parts.push(govNote);
+    if (governed) parts.push("governed run: not replayable from its seed");
+    statusEl.textContent = parts.filter(Boolean).join("  ·  ");
+    statusEl.title = threaded ? "running the pthreads module: fast, NOT reproducible from the seed"
+                              : "running the single-threaded module (" + threadWhy + "): reproducible from the seed";
+  }
+
+  function frame(now) {
     if (Module) {
-      if (turboState === "live" && !paused) Module._evo_step(simSpeed);
+      var t0 = performance.now();
+      var stepped = 0;
+      if (turboState === "live" && !paused) {
+        stepped = bench ? 1 : simSpeed;
+        Module._evo_step(stepped);
+      }
+      var t1 = performance.now();
       /* while not 'live' the main sim is frozen: re-sync repacks the same
        * state, so this keeps drawing the last frame (never stale-black) */
       Module._evo_sync();
-      draw(snapshot(turboState === "live" ? resolveSelection() : -1));
+      var s = snapshot(turboState === "live" ? resolveSelection() : -1);
+      draw(s);
       if (turboState !== "live") drawTurboOverlay();
+      var t2 = performance.now();
+      if (stepped) {
+        var per = (t1 - t0) / stepped;
+        stepEma = stepEma ? stepEma * 0.9 + per * 0.1 : per;
+      }
+      govern(t2 - t0, s.n);
+      if (bench) benchFrame(now, t1 - t0, t2 - t1, s.n);
+      fpsFrames++;
+      if (!fpsT0) fpsT0 = now;
+      if (now - fpsT0 >= 500) {
+        fps = Math.round(fpsFrames * 1000 / (now - fpsT0));
+        fpsFrames = 0;
+        fpsT0 = now;
+        updateStatus(s.stats);
+      }
     }
     requestAnimationFrame(frame);
+  }
+
+  /* ---- ?bench: agents at a stable 60 fps, measured in this browser ----
+   * Pins the population at N (reseed floor = birth cap = N, so the count holds
+   * at N), steps once per frame, warms up, then records frame intervals, step
+   * time and draw time; repeats for growing N until the frame rate falls under
+   * 30. Results go to an overlay, the console, and window.EVO_BENCH.
+   * Keep the tab visible while it runs (hidden tabs throttle rAF).
+   * ?bench&threads=0 measures the single-threaded module on an isolated page. */
+  var bench = /[?&]bench(=|&|$)/.test(location.search) ? { results: [] } : null;
+  var BENCH_NS = [250, 500, 1000, 1500, 2000, 3000, 4000, 6000, 8000];
+  var BENCH_WARM = 90, BENCH_MEASURE = 300;
+  function benchNext() {
+    var b = bench;
+    if (b.i >= BENCH_NS.length) { benchDone(); return; }
+    b.n = BENCH_NS[b.i];
+    initWorld(42, b.n, { minPopulation: b.n, maxPopulation: b.n });
+    b.frame = 0; b.prev = 0; b.iv = []; b.step = []; b.draw = []; b.pop = [];
+  }
+  function quantile(a, q) {
+    var s = a.slice().sort(function (x, y) { return x - y; });
+    return s[Math.min(s.length - 1, Math.floor(q * s.length))];
+  }
+  function mean(a) { var t = 0; for (var i = 0; i < a.length; i++) t += a[i]; return t / a.length; }
+  function benchFrame(now, stepMs, drawMs, pop) {
+    var b = bench;
+    if (b.done) return;
+    b.frame++;
+    if (b.frame > BENCH_WARM) {
+      if (b.prev) b.iv.push(now - b.prev);
+      b.step.push(stepMs); b.draw.push(drawMs); b.pop.push(pop);
+    }
+    b.prev = now;
+    if (b.iv.length < BENCH_MEASURE) return;
+    var r = {
+      agents: Math.round(mean(b.pop)),
+      fps: +(1000 / mean(b.iv)).toFixed(1),
+      p95FrameMs: +quantile(b.iv, 0.95).toFixed(2),
+      stepMsMedian: +quantile(b.step, 0.5).toFixed(3),
+      drawMsMedian: +quantile(b.draw, 0.5).toFixed(3)
+    };
+    r.stable60 = r.fps >= 58 && r.p95FrameMs <= 20;
+    b.results.push(r);
+    benchShow();
+    if (r.fps < 30) { benchDone(); return; }
+    b.i++;
+    benchNext();
+  }
+  function benchEnv() {
+    return {
+      userAgent: navigator.userAgent,
+      hardwareConcurrency: navigator.hardwareConcurrency,
+      crossOriginIsolated: self.crossOriginIsolated === true,
+      module: threaded ? "threaded" : "single-threaded",
+      threads: Module._evo_threads ? Module._evo_threads() : 1,
+      renderer: glScene ? "webgl2" : "canvas2d",
+      canvas: canvas.width + "x" + canvas.height,
+      devicePixelRatio: window.devicePixelRatio
+    };
+  }
+  function benchShow() {
+    var out = el("benchout");
+    if (!out) {
+      out = document.createElement("pre");
+      out.id = "benchout";
+      document.body.appendChild(out);
+    }
+    var lines = ["evo_boids ?bench   " + JSON.stringify(benchEnv()), "",
+                 "agents     fps   p95 frame ms   step ms   draw ms   stable 60"];
+    bench.results.forEach(function (r) {
+      lines.push(String(r.agents).padStart(6) + String(r.fps).padStart(8) +
+                 String(r.p95FrameMs).padStart(15) + String(r.stepMsMedian).padStart(10) +
+                 String(r.drawMsMedian).padStart(10) + "   " + (r.stable60 ? "yes" : "no"));
+    });
+    if (bench.done) {
+      var best = bench.results.filter(function (r) { return r.stable60; }).pop();
+      lines.push("", "max agents at a stable 60 fps: " + (best ? best.agents : "none measured"));
+    } else {
+      lines.push("", "measuring " + bench.n + " agents…");
+    }
+    out.textContent = lines.join("\n");
+  }
+  function benchDone() {
+    bench.done = true;
+    window.EVO_BENCH = { env: benchEnv(), results: bench.results };
+    console.log("EVO_BENCH " + JSON.stringify(window.EVO_BENCH));
+    benchShow();
   }
 
   /* ---- control state helpers ---- */
@@ -501,7 +795,7 @@
     if (!Module) return;
     if (guardTurbo()) return;
     var str = Module.UTF8ToString(Module._evo_checkpoint());
-    var frameNo = Math.round(new Float64Array(Module.HEAPF64.buffer, Module._evo_stats(), 9)[3]);
+    var frameNo = Math.round(new Float64Array(heap(), Module._evo_stats(), STATS_LEN)[3]);
     var blob = new Blob([str], { type: "application/json" });
     var url = URL.createObjectURL(blob);
     var a = document.createElement("a");
@@ -519,6 +813,8 @@
       return;
     }
     selectedId = null;
+    warmup = WARMUP_FRAMES;  /* a load is a restart as far as frame timing goes */
+    workEma = 0;
     var w = Module._evo_width(), h = Module._evo_height();
     if (w !== WORLD_W || h !== WORLD_H) {
       WORLD_W = w; WORLD_H = h;
@@ -575,7 +871,7 @@
     selectedId = null; /* ids will be stale by exit */
     updateLocks();
     if (!turboWorker) { /* created once, reused across sessions */
-      turboWorker = new Worker("worker.js");
+      turboWorker = new Worker(ASSETS.worker);
       turboWorker.onmessage = onTurboMessage;
       turboWorker.onerror = function (ev) {
         showError("turbo worker failed: " + (ev.message || "could not load worker.js"));
@@ -584,7 +880,9 @@
       };
     }
     turboWorker.postMessage({ cmd: "start",
-                              checkpoint: Module.UTF8ToString(Module._evo_checkpoint()) });
+                              checkpoint: Module.UTF8ToString(Module._evo_checkpoint()),
+                              js: moduleUrls.js, wasm: moduleUrls.wasm,
+                              threads: Module._evo_threads ? Module._evo_threads() : 1 });
   }
   function exitTurbo() {
     if (turboState !== "turbo") return;
@@ -630,8 +928,8 @@
     var wx = (e.clientX - rect.left) * (canvas.width / rect.width);
     var wy = (e.clientY - rect.top) * (canvas.height / rect.height);
     var n = Module._evo_creature_count();
-    var segs = new Float32Array(Module.HEAPF32.buffer, Module._evo_creature_segments(), n * 12);
-    var ids = new Float64Array(Module.HEAPF64.buffer, Module._evo_creature_ids(), n);
+    var segs = new Float32Array(heap(), Module._evo_creature_segments(), n * 12);
+    var ids = new Float64Array(heap(), Module._evo_creature_ids(), n);
     var best = -1, bestD2 = 25 * 25;
     for (var i = 0; i < n; i++) {
       var dx = segs[12 * i] - wx, dy = segs[12 * i + 1] - wy;
@@ -729,7 +1027,7 @@
   }
   drawerEl.addEventListener("scroll", hideTip);
   /* basic (static-HTML) parameter labels, resolved via their input ids */
-  ["seed", "population", "toroidal", "bodyModel", "predators", "foodPatches", "currentStrength", "predatorEconomy"]
+  ["seed", "population", "toroidal", "bodyModel", "predators", "foodPatches", "currentStrength", "predatorEconomy", "governor"]
     .forEach(function (id) {
       var l = el(id).closest("label");
       if (l) attachTip(l, id);
@@ -753,21 +1051,59 @@
     var file = this.files && this.files[0];
     this.value = "";
     if (!file || !Module || guardTurbo()) return;
-    file.text().then(loadCheckpointText,
-                     function (err) { showError("could not read file: " + err); });
+    file.text().then(function (text) {
+      loadCheckpointText(text);
+      /* the file's own cap becomes the user cap; the governor starts fresh */
+      var cap = 0;
+      try { cap = (JSON.parse(text).config || {}).maxPopulation || 0; } catch (e) { /* load reported it */ }
+      userCap = cap;
+      autoCap = 0;
+      el("adv_maxPopulation").value = String(cap);
+      resetGovernor();
+    }, function (err) { showError("could not read file: " + err); });
+  });
+  el("governor").addEventListener("change", function () {
+    governorOn = this.checked;
+    if (!governorOn && autoCap) { autoCap = 0; applyCap(); }
+    govNote = "";
+    this.blur();
   });
 
   buildAdvancedUI();
   setSpeed(simSpeed);
 
   /* ---- boot ---- */
-  if (typeof createEvoBoids !== "function") {
-    showError("evo_boids.js not found — build the wasm module into web/ first");
+  if (!window.EvoLoader || !ASSETS) {
+    showError("loader.js / EVO_ASSETS missing from the page");
     return;
   }
-  createEvoBoids().then(function (m) {
-    Module = m;
-    if (restart()) clearError();
+  EvoLoader.load().then(function (r) {
+    Module = r.Module;
+    threaded = r.threaded;
+    threadWhy = r.why;
+    moduleUrls = { js: r.js, wasm: r.wasm };
+    if (Module._evo_stats_len) STATS_LEN = Module._evo_stats_len();
+    /* Thread count: ?nthreads=N, else every pre-spawned worker plus this
+     * thread (EvoLoader.poolThreads() — the -sPTHREAD_POOL_SIZE formula). */
+    var nt = parseInt(new URLSearchParams(location.search).get("nthreads"), 10);
+    if (threaded) Module._evo_set_threads(nt > 0 ? Math.min(nt, EvoLoader.poolThreads()) : EvoLoader.poolThreads());
+    /* The single-threaded module starts with fewer creatures (see the
+     * benchmark in README.md); either default can be changed in the drawer. */
+    el("population").value = String(threaded ? DEFAULT_POP_THREADED : DEFAULT_POP_SINGLE);
+    el("turbobtn").title = threaded
+      ? "run headless in a worker at full speed — no rendering, keeps running in background tabs; the hand-off is exact, but a threaded run is not reproducible"
+      : "run headless in a worker at full speed — no rendering, keeps running in background tabs; toggling is bit-exact";
+    el("modeline").textContent = (threaded
+      ? "module: threaded (" + Module._evo_threads() + " threads) — fast, not reproducible from the seed"
+      : "module: single-threaded — reproducible from the seed (" + threadWhy + ")") +
+      "; drawing: " + (glScene ? "WebGL2" : "canvas 2D");
+    if (bench) {
+      bench.i = 0;
+      benchNext();
+      clearError();
+    } else if (restart()) {
+      clearError();
+    }
     requestAnimationFrame(frame);
   }).catch(function (err) {
     showError("failed to load wasm module: " + err);

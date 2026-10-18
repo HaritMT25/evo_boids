@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(evo_boids VERSION 0.24.0 LANGUAGES CXX)
+project(evo_boids VERSION 0.25.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -34,7 +34,17 @@ add_compile_options(-ffp-contract=off)
 # runs. Default OFF keeps the fast parallel build.
 option(EVO_NO_OPENMP "Build single-threaded (deterministic at a fixed --seed)" OFF)
 
-if(EVO_NO_OPENMP)
+# Thread-pool switch. Runs the same per-creature loop on src/core/thread_pool.hpp
+# instead of OpenMP. This is how the Emscripten pthreads build parallelises (no
+# OpenMP runtime there); natively it exists to test that path (e.g. under
+# -fsanitize=thread). Same contract as OpenMP: NOT reproducible at a fixed seed.
+option(EVO_POOL_THREADS "Parallelise with the built-in thread pool instead of OpenMP" OFF)
+
+if(EMSCRIPTEN)
+    message(STATUS "Emscripten -> browser module only (EVO_POOL_THREADS=${EVO_POOL_THREADS})")
+elseif(EVO_POOL_THREADS)
+    message(STATUS "EVO_POOL_THREADS=ON -> thread-pool build (no OpenMP, not deterministic)")
+elseif(EVO_NO_OPENMP)
     message(STATUS "EVO_NO_OPENMP=ON -> serial, deterministic build (no OpenMP)")
 else()
     find_package(OpenMP)
@@ -50,20 +60,44 @@ if(OpenMP_CXX_FOUND)
     target_link_libraries(evo_core INTERFACE OpenMP::OpenMP_CXX)
     target_compile_definitions(evo_core INTERFACE USE_OPENMP)
 endif()
+if(EVO_POOL_THREADS)
+    target_compile_definitions(evo_core INTERFACE EVO_POOL_THREADS)
+    if(EMSCRIPTEN)
+        target_compile_options(evo_core INTERFACE -pthread)
+        target_link_options(evo_core INTERFACE -pthread)
+    else()
+        find_package(Threads REQUIRED)
+        target_link_libraries(evo_core INTERFACE Threads::Threads)
+    endif()
+endif()
+
+# ------------------------------------------------------------------
+# Emscripten: the browser module only (wasm/wasm.cmake), then stop —
+# no SFML window, no native tests. See CMakePresets.json (wasm-st, wasm-mt).
+# ------------------------------------------------------------------
+if(EMSCRIPTEN)
+    include(wasm/wasm.cmake)
+    return()
+endif()
 
 # ------------------------------------------------------------------
 # evo_boids — the SFML frontend (window, rendering, input).
-# SFML is required ONLY for this target.
+# SFML is required ONLY for this target; without it the core, the tests and
+# the benchmark still build.
 # ------------------------------------------------------------------
-find_package(SFML 2.6 COMPONENTS graphics window system REQUIRED)
-add_executable(evo_boids
-    src/app/main.cpp
-    src/render/sfml_renderer.cpp
-)
-target_link_libraries(evo_boids PRIVATE evo_core sfml-graphics sfml-window sfml-system)
-target_compile_definitions(evo_boids PRIVATE EVO_VERSION="${PROJECT_VERSION}")
-
-file(COPY ${CMAKE_SOURCE_DIR}/img DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
+find_package(SFML 2.6 COMPONENTS graphics window system QUIET)
+if(SFML_FOUND)
+    add_executable(evo_boids
+        src/app/main.cpp
+        src/render/sfml_renderer.cpp
+    )
+    target_link_libraries(evo_boids PRIVATE evo_core sfml-graphics sfml-window sfml-system)
+    target_compile_definitions(evo_boids PRIVATE EVO_VERSION="${PROJECT_VERSION}")
+    file(COPY ${CMAKE_SOURCE_DIR}/img DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
+else()
+    message(WARNING "SFML 2.6 not found: skipping the evo_boids app; core_tests, "
+                    "predator_smoke and core_bench still build")
+endif()
 
 # ------------------------------------------------------------------
 # core_tests — unit tests for the core. No SFML.

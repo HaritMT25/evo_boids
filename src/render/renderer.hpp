@@ -35,6 +35,8 @@ struct HudInfo {
     int births = 0;
     int deaths = 0;
     float avgGenome = 0.0f;
+    float genMean = 0.0f;        // generation depth across the live set
+    unsigned genMax = 0;
     int simSpeed = 1;
     int fps = 0;
     bool paused = false;

@@ -15,6 +15,7 @@
 #include <cstring>
 #include <limits>
 #include <string>
+#include <atomic>
 
 #include "core/vec2.hpp"
 #include "core/color.hpp"
@@ -907,7 +908,7 @@ static void test_topological_neighbors() {
     // OpenMP the parallel phase draws from per-thread RNGs, so a fixed seed
     // does not pin the run (see EVO_NO_OPENMP in CMakeLists.txt). These two
     // checks compare whole runs, so they only mean anything there.
-#ifndef USE_OPENMP
+#ifdef EVO_DETERMINISTIC
     // Same seed + same cap must reproduce exactly: the nearest-N selection is
     // ordered by (distanceSq, index), so equidistant neighbours can't reorder.
     {
@@ -931,7 +932,7 @@ static void test_topological_neighbors() {
     // nearest-first rounds differently from summing in spatial-index order — so
     // this checks agreement to float tolerance after a single step, in a world
     // sparse enough that nobody has MAX_TOPOLOGICAL_NEIGHBORS neighbours.
-#ifndef USE_OPENMP
+#ifdef EVO_DETERMINISTIC
     {
         rng.seed(7u);
         World huge; huge.cfg.maxNeighbors = MAX_TOPOLOGICAL_NEIGHBORS;
@@ -1104,7 +1105,7 @@ static void test_checkpoint() {
     // --- THE test: save, reload, continue == never interrupted ---
     // Only meaningful in the serial build; the OpenMP build is not run-to-run
     // reproducible at all, so there is no fixed continuation to compare against.
-#ifndef USE_OPENMP
+#ifdef EVO_DETERMINISTIC
     {
         const int WARM = 220, AFTER = 140;
 
@@ -1276,7 +1277,7 @@ static void test_toroidal() {
         else     CHECK(far == 0.0f);
     }
 
-#ifndef USE_OPENMP
+#ifdef EVO_DETERMINISTIC
     // --- toroidal + every hidden-state subsystem: resume is still bit-exact,
     //     runs are repeatable, and positions stay in-bounds ---
     {
@@ -1446,7 +1447,7 @@ static void test_reproductive_isolation() {
     // promises to reproduce — under OpenMP the parallel phase draws from
     // per-thread RNGs and a fixed seed does not pin the run. Same guard the
     // topological, checkpoint and toroidal tests use.
-#ifndef USE_OPENMP
+#ifdef EVO_DETERMINISTIC
     // --- a permissive gate is exactly a no-op ---
     // Threshold far above the largest achievable distance must reproduce the
     // ungated run bit for bit: the gate consumes no rng and changes no order.
@@ -1511,7 +1512,7 @@ static void test_reproductive_isolation() {
     }
 
     // --- determinism with the gate on (serial build only, as above) ---
-#ifndef USE_OPENMP
+#ifdef EVO_DETERMINISTIC
     {
         const int STEPS = 300;
         std::uint64_t fp[2] = {0, 0};
@@ -1610,7 +1611,7 @@ static void test_repro_graph() {
     // the warm-up rather than the ring.
     // Serial-only: >64 is a whole-run birth count, which the OpenMP build's
     // per-thread rngs do not pin (same guard as the fingerprint tests).
-#ifndef USE_OPENMP
+#ifdef EVO_DETERMINISTIC
     {
         rng.seed(80808u);
         World w;
@@ -1665,7 +1666,7 @@ static void test_repro_graph() {
         // to form only 2-member components legitimately reports 0. Births
         // themselves do happen in both builds, so the assertion above stays
         // unguarded. Same guard, and the same reason, as the archive block below.
-#ifndef USE_OPENMP
+#ifdef EVO_DETERMINISTIC
         CHECK(mixed.reproComponents() >= 1);
 #endif
 
@@ -1682,7 +1683,7 @@ static void test_repro_graph() {
     // --- the archive log is bounded and decimates like the death log ---
     // Serial-only for the same reason as the ring test: >64 is a whole-run
     // count that OpenMP's per-thread rngs do not pin.
-#ifndef USE_OPENMP
+#ifdef EVO_DETERMINISTIC
     {
         rng.seed(31415u);
         World w;
@@ -2206,7 +2207,7 @@ static void test_body_model() {
     // --- 4. determinism with the flag on, and the flag is not a no-op ----
     // Whole-run comparisons, so serial build only — the same guard the
     // topological, checkpoint, toroidal and isolation tests use.
-#ifndef USE_OPENMP
+#ifdef EVO_DETERMINISTIC
     {
         auto runFp = [](bool on, float mut, bool tri = false) {
             rng.seed(80808u);
@@ -2464,7 +2465,7 @@ static void test_body_model() {
     // going, reload, keep going, and the two futures must be identical. A
     // dropped or mis-restored body column changes the speed ceiling and the
     // metabolic burn, so it cannot survive this.
-#ifndef USE_OPENMP
+#ifdef EVO_DETERMINISTIC
     {
         rng.seed(1357911u);
         World a;
@@ -2622,7 +2623,7 @@ static void test_repro_mitigations() {
     // Whole-run comparisons below are serial-build only, for the reason the
     // isolation, toroidal and checkpoint tests give: the OpenMP parallel phase
     // draws from per-thread RNGs and a fixed seed does not pin the run.
-#ifndef USE_OPENMP
+#ifdef EVO_DETERMINISTIC
     // --- both knobs off is bit-for-bit the v0.21 hard gate ----------------
     // The load-bearing no-op proof: <=0 must mean "off" for BOTH spellings
     // (0 and negative), and the off-path must not touch the rng sequence.
@@ -2892,7 +2893,7 @@ static void test_repro_mitigations() {
     // The load-bearing checkpoint assertion, on the mitigation path: save, keep
     // going, reload, keep going, and the two futures must be identical. The
     // fingerprint covers both counters, so a dropped one fails here.
-#ifndef USE_OPENMP
+#ifdef EVO_DETERMINISTIC
     {
         rng.seed(1357911u);
         World a;
@@ -2977,6 +2978,103 @@ static void test_repro_mitigations() {
     }
 }
 
+// ---------------------------------------------------------------
+// Generation counter (display-only, v0.25.0). Founders — spawned or reseeded —
+// are generation 0 and are exactly the creatures with lineageId == id; every
+// newborn is max(source records) + 1, so it is >= 1. The column survives a
+// checkpoint round trip, a checkpoint without it (pre-0.25) loads with every
+// creature at 0, and a malformed one is rejected. Holds in every build.
+static void test_generation() {
+    rng.seed(4242u);
+    World w;
+    w.init(800, 600, 200);
+    bool allZero = true;
+    for (const auto& c : w.creatures) if (c.generation != 0u) allZero = false;
+    CHECK(allZero);
+
+    for (int i = 0; i < 4000; ++i) w.update(0.016f);
+    CHECK(w.totalBirths > 0);
+    bool founderIffZero = true;
+    std::uint32_t maxGen = 0;
+    for (const auto& c : w.creatures) {
+        if ((c.lineageId == c.id) != (c.generation == 0u)) founderIffZero = false;
+        maxGen = std::max(maxGen, c.generation);
+    }
+    CHECK(founderIffZero);
+    CHECK(maxGen >= 1u);
+    const GenerationSpan span = generationSpan(w);
+    CHECK(span.max == maxGen);
+    CHECK(span.mean >= 0.0 && span.mean <= (double)span.max);
+
+    // round trip keeps every value
+    const std::string blob = checkpoint::serialize(w, "test");
+    World r;
+    std::string err;
+    CHECK(checkpoint::deserialize(blob, r, err));
+    bool same = r.creatures.size() == w.creatures.size();
+    for (size_t i = 0; same && i < w.creatures.size(); ++i)
+        same = r.creatures[i].generation == w.creatures[i].generation;
+    CHECK(same);
+
+    const std::string key = ",\"generation\":[";
+    const size_t at = blob.find(key);
+    CHECK(at != std::string::npos);
+    if (at == std::string::npos) return;
+
+    // a checkpoint written before the column existed loads at generation 0
+    std::string old = blob;
+    old.erase(at, old.find(']', at) - at + 1);
+    World o;
+    CHECK(checkpoint::deserialize(old, o, err));
+    bool zero = !o.creatures.empty();
+    for (const auto& c : o.creatures) if (c.generation != 0u) zero = false;
+    CHECK(zero);
+
+    // a negative value is a corrupt file: rejected, not wrapped to 2^32-1
+    std::string bad = blob;
+    const size_t v0 = at + key.size();
+    bad.replace(v0, bad.find_first_of(",]", v0) - v0, "-1");
+    World b;
+    CHECK(!checkpoint::deserialize(bad, b, err));
+}
+
+#ifdef EVO_POOL_THREADS
+// ---------------------------------------------------------------
+// Thread pool (the Emscripten pthreads path, testable natively with
+// -DEVO_POOL_THREADS=ON): every index is visited exactly once, by a thread id
+// in range, for every thread count / size / chunk shape, across thousands of
+// back-to-back dispatches (a lost wake-up would hang here rather than pass).
+static void test_thread_pool() {
+    evo_par::Pool& pool = evo_par::Pool::instance();
+    const int maxT = evo_par::Pool::maxThreads();
+    bool exact = true, tidsOk = true;
+    int dispatches = 0;
+    for (int t : {1, 2, 3, maxT}) {
+        pool.setThreads(t);
+        CHECK(pool.threads() == std::min(t, maxT));
+        for (int n : {0, 1, 15, 16, 17, 1000, 4099}) {
+            for (int chunk : {1, 16, 64}) {
+                for (int rep = 0; rep < 25; ++rep) {
+                    std::vector<int> hits((size_t)n, 0);  // chunks are disjoint: no two threads share an index
+                    std::atomic<int> badTid{0};
+                    pool.run(n, chunk, [&](int lo, int hi, int tid) {
+                        if (tid < 0 || tid >= pool.threads()) badTid.fetch_add(1);
+                        for (int i = lo; i < hi; ++i) hits[(size_t)i]++;
+                    });
+                    ++dispatches;
+                    for (int h : hits) if (h != 1) exact = false;
+                    if (badTid.load()) tidsOk = false;
+                }
+            }
+        }
+    }
+    CHECK(exact);
+    CHECK(tidsOk);
+    CHECK(dispatches == 4 * 7 * 3 * 25);
+    pool.setThreads(maxT);  // leave it as World expects
+}
+#endif
+
 int main() {
     std::printf("=== evo_boids core tests (no SFML linked) ===\n");
     test_portable_mt19937();
@@ -3001,6 +3099,10 @@ int main() {
     test_repro_graph();
     test_body_model();
     test_repro_mitigations();
+    test_generation();
+#ifdef EVO_POOL_THREADS
+    test_thread_pool();
+#endif
 
     std::printf("---------------------------------------------\n");
     std::printf("%d checks, %d failures\n", g_checks, g_failures);

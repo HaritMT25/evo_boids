@@ -1,15 +1,23 @@
 "use strict";
 /* evo_boids TURBO worker — steps the sim headless at full speed, no rendering.
  * Classic worker (no modules). Protocol:
- *   in : {cmd:'start', checkpoint: string} -> load checkpoint, run chunked loop
+ *   in : {cmd:'start', checkpoint: string, js, wasm, threads}
+ *                                          -> load the module the page uses
+ *                                             (once), load checkpoint, run
+ *                                             chunked loop
  *   in : {cmd:'stop'}                      -> finish current chunk, post the
  *                                             checkpoint back, go idle
  *   out: {type:'stats', frame, pop, food, pred, stepsPerSec, totalSteps} ~4x/s
  *   out: {type:'checkpoint', json}
  *   out: {type:'error', message}
  * Never calls _evo_sync or any render export; dt is fixed inside _evo_step —
- * no wall-clock time is ever passed to the sim. */
-importScripts("evo_boids.js");
+ * no wall-clock time is ever passed to the sim.
+ *
+ * The page passes the module script/wasm URLs it loaded, so a threaded page
+ * runs Turbo threaded too (a dedicated worker inherits the page's cross-origin
+ * isolation). If the threaded module cannot start here, the single-threaded
+ * one would need its own URLs, so the error is reported and the page keeps its
+ * state — nothing is lost. */
 
 var Module = null;
 var modulePromise = null;
@@ -30,9 +38,18 @@ var pump = new MessageChannel();
 pump.port1.onmessage = runChunk;
 function scheduleChunk() { pump.port2.postMessage(0); }
 
-function ensureModule() {
+function ensureModule(msg) {
   if (!modulePromise) {
-    modulePromise = createEvoBoids().then(function (m) { Module = m; return m; });
+    var js = msg.js || "evo_boids.js", wasm = msg.wasm || "evo_boids.wasm";
+    importScripts(js);
+    modulePromise = createEvoBoids({
+      locateFile: function (path) { return path.slice(-5) === ".wasm" ? wasm : path; },
+      mainScriptUrlOrBlob: js
+    }).then(function (m) {
+      Module = m;
+      if (msg.threads && Module._evo_set_threads) Module._evo_set_threads(msg.threads);
+      return m;
+    });
   }
   return modulePromise;
 }
@@ -50,7 +67,10 @@ onmessage = function (e) {
   var msg = e.data || {};
   if (msg.cmd === "start") {
     if (running) return;
-    ensureModule().then(
+    var p;
+    try { p = ensureModule(msg); }
+    catch (err) { postMessage({ type: "error", message: "wasm load failed: " + err }); return; }
+    p.then(
       function () { startRun(String(msg.checkpoint)); },
       function (err) { postMessage({ type: "error", message: "wasm load failed: " + err }); }
     );

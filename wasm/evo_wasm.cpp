@@ -9,12 +9,18 @@
 // serial build bit for bit (proven by wasm/parity.sh; the checkpoint JSON is
 // the oracle). step() takes a STEP COUNT, never wall-clock time.
 //
+// The same source also builds the threaded module (EVO_POOL_THREADS, see
+// wasm/wasm.cmake): identical API, but the per-creature phase runs on a thread
+// pool, so a run is NOT reproducible — the single-threaded module stays the
+// reference.
+//
 // Buffer lifetime: getters return pointers into buffers repacked by
 // evo_sync(); pointers are valid until the next evo_sync/evo_init call, and
 // wasm memory growth can move the heap — JS must re-create typed-array views
 // after every sync and never cache them.
 #include <cstdint>
 #include <cstring>
+#include <cstdio>
 #include <cmath>
 #include <string>
 #include <vector>
@@ -22,6 +28,7 @@
 #include "core/world.hpp"
 #include "core/checkpoint_io.hpp"
 #include "core/random.hpp"
+#include "core/stats.hpp"
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
@@ -48,8 +55,21 @@ std::vector<double>  g_ids;        // N
 std::vector<float>   g_food;       // F*2
 std::vector<float>   g_predators;  // P*3: x, y, digestTimer
 std::vector<float>   g_current;    // cols*rows*2
-double g_stats[9] = {};
+// evo_stats() layout — web/renderer.js reads STATS_LEN of them; change both:
+// 0 creatures, 1 food, 2 predators, 3 frame, 4 births (last step), 5 deaths
+// (last step), 6 total births, 7 total deaths, 8 mean genome length,
+// 9 mean generation, 10 max generation
+constexpr int kStatsLen = 11;
+double g_stats[kStatsLen] = {};
 int g_currentCols = 0, g_currentRows = 0;
+
+// The last successful evo_init arguments, so evo_reset() can replay them.
+struct InitArgs {
+    unsigned seed = 0;
+    int width = 0, height = 0, population = 0;
+    std::string cfgJson;
+    bool valid = false;
+} g_lastInit;
 
 constexpr int kCurrentStep = 64;   // overlay lattice pitch, mirrors SfmlRenderer
 
@@ -131,7 +151,137 @@ EVO_EXPORT int evo_init(unsigned seed, int width, int height, int population,
     g_world = new World();
     g_world->cfg = cfg;
     g_world->init(width, height, population);
+
+    g_lastInit.seed = seed;
+    g_lastInit.width = width;
+    g_lastInit.height = height;
+    g_lastInit.population = population;
+    g_lastInit.cfgJson = (cfgJson && cfgJson[0]) ? cfgJson : "";
+    g_lastInit.valid = true;
     return 1;
+}
+
+// Re-run the last evo_init with the same arguments: same seed and config, so in
+// the single-threaded module the run replays exactly. Live parameter changes
+// made since (evo_set_param) are dropped.
+EVO_EXPORT int evo_reset() {
+    if (!g_lastInit.valid) { g_error = "evo_reset before any successful evo_init"; return 0; }
+    const InitArgs a = g_lastInit;  // evo_init overwrites g_lastInit
+    return evo_init(a.seed, a.width, a.height, a.population,
+                    a.cfgJson.empty() ? nullptr : a.cfgJson.c_str());
+}
+
+// Change one parameter of the running world. Only parameters the step reads
+// fresh every tick are accepted; anything baked in at init (world size,
+// currents, food patches, predator count, the toroidal grid) needs a restart.
+// All accepted values are non-negative. Returns 0 and sets evo_last_error() on
+// refusal; the config is left unchanged.
+EVO_EXPORT int evo_set_param(const char* name, double value) {
+    g_error.clear();
+    if (!g_world) { g_error = "no world (call evo_init first)"; return 0; }
+    static const char* const kLive[] = {
+        "maxPopulation", "minPopulation", "targetFood", "foodSpawnBase", "foodSpawnAmp",
+        "foodEnergy", "metabolicRate", "moveCost", "geneCost", "maxAge", "reproEnergy",
+        "newbornEnergy", "mutationMultiplier", "minSpeed", "maxSpeed",
+    };
+    bool live = false;
+    for (const char* k : kLive) if (name && std::strcmp(name, k) == 0) { live = true; break; }
+    if (!live) {
+        g_error = std::string("not a live parameter (change it and restart): ") + (name ? name : "(null)");
+        return 0;
+    }
+    if (!std::isfinite(value) || value < 0.0) {
+        g_error = std::string(name) + " must be finite and >= 0";
+        return 0;
+    }
+    // Route through the checkpoint config reader so the field mapping (and the
+    // int/float typing) is the one place that already defines it.
+    char num[40];
+    std::snprintf(num, sizeof num, "%.9g", value);
+    const std::string json = std::string("{\"config\":{\"") + name + "\":" + num + "}}";
+    jsonm::Value root;
+    std::string err;
+    if (!jsonm::Parser::parse(json, root, err)) { g_error = "internal: " + err; return 0; }
+    SimConfig cfg = g_world->cfg;
+    checkpoint::readConfig(root, cfg);
+    clampConfig(cfg);
+    g_world->cfg = cfg;
+    return 1;
+}
+
+// ---- Threading -------------------------------------------------------------
+// 1 in the pthreads module, 0 in the single-threaded one.
+EVO_EXPORT int evo_threaded() {
+#ifdef EVO_POOL_THREADS
+    return 1;
+#else
+    return 0;
+#endif
+}
+EVO_EXPORT int evo_max_threads() {
+#ifdef EVO_POOL_THREADS
+    return evo_par::Pool::maxThreads();
+#else
+    return 1;
+#endif
+}
+EVO_EXPORT int evo_threads() {
+#ifdef EVO_POOL_THREADS
+    return evo_par::Pool::instance().threads();
+#else
+    return 1;
+#endif
+}
+// Set the thread count (clamped to [1, evo_max_threads()]); returns the count
+// in effect. A no-op in the single-threaded module.
+EVO_EXPORT int evo_set_threads(int n) {
+#ifdef EVO_POOL_THREADS
+    evo_par::Pool::instance().setThreads(n);
+#else
+    (void)n;
+#endif
+    return evo_threads();
+}
+
+// Remove creatures uniformly at random until at most n remain; returns how many
+// were removed. Used by the page's frame-budget governor (web/renderer.js) to
+// shed agents immediately instead of waiting for the birth cap to act through
+// deaths. Uniform, so it favours no trait. Not a death: no death log entry and
+// no counters. It draws from its own SplitMix64 seeded by the frame number, so
+// the simulation's rng stream is untouched — but the run itself has been
+// changed, so it no longer replays from its seed (the page says so).
+// Safe between steps: nothing in World keeps creature indices across update()
+// (the pairing log is keyed by Creature::id).
+EVO_EXPORT int evo_cull_to(int n) {
+    if (!g_world || n < 0) return 0;
+    std::vector<Creature>& cs = g_world->creatures;
+    const size_t total = cs.size();
+    if (total <= (size_t)n) return 0;
+    const size_t k = total - (size_t)n;
+
+    std::uint64_t s = 0x9E3779B97F4A7C15ull ^ (std::uint64_t)g_world->frame;
+    auto next = [&s]() {
+        std::uint64_t z = (s += 0x9E3779B97F4A7C15ull);
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+        return z ^ (z >> 31);
+    };
+    std::vector<size_t> idx(total);
+    for (size_t i = 0; i < total; ++i) idx[i] = i;
+    std::vector<char> drop(total, 0);
+    for (size_t i = 0; i < k; ++i) {  // partial Fisher-Yates: the first k picks
+        const size_t j = i + (size_t)(next() % (total - i));
+        std::swap(idx[i], idx[j]);
+        drop[idx[i]] = 1;
+    }
+    size_t w = 0;
+    for (size_t r = 0; r < total; ++r) {
+        if (drop[r]) continue;
+        if (w != r) cs[w] = std::move(cs[r]);
+        ++w;
+    }
+    cs.resize(w);
+    return (int)k;
 }
 
 // Advance n fixed steps. dt is pinned to the native headless path's 0.016f —
@@ -211,6 +361,9 @@ EVO_EXPORT void evo_sync() {
     g_stats[6] = (double)w.totalBirths;
     g_stats[7] = (double)w.totalDeaths;
     g_stats[8] = avgGenome;
+    const GenerationSpan gen = generationSpan(w);
+    g_stats[9] = gen.mean;
+    g_stats[10] = (double)gen.max;
 }
 
 EVO_EXPORT int evo_creature_count()             { return g_world ? (int)g_world->creatures.size() : 0; }
@@ -230,6 +383,7 @@ EVO_EXPORT int evo_current_cols()               { return g_currentCols; }
 EVO_EXPORT int evo_current_rows()               { return g_currentRows; }
 EVO_EXPORT const float* evo_current_grid()      { return g_current.data(); }
 EVO_EXPORT const double* evo_stats()            { return g_stats; }
+EVO_EXPORT int evo_stats_len()                  { return kStatsLen; }
 EVO_EXPORT int evo_width()                      { return g_world ? g_world->width : 0; }
 EVO_EXPORT int evo_height()                     { return g_world ? g_world->height : 0; }
 
@@ -280,9 +434,9 @@ EVO_EXPORT const char* evo_last_error() { return g_error.c_str(); }
 // drawNeuralOverlay): lastSensors / neuron outputs / lastActions, and the
 // flattened connection list decoded via asGene().
 namespace {
-// 6 doubles, in this order — web/renderer.js reads INSPECT_INFO_LEN of them and
+// 7 doubles, in this order — web/renderer.js reads INSPECT_INFO_LEN of them and
 // the two must be changed together.
-double g_inspInfo[6] = {};                 // id, speed, foodReserves, age, bodySize, bodyElong
+double g_inspInfo[7] = {};                 // id, speed, foodReserves, age, bodySize, bodyElong, generation
 std::vector<float> g_inspSensors;          // NUM_SENSES
 std::vector<float> g_inspHidden;           // MAX_INTERNAL_NEURONS
 std::vector<float> g_inspActions;          // NUM_ACTIONS
@@ -299,6 +453,7 @@ EVO_EXPORT int evo_inspect(int index) {
     g_inspInfo[3] = (double)c.age;
     g_inspInfo[4] = (double)c.bodySize;
     g_inspInfo[5] = (double)c.bodyElong;
+    g_inspInfo[6] = (double)c.generation;
 
     g_inspSensors.assign(c.lastSensors, c.lastSensors + NUM_SENSES);
     g_inspActions.assign(c.lastActions, c.lastActions + NUM_ACTIONS);

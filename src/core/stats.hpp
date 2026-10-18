@@ -236,6 +236,25 @@ struct WorldStats {
     int   totalSoftBirths               = 0;
 };
 
+// Generation depth across the live set, for the two HUDs. Deliberately not a
+// WorldStats field, so the CSV schema is unchanged.
+struct GenerationSpan {
+    double        mean = 0.0;
+    std::uint32_t max  = 0;
+};
+inline GenerationSpan generationSpan(const World& w) {
+    GenerationSpan g;
+    std::size_t n = 0;
+    for (const Creature& c : w.creatures) {
+        if (!c.alive) continue;
+        g.mean += (double)c.generation;
+        if (c.generation > g.max) g.max = c.generation;
+        ++n;
+    }
+    if (n) g.mean /= (double)n;
+    return g;
+}
+
 // Compute a snapshot from the current world state.
 inline WorldStats computeStats(const World& w) {
     WorldStats s;

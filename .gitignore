@@ -14,3 +14,9 @@ runs/
 .idea/
 *.swp
 .DS_Store
+
+# research log: kept local, never published
+docs/evo_boids_context.md
+
+# deploy output (wasm/build_site.sh)
+dist/

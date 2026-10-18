@@ -19,6 +19,11 @@ struct Creature {
                            // from parent1 at birth. Lets the cluster map colour by
                            // clade and lets selective sweeps be measured. Dynamics-
                            // neutral (integer copy only; never touches the rng).
+    std::uint32_t generation = 0;  // 0 for a spawned/reseeded founder, else
+                           // max(source records' generation) + 1 at birth.
+                           // Generations overlap (continuous birth and death),
+                           // so this is a depth count, not a synchronised epoch.
+                           // Display-only and dynamics-neutral, like lineageId.
     Vec2 pos;
     Vec2 vel;
     Vec2 lastMoveDir = {1.0f, 0.0f}; // biosim4: last movement direction

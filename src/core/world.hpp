@@ -20,6 +20,16 @@
 #include "cluster_projection.hpp"
 #include "isolation.hpp"
 #include "repro_graph.hpp"
+#ifdef EVO_POOL_THREADS
+#include "thread_pool.hpp"
+#endif
+
+// A fixed --seed reproduces a whole run only in the single-threaded build. Both
+// threaded paths (OpenMP natively, the thread pool under Emscripten) give each
+// thread its own rng, so tests that compare whole runs key off this.
+#if !defined(USE_OPENMP) && !defined(EVO_POOL_THREADS)
+#define EVO_DETERMINISTIC 1
+#endif
 
 struct Food {
     Vec2 pos;
@@ -521,21 +531,14 @@ public:
         // PARALLEL PHASE: sensors + neural net + movement
         // Each creature only modifies itself. Read-only on quadtrees.
         // ============================================================
-        #ifdef USE_OPENMP
-        #pragma omp parallel
-        #endif
-        {
-        // Per-thread scratch: one set per thread under OpenMP, a single reused
-        // set in the serial build. The spatial queries inside computeSensors
-        // reuse these buffers instead of allocating per creature each tick.
-        SensorScratch scratch;
-
-        #ifdef USE_OPENMP
-        #pragma omp for schedule(dynamic, 16) reduction(+:gNs,fNs,mNs)
-        #endif
-        for (int i = 0; i < numCreatures; ++i) {
+        // One creature's step. It writes only creature i, pending[i], the
+        // caller's scratch and the caller's three profiling sums, so any
+        // partition of [0, numCreatures) across threads is race-free. Shared by
+        // the serial, OpenMP and thread-pool paths below.
+        auto stepCreature = [&](int i, SensorScratch& scratch,
+                                double& gAcc, double& fAcc, double& mAcc) {
             Creature& c = creatures[i];
-            if (!c.alive) continue;
+            if (!c.alive) return;
 
             std::chrono::steady_clock::time_point ta, tb, tc;
             if (prof_) ta = std::chrono::steady_clock::now();
@@ -679,12 +682,45 @@ public:
 
             if (prof_) {
                 const auto td = std::chrono::steady_clock::now();
-                gNs += std::chrono::duration<double, std::nano>(tb - ta).count();
-                fNs += std::chrono::duration<double, std::nano>(tc - tb).count();
-                mNs += std::chrono::duration<double, std::nano>(td - tc).count();
+                gAcc += std::chrono::duration<double, std::nano>(tb - ta).count();
+                fAcc += std::chrono::duration<double, std::nano>(tc - tb).count();
+                mAcc += std::chrono::duration<double, std::nano>(td - tc).count();
             }
+        };
+
+#ifdef EVO_POOL_THREADS
+        // Thread-pool path (the Emscripten pthreads build; thread_pool.hpp).
+        // Same partition as the OpenMP schedule: dynamic chunks of 16.
+        {
+            evo_par::Pool& pool = evo_par::Pool::instance();
+            const int T = pool.threads();
+            if ((int)poolScratch_.size() < T) poolScratch_.resize(T);
+            // Per-thread sums, one cache line apart so the threads don't
+            // contend on them.
+            struct alignas(64) Sums { double g = 0, f = 0, m = 0; };
+            std::vector<Sums> sums((size_t)T);
+            pool.run(numCreatures, 16, [&](int lo, int hi, int tid) {
+                Sums& s = sums[(size_t)tid];
+                for (int i = lo; i < hi; ++i) stepCreature(i, poolScratch_[(size_t)tid], s.g, s.f, s.m);
+            });
+            for (const Sums& s : sums) { gNs += s.g; fNs += s.f; mNs += s.m; }
         }
+#else
+        #ifdef USE_OPENMP
+        #pragma omp parallel
+        #endif
+        {
+        // Per-thread scratch: one set per thread under OpenMP, a single reused
+        // set in the serial build. The spatial queries inside computeSensors
+        // reuse these buffers instead of allocating per creature each tick.
+        SensorScratch scratch;
+
+        #ifdef USE_OPENMP
+        #pragma omp for schedule(dynamic, 16) reduction(+:gNs,fNs,mNs)
+        #endif
+        for (int i = 0; i < numCreatures; ++i) stepCreature(i, scratch, gNs, fNs, mNs);
         } // end parallel region
+#endif
 
         if (prof_) {
             prof.parWallNs += std::chrono::duration<double, std::nano>(clk::now() - tPar0).count();
@@ -812,6 +848,9 @@ private:
     SpatialGrid foodGrid_;
     CurrentField current_;          // ocean flow (off unless cfg.currentStrength>0)
     std::vector<Vec2> foodPatches_; // patch centres (empty => uniform food spawn)
+#ifdef EVO_POOL_THREADS
+    std::vector<SensorScratch> poolScratch_;  // one per pool thread, reused across steps
+#endif
 
     // The scripted hunt + (Stage B) energy economy. For each predator: find the
     // nearest LIVING prey in its detection radius, steer toward it (else wander),
@@ -1098,6 +1137,7 @@ private:
                                           m.y - baby.vel.y * bi * 4.0f };
                 }
                 newborns.back().lineageId = c1.lineageId;   // inherit maternal line
+                newborns.back().generation = std::max(c1.generation, c2.generation) + 1;
 
                 // --- Tier-1 body inheritance (v0.23.0) --------------------
                 // THE RANDOM STREAM IS DEFINED HERE. Read before editing:

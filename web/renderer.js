@@ -732,7 +732,15 @@
       stepMsMedian: +quantile(b.step, 0.5).toFixed(3),
       drawMsMedian: +quantile(b.draw, 0.5).toFixed(3)
     };
-    r.stable60 = r.fps >= 58 && r.p95FrameMs <= 20;
+    /* The lightest load (the first N) shows the display's own refresh rate.
+     * On a display at or above 60 Hz "stable" means 60 fps; on a slower one
+     * (some laptops drop to ~57 Hz on battery or when idle) 60 fps cannot be
+     * measured, so it means holding the display rate instead, and the report
+     * says which. */
+    if (!b.displayFps) b.displayFps = r.fps;
+    r.stable60 = b.displayFps >= 58
+      ? r.fps >= 58 && r.p95FrameMs <= 20
+      : r.fps >= 0.97 * b.displayFps && r.p95FrameMs <= 1.2 * 1000 / b.displayFps;
     b.results.push(r);
     benchShow();
     if (r.fps < 30) { benchDone(); return; }
@@ -767,7 +775,9 @@
     });
     if (bench.done) {
       var best = bench.results.filter(function (r) { return r.stable60; }).pop();
-      lines.push("", "max agents at a stable 60 fps: " + (best ? best.agents : "none measured"));
+      var at = bench.displayFps >= 58 ? "a stable 60 fps"
+             : "the display's " + bench.displayFps + " Hz (it cannot show 60 fps)";
+      lines.push("", "max agents at " + at + ": " + (best ? best.agents : "none measured"));
     } else {
       lines.push("", "measuring " + bench.n + " agents…");
     }
@@ -775,7 +785,7 @@
   }
   function benchDone() {
     bench.done = true;
-    window.EVO_BENCH = { env: benchEnv(), results: bench.results };
+    window.EVO_BENCH = { env: benchEnv(), displayFps: bench.displayFps, results: bench.results };
     console.log("EVO_BENCH " + JSON.stringify(window.EVO_BENCH));
     benchShow();
   }

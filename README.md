@@ -124,14 +124,14 @@ wasm/parity.sh                   # native serial == wasm, byte for byte
 
 All numbers were measured on one machine on 2026-10-18:
 
-- Intel Core i7-1165G7 (4 cores / 8 threads), 16 GB RAM, Windows 11.
-- Measured **on battery, with the "Balanced" power plan**. On AC power the CPU may run faster.
+- Intel Core i7-1165G7 (4 cores / 8 threads), 16 GB RAM, Windows 11, "Balanced" power plan.
+- Power source as noted per table.
 - Native builds: g++ 13.3, `-O3`, in WSL2 (Ubuntu 24.04).
 - WebAssembly: Emscripten 6.0.4. Step times were measured under Node 22.16 (V8), and frame rates in Chrome 155.
 
 ### Agents at a stable 60 fps in the browser
 
-Measured with `?bench`. The population is pinned at N, and the page takes one simulation step per frame on a 1920×1080 canvas. "Stable" means a mean of at least 58 fps and a 95th-percentile frame time of 20 ms or less, over 300 frames.
+Measured with `?bench`, on battery, on a 60 Hz display. The population is pinned at N, and the page takes one simulation step per frame on a 1920×1080 canvas. "Stable" means a mean of at least 58 fps and a 95th-percentile frame time of 20 ms or less, over 300 frames.
 
 | module | drawing | stable 60 fps up to | next N measured |
 |---|---|---:|---|
@@ -142,24 +142,32 @@ Measured with `?bench`. The population is pinned at N, and the page takes one si
 
 With canvas 2D, drawing was the bottleneck: at 2,000 agents a frame spent 11.6–13.2 ms drawing, against 0.3–0.7 ms with WebGL2. That is why WebGL2 is the default.
 
+A repeat on AC power is not in the table, because the display refreshed at about 56.6 Hz during it, so it could not test 60 fps. Against that rate, the page held steady up to:
+- threaded + WebGL2: 12,000 (37.6 fps at 16,000)
+- single-threaded + WebGL2: 6,000 (38 fps at 8,000)
+- both canvas 2D rows: 2,000 (39–41 fps at 3,000)
+
+`?bench` now detects a display slower than 58 Hz and reports against its rate instead.
+
 The page starts the single-threaded module at 300 creatures and the threaded one at 600. Under the default settings, the population then settles between roughly 250 and 800.
 
 ### Step time at a fixed creature count
 
-Milliseconds per simulation step, lower is better. Each cell is the median of 3 runs, and each run is the median of 5 blocks of 200 steps. Produced by `wasm/bench.sh`: one source file (`wasm/bench_fixed.cpp`) built for every target. The population is pinned, on a 1920×1080 world with default settings.
+Milliseconds per simulation step, lower is better, measured on AC power. Each cell is the median of 3 runs, and each run is the median of 5 blocks of 200 steps. Produced by `wasm/bench.sh`: one source file (`wasm/bench_fixed.cpp`) built for every target. The population is pinned, on a 1920×1080 world with default settings.
 
 | creatures | native, 1 thread | native OpenMP, 2 | OpenMP, 4 | OpenMP, 8 | wasm, 1 thread | wasm threaded, 2 | threaded, 4 | threaded, 8 |
 |---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 500 | 0.67 | 0.47 | 0.38 | 0.38 | 0.83 | 0.65 | 0.59 | 0.49 |
-| 1,000 | 1.35 | 0.96 | 0.75 | 0.73 | 1.64 | 1.20 | 0.97 | 0.92 |
-| 2,000 | 3.05 | 2.06 | 1.54 | 1.28 | 3.55 | 2.44 | 1.66 | 1.55 |
-| 4,000 | 7.55 | 5.10 | 4.08 | 4.09 | 10.22 | 6.29 | 4.73 | 4.80 |
-| 8,000 | 22.13 | 14.02 | 9.57 | 7.58 | 25.49 | 16.39 | 11.53 | 9.16 |
+| 500 | 0.65 | 0.37 | 0.26 | 0.22 | 0.73 | 0.49 | 0.55 | 0.52 |
+| 1,000 | 1.37 | 0.92 | 0.70 | 0.62 | 1.59 | 1.08 | 0.88 | 0.77 |
+| 2,000 | 2.97 | 2.03 | 1.38 | 1.30 | 3.48 | 2.47 | 1.91 | 1.64 |
+| 4,000 | 7.43 | 4.77 | 3.59 | 3.05 | 8.82 | 5.85 | 4.42 | 3.59 |
+| 8,000 | 21.17 | 13.39 | 10.21 | 7.82 | 25.12 | 16.41 | 11.57 | 9.27 |
 
-- Single-threaded wasm took 1.15–1.35× as long per step as the native single-threaded build.
-- The threaded wasm build took 1.08–1.55× as long as native OpenMP at the same thread count, about 1.2× in most cells.
-- From 2,000 creatures up, the best thread count cut the step time by 1.8–2.9× natively and 2.2–2.8× in wasm.
-- Going from 4 to 8 threads gained 0–17% below 8,000 creatures and about 20% at 8,000. The machine has 4 physical cores.
+- Single-threaded wasm took 1.13–1.19× as long per step as the native single-threaded build.
+- From 1,000 creatures up, the threaded wasm build took 1.13–1.38× as long as native OpenMP at the same thread count, about 1.2× in most cells. At 500 it took 1.3–2.4× as long: steps that short are dominated by the cost of waking the threads, and wasm pays more for that.
+- From 2,000 creatures up, the best thread count cut the step time by 2.3–2.7× natively and 2.1–2.7× in wasm.
+- Going from 4 to 8 threads (hyper-threads on 4 physical cores) gained 5–23%.
+- A battery-powered run earlier the same day gave single-threaded times from 1% faster to 16% slower than these. Its threaded times ranged from 13% faster to 73% slower: multi-threaded timings on this laptop vary much more from run to run.
 
 To reproduce: `wasm/bench.sh` for the table above, and `?bench` (add `&threads=0` or `&gl=0`) in a browser for the frame rates.
 

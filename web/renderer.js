@@ -629,7 +629,9 @@
       var ema = workEma;  /* settle() clears it; size the cut first */
       settle();
       if (simSpeed > 1) {
-        setSpeed(simSpeed - 1);
+        /* work per frame is proportional to steps per frame, so the speed
+         * that fits can be computed rather than found one notch at a time */
+        setSpeed(Math.min(simSpeed - 1, Math.floor(simSpeed * (BUDGET_MS * 0.8) / ema)));
         govNote = "speed lowered to " + simSpeed + "x to hold 60 fps";
       } else if (!autoCap || pop <= autoCap * 1.02) {
         /* only tighten once the population has come down to the last cap */

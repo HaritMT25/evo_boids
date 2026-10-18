@@ -105,7 +105,10 @@
         /* a meal relative to what a hunt costs: eating once per cooldown at
          * cruise speed 110 (the default) breaks even at this */
         var breakEven = adv.predatorCooldown * (adv.predatorMetabolism + adv.moveCost * PREDATOR_SPEED * PREDATOR_SPEED);
-        adv.predatorMeal = round(range("mealFactor") * breakEven, 0.5);
+        var f = RANGES.mealFactor;   /* rounded to 0.5, kept inside the measured factor range */
+        adv.predatorMeal = Math.min(Math.floor(f[1] * breakEven * 2) / 2,
+                                    Math.max(Math.ceil(f[0] * breakEven * 2) / 2,
+                                             round(range("mealFactor") * breakEven, 0.5)));
         adv.predatorReproEnergy = range("predatorReproEnergy");
         adv.minPopulation = 20;
         labels.push(form.predators + " predators that must eat to breed (meal " + adv.predatorMeal + ")");

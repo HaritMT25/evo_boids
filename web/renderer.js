@@ -67,7 +67,7 @@
     ["predators", [
       ["predatorSpeed", 110], ["predatorPerception", 150], ["predatorCaptureRadius", 14],
       ["predatorCooldown", 3, { step: 0.5, min: 0 }],
-      ["predatorMeal", -1, { step: 1, label: "predator meal (-1 = absorb prey)" }],
+      ["predatorMeal", -1, { step: 0.5, label: "predator meal (-1 = absorb prey)" }],
       ["predatorMetabolism", 2], ["predatorReproEnergy", 60], ["predatorMaxAge", 0]
     ]],
     ["currents", [
@@ -130,7 +130,7 @@
     predatorPerception: { d: "Predator's prey-detection radius; above prey's 80 = ambush edge.", t: "try: 80 for symmetric sight" },
     predatorCaptureRadius: { d: "Contact distance at which a prey is caught.", t: "try: 10-20 around the default 14" },
     predatorCooldown: { d: "Seconds a predator digests after a catch before it can catch again — caps its kill rate.", t: "try: 3-5; 5 eases the chase" },
-    predatorMeal: { d: "Energy a predator gains per catch (economy on). -1 = it absorbs the prey's whole reserve, which lets predators explode.", t: "try: just above break-even = cooldown × (metabolism + thrust cost × 110²): ~6.5 at the defaults, ~9.5 with thrust cost 7e-5" },
+    predatorMeal: { d: "Energy a predator gains per catch (economy on). -1 = it absorbs the prey's whole reserve, which lets predators explode.", t: "try: 1.0-1.1 × break-even, which is cooldown × (metabolism + thrust cost × 110²): ≈6 at the defaults, ≈8.5 with thrust cost 7e-5" },
     predatorMetabolism: { d: "Predator energy burn per second (economy on); prey burn 1.5.", t: "try: 2-3; higher = must hunt more" },
     predatorReproEnergy: { d: "Energy a predator needs to bud a child (economy on).", t: "try: 40-80; higher = slower breeding" },
     predatorMaxAge: { d: "Predator death age; 0 = immortal until starved.", t: "try: 0, or 120 to age them out" },
@@ -1070,6 +1070,7 @@
     }
     worldFitted = false;
     updateFitButton();
+    el("randnote").textContent = "";  /* the 🎲 pick no longer describes this world */
     showNote("(checkpoint loaded)");
   }
 
@@ -1181,21 +1182,29 @@
     var rect = canvas.getBoundingClientRect();
     var wx = (e.clientX - rect.left) * (canvas.width / rect.width);
     var wy = (e.clientY - rect.top) * (canvas.height / rect.height);
-    var n = Module._evo_creature_count();
-    var segs = new Float32Array(heap(), Module._evo_creature_segments(), n * 12);
-    var ids = new Float64Array(heap(), Module._evo_creature_ids(), n);
     /* the mouse picks within 25 world px; a finger within ~24 CSS px, which
      * on a phone-sized canvas is several times farther */
     var reach = lastPointer === "mouse" ? 25 : Math.max(25, 24 * canvas.width / rect.width);
-    var best = -1, bestD2 = reach * reach;
+    var best = nearestFish(wx, wy, reach * reach);
+    selectedId = best >= 0 ? fishId(best) : null;
+    if (best >= 0) everSelected = true;
+  });
+  /* Index of the creature whose head is nearest (wx, wy), at most
+   * sqrt(maxD2) away, or -1. Ties go to the later creature. */
+  function nearestFish(wx, wy, maxD2) {
+    var n = Module._evo_creature_count();
+    var segs = new Float32Array(heap(), Module._evo_creature_segments(), n * 12);
+    var best = -1, bestD2 = maxD2;
     for (var i = 0; i < n; i++) {
       var dx = segs[12 * i] - wx, dy = segs[12 * i + 1] - wy;
       var d2 = dx * dx + dy * dy;
       if (d2 <= bestD2) { bestD2 = d2; best = i; }
     }
-    selectedId = best >= 0 ? ids[best] : null;
-    if (best >= 0) everSelected = true;
-  });
+    return best;
+  }
+  function fishId(index) {
+    return new Float64Array(heap(), Module._evo_creature_ids(), index + 1)[index];
+  }
 
   window.addEventListener("keydown", function (e) {
     /* Escape always closes the drawer, regardless of what has focus —
@@ -1368,31 +1377,30 @@
   setSpeed(simSpeed);
 
   /* ---- hooks for the first-visit guide (web/guide.js) ---- */
+  var guideFish = null;   /* the fish the guide selected, released after its step */
   window.EvoApp = {
     ready: false,   /* the world is running; "evo:ready" fires on window then */
     touch: function () { return coarseMQ.matches; },
     setDrawer: setDrawer,
     /* Selects a fish for the guide to show, unless one is selected: the one
-     * nearest a point left of centre, clear of the desktop inspector. */
+     * nearest a point left of centre, clear of the desktop inspector. Leaves
+     * everSelected alone, so the "tap a fish" hint stays until the visitor
+     * picks one. */
     inspectSomeFish: function () {
       if (!Module || turboState !== "live") return false;
       if (selectedId !== null) return true;
-      var n = Module._evo_creature_count();
-      if (!n) return false;
-      var segs = new Float32Array(heap(), Module._evo_creature_segments(), n * 12);
-      var ids = new Float64Array(heap(), Module._evo_creature_ids(), n);
-      var tx = WORLD_W * 0.35, ty = WORLD_H * 0.5, best = 0, bestD2 = Infinity;
-      for (var i = 0; i < n; i++) {
-        var dx = segs[12 * i] - tx, dy = segs[12 * i + 1] - ty, d2 = dx * dx + dy * dy;
-        if (d2 < bestD2) { bestD2 = d2; best = i; }
-      }
-      selectedId = ids[best];
-      everSelected = true;
+      var best = nearestFish(WORLD_W * 0.35, WORLD_H * 0.5, Infinity);
+      if (best < 0) return false;
+      selectedId = guideFish = fishId(best);
       return true;
+    },
+    releaseFish: function () {
+      if (guideFish !== null && selectedId === guideFish) selectedId = null;
+      guideFish = null;
     },
     /* CSS rect of the inspector being shown, or null */
     inspectorRect: function () {
-      if (selectedId === null) return null;
+      if (selectedId === null || turboState !== "live") return null;
       if (compactMQ.matches) return inspDock ? inspEl.getBoundingClientRect() : null;
       var cr = canvas.getBoundingClientRect(), c = cr.width / canvas.width;
       return { left: cr.left + inspectorX() * c, top: cr.top + INSP_Y * c,

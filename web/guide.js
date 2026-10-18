@@ -34,7 +34,7 @@
         return "Green dots are food. Fish that find enough of it have children. Colour follows " +
                "the genes, so look-alikes are relatives.";
       } },
-    { drawer: false, title: "A fish's brain",
+    { drawer: false, title: "A fish's brain", fish: true,
       enter: function () { if (app().inspectSomeFish) app().inspectSomeFish(); },
       target: function () { return app().inspectorRect ? app().inspectorRect() : null; },
       body: function () {
@@ -52,7 +52,7 @@
     { desktopOnly: true, drawer: false, title: "Keyboard",
       body: function () {
         return "<kbd>Space</kbd> pause · <kbd>↑</kbd> <kbd>↓</kbd> speed · <kbd>R</kbd> a fresh " +
-               "world · <kbd>Esc</kbd> close the menu. Try one now; the tour waits.";
+               "world. Try one now; the tour waits. (<kbd>Esc</kbd> closes the menu, and this tour.)";
       } },
     { drawer: false, title: "Settings",
       target: function () { return rectOf("#menubtn"); },
@@ -90,7 +90,10 @@
   ];
 
   var root = null, spot = null, card = null;
-  var steps = [], idx = -1, raf = 0, lastKey = "";
+  var steps = [], idx = -1, timer = 0, lastKey = "";
+  function drawerOpen() { var d = q("#drawer"); return !!d && d.classList.contains("open"); }
+  /* the fish the brain step selected goes back once that step is over */
+  function releaseFish() { if (app().releaseFish) app().releaseFish(); }
 
   function build() {
     root = document.createElement("div");
@@ -116,6 +119,7 @@
   function show(i) {
     idx = i;
     var s = steps[i];
+    if (!s.fish) releaseFish();
     if (s.drawer !== undefined && app().setDrawer) app().setDrawer(s.drawer);
     if (s.enter) s.enter();
     if (s.scroll) { var t = q(s.scroll); if (t) t.scrollIntoView({ block: "nearest" }); }
@@ -139,14 +143,17 @@
       nav.appendChild(button(s.last ? "Done" : "Next", "next", s.last ? finish : function () { show(i + 1); }));
     }
     lastKey = "";
+    tick();
   }
 
-  /* Re-measured every frame: targets move (the menu slides, the inspector
-   * follows its fish, the status line steps aside). */
+  /* Re-measured ten times a second: targets move (the menu slides, the
+   * inspector follows its fish, the status line steps aside). A timer, not
+   * requestAnimationFrame, so the reads land on a settled layout instead of
+   * right after the simulation's per-frame DOM writes. */
   function tick() {
-    raf = requestAnimationFrame(tick);
     var s = steps[idx];
-    var r = s.target ? s.target() : null;
+    /* a menu step whose menu got closed: nothing to point at until it reopens */
+    var r = s.target && !(s.drawer && !drawerOpen()) ? s.target() : null;
     if (r && !(r.width > 0 && r.height > 0)) r = null;
     var key = idx + "|" + innerWidth + "x" + innerHeight + "|" +
               (r ? [r.left, r.top, r.width, r.height].map(Math.round).join() : "none") +
@@ -192,7 +199,8 @@
 
   function finish() {
     markSeen();
-    cancelAnimationFrame(raf);
+    clearInterval(timer);
+    releaseFish();
     if (root && root.parentNode) root.parentNode.removeChild(root);
     idx = -1;
     if (app().setDrawer) app().setDrawer(false);
@@ -204,7 +212,7 @@
     document.body.appendChild(root);
     steps = STEPS.filter(function (s) { return !(s.desktopOnly && touch()); });
     show(replay ? 1 : 0);
-    raf = requestAnimationFrame(tick);
+    timer = setInterval(tick, 100);
   }
   window.addEventListener("keydown", function (e) {
     if (idx < 0) return;
@@ -216,9 +224,10 @@
   });
 
   window.EvoGuide = { start: function () { start(true); } };
+  /* renderer.js never fires evo:ready under ?bench, so no tour there */
   function auto() {
     var g = new URLSearchParams(location.search).get("guide");
-    if (/[?&]bench(=|&|$)/.test(location.search) || g === "0") return;
+    if (g === "0") return;
     if (g === "1" || !seen()) start(false);
   }
   if (app().ready) auto();

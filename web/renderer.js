@@ -153,6 +153,10 @@
   var paused = false;
   var simSpeed = 1;
   var selectedId = null;
+  /* the running world's config (non-default keys), for the dashboards */
+  var runCfg = {};
+  /* the dashboards (web/dashboard.js), when the page has them */
+  function dash() { return window.EvoDash || null; }
 
   var canvas = document.getElementById("canvas");
   var ctx = canvas.getContext("2d", { alpha: false });
@@ -407,6 +411,7 @@
     autoCap = 0;
     resetGovernor();
     if (!ok) showError("evo_init failed: " + Module.UTF8ToString(Module._evo_last_error()));
+    else { runCfg = cfg; if (dash()) dash().reset(); }   /* a new run: new charts */
     return !!ok;
   }
 
@@ -908,13 +913,16 @@
         stepped = bench ? 1 : simSpeed;
         Module._evo_step(stepped);
       }
+      if (dash()) dash().pump();   /* what the recorder saw (also a restart's first sample) */
       var t1 = performance.now();
       /* while not 'live' the main sim is frozen: re-sync repacks the same
        * state, so this keeps drawing the last frame (never stale-black) */
       Module._evo_sync();
       var s = snapshot(turboState === "live" ? resolveSelection() : -1);
-      draw(s);
-      if (turboState !== "live") drawTurboOverlay();
+      /* the dashboards cover the whole page: no point drawing the ocean */
+      var covered = dash() && dash().isOpen();
+      if (!covered) draw(s);
+      if (turboState !== "live" && !covered) drawTurboOverlay();
       var t2 = performance.now();
       if (stepped) {
         var per = (t1 - t0) / stepped;
@@ -1058,11 +1066,18 @@
     a.remove();
     URL.revokeObjectURL(url);
   }
-  function loadCheckpointText(text) {
+  /* fromTurbo: the Turbo worker handing the same run back, so the dashboards
+   * carry on; a file is a new run, so they start over */
+  function loadCheckpointText(text, fromTurbo) {
     var ok = withCString(text, function (ptr) { return Module._evo_load_checkpoint(ptr); });
     if (!ok) {
       showError("checkpoint load failed: " + Module.UTF8ToString(Module._evo_last_error()));
       return;
+    }
+    if (!fromTurbo) {
+      try { runCfg = JSON.parse(text).config || {}; } catch (e) { runCfg = {}; }
+      if (dash()) dash().reset();
+      if (Module._evo_rec_reset) Module._evo_rec_reset(1);   /* the loaded fish, as the tree's roots */
     }
     selectedId = null;
     warmupUntil = performance.now() + WARMUP_MS;  /* a load is a restart for frame timing */
@@ -1106,10 +1121,13 @@
     if (msg.type === "stats") {
       turboStats = msg;
       if (turboState === "entering") { turboState = "turbo"; updateLocks(); }
+    } else if (msg.type === "rec") {
+      /* what the worker's recorder saw: same run, so straight into the dashboards */
+      if (dash()) dash().ingest(new Float64Array(msg.s), new Float64Array(msg.b), new Float64Array(msg.c));
     } else if (msg.type === "checkpoint") {
       if (turboState !== "exiting") return;
       turboState = "live";
-      loadCheckpointText(msg.json); /* reuses the width/height re-read + selection clear */
+      loadCheckpointText(msg.json, true); /* reuses the width/height re-read + selection clear */
       setPaused(false);             /* turbo implies running; come back un-paused */
       updateLocks();
       showNote("(turbo: +" + (turboStats ? turboStats.totalSteps : 0) + " steps)");
@@ -1134,10 +1152,15 @@
         updateLocks();
       };
     }
+    /* everything recorded up to the hand-off goes to the dashboards first;
+     * the worker records on from here at the same interval */
+    if (Module._evo_rec_flush) { Module._evo_rec_flush(); if (dash()) dash().pump(); }
     turboWorker.postMessage({ cmd: "start",
                               checkpoint: Module.UTF8ToString(Module._evo_checkpoint()),
                               js: moduleUrls.js, wasm: moduleUrls.wasm,
-                              threads: Module._evo_threads ? Module._evo_threads() : 1 });
+                              threads: Module._evo_threads ? Module._evo_threads() : 1,
+                              recEvery: dash() ? dash().every() : 60,
+                              culled: Module._evo_rec_culled ? Module._evo_rec_culled() : 0 });
   }
   function exitTurbo() {
     if (turboState !== "turbo") return;
@@ -1250,6 +1273,7 @@
   /* ---- side drawer ---- */
   var drawerEl = el("drawer"), menuBtn = el("menubtn");
   function setDrawer(open) {
+    if (open && dash()) dash().close();
     drawerEl.classList.toggle("open", open);
     document.body.classList.toggle("menu-open", open);
     menuBtn.textContent = open ? "✕" : "☰";
@@ -1477,6 +1501,16 @@
     threadWhy = r.why;
     moduleUrls = { js: r.js, wasm: r.wasm };
     if (Module._evo_stats_len) STATS_LEN = Module._evo_stats_len();
+    if (dash() && Module._evo_rec_take) dash().attach({
+      module: Module, heap: heap, actionNames: ACTION_NAMES, setDrawer: setDrawer,
+      runConfig: function () { return runCfg; },
+      /* the sampling interval, here and in a running Turbo worker */
+      setRecEvery: function (every) {
+        Module._evo_rec_config(every, -1);
+        if (turboWorker && (turboState === "entering" || turboState === "turbo"))
+          turboWorker.postMessage({ cmd: "rec", every: every });
+      }
+    });
     /* Thread count: ?nthreads=N, else every pre-spawned worker plus this
      * thread (EvoLoader.poolThreads() — the -sPTHREAD_POOL_SIZE formula),
      * at most TOUCH_THREADS on a touch device. */

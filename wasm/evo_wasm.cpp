@@ -18,17 +18,22 @@
 // evo_sync(); pointers are valid until the next evo_sync/evo_init call, and
 // wasm memory growth can move the heap — JS must re-create typed-array views
 // after every sync and never cache them.
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <cstdio>
 #include <cmath>
 #include <string>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "core/world.hpp"
 #include "core/checkpoint_io.hpp"
+#include "core/isolation.hpp"
 #include "core/random.hpp"
 #include "core/stats.hpp"
+#include "core/wiring_log.hpp"
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
@@ -82,6 +87,232 @@ void clampConfig(SimConfig& c) {
     if (c.maxNeighbors < 0) c.maxNeighbors = 0;
     if (c.maxNeighbors > MAX_TOPOLOGICAL_NEIGHBORS)
         c.maxNeighbors = MAX_TOPOLOGICAL_NEIGHBORS;
+}
+
+// ---- Dashboard recorder ------------------------------------------------------
+// What the page's dashboards (web/dashboard.js) chart. Read-only by contract: it
+// reads the world between steps, draws no random numbers and writes nothing the
+// simulation reads, so a run is the same bit for bit with or without it. It
+// lives here rather than in JS because only the step loop sees every step:
+// samples land on the same simulated-time grid at any speed and in Turbo, and
+// each newborn's id can be paired with its sources.
+//
+// Three streams, appended in step order; the page empties them with
+// evo_rec_take() and reads the copies:
+//   samples  one row of kRecLen doubles every `every` frames (frame % every == 0)
+//   births   one row per newborn: id, first source, second source, lineageId,
+//            frame. The first source is the parent whose lineageId it carries.
+//   changes  one row per id entering or leaving the live set without a birth:
+//            kind (1 = left: death, predation or the governor's cull; 2 = joined:
+//            a founder, or a live creature of unknown origin after a reset),
+//            id, lineageId (0 when it left), frame.
+// Leaving is detected by comparing the live ids at each sample (and at
+// evo_rec_flush) with the previous ones, so a death is dated to the next sample.
+//
+// Newborn ids: World::update assigns them consecutively from nextId_ right
+// after the step's pass (world.hpp, `baby.id = nextId_++`), in the same order
+// logBirth pushes their source pairs into reproWindow_; reseeded founders come
+// after. So a step with B births made ids nextId_..nextId_+B-1, and their pairs
+// are the ring's last B edges. That holds while reproWindow >= B (default 2000;
+// a step has a handful); otherwise the sources are written as 0 (unknown).
+//
+// Sample row layout (web/dash_data.js names the columns; change both):
+constexpr int kRecTopLines = 24;   // lineages reported per sample, largest first
+constexpr int kRecQ = 5;           // quantiles: 10, 25, 50, 75, 90 %
+enum RecCol {
+    RC_FRAME, RC_POP, RC_FOOD, RC_PRED,
+    RC_BIRTHS, RC_DEATHS, RC_KILLS, RC_STARVED, RC_AGED,          // cumulative
+    RC_AVG_AGE, RC_MAX_AGE, RC_AVG_ENERGY, RC_AVG_SPEED,
+    RC_AVG_GLEN, RC_GLEN_STD, RC_DIVERSITY,
+    RC_FLOW_ALIGN, RC_PRED_ALIGN, RC_NEIGH_ALIGN, RC_NEIGH_COUNT,
+    RC_PRED_BIRTHS, RC_PRED_STARVED, RC_PRED_AGED, RC_PRED_ENERGY,  // births/deaths cumulative
+    RC_COMPONENTS, RC_GEN_MEAN, RC_GEN_MAX, RC_LINES,
+    RC_BODY_SIZE, RC_BODY_ELONG, RC_CURRENT, RC_CULLED,
+    RC_Q_SPEED, RC_Q_GLEN = RC_Q_SPEED + kRecQ, RC_Q_BODY = RC_Q_GLEN + kRecQ,
+    RC_Q_AGE = RC_Q_BODY + kRecQ,
+    RC_SENSORS = RC_Q_AGE + kRecQ,                    // NUM_SENSES usage shares
+    RC_TOP = RC_SENSORS + NUM_SENSES,                 // kRecTopLines (id, count) pairs
+    kRecLen = RC_TOP + 2 * kRecTopLines
+};
+
+struct Recorder {
+    int every = 60;                       // frames between samples (0 = no samples)
+    long long culled = 0;                 // creatures the governor removed (evo_cull_to)
+    std::vector<double> samples, births, changes;
+    std::vector<double> outSamples, outBirths, outChanges;   // what evo_rec_take handed out
+    std::vector<std::uint64_t> live;      // sorted live ids at the last check
+    std::vector<std::uint64_t> born;      // ids born since the last check (ascending)
+} g_rec;
+
+struct IdLine { std::uint64_t id, lineage; };
+
+// The live set as (id, lineageId), ascending by id. World keeps creatures in id
+// order (appends only, removal keeps order), so the sort is a no-op guard.
+std::vector<IdLine> liveIds(const World& w) {
+    std::vector<IdLine> v;
+    v.reserve(w.creatures.size());
+    for (const Creature& c : w.creatures) v.push_back({c.id, c.lineageId});
+    if (!std::is_sorted(v.begin(), v.end(), [](const IdLine& a, const IdLine& b) { return a.id < b.id; }))
+        std::sort(v.begin(), v.end(), [](const IdLine& a, const IdLine& b) { return a.id < b.id; });
+    return v;
+}
+
+void recChange(int kind, std::uint64_t id, std::uint64_t lineage, unsigned long long frame) {
+    g_rec.changes.insert(g_rec.changes.end(),
+                         {(double)kind, (double)id, (double)lineage, (double)frame});
+}
+
+// Compare the live set with the last check: ids gone are reported as left,
+// ids that are new and were not born (reseeded founders) as joined.
+void recCheckLive(const World& w) {
+    const std::vector<IdLine> cur = liveIds(w);
+    // born ids are all newer than every id of the last check, so this is sorted
+    std::vector<std::uint64_t>& prev = g_rec.live;
+    prev.insert(prev.end(), g_rec.born.begin(), g_rec.born.end());
+    std::size_t i = 0, j = 0;
+    while (i < prev.size() || j < cur.size()) {
+        if (j == cur.size() || (i < prev.size() && prev[i] < cur[j].id)) {
+            recChange(1, prev[i++], 0, w.frame);
+        } else if (i == prev.size() || cur[j].id < prev[i]) {
+            recChange(2, cur[j].id, cur[j].lineage, w.frame);
+            ++j;
+        } else {
+            ++i; ++j;
+        }
+    }
+    prev.clear();
+    for (const IdLine& c : cur) prev.push_back(c.id);
+    g_rec.born.clear();
+}
+
+// After World::update: one row per newborn of that step (see the note above).
+void recBirths(const World& w, std::uint64_t id0, long long births0) {
+    const long long nb = w.totalBirths - births0;
+    if (nb <= 0) return;
+    const std::vector<repro::Edge>& ring = w.reproWindow_;
+    const std::size_t cap = w.cfg.reproWindow > 0 ? (std::size_t)w.cfg.reproWindow : 0;
+    const bool known = cap > 0 && (std::size_t)nb <= ring.size();
+    for (long long k = 0; k < nb; ++k) {
+        const std::uint64_t id = id0 + (std::uint64_t)k;
+        std::uint64_t a = 0, b = 0, lineage = 0;
+        if (known) {
+            // the ring's last nb edges, oldest first: appended while it fills,
+            // then overwritten from reproWindowNext_ on
+            const std::size_t back = (std::size_t)(nb - k);
+            const std::size_t at = ring.size() < cap
+                ? ring.size() - back
+                : (w.reproWindowNext_ + cap - back) % cap;
+            a = ring[at].a; b = ring[at].b;
+        }
+        // the newborn itself, for its lineage (absent if eaten the same step)
+        auto it = std::lower_bound(w.creatures.begin(), w.creatures.end(), id,
+                                   [](const Creature& c, std::uint64_t v) { return c.id < v; });
+        if (it != w.creatures.end() && it->id == id) lineage = it->lineageId;
+        g_rec.births.insert(g_rec.births.end(),
+                            {(double)id, (double)a, (double)b, (double)lineage, (double)w.frame});
+        g_rec.born.push_back(id);
+    }
+}
+
+void quantiles(std::vector<float>& v, double* out) {
+    static const double kQ[kRecQ] = {0.10, 0.25, 0.50, 0.75, 0.90};
+    if (v.empty()) { for (int q = 0; q < kRecQ; ++q) out[q] = 0.0; return; }
+    std::sort(v.begin(), v.end());
+    for (int q = 0; q < kRecQ; ++q) {
+        const double pos = kQ[q] * (double)(v.size() - 1);
+        const std::size_t lo = (std::size_t)pos;
+        const std::size_t hi = std::min(lo + 1, v.size() - 1);
+        out[q] = v[lo] + (pos - (double)lo) * (v[hi] - v[lo]);
+    }
+}
+
+void recSample(const World& w) {
+    recCheckLive(w);
+    const WorldStats s = computeStats(w);
+    double r[kRecLen] = {};
+    r[RC_FRAME] = (double)w.frame;
+    r[RC_POP] = s.population;
+    r[RC_FOOD] = s.food;
+    r[RC_PRED] = s.predatorPop;
+    r[RC_BIRTHS] = (double)w.totalBirths;
+    r[RC_DEATHS] = (double)w.totalDeaths;
+    r[RC_KILLS] = (double)w.totalDeathsPredation;
+    r[RC_STARVED] = (double)w.totalDeathsStarvation;
+    r[RC_AGED] = (double)w.totalDeathsAge;
+    r[RC_AVG_AGE] = s.avgAge;
+    r[RC_MAX_AGE] = s.maxAge;
+    r[RC_AVG_ENERGY] = s.avgEnergy;
+    r[RC_AVG_SPEED] = s.avgSpeed;
+    r[RC_AVG_GLEN] = s.avgGenomeLen;
+    r[RC_GLEN_STD] = s.genomeLenStd;
+    r[RC_DIVERSITY] = s.geneticDiversity;
+    r[RC_FLOW_ALIGN] = s.avgFlowAlign;
+    r[RC_PRED_ALIGN] = s.avgPredatorAlign;
+    r[RC_NEIGH_ALIGN] = s.avgNeighborAlign;
+    r[RC_NEIGH_COUNT] = s.avgNeighborCount;
+    r[RC_PRED_BIRTHS] = (double)w.totalPredatorBirths;
+    r[RC_PRED_STARVED] = (double)w.totalPredatorDeathsStarvation;
+    r[RC_PRED_AGED] = (double)w.totalPredatorDeathsAge;
+    r[RC_PRED_ENERGY] = s.predatorAvgEnergy;
+    r[RC_COMPONENTS] = s.reproComponents;
+    const GenerationSpan gen = generationSpan(w);
+    r[RC_GEN_MEAN] = gen.mean;
+    r[RC_GEN_MAX] = (double)gen.max;
+    r[RC_CURRENT] = w.currentActive() ? 1.0 : 0.0;
+    r[RC_CULLED] = (double)g_rec.culled;
+
+    const std::size_t n = w.creatures.size();
+    std::vector<float> speed, glen, body, age;
+    speed.reserve(n); glen.reserve(n); body.reserve(n); age.reserve(n);
+    std::unordered_map<std::uint64_t, int> lines;
+    lines.reserve(n);
+    double bs = 0.0, be = 0.0;
+    for (const Creature& c : w.creatures) {
+        speed.push_back(c.speed);
+        glen.push_back((float)c.genome.size());
+        body.push_back(c.bodySize);
+        age.push_back(c.age);
+        bs += c.bodySize; be += c.bodyElong;
+        ++lines[c.lineageId];
+    }
+    if (n) { r[RC_BODY_SIZE] = bs / (double)n; r[RC_BODY_ELONG] = be / (double)n; }
+    quantiles(speed, r + RC_Q_SPEED);
+    quantiles(glen, r + RC_Q_GLEN);
+    quantiles(body, r + RC_Q_BODY);
+    quantiles(age, r + RC_Q_AGE);
+    float use[NUM_SENSES];
+    wiring::fractions(w, use);
+    for (int k = 0; k < NUM_SENSES; ++k) r[RC_SENSORS + k] = use[k];
+
+    r[RC_LINES] = (double)lines.size();
+    std::vector<std::pair<int, std::uint64_t>> top;   // (count, id)
+    top.reserve(lines.size());
+    for (const auto& kv : lines) top.push_back({kv.second, kv.first});
+    const std::size_t k = std::min<std::size_t>(kRecTopLines, top.size());
+    // largest first; ties to the older line, so the order is deterministic
+    std::partial_sort(top.begin(), top.begin() + k, top.end(),
+                      [](const std::pair<int, std::uint64_t>& a, const std::pair<int, std::uint64_t>& b) {
+                          return a.first != b.first ? a.first > b.first : a.second < b.second;
+                      });
+    for (std::size_t t = 0; t < k; ++t) {
+        r[RC_TOP + 2 * t] = (double)top[t].second;
+        r[RC_TOP + 2 * t + 1] = (double)top[t].first;
+    }
+    g_rec.samples.insert(g_rec.samples.end(), r, r + kRecLen);
+}
+
+// Start the streams over: forget what was recorded, take the current live set
+// as the baseline, and (roots) report it as joined so the page knows who is
+// alive. Then one sample, so a chart starts at the reset.
+void recReset(const World& w, bool roots, bool sample) {
+    g_rec.samples.clear(); g_rec.births.clear(); g_rec.changes.clear();
+    g_rec.born.clear();
+    g_rec.live.clear();
+    for (const IdLine& c : liveIds(w)) {
+        g_rec.live.push_back(c.id);
+        if (roots) recChange(2, c.id, c.lineage, w.frame);
+    }
+    if (sample && g_rec.every > 0) recSample(w);
 }
 
 }  // namespace
@@ -151,6 +382,8 @@ EVO_EXPORT int evo_init(unsigned seed, int width, int height, int population,
     g_world = new World();
     g_world->cfg = cfg;
     g_world->init(width, height, population);
+    g_rec.culled = 0;
+    recReset(*g_world, true, true);
 
     g_lastInit.seed = seed;
     g_lastInit.width = width;
@@ -281,14 +514,165 @@ EVO_EXPORT int evo_cull_to(int n) {
         ++w;
     }
     cs.resize(w);
+    g_rec.culled += (long long)k;
     return (int)k;
 }
 
 // Advance n fixed steps. dt is pinned to the native headless path's 0.016f —
-// passing wall-clock time here would destroy reproducibility.
+// passing wall-clock time here would destroy reproducibility. The recorder
+// reads the world after each step (see "Dashboard recorder").
 EVO_EXPORT void evo_step(int n) {
     if (!g_world) return;
-    for (int i = 0; i < n; ++i) g_world->update(0.016f);
+    World& w = *g_world;
+    for (int i = 0; i < n; ++i) {
+        const std::uint64_t id0 = w.nextId_;
+        const long long births0 = w.totalBirths;
+        w.update(0.016f);
+        recBirths(w, id0, births0);
+        if (g_rec.every > 0 && w.frame % (unsigned long long)g_rec.every == 0) recSample(w);
+    }
+}
+
+// ---- Dashboard recorder: the page's side -----------------------------------
+// every: frames between samples (> 0; the page doubles it as its history
+// thins out). culled >= 0 sets the governor's removal count (the Turbo worker
+// takes the page's, so the column stays continuous); < 0 keeps it.
+EVO_EXPORT void evo_rec_config(int every, double culled) {
+    if (every > 0) g_rec.every = every;
+    if (culled >= 0.0) g_rec.culled = (long long)culled;
+}
+EVO_EXPORT double evo_rec_culled() { return (double)g_rec.culled; }
+EVO_EXPORT int evo_rec_len() { return kRecLen; }
+EVO_EXPORT int evo_rec_top_lines() { return kRecTopLines; }
+// Report every departure since the last sample now (before a hand-off, so
+// nothing is dated to the other side).
+EVO_EXPORT void evo_rec_flush() { if (g_world) recCheckLive(*g_world); }
+// After a checkpoint load from a file: forget, re-baseline, report the live set.
+EVO_EXPORT void evo_rec_reset(int roots) {
+    if (g_world) recReset(*g_world, roots != 0, roots != 0);
+}
+// Move the three streams (k = 0 samples, 1 births, 2 changes) into out
+// buffers and empty them; read each with evo_rec_count(k) doubles at
+// evo_rec_data(k), valid until the next evo_rec_take.
+EVO_EXPORT void evo_rec_take() {
+    g_rec.outSamples.swap(g_rec.samples);  g_rec.samples.clear();
+    g_rec.outBirths.swap(g_rec.births);    g_rec.births.clear();
+    g_rec.outChanges.swap(g_rec.changes);  g_rec.changes.clear();
+}
+EVO_EXPORT int evo_rec_count(int k) {
+    const std::vector<double>& v = k == 0 ? g_rec.outSamples : k == 1 ? g_rec.outBirths : g_rec.outChanges;
+    return (int)v.size();
+}
+EVO_EXPORT const double* evo_rec_data(int k) {
+    const std::vector<double>& v = k == 0 ? g_rec.outSamples : k == 1 ? g_rec.outBirths : g_rec.outChanges;
+    return v.data();
+}
+
+// ---- On-demand analyses (only while their dashboard tab is open) ----------
+namespace {
+std::vector<double> g_simInfo;   // m*6: id, lineageId, generation, r, g, b
+std::vector<float>  g_simDist;   // m*m: match distance (sqrt of genomeDistanceSq)
+std::vector<float>  g_wiring;    // 2 * NUM_SENSES * NUM_ACTIONS: path share, direct share
+std::string g_sensorNames;
+}
+
+// Pairwise match distances among up to maxN creatures, taken evenly across
+// the live set (no rng). Same fold and sum as genomeDistanceSq (isolation.hpp),
+// folding each genome once. Returns the number sampled.
+EVO_EXPORT int evo_similarity(int maxN) {
+    g_simInfo.clear(); g_simDist.clear();
+    if (!g_world || maxN <= 0) return 0;
+    const std::vector<Creature>& cs = g_world->creatures;
+    const std::size_t n = cs.size();
+    const std::size_t m = std::min<std::size_t>(n, (std::size_t)maxN);
+    using namespace isolation_detail;
+    std::vector<std::vector<std::uint16_t>> cells(m);
+    std::vector<std::vector<float>> weights(m);
+    std::vector<std::uint16_t> cbuf(ISO_MAX_GENES);
+    std::vector<float> wbuf(ISO_MAX_GENES);
+    for (std::size_t s = 0; s < m; ++s) {
+        const Creature& c = cs[s * n / m];
+        const int k = foldGenome(c.genome, cbuf.data(), wbuf.data());
+        cells[s].assign(cbuf.begin(), cbuf.begin() + k);
+        weights[s].assign(wbuf.begin(), wbuf.begin() + k);
+        g_simInfo.insert(g_simInfo.end(), {(double)c.id, (double)c.lineageId, (double)c.generation,
+                                           (double)c.color.r, (double)c.color.g, (double)c.color.b});
+    }
+    g_simDist.assign(m * m, 0.0f);
+    for (std::size_t a = 0; a < m; ++a) {
+        for (std::size_t b = a + 1; b < m; ++b) {
+            const std::vector<std::uint16_t>& ca = cells[a], & cb = cells[b];
+            const std::vector<float>& wa = weights[a], & wb = weights[b];
+            float acc = 0.0f;
+            std::size_t i = 0, j = 0;
+            while (i < ca.size() && j < cb.size()) {
+                if (ca[i] == cb[j]) { const float d = wa[i] - wb[j]; acc += d * d; ++i; ++j; }
+                else if (ca[i] < cb[j]) { acc += wa[i] * wa[i]; ++i; }
+                else { acc += wb[j] * wb[j]; ++j; }
+            }
+            for (; i < ca.size(); ++i) acc += wa[i] * wa[i];
+            for (; j < cb.size(); ++j) acc += wb[j] * wb[j];
+            const float d = std::sqrt(acc);
+            g_simDist[a * m + b] = g_simDist[b * m + a] = d;
+        }
+    }
+    return (int)m;
+}
+EVO_EXPORT const double* evo_similarity_info() { return g_simInfo.data(); }
+EVO_EXPORT const float* evo_similarity_dist()  { return g_simDist.data(); }
+
+// Which senses reach which actions, over the live set: [0] the share of
+// creatures with a path from sensor s to action a (directly or through hidden
+// neurons), [1] the share with a direct connection. Row-major, sensor rows.
+// Returns the population counted.
+EVO_EXPORT int evo_wiring() {
+    constexpr int S = NUM_SENSES, A = NUM_ACTIONS, H = MAX_INTERNAL_NEURONS;
+    g_wiring.assign(2 * S * A, 0.0f);
+    if (!g_world || g_world->creatures.empty()) return 0;
+    std::vector<long> path(S * A, 0), direct(S * A, 0);
+    for (const Creature& c : g_world->creatures) {
+        // reach[h]: actions reachable from hidden neuron h, as a bit set
+        std::uint32_t reach[H] = {};
+        bool grew = true;
+        while (grew) {
+            grew = false;
+            for (const auto& fc : c.nnet.flat) {
+                const int src = fc.src(), sink = fc.sink();
+                if (src < S) continue;
+                const int h = src - S;
+                const std::uint32_t add = sink < A ? (1u << sink) : reach[sink - A];
+                if ((reach[h] | add) != reach[h]) { reach[h] |= add; grew = true; }
+            }
+        }
+        std::uint32_t pathBits[S] = {}, directBits[S] = {};
+        for (const auto& fc : c.nnet.flat) {
+            const int src = fc.src(), sink = fc.sink();
+            if (src >= S) continue;
+            if (sink < A) { pathBits[src] |= 1u << sink; directBits[src] |= 1u << sink; }
+            else pathBits[src] |= reach[sink - A];
+        }
+        for (int s = 0; s < S; ++s)
+            for (int a = 0; a < A; ++a) {
+                if (pathBits[s] >> a & 1u) ++path[s * A + a];
+                if (directBits[s] >> a & 1u) ++direct[s * A + a];
+            }
+    }
+    const float inv = 1.0f / (float)g_world->creatures.size();
+    for (int k = 0; k < S * A; ++k) {
+        g_wiring[k] = (float)path[k] * inv;
+        g_wiring[S * A + k] = (float)direct[k] * inv;
+    }
+    return (int)g_world->creatures.size();
+}
+EVO_EXPORT const float* evo_wiring_data() { return g_wiring.data(); }
+// The sensor names, comma-separated, in Sensor-enum order (wiring_log.hpp).
+EVO_EXPORT const char* evo_sensor_names() {
+    if (g_sensorNames.empty())
+        for (int s = 0; s < NUM_SENSES; ++s) {
+            if (s) g_sensorNames += ',';
+            g_sensorNames += wiring::kSensorNames[s];
+        }
+    return g_sensorNames.c_str();
 }
 
 // Repack all export buffers from the current world state.
@@ -422,6 +806,9 @@ EVO_EXPORT int evo_load_checkpoint(const char* json) {
     delete g_world;
     g_world = w;
     g_world->cfg.captureActivations = true;  // see evo_init
+    // A Turbo hand-off carries on the same run: re-baseline quietly. A file
+    // load is a new run; the page then calls evo_rec_reset(1).
+    recReset(*g_world, false, false);
     return 1;
 }
 

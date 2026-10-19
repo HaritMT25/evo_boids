@@ -7,7 +7,13 @@
  *                                             chunked loop
  *   in : {cmd:'stop'}                      -> finish current chunk, post the
  *                                             checkpoint back, go idle
+ *   in : {cmd:'rec', every}                -> the dashboards' sampling interval
  *   out: {type:'stats', frame, pop, food, pred, stepsPerSec, totalSteps} ~4x/s
+ *   out: {type:'rec', s, b, c}             -> what the dashboard recorder saw
+ *                                             (samples, births, changes; see
+ *                                             wasm/evo_wasm.cpp), with each
+ *                                             stats message and before the
+ *                                             checkpoint
  *   out: {type:'checkpoint', json}
  *   out: {type:'error', message}
  * Never calls _evo_sync or any render export; dt is fixed inside _evo_step —
@@ -28,6 +34,8 @@ var totalSteps = 0;
 var startFrame = 0;
 var samples = [];      /* [chunkStartMs, steps] pairs, rolling ~1 s window */
 var lastStats = 0;
+var recEvery = 60, recCulled = 0;
+var rec = [[], [], []]; /* recorder output not yet posted: Float64Array pieces per stream */
 
 /* MessageChannel pump: schedules the next chunk as a plain macrotask (worker
  * timers can be throttled in background tabs; a port message is not). A 'stop'
@@ -67,6 +75,8 @@ onmessage = function (e) {
   var msg = e.data || {};
   if (msg.cmd === "start") {
     if (running) return;
+    recEvery = msg.recEvery || 60;
+    recCulled = msg.culled || 0;
     var p;
     try { p = ensureModule(msg); }
     catch (err) { postMessage({ type: "error", message: "wasm load failed: " + err }); return; }
@@ -76,8 +86,35 @@ onmessage = function (e) {
     );
   } else if (msg.cmd === "stop") {
     stopRequested = true; /* honoured at the next chunk boundary */
+  } else if (msg.cmd === "rec") {
+    recEvery = msg.every;
+    if (Module && Module._evo_rec_config) Module._evo_rec_config(recEvery, -1);
   }
 };
+
+/* the dashboard recorder (absent from an older module): collect after each
+ * chunk, post with the stats */
+function heapBuf() { return Module.wasmMemory ? Module.wasmMemory.buffer : Module.HEAPU8.buffer; }
+function takeRec() {
+  if (!Module._evo_rec_take) return;
+  Module._evo_rec_take();
+  for (var k = 0; k < 3; k++) {
+    var n = Module._evo_rec_count(k);
+    if (n) rec[k].push(new Float64Array(heapBuf(), Module._evo_rec_data(k), n).slice());
+  }
+}
+function postRec() {
+  if (!rec[0].length && !rec[1].length && !rec[2].length) return;
+  var out = rec.map(function (parts) {
+    var len = 0, o = 0;
+    parts.forEach(function (p) { len += p.length; });
+    var a = new Float64Array(len);
+    parts.forEach(function (p) { a.set(p, o); o += p.length; });
+    return a;
+  });
+  rec = [[], [], []];
+  postMessage({ type: "rec", s: out[0], b: out[1], c: out[2] }, [out[0].buffer, out[1].buffer, out[2].buffer]);
+}
 
 function startRun(checkpoint) {
   var ok = withCString(checkpoint, function (ptr) { return Module._evo_load_checkpoint(ptr); });
@@ -96,6 +133,8 @@ function startRun(checkpoint) {
   samples = [];
   chunkSteps = 60;
   lastStats = 0;
+  rec = [[], [], []];
+  if (Module._evo_rec_config) Module._evo_rec_config(recEvery, recCulled);
   running = true;
   stopRequested = false;
   postStats(performance.now()); /* immediate: the page flips to 'turbo' on first stats */
@@ -107,6 +146,7 @@ function runChunk() {
   if (stopRequested) { finishStop(); return; }
   var t0 = performance.now();
   Module._evo_step(chunkSteps);
+  takeRec();
   var t1 = performance.now();
   var elapsed = Math.max(1, t1 - t0);
   totalSteps += chunkSteps;
@@ -119,6 +159,7 @@ function runChunk() {
 
 function postStats(now) {
   lastStats = now;
+  postRec();
   var sps = 0;
   if (samples.length) {
     var span = (now - samples[0][0]) / 1000;
@@ -140,5 +181,9 @@ function postStats(now) {
 function finishStop() {
   running = false;
   stopRequested = false;
+  /* every departure up to the hand-off, then the rest of the recording,
+   * before the checkpoint (the page re-baselines when it loads it) */
+  if (Module._evo_rec_flush) { Module._evo_rec_flush(); takeRec(); }
+  postRec();
   postMessage({ type: "checkpoint", json: Module.UTF8ToString(Module._evo_checkpoint()) });
 }

@@ -57,7 +57,23 @@
     border-radius: 4px;
     cursor: pointer;
   }
-  #menubtn:hover { background: rgba(35,80,56,0.95); }
+  #menubtn:hover, #dashbtn:hover { background: rgba(35,80,56,0.95); }
+  /* dashboards: beside the hamburger (web/dashboard.js) */
+  #dashbtn {
+    position: fixed;
+    top: 10px;
+    right: 54px;
+    z-index: 30;
+    width: 36px;
+    height: 36px;
+    padding: 0;
+    font-size: 17px;
+    line-height: 1;
+    background: rgba(26,58,42,0.8);
+    border: 1px solid #3a6a4e;
+    border-radius: 4px;
+    cursor: pointer;
+  }
   /* shown on compact screens when the world no longer matches the screen's
    * shape (the phone was rotated): restarts with a fitted world */
   #fitbtn {
@@ -97,7 +113,7 @@
     font-weight: normal;
     color: #7ea08c;
     letter-spacing: 1px;
-    margin-right: 40px; /* keep clear of the ✕ button */
+    margin-right: 100px; /* keep clear of the 📊 and ✕ buttons */
   }
   #bar, #controls {
     display: flex;
@@ -269,9 +285,9 @@
     min-height: 44px;
     padding-left: 10px;
   }
-  /* keep the close button clear of the fixed ☰ button */
-  #inspector.top .ihead { padding-right: 56px; }
-  #inspector.right .ihead { padding-right: 56px; min-height: 56px; }
+  /* keep the close button clear of the fixed 📊 and ☰ buttons */
+  #inspector.top .ihead { padding-right: 112px; }
+  #inspector.right .ihead { padding-right: 112px; min-height: 56px; }
   #inspector .itext { flex: 1; min-width: 0; line-height: 1.4; }
   #isub { color: #becdd2; font-size: 11px; }
   #iclose {
@@ -294,7 +310,7 @@
     background: none;
   }
   /* the status line steps out of the docked inspector's way */
-  body[data-dock="bottom"] #status { bottom: auto; top: 12px; right: 64px; }
+  body[data-dock="bottom"] #status { bottom: auto; top: 12px; right: 120px; }
   body[data-dock="left"] #status { left: calc(min(320px, 46vw) + 12px); }
   body[data-dock="right"] #status { right: calc(min(320px, 46vw) + 12px); }
   @media (pointer: coarse) {
@@ -304,6 +320,7 @@
     button, summary { min-height: 44px; }
     #slower, #faster { min-width: 44px; }
     #menubtn { width: 44px; height: 44px; font-size: 20px; }
+    #dashbtn { width: 44px; height: 44px; right: 62px; font-size: 20px; }
     input[type="checkbox"] { width: 24px; height: 24px; }
     #controls fieldset label, #advgrid label { min-height: 44px; }
     /* parameter names are tapped for their explanation (renderer.js attachTip) */
@@ -362,6 +379,108 @@
     padding: 0 3px;
     vertical-align: 1px;
   }
+  /* ---- dashboards (web/dashboard.js, charts in web/charts.js) ---- */
+  #dash {
+    position: fixed;
+    inset: 0;
+    z-index: 35;
+    display: flex;
+    flex-direction: column;
+    background: #0a120e;
+    color: #dfe9e3;
+    font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  #dash[hidden] { display: none; }
+  #dash .dhead { display: flex; align-items: center; gap: 10px 14px; padding: 10px 16px 0; flex-wrap: wrap; }
+  #dash h2 { font-size: 16px; font-weight: 600; white-space: nowrap; }
+  #dtabs { display: flex; gap: 2px; flex: 1 1 auto; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+  #dtabs::-webkit-scrollbar { display: none; }
+  #dash button { font: 13px system-ui, -apple-system, "Segoe UI", sans-serif; }
+  #dtabs button {
+    background: none;
+    border: 0;
+    border-bottom: 2px solid transparent;
+    border-radius: 0;
+    color: #a9bdb1;
+    padding: 8px 10px;
+    white-space: nowrap;
+  }
+  #dtabs button:hover { background: #12231b; }
+  #dtabs button[aria-selected="true"] { color: #eaf6ee; border-bottom-color: #3987e5; }
+  #dash .dtools { display: flex; gap: 6px; margin-left: auto; }
+  #dash .dtools button { padding: 5px 10px; }
+  #dclose { width: 36px; padding: 0 !important; font-size: 16px !important; }
+  #dnote { padding: 6px 16px 8px; font-size: 12px; color: #7f958a; border-bottom: 1px solid #1d2c25; }
+  #dgrid {
+    flex: 1 1 auto;
+    overflow-y: auto;
+    padding: 14px 16px 28px;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(440px, 1fr));
+    gap: 14px;
+    align-content: start;
+  }
+  .dcard { background: #101c17; border: 1px solid #1d2c25; border-radius: 8px; padding: 12px 14px 10px; min-width: 0; }
+  .dcard.wide { grid-column: 1 / -1; }
+  .dcard h3 { font-size: 13px; font-weight: 600; }
+  .dcard .cap { font-size: 12px; color: #a9bdb1; line-height: 1.45; margin: 3px 0 8px; }
+  .dcard .cbox { position: relative; height: 210px; }
+  .dcard .cbox.tall { height: 340px; }
+  .dcard .cbox.huge { height: min(70vh, 640px); }
+  .dcard .cbox.xtall { height: 560px; }
+  .dcard .cbox canvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    max-width: none;
+    max-height: none;
+    border: 0;
+    background: none;
+    touch-action: pan-y;
+  }
+  .dcard .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 6px; font-size: 11px; color: #a9bdb1; }
+  .dcard .legend:empty { display: none; }
+  .legend .li { display: inline-flex; align-items: center; gap: 5px; }
+  .legend i, .charttip i { display: inline-block; flex: none; width: 12px; height: 10px; border-radius: 2px; }
+  .legend b { color: #dfe9e3; font-weight: 600; }
+  .legend .scale { display: inline-block; width: 140px; height: 10px; border-radius: 2px; }
+  .dcard .cnote { font-size: 11px; color: #7f958a; margin-top: 4px; }
+  .dcard .cnote:empty { display: none; }
+  .dcard.off .cbox, .dcard.off .legend { display: none; }
+  .dcard.off .cnote { color: #a9bdb1; font-size: 12px; }
+  .charttip {
+    position: fixed;
+    z-index: 60;
+    display: none;
+    pointer-events: none;
+    min-width: 130px;
+    max-width: 300px;
+    background: rgba(8,16,12,0.96);
+    border: 1px solid #2a4a3a;
+    border-radius: 6px;
+    padding: 6px 9px;
+    font: 12px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+    color: #dfe9e3;
+  }
+  .charttip .th { color: #a9bdb1; margin-bottom: 2px; }
+  .charttip .tr { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .charttip .tr span { flex: 1; color: #a9bdb1; }
+  .charttip .tr b { font-weight: 600; font-variant-numeric: tabular-nums; }
+  @media (max-width: 700px) {
+    #dash .dhead { padding: 8px 10px 0; }
+    #dtabs { order: 3; flex-basis: 100%; }
+    #dnote { padding: 4px 10px 6px; }
+    #dgrid { grid-template-columns: 1fr; padding: 10px 10px 24px; gap: 10px; }
+    .dcard { padding: 10px 10px 8px; }
+    .dcard .cbox { height: 190px; }
+    .dcard .cbox.tall { height: 300px; }
+    .dcard .cbox.xtall { height: 540px; }
+  }
+  @media (pointer: coarse) {
+    #dclose { width: 44px; }
+    #dtabs button { min-height: 44px; }
+  }
   #benchout {
     position: fixed;
     left: 12px;
@@ -390,7 +509,21 @@
     <div class="inet"><canvas id="inetc"></canvas></div>
   </div>
   <button id="fitbtn" hidden>&#10530; fit to screen (restarts)</button>
+  <button id="dashbtn" aria-label="open the dashboards" aria-expanded="false" title="dashboards: charts of this run">&#128202;</button>
   <button id="menubtn" aria-label="open controls">&#9776;</button>
+  <div id="dash" role="dialog" aria-label="dashboards" hidden>
+    <div class="dhead">
+      <h2>&#128202; Dashboards</h2>
+      <nav id="dtabs" role="tablist"></nav>
+      <div class="dtools">
+        <button id="dcsv" title="every recorded sample, as a spreadsheet">&#10515; CSV</button>
+        <button id="dtree" title="the family tree in Newick format, for tree viewers such as FigTree or iTOL">&#10515; Tree</button>
+        <button id="dclose" aria-label="close the dashboards">&#10005;</button>
+      </div>
+    </div>
+    <p id="dnote"></p>
+    <div id="dgrid"></div>
+  </div>
   <div id="drawer">
     <h1>evo_boids — wasm</h1>
     <div class="row" id="quick">
@@ -461,6 +594,9 @@
   <script src="loader.js"></script>
   <script src="gl_renderer.js"></script>
   <script src="randomizer.js"></script>
+  <script src="dash_data.js"></script>
+  <script src="charts.js"></script>
+  <script src="dashboard.js"></script>
   <script src="renderer.js"></script>
   <script src="guide.js"></script>
 </body>

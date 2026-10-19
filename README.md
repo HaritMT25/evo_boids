@@ -150,11 +150,33 @@ Uncapped rich-food setups reached ~2,400 fish headless; in the browser, the fram
 **First-visit guide.** A first visit gets a one-minute spotlight tour:
 - what you're looking at, a fish's brain, and the status line
 - the keyboard (with a mouse only)
-- the ☰ menu, 🎲 Randomize, playback (including what Turbo's "headless" means), settings, and checkpoints
+- the 📊 dashboards, the ☰ menu, 🎲 Randomize, playback (including what Turbo's "headless" means), settings, and checkpoints
 
 **Settings.** On screens 960 px wide or more, the open menu sits beside the world rather than over it, so a change can be watched. Settings that only matter while another one is on, such as patch radius without food patches or eddy count without a current, are dimmed with the reason. Changes other than the ones marked *live* turn the Restart button into **Restart to apply**.
 
 The tour's text adapts to touch screens. The page stays usable during the tour. "? Guide" in the menu replays it, and it's remembered in `localStorage`; `?guide=0` / `?guide=1` override that.
+
+### 📊 Dashboards
+
+The 📊 button beside ☰ opens charts of the running world. Each chart says in one sentence what to look for, and charts that need a feature (predators, a current, the body model) say how to turn it on.
+
+| tab | charts |
+|---|---|
+| Population | fish and food; predators; births and deaths per second; causes of death; the boom-and-bust loop as a phase plot (fish vs food, and fish vs predators) |
+| Evolution | generations; genetic diversity; genome length, swim speed, body size and age as median with 50% / 80% bands |
+| Family lines | Muller plot of the founder lines (`lineageId`), the lines still alive, breeding groups (`reproComponents`) |
+| Family tree | up to 300 living fish traced back through each one's first parent, with their most recent common ancestor |
+| Similarity | 150 fish sampled evenly: the match-distance matrix ordered by a UPGMA tree, a classical-MDS genome map, the distance histogram with the breeding gate marked |
+| Brains | which senses reach which actions (directly or through hidden neurons) across the population; each sense's use over time |
+| Behaviour | schooling alignment, neighbours in sight, riding the current, fleeing predators |
+
+**Where the numbers come from.** A recorder in the wasm shim (`wasm/evo_wasm.cpp`, "Dashboard recorder") reads the world inside the step loop. Every 60 frames (about one simulated second) it takes a sample row: `computeStats` plus generations, quantiles, family-line counts and sensor use. It also pairs each newborn's id with its two sources. World assigns newborn ids consecutively right after the step, in the order their pairs enter `reproWindow_`, so this needs no change to `src/core`. The recorder is read-only: no random draws, no writes the simulation reads. Checkpoints from a recording build match `main`'s for the same runs, through odd chunk sizes, a governor cull and a save/load round trip. One sample costs about 1% of the step time it covers (3 ms at 2,000 fish, 10 ms at 6,000, single-threaded). Turbo records in its worker and hands the rows back, so the charts carry on through it.
+
+**The family tree** follows one parent per fish: the first source, whose family line a child carries, as mitochondrial DNA does in people. With both parents, every past fish with living descendants would soon be an ancestor of everyone, and the tree would grow without bound. Following one parent, a dead fish with no living descendants is dropped, and one with a single surviving branch is spliced out. That keeps the tree to about twice the live set (measured: 1.2–1.34×).
+
+**Storage.** Everything stays in this browser tab, in memory; nothing is uploaded. At 4,096 rows the history drops every other row and samples half as often, so a session of any length fits in about 5 MB and covers the whole run evenly. Restart or loading a checkpoint file starts a new recording. **⤓ CSV** saves every row; **⤓ Tree** saves the family tree as Newick, for tree viewers such as FigTree or iTOL.
+
+**Cost while open.** Charts redraw at most twice a second, only while the dashboard is open, and the world is not drawn behind it. The similarity tab refreshes every 10 s, with one ~80 ms computation; the other tabs measured no long tasks.
 
 ### Deploy (Vercel, static)
 

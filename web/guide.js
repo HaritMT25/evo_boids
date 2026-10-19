@@ -54,6 +54,13 @@
         return "<kbd>Space</kbd> pause · <kbd>↑</kbd> <kbd>↓</kbd> speed · <kbd>R</kbd> a fresh " +
                "world. Try one now; the tour waits. (<kbd>Esc</kbd> closes the menu, and this tour.)";
       } },
+    { drawer: false, title: "📊 Dashboards",
+      target: function () { return rectOf("#dashbtn"); },
+      body: function () {
+        return "Charts of this run as it happens: population booms and crashes, family lines and a " +
+               "family tree, how alike the fish are, and which senses their brains use. Each chart " +
+               "says what to look for. Recorded on your device only.";
+      } },
     { drawer: false, title: "Settings",
       target: function () { return rectOf("#menubtn"); },
       body: function () { return "Everything else lives behind this button."; } },

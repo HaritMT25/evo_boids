@@ -74,6 +74,9 @@
     border-radius: 4px;
     cursor: pointer;
   }
+  /* hidden while the menu is open: it would float over the settings column
+   * as the menu scrolls (opening the menu closes the dashboards anyway) */
+  body.menu-open #dashbtn { display: none; }
   /* shown on compact screens when the world no longer matches the screen's
    * shape (the phone was rotated): restarts with a fitted world */
   #fitbtn {
@@ -113,7 +116,7 @@
     font-weight: normal;
     color: #7ea08c;
     letter-spacing: 1px;
-    margin-right: 100px; /* keep clear of the 📊 and ✕ buttons */
+    margin-right: 40px; /* keep clear of the ✕ button */
   }
   #bar, #controls {
     display: flex;
@@ -242,6 +245,20 @@
   .needs:empty { display: none; }
   /* settings changed since the last restart */
   #restart.pending { background: #2f6b4a; border-color: #9fd3b0; color: #eaf6ee; font-weight: bold; }
+  /* Restart and its messages stay pinned to the bottom of the menu, so a
+   * change made anywhere in it, advanced settings included, is one click
+   * from applying. The bar spans the drawer's padding. */
+  #applybar {
+    position: sticky;
+    bottom: -12px;
+    margin: 0 -12px -12px;
+    padding: 10px 12px;
+    background: #0d1813;
+    border-top: 1px solid #1e3a2e;
+    box-shadow: 0 -8px 14px rgba(13,24,19,0.9);
+    z-index: 1;
+  }
+  #applybar #err { flex: 1; min-width: 0; font-size: 12px; line-height: 1.35; }
   /* narrow (portrait phone) screens: wrap instead of cutting the line off */
   @media (max-width: 600px) {
     #status { white-space: normal; line-height: 1.5; right: 12px; }
@@ -567,10 +584,6 @@
         <label><span class="lt">food patches</span><input id="foodPatches" type="number" value="0" min="0" step="1"></label>
         <label><span class="lt">current strength</span><input id="currentStrength" type="number" value="0" min="0" step="1"></label>
       </fieldset>
-      <div class="row">
-        <button id="restart">Restart</button>
-        <span id="err"></span>
-      </div>
     </div>
     <details id="adv">
       <summary>advanced settings</summary>
@@ -579,6 +592,11 @@
     </details>
     <p id="credit">evo_boids © 2026 Harit Tarwani ·
       <a href="https://creativecommons.org/licenses/by-nc/4.0/" target="_blank" rel="noopener noreferrer">CC BY-NC 4.0</a></p>
+    <!-- pinned to the menu's bottom edge: in reach from any setting -->
+    <div class="row" id="applybar">
+      <button id="restart">Restart</button>
+      <span id="err"></span>
+    </div>
   </div>
   <script>
     /* Asset URLs, relative to this page. web/ served from the repo root uses

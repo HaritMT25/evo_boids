@@ -14,7 +14,9 @@
   function q(sel) { return document.querySelector(sel); }
   function rectOf(sel) { var e = q(sel); return e && !e.hidden ? e.getBoundingClientRect() : null; }
   function touch() { return !!(app().touch && app().touch()); }
-  /* compact screens show the selected fish as a card instead of the canvas panel */
+  /* the tank view (renderer.js, opt-in) is showing */
+  function tank() { return !!(app().has3D && app().has3D()); }
+  /* compact screens and the tank view show the selected fish as a card instead of the canvas panel */
   function compact() { return !!(app().compact && app().compact()); }
   function seen() { try { return localStorage.getItem(KEY) === "1"; } catch (e) { return false; } }
   function markSeen() { try { localStorage.setItem(KEY, "1"); } catch (e) { /* private mode */ } }
@@ -32,9 +34,16 @@
                "have children with slightly mutated genes. Nobody programs what they do: " +
                "their behaviour evolves.<br>Take the one-minute tour?";
       } },
-    { drawer: false, title: "The ocean",
-      target: function () { return rectOf("#canvas"); },
+    { drawer: false, title: function () { return tank() ? "The tank" : "The ocean"; },
+      target: function () { return rectOf(tank() ? "#scene3d" : "#canvas"); },
       body: function () {
+        if (tank()) {
+          return "This is the tank view: the same world drawn in 3D, for looks. Glowing specks are " +
+                 "food, colour follows the genes, and the dark fish with glowing eyes are predators. " +
+                 (touch() ? "Drag to look around, pinch to zoom, twist with two fingers to turn. "
+                          : "Drag to look around, scroll to zoom, right-drag to tilt and turn. ") +
+                 "The flat view, in the settings, shows the world as the simulation sees it.";
+        }
         return "Green dots are food. Fish that find enough of it have children. Colour follows " +
                "the genes, so look-alikes are relatives. Red dots, when there are any, are " +
                "predators: bright while they hunt, dim while they digest.";
@@ -67,14 +76,15 @@
     { desktopOnly: true, drawer: false, title: "Keyboard",
       body: function () {
         return "<kbd>Space</kbd> pause · <kbd>↑</kbd> <kbd>↓</kbd> speed · <kbd>R</kbd> a fresh " +
-               "world. Try one now; the tour waits. (<kbd>Esc</kbd> closes things, and this tour.)";
+               "world" + (tank() ? " · <kbd>F</kbd> follow the selected fish · <kbd>C</kbd> fit the view" : "") +
+               ". Try one now; the tour waits. (<kbd>Esc</kbd> closes things, and this tour.)";
       } },
     { drawer: false, title: "Playback",
       target: function () { return rectOf("#dock"); },
       body: function () {
         return "Pause and change speed. <b>Turbo</b> runs the simulation headless in a background " +
                "thread, many times faster; stop it to see how far evolution got. The dice draws a " +
-               "new world.";
+               "new world" + (tank() ? ", and the corners fit the whole tank back on screen." : ".");
       } },
     { drawer: false, title: "Dashboards",
       target: function () { return rectOf("#dashbtn"); },
@@ -147,7 +157,7 @@
     if (s.enter) s.enter();
     if (s.scroll) { var t = q(s.scroll); if (t) t.scrollIntoView({ block: "nearest" }); }
     card.innerHTML = "<h2></h2><p></p><div class='nav'></div>";
-    card.querySelector("h2").textContent = s.title;
+    card.querySelector("h2").textContent = typeof s.title === "function" ? s.title() : s.title;
     card.querySelector("p").innerHTML = s.body();
     var nav = card.querySelector(".nav");
     if (s.welcome) {

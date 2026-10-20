@@ -18,7 +18,7 @@ cd "$(dirname "$0")/.."
 OUT=dist
 SRC=(web/evo_boids.js web/evo_boids.wasm web/evo_boids_mt.js web/evo_boids_mt.wasm
      web/loader.js web/gl_renderer.js web/randomizer.js web/renderer.js web/guide.js
-     web/dash_data.js web/charts.js web/dashboard.js
+     web/dash_data.js web/charts.js web/dashboard.js web/scene3d.js web/vendor/three.bundle.min.js
      web/worker.js img/rocks.jpg web/index.html web/vercel.json)
 for f in "${SRC[@]}"; do
     [ -f "$f" ] || { echo "missing $f — build the wasm-st and wasm-mt presets first" >&2; exit 1; }
@@ -47,6 +47,7 @@ GLR=$(publish web/gl_renderer.js);    RAND=$(publish web/randomizer.js)
 GUIDE=$(publish web/guide.js);        DDATA=$(publish web/dash_data.js)
 CHARTS=$(publish web/charts.js);      DASH=$(publish web/dashboard.js)
 WORKER=$(publish web/worker.js);      BG=$(publish img/rocks.jpg)
+SCENE=$(publish web/scene3d.js);      THREE=$(publish web/vendor/three.bundle.min.js)
 
 # Rewrite the EVO_ASSETS block and the <script src> tags. Fails loudly if
 # index.html no longer has the shape this expects.
@@ -57,7 +58,8 @@ assets = '''window.EVO_ASSETS = {
       st: "$ST", stWasm: "$ST_WASM",
       mt: "$MT", mtWasm: "$MT_WASM",
       worker: "$WORKER",
-      background: "$BG"
+      background: "$BG",
+      three: "$THREE"
     };'''
 out, n1 = re.subn(r'window\.EVO_ASSETS = \{.*?\};', lambda m: assets, src, count=1, flags=re.S)
 out, n2 = re.subn(r'<script src="loader\.js"></script>', '<script src="$LOADER"></script>', out, count=1)
@@ -68,8 +70,9 @@ out, n6 = re.subn(r'<script src="guide\.js"></script>', '<script src="$GUIDE"></
 out, n7 = re.subn(r'<script src="dash_data\.js"></script>', '<script src="$DDATA"></script>', out, count=1)
 out, n8 = re.subn(r'<script src="charts\.js"></script>', '<script src="$CHARTS"></script>', out, count=1)
 out, n9 = re.subn(r'<script src="dashboard\.js"></script>', '<script src="$DASH"></script>', out, count=1)
-counts = (n1, n2, n3, n4, n5, n6, n7, n8, n9)
-assert counts == (1,) * 9, ("index.html changed shape", counts)
+out, n10 = re.subn(r'<script src="scene3d\.js"></script>', '<script src="$SCENE"></script>', out, count=1)
+counts = (n1, n2, n3, n4, n5, n6, n7, n8, n9, n10)
+assert counts == (1,) * 10, ("index.html changed shape", counts)
 open(sys.argv[1], "w").write(out)
 PY
 

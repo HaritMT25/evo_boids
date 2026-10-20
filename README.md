@@ -47,8 +47,13 @@ tests/         core_tests, predator_smoke, core_bench (no SFML needed)
   - `evo_boids_mt` uses pthreads. It needs `SharedArrayBuffer`, which browsers allow only on cross-origin-isolated pages (COOP `same-origin` + COEP `require-corp`).
   - `evo_boids` is single-threaded.
   - `web/loader.js` checks `self.crossOriginIsolated` and picks one. Inside an iframe on a page without those headers, it always gets the single-threaded build.
-- **Drawing.** With WebGL2, the background, food, fish and predators are drawn with one instanced draw call per kind (`web/gl_renderer.js`). The result is copied onto a 2D canvas, which draws the HUD and the neural inspector on top. Without WebGL2, everything is drawn with canvas 2D, at one fill per body segment.
-- **Frame budget.** When a frame takes too long, the page first lowers the simulation speed. Then it removes creatures uniformly at random and caps births, so the agent count drops instead of the frame rate. The status line reports when this happens, because a run changed this way can no longer be replayed from its seed. It can be switched off ("hold 60 fps").
+- **Drawing.** With WebGL2, the world is a 3D tank seen at an angle (`web/scene3d.js`, three.js). The simulation stays 2D; the scene only dresses it.
+  - Every fish is a faceted low-poly body bent along the six spine points the core already exports, in its genome colour, with a tail beat in the vertex shader. All fish are one instanced draw, their floor shadows a second.
+  - Food is glowing plankton, predators are larger dark hunters (their history of positions becomes their spine) with an ember glow while hunting, and a current shows as streaks advected through the flow grid.
+  - The camera pans, zooms, tilts and follows a fish (three's `MapControls`). Everything read as text (live numbers, the fish card and its brain, settings, Turbo) is DOM, readable at any zoom.
+  - three.js ships as a trimmed bundle, `web/vendor/three.bundle.min.js`, with only the classes the scene uses; `tools/three_bundle/build.sh` rebuilds it.
+  - Without WebGL2 (or with `?gl=0`), the same world is drawn flat with canvas 2D.
+- **Frame budget.** When a frame takes too long, the page first draws with less detail (fewer pixels, then no shadows), which changes nothing in the run. Then it lowers the simulation speed. Then it removes creatures uniformly at random and caps births, so the agent count drops instead of the frame rate. A note says when this happens, because a run changed this way can no longer be replayed from its seed. It can be switched off ("hold 60 fps").
 
 ## Build and run
 
@@ -86,12 +91,14 @@ Page options:
 | `?threads=0` | forces the single-threaded module |
 | `?nthreads=N` | sets the thread count |
 | `?bench` | runs the frame-rate benchmark below |
-| `?gl=0` | forces canvas 2D drawing instead of WebGL2 |
+| `?gl=0` | forces the flat canvas 2D view instead of the 3D scene |
 | `?guide=0` / `?guide=1` | never / always start the first-visit guide on load |
+
+Keyboard: <kbd>Space</kbd> pause · <kbd>↑</kbd> <kbd>↓</kbd> speed · <kbd>R</kbd> a fresh world · <kbd>F</kbd> follow the selected fish · <kbd>C</kbd> fit the view · <kbd>Esc</kbd> close what is open. Mouse: drag to pan, scroll to zoom (towards the pointer), right-drag to tilt and turn, click a fish to inspect it.
 
 Browser requirements:
 - **WebAssembly.**
-- **WebGL2**, optional: without it the fish are drawn with canvas 2D, which is slower at high counts.
+- **WebGL2**, optional: it draws the 3D scene; without it the world is drawn flat with canvas 2D, which is slower at high counts.
 - **Cross-origin isolation** for the threaded module: Chrome 92+, Firefox 79+ and Safari 15.2+ support it. Anywhere else, the page runs the single-threaded module.
 
 Tested on Windows 11 in:
@@ -113,9 +120,12 @@ Safari on macOS/iOS has not been tested.
 
 The page adapts to small and touch screens. A desktop browser with a mouse, in a landscape window, gets the layout above unchanged.
 
-- **World shape.** In portrait, or on any touch screen, a start or restart creates a world with the area of 1920×1080 but the shape of the screen, so it fills the screen instead of a 16:9 strip. Food density and crowding stay the same. Rotating the device keeps the running world, and a "fit to screen" button restarts it with a fitted one. A checkpoint keeps its own size, and `?bench` always uses 1920×1080.
-- **Inspector.** On screens 700 px wide or less, and on touch screens, the selected fish's network is drawn in a panel docked to the screen edge away from the fish, with 11–12 px text, instead of on the canvas. The on-canvas HUD is left out there; the status line carries the essentials.
-- **Touch.** A tap selects the nearest fish within about 24 CSS px. Tapping a parameter's name (marked ⓘ) shows its explanation. Inputs use 16 px text, so iOS does not zoom the page on focus, and buttons and rows are at least 44 px tall.
+The layout is built for a phone first and widens from there:
+
+- **World shape.** In portrait, or on any touch screen, a start or restart creates a world with the area of 1920×1080 but the shape of the screen, so it fills the screen instead of a 16:9 strip. Food density and crowding stay the same. Rotating the device keeps the running world, and a "Fit the world to this screen" button restarts it with a fitted one. A checkpoint keeps its own size, and `?bench` always uses 1920×1080.
+- **Controls.** Playback (pause, speed, Turbo, Randomize, fit the view) sits in a dock at the bottom, in reach of a thumb. Settings open as a bottom sheet you can drag down to close; on screens 960 px wide or more they sit beside the world instead, and the camera reframes the tank into the space left.
+- **The selected fish.** A card above the dock shows its energy (with the breeding threshold marked), age and speed; its brain opens below. The camera keeps the fish clear of the card.
+- **Touch.** A tap selects the nearest fish within about 30 CSS px; a drag moves the camera, a pinch zooms, a two-finger twist turns. Tapping a setting's name shows its explanation. Inputs use 16 px text, so iOS does not zoom the page on focus, and buttons and rows are at least 44 px tall.
 - **Load.** Touch devices start with 200 creatures (single-threaded) or 400 (threaded), on at most 4 threads; `?nthreads=N` overrides the thread count. The threaded module still pre-spawns min(cores, 8) − 1 workers. The frame-budget governor works as everywhere else.
 
 So far this is measured in emulation only: Playwright's iPhone 13 profile in WebKit 26.6 and its Pixel 7 profile in Chrome 155, portrait and landscape. The world covers 95% of the screen in all four cases (before: 31%, 26%, 75% and 69%). No real phone has been tested, so frame rate, battery use, memory, and whether the threaded module starts on iOS are unmeasured.
@@ -240,6 +250,8 @@ A repeat on AC power is not in the table, because the display refreshed at about
 - both canvas 2D rows: 2,000 (39–41 fps at 3,000)
 
 `?bench` now detects a display slower than 58 Hz and reports against its rate instead.
+
+The 3D scene (2026-10-19, same machine, AC power, Chrome on the Iris Xe, threaded × 8, 1440×900 window): stable 60 fps up to 10,000 agents (52.2 fps at 12,000). The instanced-circle renderer it replaced measured 12,000 under the same conditions (38.8 fps at 16,000). At 2,000 agents a frame spends about 1.2 ms drawing, against 0.8 ms before. The page also loads as fast as before: about 382 KB brotli instead of 390 KB (the trimmed three.js bundle replaces the background photo), and the world is running about 0.23 s after navigation from a local server, either way.
 
 The page starts the single-threaded module at 300 creatures and the threaded one at 600. Under the default settings, the population then settles between roughly 250 and 800.
 

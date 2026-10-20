@@ -1,34 +1,38 @@
 "use strict";
-/* evo_boids wasm renderer — canvas 2D front-end.
- * World: 1 unit = 1 px, origin top-left, +y down (canvas-native).
- * No interpolation, no trails, no wrap ghosts. Typed-array views are re-created
- * after every _evo_sync/_evo_inspect (memory growth invalidates buffers). */
+/* evo_boids page controller: the simulation loop, the scene, and every control.
+ *
+ * World: 1 unit = 1 px, origin top-left, +y down. Typed-array views into the
+ * wasm heap are re-created after every _evo_sync/_evo_inspect (memory growth
+ * invalidates buffers).
+ *
+ * Drawing: the 3D scene (web/scene3d.js, three.js on WebGL2) when it loads;
+ * otherwise a canvas-2D view of the same world (?gl=0 forces it). Everything
+ * read as text (live numbers, the selected fish, settings, Turbo) is DOM, laid
+ * out in CSS px, so it stays readable at any world size or zoom. */
 (function () {
   var DEFAULT_W = 1920, DEFAULT_H = 1080, TAU = Math.PI * 2;
   var WORLD_W = DEFAULT_W, WORLD_H = DEFAULT_H; /* may change on checkpoint load */
   var RADII = [5, 3.5, 3, 2.5, 2, 1.5];
-  var SEG_ALPHA = [255, 225, 195, 165, 135, 105].map(function (a) { return a / 255; });
-  /* Drawn radius = RADII[seg] * bodyScale(bodySize), floored at MIN_RADIUS so a
-   * small body still has a visible tail. bodySize is core-clamped to [0.5, 2],
-   * but its realised standing spread is narrow (sd ~0.08 about 1.0), so a plain
-   * multiply would separate two typical neighbours by a couple of tenths of a
-   * pixel. tanh gives slope BODY_SPAN*BODY_GAIN = 2 where the population
-   * actually sits and saturates at +/-BODY_SPAN, so the rails stay sane — a 2.0
-   * body draws 1.4x, not 2x. tanh(0) is exactly 0, so a default 1.0 body
-   * multiplies by exactly 1.0 and draws the pixels it always did. */
+  /* Drawn radius = RADII[seg] * bodyScale(bodySize). bodySize is core-clamped
+   * to [0.5, 2], but its realised standing spread is narrow (sd ~0.08 about
+   * 1.0), so a plain multiply would separate two typical neighbours by a couple
+   * of tenths of a pixel. tanh gives slope BODY_SPAN*BODY_GAIN = 2 where the
+   * population actually sits and saturates at +/-BODY_SPAN, so the rails stay
+   * sane — a 2.0 body draws 1.4x, not 2x. tanh(0) is exactly 0, so a default
+   * 1.0 body multiplies by exactly 1.0. Same formula as the native renderer. */
   var BODY_GAIN = 5, BODY_SPAN = 0.4, MIN_RADIUS = 1;
-  /* Same formula as SfmlRenderer::drawCreatures — the two frontends must match. */
   function bodyScale(b) {
     if (!(b > 0)) return 1;  /* absent buffer (older wasm blob) or NaN */
     return 1 + BODY_SPAN * Math.tanh(BODY_GAIN * (b - 1));
   }
   /* evo_inspect_info(): id, speed, foodReserves, age, bodySize, bodyElong, generation. */
   var INSPECT_INFO_LEN = 7;
-  var CUR_TAIL = "rgba(110,170,215," + (60 / 255).toFixed(4) + ")";
-  var CUR_HEAD = "rgba(150,205,235," + (130 / 255).toFixed(4) + ")";
-  var RING_STYLE = "rgba(255,235,120," + (230 / 255).toFixed(4) + ")";
   var ACTION_NAMES = ["steerX", "steerY", "moveFwd", "moveRnd", "speed", "signal",
                       "oscPer", "resp", "share", "repro", "fight", "ignore"];
+  var ACTION_LABELS = ["steer x", "steer y", "swim forward", "wander", "speed", "signal",
+                       "oscillator period", "respond", "share food", "reproduce", "fight", "ignore"];
+  var ACTION_SHORT = ["steer x", "steer y", "forward", "wander", "speed", "signal",
+                      "osc", "respond", "share", "breed", "fight", "ignore"];
 
   /* Advanced config, grouped: [sectionName, [[key, default, {step,title,label,options}], ...]] */
   var ADV_SECTIONS = [
@@ -42,44 +46,50 @@
       ["reproEnergy", 20], ["newbornEnergy", 25]
     ]],
     ["population", [
-      ["maxPopulation", 0, { step: 1, min: 0, label: "population cap (0 = none)" }],
-      ["minPopulation", 50, { step: 1, min: 0, label: "reseed floor" }]
+      ["maxPopulation", 0, { step: 1, min: 0 }],
+      ["minPopulation", 50, { step: 1, min: 0 }]
     ]],
     ["motion", [
       ["minSpeed", 30], ["maxSpeed", 150], ["maxTurnRate", 4], ["triangularMotion", false]
     ]],
     ["perception & social", [
       ["perceptionRadius", 80], ["interactRadius", 20],
-      ["maxNeighbors", 0, { step: 1, title: "0 = metric; N = topological cap" }]
+      ["maxNeighbors", 0, { step: 1 }]
     ]],
     ["genome", [
       ["mutationMultiplier", 1, { step: 0.1 }], ["genomeInitMin", 24], ["genomeInitMax", 48],
       ["genomeMinLength", 16], ["genomeMaxLength", 80],
-      ["reproMaxDistance", -1, { step: 0.5, label: "repro max distance (-1 = off)",
-                                 title: "genetic reproduction gate; -1 disables it" }],
-      ["reproSoftWidth", 0, { step: 0.5, min: 0, label: "repro soft width (0 = hard gate)",
-                              title: "acceptance ramp above the gate distance; needs the gate on" }],
-      ["reproGracePeriod", 0, { step: 10, min: 0, label: "repro grace (0 = off)",
-                                title: "young founders skip the gate; needs the gate on" }],
-      ["bodyMutation", 0.1, { step: 0.01, min: 0, label: "body mutation (body model on)",
-                              title: "uniform half-width per body parameter per birth" }]
+      ["reproMaxDistance", -1, { step: 0.5 }],
+      ["reproSoftWidth", 0, { step: 0.5, min: 0 }],
+      ["reproGracePeriod", 0, { step: 10, min: 0 }],
+      ["bodyMutation", 0.1, { step: 0.01, min: 0 }]
     ]],
     ["predators", [
       ["predatorSpeed", 110], ["predatorPerception", 150], ["predatorCaptureRadius", 14],
       ["predatorCooldown", 3, { step: 0.5, min: 0 }],
-      ["predatorMeal", -1, { step: 0.5, label: "predator meal (-1 = absorb prey)" }],
+      ["predatorMeal", -1, { step: 0.5 }],
       ["predatorMetabolism", 2], ["predatorReproEnergy", 60], ["predatorMaxAge", 0]
     ]],
     ["currents", [
-      ["currentMode", 0, { options: ["eddies", "gyre"] }],
+      ["currentMode", 0, { options: ["Eddies", "Gyre"] }],
       ["currentEddies", 5], ["currentCore", 150], ["currentDrift", 1]
     ]],
     ["numerics", [
-      ["fastTanh", false, { label: "fast tanh (changes the numbers)" }]
+      ["fastTanh", false]
     ]]
   ];
   /* Flat view: readAdvanced/resetAdvanced iterate every key regardless of section. */
   var ADV = ADV_SECTIONS.reduce(function (acc, sec) { return acc.concat(sec[1]); }, []);
+  var ADV_BY_KEY = {};
+  ADV.forEach(function (a) { ADV_BY_KEY[a[0]] = a; });
+  /* The basic settings: ids without the adv_ prefix (readForm, the randomizer
+   * and the guide use them by id). */
+  var BASIC = {
+    seed: [42, { step: 1, min: 0 }], population: [300, { step: 1, min: 1 }],
+    toroidal: [false], bodyModel: [false],
+    predators: [0, { step: 1, min: 0 }], predatorEconomy: [false],
+    foodPatches: [0, { step: 1, min: 0 }], currentStrength: [0, { step: 1, min: 0 }]
+  };
   /* Keys the running world accepts mid-run (evo_set_param's whitelist in
    * wasm/evo_wasm.cpp). Editing one applies immediately; every other key
    * applies on Restart. */
@@ -87,6 +97,71 @@
                foodSpawnAmp: 1, foodEnergy: 1, metabolicRate: 1, moveCost: 1, geneCost: 1,
                maxAge: 1, reproEnergy: 1, newbornEnergy: 1, mutationMultiplier: 1,
                minSpeed: 1, maxSpeed: 1 };
+
+  /* The settings sheet: tabs, then groups of keys ("b:" = a basic setting). */
+  var SETTINGS_TABS = [
+    { id: "run", title: "Run" },
+    { id: "world", title: "World", groups: [
+      ["The world", ["b:seed", "b:population", "b:toroidal", "b:bodyModel"]],
+      ["Population limits", ["maxPopulation", "minPopulation"]],
+      ["Movement", ["minSpeed", "maxSpeed", "triangularMotion", "maxTurnRate"]],
+      ["Senses", ["perceptionRadius", "interactRadius", "maxNeighbors"]],
+      ["Numerics", ["fastTanh"]]] },
+    { id: "food", title: "Food", groups: [
+      ["Food", ["b:foodPatches", "foodPatchRadius", "targetFood", "foodSpawnBase", "foodSpawnAmp", "foodEnergy", "foodDrift"]]] },
+    { id: "life", title: "Life", groups: [
+      ["Energy and age", ["metabolicRate", "moveCost", "geneCost", "maxAge", "reproEnergy", "newbornEnergy"]],
+      ["Genes", ["mutationMultiplier", "genomeInitMin", "genomeInitMax", "genomeMinLength", "genomeMaxLength"]],
+      ["Who can breed", ["reproMaxDistance", "reproSoftWidth", "reproGracePeriod"]],
+      ["Bodies", ["bodyMutation"]]] },
+    { id: "predators", title: "Predators", groups: [
+      ["Predators", ["b:predators", "b:predatorEconomy"]],
+      ["Hunting", ["predatorSpeed", "predatorPerception", "predatorCaptureRadius", "predatorCooldown"]],
+      ["Their economy", ["predatorMeal", "predatorMetabolism", "predatorReproEnergy", "predatorMaxAge"]]] },
+    { id: "ocean", title: "Ocean", groups: [
+      ["Currents", ["b:currentStrength", "currentMode", "currentEddies", "currentCore", "currentDrift"]]] }
+  ];
+  var LABELS = {
+    seed: "Seed", population: "Starting fish", toroidal: "Wrap-around edges", bodyModel: "Evolving bodies",
+    predators: "Predators", predatorEconomy: "Predators eat, breed and starve",
+    foodPatches: "Food patches", currentStrength: "Current strength",
+    targetFood: "Food target", foodSpawnBase: "Food per step", foodSpawnAmp: "Food swing",
+    foodEnergy: "Energy per food", foodPatchRadius: "Patch radius", foodDrift: "Food drifts with the current",
+    metabolicRate: "Energy burned per second", moveCost: "Swimming cost", geneCost: "Cost per gene",
+    maxAge: "Lifespan (s)", reproEnergy: "Energy needed to breed", newbornEnergy: "Newborn energy",
+    maxPopulation: "Population cap", minPopulation: "Reseed floor",
+    minSpeed: "Slowest speed", maxSpeed: "Fastest speed", maxTurnRate: "Turn rate",
+    triangularMotion: "Fast swims straight, slow turns",
+    perceptionRadius: "Sight radius", interactRadius: "Touch radius", maxNeighbors: "Neighbours watched",
+    mutationMultiplier: "Mutation rate ×", genomeInitMin: "Starting genes, fewest",
+    genomeInitMax: "Starting genes, most", genomeMinLength: "Genes, minimum", genomeMaxLength: "Genes, maximum",
+    reproMaxDistance: "Breeding distance limit", reproSoftWidth: "Soft limit width",
+    reproGracePeriod: "Founder grace (s)", bodyMutation: "Body mutation",
+    predatorSpeed: "Predator speed", predatorPerception: "Predator sight", predatorCaptureRadius: "Catch distance",
+    predatorCooldown: "Digesting time (s)", predatorMeal: "Energy per catch",
+    predatorMetabolism: "Predator energy burn", predatorReproEnergy: "Energy to bud a child",
+    predatorMaxAge: "Predator lifespan", currentMode: "Current shape", currentEddies: "Eddies",
+    currentCore: "Eddy radius", currentDrift: "How fast the flow changes", fastTanh: "Fast tanh"
+  };
+  var HINTS = {
+    maxPopulation: "0 = none", minPopulation: "founders added below this",
+    maxNeighbors: "0 = everyone in range", reproMaxDistance: "-1 = off",
+    reproSoftWidth: "0 = a hard limit", reproGracePeriod: "0 = off", predatorMeal: "-1 = the prey's whole store",
+    predatorMaxAge: "0 = until it starves", currentDrift: "0 = a still pattern", fastTanh: "changes the numbers"
+  };
+  /* what one press of − / + changes */
+  var BTN_STEP = {
+    seed: 1, population: 50, predators: 1, foodPatches: 1, currentStrength: 10,
+    targetFood: 50, foodSpawnBase: 1, foodSpawnAmp: 0.5, foodEnergy: 0.5, foodPatchRadius: 10,
+    metabolicRate: 0.1, moveCost: 0.00001, geneCost: 0.001, maxAge: 10, reproEnergy: 1, newbornEnergy: 1,
+    maxPopulation: 50, minPopulation: 10, minSpeed: 5, maxSpeed: 5, maxTurnRate: 0.5,
+    perceptionRadius: 5, interactRadius: 1, maxNeighbors: 1, mutationMultiplier: 0.1,
+    genomeInitMin: 1, genomeInitMax: 1, genomeMinLength: 1, genomeMaxLength: 1,
+    reproMaxDistance: 0.5, reproSoftWidth: 0.5, reproGracePeriod: 10, bodyMutation: 0.01,
+    predatorSpeed: 5, predatorPerception: 5, predatorCaptureRadius: 1, predatorCooldown: 0.5,
+    predatorMeal: 0.5, predatorMetabolism: 0.1, predatorReproEnergy: 5, predatorMaxAge: 10,
+    currentEddies: 1, currentCore: 10, currentDrift: 0.1
+  };
 
   /* Hover info per parameter: d = what it is, t = suggested values (docs/evo_boids_flags.md). */
   var TIPS = {
@@ -141,10 +216,11 @@
     fastTanh: { d: "~1.25x faster tanh approximation — changes the numbers.", t: "try: off to reproduce native runs" },
     maxPopulation: { d: "Birth cap: no births while the population is at or above it (0 = none). Applies live.", t: "try: 0; the frame-budget governor may set a lower one" },
     minPopulation: { d: "Reseed floor: random founders are added when the population falls below it. Applies live.", t: "try: 50 (the default)" },
-    governor: { d: "When frames take too long: first lower the speed, then remove creatures at random (no trait favoured) and cap births at what this machine can run at 60 fps. The status line reports each step; a governed run no longer replays from its seed.", t: "try: on; off to see the uncapped run (it may stutter)" }
+    governor: { d: "When frames take too long: first draw with fewer pixels, then lower the speed, then remove creatures at random (no trait favoured) and cap births at what this machine can run at 60 fps. A governed run no longer replays from its seed.", t: "try: on; off to see the uncapped run (it may stutter)" }
   };
 
   var ASSETS = window.EVO_ASSETS;
+  var PARAMS = new URLSearchParams(location.search);
   var Module = null;
   var threaded = false;      /* which module EvoLoader picked */
   var threadWhy = "";
@@ -153,38 +229,29 @@
   var paused = false;
   var simSpeed = 1;
   var selectedId = null;
-  /* the running world's config (non-default keys), for the dashboards */
+  var animT = 0;             /* scene animation clock: runs with the world, stops when it stops */
+  /* the running world's config (non-default keys), for the dashboards and the fish card */
   var runCfg = {};
-  /* the dashboards (web/dashboard.js), when the page has them */
   function dash() { return window.EvoDash || null; }
+  function cfgVal(key, def) { return Object.prototype.hasOwnProperty.call(runCfg, key) ? runCfg[key] : def; }
 
   var canvas = document.getElementById("canvas");
-  var ctx = canvas.getContext("2d", { alpha: false });
-  var bgImage = new Image();  /* background texture — shared with the native app (img/rocks.jpg) */
-  bgImage.src = ASSETS.background;
+  var scene = null;   /* web/scene3d.js, or null: the 2D view below */
+  var ctx2d = null;
   function el(id) { return document.getElementById(id); }
   var errEl = el("err");
-  var statusEl = el("status");
 
-  /* Compact screens (phones, touch devices, narrow windows): the world-space
-   * overlays — HUD text, inspector panel — shrink with the canvas until they
-   * are unreadable, so there the inspector is a DOM panel laid out in CSS px
-   * and the HUD is left to the status line. Elsewhere the canvas versions
-   * stay, matching the native SFML window. */
-  var compactMQ = window.matchMedia("(max-width: 700px), (pointer: coarse)");
+  var compactMQ = window.matchMedia("(max-width: 599px)");
+  var wideMQ = window.matchMedia("(min-width: 960px)");
   var coarseMQ = window.matchMedia("(pointer: coarse)");
+  var reducedMQ = window.matchMedia("(prefers-reduced-motion: reduce)");
   /* Kind of the last pointer seen. Hover tooltips are for the mouse; a touch
    * tap on a parameter name toggles its tooltip instead (attachTip), and a
-   * touch tap selects a fish from farther away (the canvas click handler). */
+   * touch tap selects a fish from farther away. */
   var lastPointer = "mouse";
   ["pointerover", "pointerdown"].forEach(function (type) {
     window.addEventListener(type, function (e) { lastPointer = e.pointerType || "mouse"; }, true);
   });
-  /* CSS px per world unit at the canvas's current on-screen size. */
-  function cssPerWorld() {
-    var r = canvas.getBoundingClientRect();
-    return r.width > 0 ? r.width / canvas.width : 1;
-  }
 
   /* The wasm heap. In the threaded module it is a growable SharedArrayBuffer,
    * and a growth triggered on another thread leaves Module.HEAP* pointing at
@@ -194,9 +261,22 @@
     return Module.wasmMemory ? Module.wasmMemory.buffer : Module.HEAPU8.buffer;
   }
 
-  function showError(msg) { errEl.textContent = msg; errEl.style.color = "#e05a5a"; }
-  function showNote(msg) { errEl.textContent = msg; errEl.style.color = "#8fa89a"; }
-  function clearError() { errEl.textContent = ""; }
+  /* ---- messages: the settings footer line, plus a toast seen from anywhere ---- */
+  var toastsEl = el("toasts");
+  function toast(msg, kind) {
+    var t = document.createElement("div");
+    t.className = "toast" + (kind ? " " + kind : "");
+    t.textContent = msg;
+    toastsEl.appendChild(t);
+    while (toastsEl.children.length > 3) toastsEl.removeChild(toastsEl.firstChild);
+    setTimeout(function () {
+      t.classList.add("out");
+      setTimeout(function () { if (t.parentNode) t.parentNode.removeChild(t); }, 220);
+    }, kind === "error" ? 6000 : 3200);
+  }
+  function showError(msg) { errEl.textContent = msg; errEl.className = "error"; toast(msg, "error"); }
+  function showNote(msg) { errEl.textContent = msg; errEl.className = ""; toast(msg); }
+  function clearError() { errEl.textContent = ""; errEl.className = ""; }
 
   function intVal(id, def) {
     var v = parseInt(el(id).value, 10);
@@ -207,50 +287,98 @@
     return Number.isFinite(v) ? v : def;
   }
 
-  /* ---- advanced settings UI (generated from ADV_SECTIONS) ---- */
-  function makeAdvInput(a) {
-    var key = a[0], def = a[1], opt = a[2] || {};
-    var label = document.createElement("label");
-    if (opt.title) label.title = opt.title;
+  /* ---- settings sheet (built from SETTINGS_TABS) ---- */
+  function decimals(x) { var s = String(x); var i = s.indexOf("."); return i < 0 ? (s.indexOf("e-") > 0 ? +s.split("e-")[1] : 0) : s.length - i - 1; }
+  function makeStepper(input, key, min) {
+    var wrap = document.createElement("span");
+    wrap.className = "stepper";
+    function button(sign, icon, label) {
+      var b = document.createElement("button");
+      b.type = "button";
+      b.tabIndex = -1;   /* the input itself takes arrow keys */
+      b.setAttribute("aria-label", label);
+      b.innerHTML = "<svg class='i'><use href='#i-" + icon + "'/></svg>";
+      b.addEventListener("click", function () {
+        var st = BTN_STEP[key] || 1, v = parseFloat(input.value);
+        if (!Number.isFinite(v)) v = 0;
+        v = +(v + sign * st).toFixed(Math.max(decimals(st), 0) + 2);
+        v = +v.toFixed(Math.max(decimals(st), decimals(v) > 6 ? 6 : decimals(v)));
+        if (min !== undefined && v < min) v = min;
+        input.value = String(v);
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+      return b;
+    }
+    wrap.appendChild(button(-1, "minus", "less"));
+    wrap.appendChild(input);
+    wrap.appendChild(button(1, "plus", "more"));
+    return wrap;
+  }
+  function makeField(key, def, opt, basic) {
+    opt = opt || {};
+    var id = basic ? key : "adv_" + key;
+    var row = document.createElement("div");
+    row.className = "field";
+    row.id = "f_" + key;
+    var left = document.createElement("span");
+    var name = document.createElement("label");
+    name.className = "name";
+    name.htmlFor = id;
+    var lt = document.createElement("span");
+    lt.className = "lt";
+    lt.textContent = LABELS[key] || key;
+    name.appendChild(lt);
+    if (LIVE[key]) {
+      var tag = document.createElement("span");
+      tag.className = "livetag";
+      tag.textContent = "live";
+      tag.title = "applies to the running world at once";
+      name.appendChild(tag);
+    }
+    var keyEl = document.createElement("span");
+    keyEl.className = "key";
+    keyEl.textContent = key + (HINTS[key] ? " · " + HINTS[key] : "");
+    left.appendChild(name);
+    left.appendChild(keyEl);
+    var ctl = document.createElement("span");
+    ctl.className = "ctl";
     var input;
     if (typeof def === "boolean") {
       input = document.createElement("input");
       input.type = "checkbox";
+      input.className = "switch";
+      input.setAttribute("role", "switch");
       input.checked = def;
+      ctl.appendChild(input);
     } else if (opt.options) {
       input = document.createElement("select");
-      opt.options.forEach(function (name, i) {
+      opt.options.forEach(function (label, i) {
         var o = document.createElement("option");
         o.value = String(i);
-        o.textContent = i + " " + name;
+        o.textContent = label;
         input.appendChild(o);
       });
       input.value = String(def);
+      ctl.appendChild(input);
     } else {
       input = document.createElement("input");
       input.type = "number";
+      input.inputMode = "decimal";
       input.step = opt.step !== undefined ? String(opt.step) : "any";
       /* A lower bound the spinner has no reason to go below: either evo_init
          refuses the value rather than clamping it (bodyMutation), or everything
          under the bound is a synonym for it (a <=0 knob that means "off"). */
       if (opt.min !== undefined) input.min = String(opt.min);
       input.value = String(def);
+      ctl.appendChild(makeStepper(input, key, opt.min));
     }
-    input.id = "adv_" + key;
-    var text = document.createElement("span");
-    text.className = "lt";
-    text.textContent = opt.label || key;
-    if (LIVE[key]) {
-      var tag = document.createElement("span");
-      tag.className = "livetag";
-      tag.textContent = "live";
-      text.appendChild(tag);
-      input.addEventListener("change", function () { applyLive(key, def, input); });
-    }
-    label.appendChild(text);  /* name left, control in the right-aligned column */
-    label.appendChild(input);
-    attachTip(label, key);
-    return label;
+    input.id = id;
+    if (LIVE[key]) input.addEventListener("change", function () { applyLive(key, def, input); });
+    row.appendChild(left);
+    row.appendChild(ctl);
+    attachTip(row, key);
+    return row;
   }
   /* Push one live-capable knob into the running world. maxPopulation goes
    * through the governor so a user cap and the frame-budget cap combine. */
@@ -261,21 +389,87 @@
     if (key === "maxPopulation") { userCap = Math.max(0, Math.round(v)); applyCap(); return; }
     if (!Module._evo_set_param) return;
     var ok = withCString(key, function (ptr) { return Module._evo_set_param(ptr, v); });
-    if (ok) showNote("(" + key + " = " + v + ", live)");
+    if (ok) { runCfg[key] = v; showNote((LABELS[key] || key) + " is now " + v + " (live)"); }
     else showError(Module.UTF8ToString(Module._evo_last_error()));
   }
-  function buildAdvancedUI() {
-    var root = el("advgrid"); /* now a vertical stack of section fieldsets */
-    ADV_SECTIONS.forEach(function (sec) {
-      var fs = document.createElement("fieldset");
-      var lg = document.createElement("legend");
-      lg.textContent = sec[0];
-      fs.appendChild(lg);
-      var grid = document.createElement("div");
-      grid.className = "agrid";
-      sec[1].forEach(function (a) { grid.appendChild(makeAdvInput(a)); });
-      fs.appendChild(grid);
-      root.appendChild(fs);
+  var tabsEl = el("tabs"), panelsEl = el("panels"), currentTab = "run";
+  function buildSettings() {
+    SETTINGS_TABS.forEach(function (tab) {
+      var b = document.createElement("button");
+      b.type = "button";
+      b.id = "tab-" + tab.id;
+      b.setAttribute("role", "tab");
+      b.setAttribute("aria-controls", "panel-" + tab.id);
+      b.textContent = tab.title;
+      b.addEventListener("click", function () { setSheetTab(tab.id); });
+      tabsEl.appendChild(b);
+      if (!tab.groups) return;   /* "run" is static HTML */
+      var panel = document.createElement("section");
+      panel.className = "panel";
+      panel.id = "panel-" + tab.id;
+      panel.dataset.tab = tab.id;
+      panel.setAttribute("role", "tabpanel");
+      tab.groups.forEach(function (g) {
+        var h = document.createElement("h3");
+        h.textContent = g[0];
+        panel.appendChild(h);
+        g[1].forEach(function (k) {
+          if (k.indexOf("b:") === 0) {
+            var key = k.slice(2), d = BASIC[key];
+            panel.appendChild(makeField(key, d[0], d[1], true));
+          } else {
+            var a = ADV_BY_KEY[k];
+            panel.appendChild(makeField(a[0], a[1], a[2], false));
+          }
+        });
+      });
+      panelsEl.appendChild(panel);
+    });
+    el("panel-run").setAttribute("role", "tabpanel");
+    attachTip(el("f_governor"), "governor");
+    var saved = null;
+    try { saved = localStorage.getItem("evo_boids.tab"); } catch (e) { /* private mode */ }
+    setSheetTab(saved && el("panel-" + saved) ? saved : "run");
+  }
+  function setSheetTab(id) {
+    currentTab = id;
+    SETTINGS_TABS.forEach(function (tab) {
+      var on = tab.id === id;
+      el("tab-" + tab.id).setAttribute("aria-selected", on ? "true" : "false");
+      el("tab-" + tab.id).tabIndex = on ? 0 : -1;
+      el("panel-" + tab.id).hidden = !on;
+    });
+    panelsEl.scrollTop = 0;
+    hideTip();
+    try { localStorage.setItem("evo_boids.tab", id); } catch (e) { /* private mode */ }
+  }
+  tabsEl.addEventListener("keydown", function (e) {
+    if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
+    var ids = SETTINGS_TABS.map(function (t) { return t.id; });
+    var i = ids.indexOf(currentTab) + (e.key === "ArrowRight" ? 1 : -1);
+    i = (i + ids.length) % ids.length;
+    setSheetTab(ids[i]);
+    el("tab-" + ids[i]).focus();
+    e.preventDefault();
+  });
+  /* a dot on each tab that holds a setting changed from its default */
+  function updateTabDots() {
+    SETTINGS_TABS.forEach(function (tab) {
+      if (!tab.groups) return;
+      var changed = tab.groups.some(function (g) {
+        return g[1].some(function (k) {
+          var basic = k.indexOf("b:") === 0, key = basic ? k.slice(2) : k;
+          if (key === "seed" || key === "population") return false;
+          var def = basic ? BASIC[key][0] : ADV_BY_KEY[key][1];
+          var input = el(basic ? key : "adv_" + key);
+          if (typeof def === "boolean") return input.checked !== def;
+          var v = parseFloat(input.value);
+          return Number.isFinite(v) && v !== def;
+        });
+      });
+      var b = el("tab-" + tab.id), dot = b.querySelector(".dot");
+      if (changed && !dot) { dot = document.createElement("span"); dot.className = "dot"; dot.title = "changed from the default"; b.appendChild(dot); }
+      else if (!changed && dot) b.removeChild(dot);
     });
   }
   function resetAdvanced() {
@@ -326,27 +520,28 @@
   /* World size for a (re)start. A landscape screen with a mouse keeps the
    * native 1920x1080. A portrait screen, or any touch screen, gets a world of
    * the same area (so food density and crowding stay the same) shaped like
-   * the stage, so the world fills a phone instead of a 16:9 strip across it.
+   * the screen, so the world fills a phone instead of a 16:9 strip across it.
    * A loaded checkpoint carries its own size. */
   function fittedWorld() {
-    var r = el("stage").getBoundingClientRect();
-    /* the stage's width with the menu closed (on wide screens the open
-     * menu narrows it): body padding is 6 px a side */
-    var aspect = (document.documentElement.clientWidth - 12) / r.height;
+    var aspect = document.documentElement.clientWidth / window.innerHeight;
     if (!(aspect > 0) || (aspect >= 1 && !coarseMQ.matches)) return [DEFAULT_W, DEFAULT_H];
     aspect = Math.max(0.4, Math.min(2.5, aspect));
     var w = Math.round(Math.sqrt(DEFAULT_W * DEFAULT_H * aspect));
     return [w, Math.round(DEFAULT_W * DEFAULT_H / w)];
   }
-  /* After a rotation or resize the running world keeps its shape
-   * (letterboxed). A button offers to restart with a fitted one on compact
-   * screens, and wherever the world was, or would now be, fitted; a
-   * landscape desktop window running the native 1920x1080 never shows it. */
+  /* After a rotation or resize the running world keeps its shape. A button
+   * offers to restart with a fitted one on touch screens, and wherever the
+   * world was, or would now be, fitted; a landscape desktop window running the
+   * native 1920x1080 never shows it. */
   var worldFitted = false;  /* the running world came from fittedWorld(), not the default */
   function updateFitButton() {
     var f = fittedWorld(), a = f[0] / f[1], b = WORLD_W / WORLD_H;
-    var fits = compactMQ.matches || worldFitted || f[0] !== DEFAULT_W || f[1] !== DEFAULT_H;
+    var fits = coarseMQ.matches || worldFitted || f[0] !== DEFAULT_W || f[1] !== DEFAULT_H;
     el("fitbtn").hidden = !!bench || !fits || Math.max(a, b) / Math.min(a, b) < 1.15;
+  }
+  function worldSized() {
+    if (scene) scene.setWorld(WORLD_W, WORLD_H);
+    else fit2D();
   }
 
   function restart() {
@@ -355,18 +550,20 @@
     clearError();
     var f = readForm();
     var size = fittedWorld();
+    var resized = size[0] !== WORLD_W || size[1] !== WORLD_H;
     WORLD_W = size[0]; WORLD_H = size[1];
     worldFitted = WORLD_W !== DEFAULT_W || WORLD_H !== DEFAULT_H;
-    if (canvas.width !== WORLD_W) canvas.width = WORLD_W;
-    if (canvas.height !== WORLD_H) canvas.height = WORLD_H;
     var ok = initWorld(f.seed, f.population, f.cfg);
+    if (resized || !worldInit) worldSized();
+    worldInit = true;
     updateFitButton();
     setPending(false);
     el("randnote").textContent = "";  /* randomize() fills it in after a pick */
     return ok;
   }
+  var worldInit = false;
 
-  /* ---- 🎲 Randomize: a whole setup drawn from tested ranges ----
+  /* ---- Randomize: a whole setup drawn from tested ranges ----
    * The ranges, and the rules that keep coupled knobs together, live in
    * web/randomizer.js. This fills the form with the draw (everything else
    * back to its default), restarts, and lists what it picked. */
@@ -391,10 +588,12 @@
     el("population").value = String(pick.population);
     el("seed").value = String((Math.random() * 0x100000000) >>> 0);
     updateNeeds();
+    updateTabDots();
     if (restart()) {
-      el("randnote").textContent = "Picked: " + pick.population + " fish" +
-        (pick.labels.length ? " · " + pick.labels.join(" · ") : " · the default world") +
-        ". Every setting is in the form below.";
+      var what = pick.population + " fish" +
+        (pick.labels.length ? " · " + pick.labels.join(" · ") : " · the default world");
+      el("randnote").textContent = "Picked: " + what + ". Every setting is in the tabs above.";
+      toast("New world: " + what);
     }
   }
   function initWorld(seed, population, cfg) {
@@ -434,6 +633,7 @@
     var s = {
       n: n, fc: fc, pc: pc, selIdx: selIdx,
       segs: new Float32Array(heap(), Module._evo_creature_segments(), n * 12),
+      ids: new Float64Array(heap(), Module._evo_creature_ids(), n),
       /* N*2 alongside segs, same creature order; absent from pre-0.24 blobs */
       body: Module._evo_body_params
               ? new Float32Array(heap(), Module._evo_body_params(), n * 2)
@@ -462,328 +662,354 @@
     return s;
   }
 
-  /* ---- neural inspector panel (drawn last, above HUD) ---- */
-  function colY(i, n, yTop, yBot) {
-    return n <= 1 ? (yTop + yBot) / 2 : yTop + (yBot - yTop) * i / (n - 1);
-  }
-  function activationColor(v) {
-    var m = Math.min(1, Math.abs(v));
-    var lo = 45;
-    var hot = lo + Math.round((235 - lo) * m);
-    var mid = Math.round(lo + (v >= 0 ? 60 : 90) * (1 - m));
-    return v >= 0 ? "rgb(" + hot + "," + mid + "," + lo + ")"
-                  : "rgb(" + lo + "," + mid + "," + hot + ")";
-  }
-  /* Canvas x of the drawer's left edge (WORLD_W when it is closed or off the
-   * canvas). The drawer is a fixed overlay on the right; the inspector's
-   * default home is the canvas's top-right, so it has to step aside. */
-  function drawerLeftInCanvas() {
-    if (!drawerEl.classList.contains("open")) return WORLD_W;
-    var cr = canvas.getBoundingClientRect();
-    if (cr.width <= 0) return WORLD_W;
-    var x = (drawerEl.getBoundingClientRect().left - cr.left) * (canvas.width / cr.width);
-    return Math.min(WORLD_W, x);
-  }
-  /* The network: 1. connections, under 2. the nodes. sen/hid/act map a node
-   * index to its [x, y]; g is the 2D context to draw into. Shared by the
-   * canvas inspector and the compact screens' DOM one. */
-  function drawNet(g, s, sen, hid, act, rSen, rNode) {
-    g.lineWidth = 1;
-    for (var k = 0; k < s.connCount; k++) {
-      var o = k * 5;
-      var srcSen = s.conns[o] !== 0;
-      var srcNum = s.conns[o + 1] | 0;
-      var sinkAct = s.conns[o + 2] !== 0;
-      var sinkNum = s.conns[o + 3] | 0;
-      var w = s.conns[o + 4];
-      var a = srcSen ? sen(srcNum) : hid(srcNum);
-      var b = sinkAct ? act(sinkNum) : hid(sinkNum);
-      var srcAct = srcSen ? s.sensors[srcNum] : s.hidden[srcNum];
-      var mag = Math.min(1, Math.abs(w) * Math.abs(srcAct) * 1.5);
-      var alpha = ((25 + Math.round(180 * mag)) / 255).toFixed(4);
-      g.strokeStyle = (w >= 0 ? "rgba(120,200,130," : "rgba(210,120,120,") + alpha + ")";
-      g.beginPath(); g.moveTo(a[0], a[1]); g.lineTo(b[0], b[1]); g.stroke();
+  /* ---- visible area: the part of the screen the panels leave uncovered ---- */
+  var insets = { top: 0, right: 0, bottom: 0, left: 0 };
+  function updateInsets() {
+    var vh = window.innerHeight;
+    var top = el("topbar").getBoundingClientRect().bottom + 6;
+    var dock = el("dock").getBoundingClientRect();
+    var bottom = drawerEl.classList.contains("open") && !wideMQ.matches ? 0 : vh - dock.top + 6;
+    var right = 0;
+    if (drawerEl.classList.contains("open")) {
+      if (wideMQ.matches) right = drawerEl.getBoundingClientRect().width;
+      else {
+        /* a phone's sheet leaves a strip too small to frame the whole tank
+         * in; then the view stays put and the sheet simply covers its foot */
+        var sheetTop = drawerEl.getBoundingClientRect().top;
+        bottom = sheetTop - top >= vh * 0.3 ? vh - sheetTop : 0;
+      }
     }
-    function node(p, r, v) {
-      g.fillStyle = activationColor(v);
-      g.beginPath(); g.arc(p[0], p[1], r, 0, TAU); g.fill();
-      g.strokeStyle = "rgba(0,0,0," + (160 / 255).toFixed(4) + ")";
-      g.lineWidth = 1;
+    if (!cardEl.hidden && compactMQ.matches && !drawerEl.classList.contains("open")) {
+      bottom = Math.max(bottom, vh - cardEl.getBoundingClientRect().top + 6);
+    }
+    insets = { top: Math.round(top), right: Math.round(right), bottom: Math.round(Math.max(0, bottom)), left: 0 };
+    if (scene) scene.setInsets(insets);
+    else if (ctx2d) fit2D();
+  }
+
+  /* ---- the 2D view (no WebGL2, or ?gl=0): the same world, flat ---- */
+  var v2 = { k: 1, ox: 0, oy: 0, dpr: 1 };
+  function fit2D() {
+    if (!ctx2d) return;
+    var cw = canvas.clientWidth, ch = canvas.clientHeight, dpr = Math.min(window.devicePixelRatio || 1, 2);
+    if (canvas.width !== Math.round(cw * dpr)) canvas.width = Math.round(cw * dpr);
+    if (canvas.height !== Math.round(ch * dpr)) canvas.height = Math.round(ch * dpr);
+    var vw = cw - insets.left - insets.right, vh = ch - insets.top - insets.bottom;
+    var k = Math.max(0.05, Math.min(vw / WORLD_W, vh / WORLD_H) * 0.96);
+    v2 = { k: k, dpr: dpr, ox: insets.left + (vw - WORLD_W * k) / 2, oy: insets.top + (vh - WORLD_H * k) / 2 };
+  }
+  function draw2D(s) {
+    var g = ctx2d, d = v2.dpr, i, c;
+    g.setTransform(d, 0, 0, d, 0, 0);
+    g.fillStyle = "#071f20";
+    g.fillRect(0, 0, canvas.width / d, canvas.height / d);
+    g.setTransform(d * v2.k, 0, 0, d * v2.k, d * v2.ox, d * v2.oy);
+    var grd = g.createRadialGradient(WORLD_W / 2, WORLD_H / 2, 0, WORLD_W / 2, WORLD_H / 2, Math.max(WORLD_W, WORLD_H) * 0.7);
+    grd.addColorStop(0, "#1e3d3a"); grd.addColorStop(1, "#122b2b");
+    g.fillStyle = grd;
+    g.fillRect(0, 0, WORLD_W, WORLD_H);
+    if (s.curActive) {
+      g.strokeStyle = "rgba(140,220,250,0.28)";
+      g.lineWidth = 1 / v2.k;
+      g.beginPath();
+      for (var j = 0; j < s.curRows; j++) for (i = 0; i < s.curCols; i++) {
+        var q = (j * s.curCols + i) * 2, vx = s.curGrid[q], vy = s.curGrid[q + 1];
+        if (vx * vx + vy * vy < 1) continue;
+        var x0 = 32 + 64 * i, y0 = 32 + 64 * j;
+        g.moveTo(x0, y0); g.lineTo(x0 + vx * 0.45, y0 + vy * 0.45);
+      }
       g.stroke();
     }
-    var i;
-    for (i = 0; i < 41; i++) node(sen(i), rSen, s.sensors[i]);
-    for (i = 0; i < 12; i++) node(hid(i), rNode, s.hidden[i]);
-    for (i = 0; i < 12; i++) node(act(i), rNode, s.actions[i]);
-  }
-  /* Canvas inspector panel, in world px: top-right by default; with the
-   * drawer open, just left of its edge (follows it while it slides), never
-   * off the canvas's left side. */
-  var INSP_W = 340, INSP_H = 560, INSP_Y = 44;
-  function inspectorX() {
-    return Math.max(12, Math.min(WORLD_W - INSP_W - 12, drawerLeftInCanvas() - INSP_W - 12));
-  }
-  function drawInspector(s) {
-    var pw = INSP_W, ph = INSP_H, py = INSP_Y;
-    var px = inspectorX();
-    ctx.fillStyle = "rgba(10,22,30," + (205 / 255).toFixed(4) + ")";
-    ctx.fillRect(px, py, pw, ph);
-    ctx.strokeStyle = "rgba(90,140,150," + (220 / 255).toFixed(4) + ")";
-    ctx.lineWidth = 1;
-    ctx.strokeRect(px + 0.5, py + 0.5, pw - 1, ph - 1);
-    var xS = px + 30, xH = px + 170, xA = px + 310;
-    var yTop = py + 46, yBot = py + ph - 22;
-    var i;
-
-    drawNet(ctx, s,
-            function (n) { return [xS, colY(n, 41, yTop, yBot)]; },
-            function (n) { return [xH, colY(n, 12, yTop, yBot)]; },
-            function (n) { return [xA, colY(n, 12, yTop, yBot)]; }, 3, 5);
-
-    /* 3. text */
-    ctx.font = "13px monospace";
-    ctx.fillStyle = "rgba(220,235,240," + (235 / 255).toFixed(4) + ")";
-    ctx.fillText("Fish #" + Math.round(s.info[0]) + "   spd " + Math.round(s.info[1]) +
-                 "   E " + Math.round(s.info[2]) + "   age " + Math.round(s.info[3]),
-                 px + 12, py + 19);
-    /* Body params get their own line at the panel foot — appended to the title
-     * they would run past the 340px panel. Always drawn: the page has no view of
-     * cfg.bodyModel, and a fixed 1.00 / 1.00 is itself the readout for a run
-     * with the model off. */
-    ctx.font = "11px monospace";
-    ctx.fillStyle = "rgba(190,205,210," + (220 / 255).toFixed(4) + ")";
-    ctx.fillText("body " + s.info[4].toFixed(2) + "   elong " + s.info[5].toFixed(2) +
-                 "   gen " + Math.round(s.info[6]),
-                 px + 12, py + ph - 8);
-    ctx.fillStyle = "rgba(150,175,180," + (200 / 255).toFixed(4) + ")";
-    var hy = yTop - 18 + 11; /* text top at yTop-18, ~11px to baseline */
-    ctx.fillText("in", xS - 8, hy);
-    ctx.fillText("hidden", xH - 20, hy);
-    ctx.fillText("out", xA - 12, hy);
-    ctx.font = "10px monospace";
-    ctx.fillStyle = "rgba(190,205,210," + (220 / 255).toFixed(4) + ")";
-    for (i = 0; i < 12; i++) ctx.fillText(ACTION_NAMES[i], xA + 8, colY(i, 12, yTop, yBot) + 3);
-  }
-
-  /* ---- compact screens: the inspector as a docked DOM panel ----
-   * The same network, drawn in CSS px at devicePixelRatio, so its text stays
-   * at 11 px however small the world is on screen. The panel docks to the
-   * screen edge away from the selected fish (top/bottom in portrait,
-   * left/right in landscape) and moves only when the fish swims under it. */
-  var inspEl = el("inspector"), inetCanvas = el("inetc"), inetCtx = inetCanvas.getContext("2d");
-  var inspDock = "", inspTitle = "", inspSub = "";
-  function hidePanel() {
-    if (!inspDock) return;
-    inspDock = "";
-    inspEl.className = "";
-    document.body.removeAttribute("data-dock");
-  }
-  function dockPanel(fx, fy) {  /* the selected fish, in CSS px */
-    var portrait = window.innerHeight >= window.innerWidth;
-    if (inspDock && (inspDock === "top" || inspDock === "bottom") === portrait) {
-      var r = inspEl.getBoundingClientRect(), m = 24;
-      if (fx < r.left - m || fx > r.right + m || fy < r.top - m || fy > r.bottom + m) return;
+    g.fillStyle = "rgba(160,220,60,0.28)";
+    g.beginPath();
+    for (i = 0; i < s.fc; i++) { g.moveTo(s.food[2 * i] + 4.5, s.food[2 * i + 1]); g.arc(s.food[2 * i], s.food[2 * i + 1], 4.5, 0, TAU); }
+    g.fill();
+    g.fillStyle = "#e6ff9c";
+    g.beginPath();
+    for (i = 0; i < s.fc; i++) { g.moveTo(s.food[2 * i] + 1.8, s.food[2 * i + 1]); g.arc(s.food[2 * i], s.food[2 * i + 1], 1.8, 0, TAU); }
+    g.fill();
+    /* fish: a tapered body along the spine, a forked tail, an eye */
+    var L = [], R = [];
+    for (c = 0; c < s.n; c++) {
+      var b = 12 * c, bs = bodyScale(s.body ? s.body[2 * c] : 1), wrap = false;
+      for (i = 1; i < 6 && !wrap; i++) wrap = Math.abs(s.segs[b + 2 * i] - s.segs[b]) > WORLD_W / 2 || Math.abs(s.segs[b + 2 * i + 1] - s.segs[b + 1]) > WORLD_H / 2;
+      g.fillStyle = "rgb(" + s.colors[3 * c] + "," + s.colors[3 * c + 1] + "," + s.colors[3 * c + 2] + ")";
+      if (wrap) {   /* straddling the seam: draw it as dots, never as a bar across the world */
+        for (i = 0; i < 6; i++) { g.beginPath(); g.arc(s.segs[b + 2 * i], s.segs[b + 2 * i + 1], Math.max(MIN_RADIUS, RADII[i] * bs), 0, TAU); g.fill(); }
+        continue;
+      }
+      for (i = 0; i < 6; i++) {
+        var pi = Math.max(0, i - 1), ni = Math.min(5, i + 1);
+        var tx = s.segs[b + 2 * pi] - s.segs[b + 2 * ni], ty = s.segs[b + 2 * pi + 1] - s.segs[b + 2 * ni + 1];
+        var tl = Math.hypot(tx, ty) || 1, r = Math.max(MIN_RADIUS * 0.6, RADII[i] * bs * 0.95);
+        L[i] = [s.segs[b + 2 * i] - ty / tl * r, s.segs[b + 2 * i + 1] + tx / tl * r];
+        R[i] = [s.segs[b + 2 * i] + ty / tl * r, s.segs[b + 2 * i + 1] - tx / tl * r];
+      }
+      var hx = s.segs[b], hy = s.segs[b + 1], fx = s.segs[b] - s.segs[b + 2], fy = s.segs[b + 1] - s.segs[b + 3];
+      var fl = Math.hypot(fx, fy) || 1;
+      g.beginPath();
+      g.moveTo(hx + fx / fl * 4 * bs, hy + fy / fl * 4 * bs);
+      for (i = 0; i < 6; i++) g.lineTo(L[i][0], L[i][1]);
+      var ex = s.segs[b + 10], ey = s.segs[b + 11], qx = ex - s.segs[b + 8], qy = ey - s.segs[b + 9], ql = Math.hypot(qx, qy) || 1;
+      g.lineTo(ex + qx / ql * 6 - qy / ql * 4.5, ey + qy / ql * 6 + qx / ql * 4.5);
+      g.lineTo(ex + qx / ql * 3, ey + qy / ql * 3);
+      g.lineTo(ex + qx / ql * 6 + qy / ql * 4.5, ey + qy / ql * 6 - qx / ql * 4.5);
+      for (i = 5; i >= 0; i--) g.lineTo(R[i][0], R[i][1]);
+      g.closePath();
+      g.fill();
     }
-    var want = portrait ? (fy > window.innerHeight / 2 ? "top" : "bottom")
-                        : (fx > window.innerWidth / 2 ? "left" : "right");
-    if (want !== inspDock) {
-      inspDock = want;
-      inspEl.className = want;
-      document.body.setAttribute("data-dock", want);  /* moves the status line clear */
+    for (i = 0; i < s.pc; i++) {
+      var hunting = !(s.preds[3 * i + 2] > 0);
+      g.fillStyle = "#2b3038";
+      g.beginPath(); g.arc(s.preds[3 * i], s.preds[3 * i + 1], 9, 0, TAU); g.fill();
+      g.strokeStyle = hunting ? "rgba(255,110,60,0.9)" : "rgba(255,110,60,0.35)";
+      g.lineWidth = 2;
+      g.stroke();
     }
+    if (s.selIdx >= 0) {
+      g.strokeStyle = "rgba(200,245,80,0.95)";
+      g.lineWidth = 2 / v2.k;
+      g.beginPath(); g.arc(s.segs[12 * s.selIdx], s.segs[12 * s.selIdx + 1], 16, 0, TAU); g.stroke();
+    }
+    g.strokeStyle = "rgba(140,210,195,0.25)";
+    g.lineWidth = 1 / v2.k;
+    g.strokeRect(0, 0, WORLD_W, WORLD_H);
   }
-  function drawPanel(s) {
-    /* layout reads first, DOM writes last, so a frame never forces a
-     * synchronous reflow (except right after a rare dock change) */
-    var cr = canvas.getBoundingClientRect(), c = cr.width / canvas.width;
-    dockPanel(cr.left + s.segs[12 * s.selIdx] * c, cr.top + s.segs[12 * s.selIdx + 1] * c);
-    var box = inetCanvas.parentNode, w = box.clientWidth, h = box.clientHeight;
-    if (w >= 60 && h >= 60) drawPanelNet(s, w, h);
-    var title = "Fish #" + Math.round(s.info[0]) + " · spd " + Math.round(s.info[1]) +
-                " · E " + Math.round(s.info[2]) + " · age " + Math.round(s.info[3]);
-    var sub = "body " + s.info[4].toFixed(2) + " · elong " + s.info[5].toFixed(2) +
-              " · gen " + Math.round(s.info[6]);
-    if (title !== inspTitle) el("ititle").textContent = inspTitle = title;
-    if (sub !== inspSub) el("isub").textContent = inspSub = sub;
+  function pick2D(s, clientX, clientY, reach) {
+    var r = canvas.getBoundingClientRect();
+    var wx = (clientX - r.left - v2.ox) / v2.k, wy = (clientY - r.top - v2.oy) / v2.k;
+    var best = -1, bestD2 = Math.pow(reach / v2.k, 2);
+    for (var i = 0; i < s.n; i++) {
+      var dx = s.segs[12 * i] - wx, dy = s.segs[12 * i + 1] - wy, d2 = dx * dx + dy * dy;
+      if (d2 <= bestD2) { bestD2 = d2; best = i; }
+    }
+    return best;
   }
-  /* the panel's network, in a w x h CSS px box */
-  function drawPanelNet(s, w, h) {
-    var dpr = window.devicePixelRatio || 1;
-    var bw = Math.round(w * dpr), bh = Math.round(h * dpr);
-    if (inetCanvas.width !== bw) inetCanvas.width = bw;
-    if (inetCanvas.height !== bh) inetCanvas.height = bh;
-    var g = inetCtx, i, sen, hid, act;
+
+  /* ---- the selected fish: a card with its numbers and its live brain ---- */
+  var cardEl = el("fishcard"), inetCanvas = el("inetc"), inetCtx = inetCanvas.getContext("2d");
+  var portrait = el("iportrait"), portraitCtx = portrait.getContext("2d");
+  var cardExpanded = !compactMQ.matches, cardCache = {}, cardFor = null;
+  var sensorNames = null, netNodes = [], netHover = -1, uiFont = "";
+  function prettyName(n) {
+    return String(n).replace(/_/g, " ").replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase();
+  }
+  function senseName(i) {
+    if (!sensorNames && Module && Module._evo_sensor_names) {
+      sensorNames = Module.UTF8ToString(Module._evo_sensor_names()).split(",").map(prettyName);
+    }
+    return sensorNames && sensorNames[i] ? sensorNames[i] : "sense " + (i + 1);
+  }
+  function setText(id, v) { if (cardCache[id] !== v) { cardCache[id] = v; el(id).textContent = v; } }
+  function setBar(id, f, tick) {
+    f = Math.max(0, Math.min(1, f));
+    var key = id + "|" + f.toFixed(3) + "|" + (tick === undefined ? "" : tick.toFixed(3));
+    if (cardCache[id + "bar"] === key) return;
+    cardCache[id + "bar"] = key;
+    var bar = el(id);
+    bar.firstElementChild.style.transform = "scaleX(" + f.toFixed(3) + ")";
+    var t = bar.querySelector(".tick");
+    if (t) t.style.left = "calc(" + ((tick || 0) * 100).toFixed(1) + "% - 1px)";
+  }
+  function showCard() {
+    cardEl.hidden = false;
+    cardEl.classList.toggle("expanded", cardExpanded);
+    el("iexpand").setAttribute("aria-expanded", cardExpanded ? "true" : "false");
+    el("followbtn").hidden = !scene;
+    cardCache = {};
+    updateInsets();
+  }
+  function hideCard() {
+    if (cardEl.hidden) return;
+    cardEl.hidden = true;
+    cardFor = null;
+    netHover = -1;
+    if (scene && scene.following()) scene.setFollow(false);
+    updateInsets();
+  }
+  function drawPortrait(rgb, size, elong) {
+    var dpr = window.devicePixelRatio || 1, w = 56, h = 40;
+    if (portrait.width !== w * dpr) { portrait.width = w * dpr; portrait.height = h * dpr; }
+    var g = portraitCtx;
     g.setTransform(dpr, 0, 0, dpr, 0, 0);
     g.clearRect(0, 0, w, h);
-    g.font = "11px monospace";
-    var headStyle = "rgba(150,175,180," + (200 / 255).toFixed(4) + ")";
-    var nameStyle = "rgba(190,205,210," + (220 / 255).toFixed(4) + ")";
-    if (w > h * 1.2) {
-      /* wide panel: rows in / hidden / out, top to bottom; the output names
-       * sit under the out row, alternating between two lines so they fit */
-      var m = 14, yIn = 24, yOut = h - 40, yHid = (yIn + yOut) / 2;
-      var x12 = function (n) { return m + 18 + (w - 2 * m - 36) * n / 11; };
-      sen = function (n) { return [m + (w - 2 * m) * n / 40, yIn]; };
-      hid = function (n) { return [x12(n), yHid]; };
-      act = function (n) { return [x12(n), yOut]; };
-      drawNet(g, s, sen, hid, act, Math.min(3, (w - 2 * m) / 40 * 0.4), 5);
-      g.fillStyle = headStyle;
-      g.fillText("in", m - 2, yIn - 10);
-      g.fillText("hidden", m - 2, yHid - 10);
-      g.fillText("out", m - 2, yOut - 10);
-      g.fillStyle = nameStyle;
+    var k = 3.0 * bodyScale(size), len = 1 + 0.35 * Math.tanh(4 * (elong - 1));
+    g.translate(w / 2 + 4, h / 2);
+    g.scale(len, 1);
+    g.fillStyle = "rgb(" + rgb.join(",") + ")";
+    g.beginPath();
+    g.moveTo(-9 * k / 1.2, 0);
+    g.bezierCurveTo(-7 * k / 1.2, -4.2 * k / 1.2, 2, -4.4 * k / 1.2, 6, -1.4);
+    g.lineTo(11, -5.5); g.lineTo(9.5, 0); g.lineTo(11, 5.5); g.lineTo(6, 1.4);
+    g.bezierCurveTo(2, 4.4 * k / 1.2, -7 * k / 1.2, 4.2 * k / 1.2, -9 * k / 1.2, 0);
+    g.fill();
+    g.fillStyle = "rgba(4,14,15,0.9)";
+    g.beginPath(); g.arc(-6.2 * k / 1.2, -1.2, 1.1, 0, TAU); g.fill();
+    g.setTransform(1, 0, 0, 1, 0, 0);
+  }
+  function updateCard(s) {
+    if (s.selIdx < 0 || !s.info) { hideCard(); return; }
+    if (cardEl.hidden) showCard();
+    var info = s.info, id = Math.round(info[0]);
+    var rgb = [s.colors[3 * s.selIdx], s.colors[3 * s.selIdx + 1], s.colors[3 * s.selIdx + 2]];
+    var pkey = id + "|" + rgb.join() + "|" + info[4].toFixed(2) + "|" + info[5].toFixed(2);
+    if (cardFor !== pkey) { cardFor = pkey; drawPortrait(rgb, info[4], info[5]); }
+    setText("ititle", "Fish " + id.toLocaleString());
+    setText("isub", "Generation " + Math.round(info[6]) +
+            (cfgVal("bodyModel", false) ? " · body " + info[4].toFixed(2) + " × " + info[5].toFixed(2) : ""));
+    var reproE = cfgVal("reproEnergy", 20), maxAge = cfgVal("maxAge", 120), maxSpd = cfgVal("maxSpeed", 150);
+    setText("ienergyv", info[2].toFixed(1));
+    setBar("ienergy", info[2] / (reproE * 2), 0.5);
+    el("ienergy").title = info[2] >= reproE ? "enough energy to breed" : "needs " + reproE + " to breed";
+    setText("iagev", Math.round(info[3]) + " s");
+    setBar("iage", info[3] / maxAge);
+    setText("ispeedv", String(Math.round(info[1])));
+    setBar("ispeed", info[1] / maxSpd);
+    if (cardExpanded) drawBrain(s);
+  }
+
+  /* The network: senses -> hidden -> actions. Links are drawn first, nodes on
+   * top; nodes keep their screen positions for the tap-to-name readout. */
+  function activationColor(v, a) {
+    var m = Math.min(1, Math.abs(v));
+    return v >= 0 ? "rgba(" + Math.round(70 + 130 * m) + "," + Math.round(90 + 150 * m) + "," + Math.round(60 + 10 * m) + "," + a + ")"
+                  : "rgba(" + Math.round(80 + 175 * m) + "," + Math.round(90 + 20 * m) + "," + Math.round(70 + 10 * m) + "," + a + ")";
+  }
+  function drawBrain(s) {
+    var box = inetCanvas.parentNode, w = box.clientWidth, h = box.clientHeight;
+    if (w < 60 || h < 60) return;
+    var dpr = window.devicePixelRatio || 1, bw = Math.round(w * dpr), bh = Math.round(h * dpr);
+    if (inetCanvas.width !== bw) inetCanvas.width = bw;
+    if (inetCanvas.height !== bh) inetCanvas.height = bh;
+    var g = inetCtx, i;
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.clearRect(0, 0, w, h);
+    var wide = w > h * 1.15, pos = { sen: [], hid: [], act: [] };
+    var m = 14;
+    if (wide) {
+      var yIn = 26, yOut = h - 40, yHid = (yIn + yOut) / 2;
+      for (i = 0; i < 41; i++) pos.sen.push([m + (w - 2 * m) * i / 40, yIn]);
+      for (i = 0; i < 12; i++) { var x = m + 18 + (w - 2 * m - 36) * i / 11; pos.hid.push([x, yHid]); pos.act.push([x, yOut]); }
+    } else {
+      var yTop = 26, yBot = h - 12, xS = 18, xA = w - 92, xH = (xS + xA) / 2;
+      for (i = 0; i < 41; i++) pos.sen.push([xS, yTop + (yBot - yTop) * i / 40]);
+      for (i = 0; i < 12; i++) { var y = yTop + (yBot - yTop) * i / 11; pos.hid.push([xH, y]); pos.act.push([xA, y]); }
+    }
+    /* links: curved, brighter and thicker the more they carry right now */
+    var hoverKey = netHover >= 0 && netNodes[netHover] ? netNodes[netHover].kind + netNodes[netHover].i : null;
+    for (var k = 0; k < s.connCount; k++) {
+      var o = k * 5;
+      var srcSen = s.conns[o] !== 0, srcNum = s.conns[o + 1] | 0;
+      var sinkAct = s.conns[o + 2] !== 0, sinkNum = s.conns[o + 3] | 0, wgt = s.conns[o + 4];
+      var a = srcSen ? pos.sen[srcNum] : pos.hid[srcNum];
+      var b = sinkAct ? pos.act[sinkNum] : pos.hid[sinkNum];
+      if (!a || !b) continue;
+      var srcAct = srcSen ? s.sensors[srcNum] : s.hidden[srcNum];
+      var mag = Math.min(1, Math.abs(wgt) * Math.abs(srcAct) * 1.5);
+      var hl = hoverKey !== null && ((srcSen ? "Sense" : "Hidden neuron") + srcNum === hoverKey ||
+                                     (sinkAct ? "Action" : "Hidden neuron") + sinkNum === hoverKey);
+      g.strokeStyle = (wgt >= 0 ? "rgba(180,235,80," : "rgba(255,120,80,") + (hl ? 0.9 : (0.10 + 0.7 * mag)).toFixed(3) + ")";
+      g.lineWidth = hl ? 2 : 0.8 + 1.6 * mag;
+      g.beginPath();
+      g.moveTo(a[0], a[1]);
+      if (wide) g.bezierCurveTo(a[0], (a[1] + b[1]) / 2, b[0], (a[1] + b[1]) / 2, b[0], b[1]);
+      else g.bezierCurveTo((a[0] + b[0]) / 2, a[1], (a[0] + b[0]) / 2, b[1], b[0], b[1]);
+      g.stroke();
+    }
+    netNodes = [];
+    function node(p, r, v, kind, idx) {
+      g.fillStyle = activationColor(v, 1);
+      g.beginPath(); g.arc(p[0], p[1], r, 0, TAU); g.fill();
+      g.strokeStyle = "rgba(4,14,16,0.85)";
+      g.lineWidth = 1;
+      g.stroke();
+      netNodes.push({ x: p[0], y: p[1], kind: kind, i: idx, v: v, ref: p });
+    }
+    var rs = Math.max(2, Math.min(3.2, (wide ? w : h) / 41 * 0.36));
+    for (i = 0; i < 41; i++) node(pos.sen[i], rs, s.sensors[i], "Sense", i);
+    for (i = 0; i < 12; i++) node(pos.hid[i], 5, s.hidden[i], "Hidden neuron", i);
+    for (i = 0; i < 12; i++) node(pos.act[i], 5.5, s.actions[i], "Action", i);
+    if (netHover >= 0 && netNodes[netHover]) {
+      var hn = netNodes[netHover];
+      g.strokeStyle = "rgba(230,255,160,0.95)"; g.lineWidth = 2;
+      g.beginPath(); g.arc(hn.x, hn.y, 8, 0, TAU); g.stroke();
+    }
+    if (!uiFont) uiFont = getComputedStyle(document.body).fontFamily;
+    g.font = "11px " + uiFont;
+    g.fillStyle = "rgba(190,210,205,0.9)";
+    function tag(text, x, y) {   /* a label on a small backing, readable over the links */
+      var tw = g.measureText(text).width;
+      g.fillStyle = "rgba(15,39,39,0.92)";
+      g.fillRect(x - 3, y - 10, tw + 6, 14);
+      g.fillStyle = "rgba(190,210,205,0.95)";
+      g.fillText(text, x, y);
+    }
+    if (wide) {
+      tag("senses", m, 13);
+      tag("hidden", m, (26 + h - 40) / 2 - 9);
+      g.fillStyle = "rgba(190,210,205,0.9)";
       g.textAlign = "center";
-      for (i = 0; i < 12; i++) g.fillText(ACTION_NAMES[i], x12(i), yOut + (i % 2 ? 32 : 18));
+      for (i = 0; i < 12; i++) g.fillText(ACTION_SHORT[i], pos.act[i][0], h - 40 + (i % 2 ? 30 : 18));
       g.textAlign = "left";
     } else {
-      /* tall panel: columns, like the canvas inspector */
-      var yTop = 26, yBot = h - 10, xS = 16, xA = w - 64, xH = (xS + xA) / 2;
-      sen = function (n) { return [xS, colY(n, 41, yTop, yBot)]; };
-      hid = function (n) { return [xH, colY(n, 12, yTop, yBot)]; };
-      act = function (n) { return [xA, colY(n, 12, yTop, yBot)]; };
-      drawNet(g, s, sen, hid, act, Math.min(3, (yBot - yTop) / 40 * 0.4), 5);
-      g.fillStyle = headStyle;
-      g.fillText("in", xS - 6, yTop - 12);
-      g.fillText("hidden", xH - 20, yTop - 12);
-      g.fillText("out", xA - 10, yTop - 12);
-      g.fillStyle = nameStyle;
-      for (i = 0; i < 12; i++) g.fillText(ACTION_NAMES[i], xA + 8, colY(i, 12, yTop, yBot) + 4);
+      g.fillText("senses", 6, 13);
+      g.fillText("hidden", (18 + w - 92) / 2 - 18, 13);
+      g.fillText("actions", w - 98, 13);
+      for (i = 0; i < 12; i++) g.fillText(ACTION_LABELS[i], pos.act[i][0] + 10, pos.act[i][1] + 4);
     }
+    updateSenseLine();
   }
-
-  /* Scene layer (background, currents, food, creatures, predators): WebGL2
-   * when available (web/gl_renderer.js; one instanced draw per kind), else the
-   * 2D path below. Both read the same constants, so they draw the same scene;
-   * ?gl=0 forces 2D. Overlays (ring, HUD, inspector) are always 2D, on top. */
-  var LOOK = {
-    radii: RADII, segAlpha: SEG_ALPHA, minRadius: MIN_RADIUS, bodyScale: bodyScale,
-    clear: [0x0F / 255, 0x1E / 255, 0x19 / 255],
-    food: [0x97 / 255, 0xC6 / 255, 0x32 / 255],
-    predDigesting: [150 / 255, 60 / 255, 60 / 255],
-    predHunting: [220 / 255, 50 / 255, 50 / 255],
-    curTail: [110 / 255, 170 / 255, 215 / 255, 60 / 255],
-    curHead: [150 / 255, 205 / 255, 235 / 255, 130 / 255]
-  };
-  var glScene = null;
-  if (window.EvoGL && new URLSearchParams(location.search).get("gl") !== "0") {
-    glScene = EvoGL.create(WORLD_W, WORLD_H, bgImage, LOOK);
-  }
-
-  function draw(s) {
-    if (glScene) glScene.resize(WORLD_W, WORLD_H);  /* world size changes on checkpoint load */
-    var layer = glScene ? glScene.draw(s, WORLD_W, WORLD_H) : null;
-    if (layer) ctx.drawImage(layer, 0, 0);
-    else drawScene2D(s);
-    drawOverlays(s);
-  }
-
-  function drawScene2D(s) {
-    ctx.fillStyle = "#0F1E19";
-    ctx.fillRect(0, 0, WORLD_W, WORLD_H);
-    /* Background texture under everything, cover-scaled to the world (works at
-     * any image resolution and after a checkpoint changes the world size); the
-     * flat clear colour stays as the fallback while it loads or if missing. */
-    if (bgImage.complete && bgImage.naturalWidth > 0) {
-      var bs = Math.max(WORLD_W / bgImage.naturalWidth, WORLD_H / bgImage.naturalHeight);
-      var bw = bgImage.naturalWidth * bs, bh = bgImage.naturalHeight * bs;
-      ctx.drawImage(bgImage, (WORLD_W - bw) / 2, (WORLD_H - bh) / 2, bw, bh);
-    }
-
-    if (s.curActive) {
-      ctx.lineWidth = 1;
-      for (var j = 0; j < s.curRows; j++) {
-        for (var i = 0; i < s.curCols; i++) {
-          var k = (j * s.curCols + i) * 2;
-          var vx = s.curGrid[k], vy = s.curGrid[k + 1];
-          if (vx * vx + vy * vy < 1) continue;
-          var x0 = 32 + 64 * i, y0 = 32 + 64 * j;
-          var x1 = x0 + vx * 0.45, y1 = y0 + vy * 0.45;
-          var grad = ctx.createLinearGradient(x0, y0, x1, y1);
-          grad.addColorStop(0, CUR_TAIL);
-          grad.addColorStop(1, CUR_HEAD);
-          ctx.strokeStyle = grad;
-          ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
-        }
+  var DEFAULT_SENSE = "Senses on one side, actions on the other. Lime links excite, orange ones inhibit; brighter = stronger right now. Tap a dot to name it.";
+  function updateSenseLine() {
+    var html;
+    if (netHover >= 0 && netNodes[netHover]) {
+      var n = netNodes[netHover];
+      var label = n.kind === "Sense" ? senseName(n.i) : n.kind === "Action" ? ACTION_LABELS[n.i] : "neuron " + (n.i + 1);
+      html = n.kind + ": <b></b> " + (n.v >= 0 ? "+" : "") + n.v.toFixed(2);
+      if (cardCache.sense !== html + label) {
+        cardCache.sense = html + label;
+        el("isense").innerHTML = html;
+        el("isense").querySelector("b").textContent = label;
       }
-    }
-
-    ctx.fillStyle = "#97C632";
-    ctx.beginPath();
-    for (var fi = 0; fi < s.fc; fi++) {
-      var fx = s.food[2 * fi], fy = s.food[2 * fi + 1];
-      ctx.moveTo(fx + 2.5, fy);
-      ctx.arc(fx, fy, 2.5, 0, TAU);
-    }
-    ctx.fill();
-
-    for (var c = 0; c < s.n; c++) {
-      var rgb = s.colors[3 * c] + "," + s.colors[3 * c + 1] + "," + s.colors[3 * c + 2];
-      var bs = bodyScale(s.body ? s.body[2 * c] : 1);
-      for (var seg = 0; seg < 6; seg++) {
-        ctx.fillStyle = "rgba(" + rgb + "," + SEG_ALPHA[seg] + ")";
-        ctx.beginPath();
-        ctx.arc(s.segs[12 * c + 2 * seg], s.segs[12 * c + 2 * seg + 1],
-                Math.max(MIN_RADIUS, RADII[seg] * bs), 0, TAU);
-        ctx.fill();
-      }
-    }
-
-    for (var p = 0; p < s.pc; p++) {
-      ctx.fillStyle = s.preds[3 * p + 2] > 0 ? "rgb(150,60,60)" : "rgb(220,50,50)";
-      ctx.beginPath();
-      ctx.arc(s.preds[3 * p], s.preds[3 * p + 1], 6.5, 0, TAU);
-      ctx.fill();
+    } else if (cardCache.sense !== "default") {
+      cardCache.sense = "default";
+      el("isense").textContent = coarseMQ.matches ? DEFAULT_SENSE : DEFAULT_SENSE.replace("Tap", "Point at");
     }
   }
+  function nearestNode(e) {
+    var r = inetCanvas.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
+    var best = -1, bd = e.pointerType === "mouse" ? 100 : 400;
+    netNodes.forEach(function (n, i) { var d = (n.x - x) * (n.x - x) + (n.y - y) * (n.y - y); if (d < bd) { bd = d; best = i; } });
+    return best;
+  }
+  inetCanvas.addEventListener("pointermove", function (e) { if (e.pointerType === "mouse") netHover = nearestNode(e); });
+  inetCanvas.addEventListener("pointerdown", function (e) { if (e.pointerType !== "mouse") netHover = nearestNode(e); });
+  inetCanvas.addEventListener("pointerleave", function (e) { if (e.pointerType === "mouse") netHover = -1; });
 
-  function drawOverlays(s) {
-    var compact = compactMQ.matches;
-    if (s.selIdx >= 0) {
-      /* on compact screens the ring keeps a ~14 CSS px radius on screen */
-      var k = compact ? Math.max(1, 0.9 / cssPerWorld()) : 1;
-      ctx.strokeStyle = RING_STYLE;
-      ctx.lineWidth = 2 * k;
-      ctx.beginPath();
-      ctx.arc(s.segs[12 * s.selIdx], s.segs[12 * s.selIdx + 1], 16 * k, 0, TAU);
-      ctx.stroke();
-    }
-    if (compact) {  /* no HUD: the status line says what it would */
-      if (s.selIdx >= 0) drawPanel(s); else hidePanel();
-      return;
-    }
-    hidePanel();
-
-    var st = s.stats, fmt = function (v) { return String(Math.round(v)); };
-    ctx.font = "14px monospace";
-    ctx.fillStyle = "rgba(200,200,200,0.78)";
-    ctx.fillText(
-      "pop " + fmt(st[0]) + "  food " + fmt(st[1]) + "  pred " + fmt(st[2]) +
-      "  frame " + fmt(st[3]) + "  births " + fmt(st[4]) + "  deaths " + fmt(st[5]) +
-      "  gLen " + st[8].toFixed(1) +
-      (STATS_LEN > 10 ? "  gen " + fmt(st[10]) + " (avg " + st[9].toFixed(1) + ")" : "") +
-      "  speed " + simSpeed + "x" + (paused ? " [PAUSED]" : ""),
-      10, 18);
-    ctx.fillText("[Space] pause  [Up/Down] speed  [R] restart  [click] inspect", 10, 36);
-
-    if (s.selIdx >= 0) drawInspector(s); /* last: above HUD */
+  function draw(s, stepped) {
+    if (scene) scene.render(s, { animT: animT, dtSim: stepped / 60, selIdx: s.selIdx });
+    else draw2D(s);
+    updateCard(s);
   }
 
   /* ---- frame budget: degrade agent count rather than stutter ----
    * workMs = step + sync + draw for one frame. When its moving average stays
-   * over BUDGET_MS (of a 16.7 ms frame), first the speed steps back toward 1x;
-   * at 1x a target count is sized from the measured cost per creature, the
-   * surplus is removed uniformly at random (_evo_cull_to: favours no trait),
-   * and a birth cap (maxPopulation) holds it there. A birth cap alone is too
-   * slow — it only bites as creatures die, which takes up to maxAge (120 sim
-   * seconds). With sustained headroom and the population pressing on the cap,
-   * the cap is raised again. A governed run no longer replays from its seed;
-   * the status line says so, and the governor can be switched off. */
+   * over BUDGET_MS (of a 16.7 ms frame), the scene first draws with fewer
+   * pixels (and then without shadows), which changes nothing in the run; then
+   * the speed steps back toward 1x; at 1x a target count is sized from the
+   * measured cost per creature, the surplus is removed uniformly at random
+   * (_evo_cull_to: favours no trait), and a birth cap (maxPopulation) holds it
+   * there. A birth cap alone is too slow — it only bites as creatures die,
+   * which takes up to maxAge (120 sim seconds). With sustained headroom and
+   * the population pressing on the cap, the cap is raised again. A governed
+   * run no longer replays from its seed; the readout says so, and the
+   * governor can be switched off. */
   var BUDGET_MS = 12;
   var MIN_CAP = 60;
   /* Starting population per module (README.md, "Benchmarks"). Touch devices
    * (phones, tablets) start lighter, on at most TOUCH_THREADS threads, to go
    * easier on battery and heat; the governor still fits the run to the
-   * device, and the drawer can raise the population. */
+   * device, and the settings can raise the population. */
   var DEFAULT_POP_SINGLE = 300, DEFAULT_POP_THREADED = 600;
   var TOUCH_POP_SINGLE = 200, TOUCH_POP_THREADED = 400, TOUCH_THREADS = 4;
   var workEma = 0, overFrames = 0, underFrames = 0;
@@ -847,11 +1073,14 @@
       overFrames = 0;
       var ema = workEma;  /* settle() clears it; size the cut first */
       settle();
-      if (simSpeed > 1) {
+      if (scene && scene.degrade()) {
+        /* drawing first: fewer pixels, then no shadows; the run is untouched */
+        setGovNote("drew with less detail to hold 60 fps");
+      } else if (simSpeed > 1) {
         /* work per frame is proportional to steps per frame, so the speed
          * that fits can be computed rather than found one notch at a time */
         setSpeed(Math.min(simSpeed - 1, Math.floor(simSpeed * (BUDGET_MS * 0.8) / ema)));
-        govNote = "speed lowered to " + simSpeed + "x to hold 60 fps";
+        setGovNote("speed lowered to " + simSpeed + "× to hold 60 fps");
       } else if (!autoCap || pop <= autoCap * 1.02) {
         /* only tighten once the population has come down to the last cap */
         var target = Math.max(MIN_CAP, Math.floor(
@@ -862,8 +1091,8 @@
           var removed = Module._evo_cull_to ? Module._evo_cull_to(autoCap) : 0;
           selectedId = null;  /* the inspected creature may be gone */
           governed = true;
-          govNote = (removed ? "removed " + removed + " at random, " : "") +
-                    "capped at " + autoCap + " to hold 60 fps";
+          setGovNote((removed ? "removed " + removed + " fish at random, " : "") +
+                     "capped at " + autoCap + " to hold 60 fps");
         }
       }
     } else if (underFrames >= 180 && autoCap && pop >= autoCap * 0.95) {
@@ -871,47 +1100,79 @@
       settle();
       autoCap = Math.round(autoCap * 1.15);
       applyCap();
-      govNote = "population cap raised to " + autoCap;
+      setGovNote("population cap raised to " + autoCap);
     }
   }
+  function setGovNote(msg) {
+    govNote = msg;
+    if (msg) toast(msg.charAt(0).toUpperCase() + msg.slice(1) + ".");
+  }
 
-  /* ---- status line (DOM, readable at any canvas scale) ---- */
+  /* ---- live numbers: the readout chip, and its detail panel ---- */
   var fpsFrames = 0, fpsT0 = 0, fps = 0;
-  var stepEma = 0;   /* ms per sim step, for the status line */
-  var everSelected = false;  /* compact screens hint at selecting until then */
+  var stepEma = 0;   /* ms per sim step */
+  var everSelected = false;
+  var statOpen = false, lastStats = null;
+  function fmt(v) { return Number.isFinite(v) ? Math.round(v).toLocaleString() : "–"; }
   function updateStatus(st) {
-    if (!statusEl) return;
-    var mode = threaded
-      ? "threaded × " + (Module._evo_threads ? Module._evo_threads() : "?")
-      : "single-threaded";
-    var parts = [
-      fps + " fps",
-      Math.round(st[0]) + " agents",
-      STATS_LEN > 10 ? "gen " + Math.round(st[10]) + " (avg " + st[9].toFixed(1) + ")" : "",
-      stepEma ? stepEma.toFixed(2) + " ms/step" : "",
-      mode
-    ];
-    var cap = userCap > 0 && autoCap > 0 ? Math.min(userCap, autoCap) : (userCap || autoCap);
-    if (cap) parts.push("cap " + cap + (autoCap && cap === autoCap ? " (auto)" : ""));
-    if (govNote) parts.push(govNote);
-    if (governed) parts.push("governed run: not replayable from its seed");
-    if (compactMQ.matches) {  /* no canvas HUD here (drawOverlays) */
-      if (simSpeed > 1) parts.splice(1, 0, "speed " + simSpeed + "x");
-      if (paused) parts.splice(1, 0, "paused");
-      if (!everSelected) parts.push((coarseMQ.matches ? "tap" : "click") + " a fish to see its brain");
-    }
-    statusEl.textContent = parts.filter(Boolean).join("  ·  ");
-    statusEl.title = threaded ? "running the pthreads module: fast, NOT reproducible from the seed"
-                              : "running the single-threaded module (" + threadWhy + "): reproducible from the seed";
+    lastStats = st;
+    el("ro-fish").textContent = fmt(st[0]);
+    el("ro-gen").textContent = STATS_LEN > 10 ? fmt(st[10]) : "–";
+    el("ro-fps").textContent = String(fps);
+    el("readout").classList.toggle("governed", governed);
+    el("ro-fps").classList.toggle("warn", fps > 0 && fps < 40);
+    if (statOpen) renderStatPanel();
   }
+  function renderStatPanel() {
+    var st = lastStats, p = el("statpanel");
+    if (!st || !Module) { p.textContent = "Starting…"; return; }
+    var mode = threaded ? "threaded × " + (Module._evo_threads ? Module._evo_threads() : "?") : "single-threaded";
+    var cap = userCap > 0 && autoCap > 0 ? Math.min(userCap, autoCap) : (userCap || autoCap);
+    var rows = [
+      ["Fish", fmt(st[0])], ["Food", fmt(st[1])], ["Predators", fmt(st[2])],
+      ["Births", fmt(st[4])], ["Deaths", fmt(st[5])],
+      ["Generation", STATS_LEN > 10 ? fmt(st[10]) + " (avg " + st[9].toFixed(1) + ")" : "–"],
+      ["Genes per fish", st[8].toFixed(1)],
+      ["Frame", fmt(st[3])],
+      ["Speed", (paused ? "paused" : simSpeed + "×")],
+      ["Step time", stepEma ? stepEma.toFixed(2) + " ms" : "–"],
+      ["Frames per second", String(fps)],
+      ["Module", mode],
+      ["Drawing", scene ? "3D, detail " + scene.quality() + " of 3" : "2D"]
+    ];
+    if (cap) rows.push(["Population cap", cap + (autoCap && cap === autoCap ? " (auto)" : "")]);
+    var html = "<dl>" + rows.map(function (r) { return "<dt>" + r[0] + "</dt><dd>" + r[1] + "</dd>"; }).join("") + "</dl>";
+    var notes = [];
+    if (govNote) notes.push(govNote.charAt(0).toUpperCase() + govNote.slice(1) + ".");
+    if (governed) notes.push("The frame budget changed this run, so it no longer replays from its seed.");
+    notes.push(threaded ? "Threaded runs are fast but not reproducible from the seed."
+                        : "Single-threaded (" + threadWhy + "): reproducible from the seed.");
+    html += "<div class='notes'>" + notes.map(function (n) { return "<p></p>"; }).join("") + "</div>";
+    p.innerHTML = html;
+    p.querySelectorAll(".notes p").forEach(function (node, i) { node.textContent = notes[i]; });
+  }
+  function setStatPanel(open) {
+    statOpen = open;
+    el("statpanel").hidden = !open;
+    el("readout").setAttribute("aria-expanded", open ? "true" : "false");
+    if (open) renderStatPanel();
+  }
+  el("readout").addEventListener("click", function () { setStatPanel(!statOpen); });
+  document.addEventListener("pointerdown", function (e) {
+    if (statOpen && !e.target.closest("#statpanel, #readout")) setStatPanel(false);
+  });
 
+  var lastNow = 0, splashDone = false, turboPaint = 0;
   function frame(now) {
     if (Module) {
+      var dt = lastNow ? Math.min(0.1, (now - lastNow) / 1000) : 0;
+      lastNow = now;
       var t0 = performance.now();
       var stepped = 0;
       if (turboState === "live" && !paused) {
         stepped = bench ? 1 : simSpeed;
         Module._evo_step(stepped);
+        animT += dt * Math.min(simSpeed, 2);
       }
       if (dash()) dash().pump();   /* what the recorder saw (also a restart's first sample) */
       var t1 = performance.now();
@@ -921,8 +1182,8 @@
       var s = snapshot(turboState === "live" ? resolveSelection() : -1);
       /* the dashboards cover the whole page: no point drawing the ocean */
       var covered = dash() && dash().isOpen();
-      if (!covered) draw(s);
-      if (turboState !== "live" && !covered) drawTurboOverlay();
+      if (!covered) draw(s, stepped);
+      if (turboState !== "live" && now - turboPaint > 250) { turboPaint = now; paintTurbo(); }
       var t2 = performance.now();
       if (stepped) {
         var per = (t1 - t0) / stepped;
@@ -939,6 +1200,7 @@
         fpsT0 = now;
         updateStatus(s.stats);
       }
+      if (!splashDone) { splashDone = true; el("splash").classList.add("done"); }
     }
     requestAnimationFrame(frame);
   }
@@ -1004,7 +1266,7 @@
       crossOriginIsolated: self.crossOriginIsolated === true,
       module: threaded ? "threaded" : "single-threaded",
       threads: Module._evo_threads ? Module._evo_threads() : 1,
-      renderer: glScene ? "webgl2" : "canvas2d",
+      renderer: scene ? scene.renderer + ", detail " + scene.quality() : "canvas2d",
       canvas: canvas.width + "x" + canvas.height,
       devicePixelRatio: window.devicePixelRatio
     };
@@ -1043,11 +1305,14 @@
   /* ---- control state helpers ---- */
   function setPaused(p) {
     paused = p;
-    el("pausebtn").textContent = paused ? "Resume" : "Pause";
+    var b = el("pausebtn");
+    b.querySelector("use").setAttribute("href", paused ? "#i-play" : "#i-pause");
+    b.setAttribute("aria-label", paused ? "play" : "pause");
+    b.title = (paused ? "Play" : "Pause") + " (Space)";
   }
   function setSpeed(n) {
     simSpeed = Math.max(1, Math.min(50, n));
-    el("speedlabel").textContent = "speed " + simSpeed + "x";
+    el("speedlabel").textContent = simSpeed + "×";
   }
 
   /* ---- checkpoint save/load ---- */
@@ -1065,13 +1330,14 @@
     a.click();
     a.remove();
     URL.revokeObjectURL(url);
+    toast("Saved the world at frame " + frameNo.toLocaleString() + ".");
   }
   /* fromTurbo: the Turbo worker handing the same run back, so the dashboards
    * carry on; a file is a new run, so they start over */
   function loadCheckpointText(text, fromTurbo) {
     var ok = withCString(text, function (ptr) { return Module._evo_load_checkpoint(ptr); });
     if (!ok) {
-      showError("checkpoint load failed: " + Module.UTF8ToString(Module._evo_last_error()));
+      showError("Couldn't load that checkpoint: " + Module.UTF8ToString(Module._evo_last_error()));
       return;
     }
     if (!fromTurbo) {
@@ -1085,12 +1351,12 @@
     var w = Module._evo_width(), h = Module._evo_height();
     if (w !== WORLD_W || h !== WORLD_H) {
       WORLD_W = w; WORLD_H = h;
-      canvas.width = w; canvas.height = h;
+      worldSized();
     }
     worldFitted = false;
     updateFitButton();
-    el("randnote").textContent = "";  /* the 🎲 pick no longer describes this world */
-    showNote("(checkpoint loaded)");
+    el("randnote").textContent = "";  /* the Randomize pick no longer describes this world */
+    if (!fromTurbo) showNote("Checkpoint loaded.");
   }
 
   /* ---- TURBO (headless worker) mode ----
@@ -1104,17 +1370,28 @@
 
   function guardTurbo() {
     if (turboState === "live") return false;
-    showNote("exit turbo first");
+    showNote("Stop Turbo first.");
     return true;
   }
   function updateLocks() {
-    var tb = el("turbobtn");
-    tb.textContent = (turboState === "live" || turboState === "entering") ? "Turbo" : "Turbo ✓";
+    var tb = el("turbobtn"), on = turboState === "turbo" || turboState === "exiting";
+    tb.setAttribute("aria-pressed", on ? "true" : "false");
     tb.disabled = turboState === "entering" || turboState === "exiting";
     var locked = turboState !== "live";
-    ["restart", "savecp", "loadcp", "pausebtn", "slower", "faster"].forEach(function (id) {
+    ["restart", "savecp", "loadcp", "pausebtn", "slower", "faster", "randombtn", "randombig"].forEach(function (id) {
       el(id).classList.toggle("locked", locked);
     });
+    el("turbo").hidden = turboState === "live";
+    el("turboexit").disabled = turboState !== "turbo";
+    el("turboexit").textContent = turboState === "exiting" ? "Syncing back…" : turboState === "entering" ? "Starting…" : "Stop Turbo and watch";
+    if (turboState !== "live") paintTurbo();
+  }
+  function paintTurbo() {
+    var t = turboStats;
+    el("ts-rate").textContent = t ? Math.round(t.stepsPerSec).toLocaleString() : "–";
+    el("ts-steps").textContent = t ? t.totalSteps.toLocaleString() : "–";
+    el("ts-pop").textContent = t ? Math.round(t.pop).toLocaleString() : "–";
+    el("ts-food").textContent = t ? Math.round(t.food).toLocaleString() : "–";
   }
   function onTurboMessage(e) {
     var msg = e.data || {};
@@ -1130,9 +1407,9 @@
       loadCheckpointText(msg.json, true); /* reuses the width/height re-read + selection clear */
       setPaused(false);             /* turbo implies running; come back un-paused */
       updateLocks();
-      showNote("(turbo: +" + (turboStats ? turboStats.totalSteps : 0) + " steps)");
+      showNote("Turbo ran " + (turboStats ? turboStats.totalSteps.toLocaleString() : 0) + " steps.");
     } else if (msg.type === "error") {
-      showError("turbo: " + (msg.message || "unknown error"));
+      showError("Turbo stopped: " + (msg.message || "unknown error"));
       turboState = "live"; /* main module still holds its last state; nothing lost */
       updateLocks();
     }
@@ -1147,7 +1424,7 @@
       turboWorker = new Worker(ASSETS.worker);
       turboWorker.onmessage = onTurboMessage;
       turboWorker.onerror = function (ev) {
-        showError("turbo worker failed: " + (ev.message || "could not load worker.js"));
+        showError("The Turbo worker failed: " + (ev.message || "could not load worker.js"));
         turboState = "live";
         updateLocks();
       };
@@ -1168,89 +1445,48 @@
     updateLocks();
     turboWorker.postMessage({ cmd: "stop" });
   }
-  function drawTurboOverlay() {
-    var pw = 560, ph = 170;
-    var px = (WORLD_W - pw) / 2, py = (WORLD_H - ph) / 2;
-    /* compact screens: scaled up about the world's centre to stay readable */
-    var k = compactMQ.matches ? Math.max(1, Math.min(0.7 / cssPerWorld(), WORLD_W * 0.96 / pw)) : 1;
-    ctx.setTransform(k, 0, 0, k, WORLD_W / 2 * (1 - k), WORLD_H / 2 * (1 - k));
-    ctx.fillStyle = "rgba(10,22,30," + (205 / 255).toFixed(4) + ")";
-    ctx.fillRect(px, py, pw, ph);
-    ctx.strokeStyle = "rgba(90,140,150," + (220 / 255).toFixed(4) + ")";
-    ctx.lineWidth = 1;
-    ctx.strokeRect(px + 0.5, py + 0.5, pw - 1, ph - 1);
-    var cx = px + pw / 2;
-    ctx.textAlign = "center";
-    ctx.font = "28px monospace";
-    ctx.fillStyle = "rgba(220,235,240," + (235 / 255).toFixed(4) + ")";
-    ctx.fillText("TURBO — headless", cx, py + 48);
-    ctx.font = "16px monospace";
-    ctx.fillStyle = "rgba(200,215,220," + (220 / 255).toFixed(4) + ")";
-    if (turboStats) {
-      ctx.fillText("frame " + turboStats.frame + "   pop " + turboStats.pop +
-                   "   food " + turboStats.food + "   pred " + turboStats.pred, cx, py + 92);
-      ctx.fillText(turboStats.stepsPerSec + " steps/s   (+" + turboStats.totalSteps +
-                   " steps this session)", cx, py + 122);
-    } else {
-      ctx.fillText("starting…", cx, py + 92);
-    }
-    if (turboState === "exiting") {
-      ctx.font = "13px monospace";
-      ctx.fillStyle = "rgba(150,175,180," + (200 / 255).toFixed(4) + ")";
-      ctx.fillText("stopping — syncing back to live…", cx, py + 150);
-    }
-    ctx.textAlign = "left"; /* restore defaults for the HUD */
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-  }
 
-  /* ---- input ---- */
-  canvas.addEventListener("click", function (e) {
-    if (!Module || turboState !== "live") return;
-    var rect = canvas.getBoundingClientRect();
-    var wx = (e.clientX - rect.left) * (canvas.width / rect.width);
-    var wy = (e.clientY - rect.top) * (canvas.height / rect.height);
-    /* the mouse picks within 25 world px; a finger within ~24 CSS px, which
-     * on a phone-sized canvas is several times farther */
-    var reach = lastPointer === "mouse" ? 25 : Math.max(25, 24 * canvas.width / rect.width);
-    var best = nearestFish(wx, wy, reach * reach);
-    selectedId = best >= 0 ? fishId(best) : null;
-    if (best >= 0) everSelected = true;
+  /* ---- input: tap or click a fish to inspect it; empty water lets go ---- */
+  var tap = null;
+  canvas.addEventListener("pointerdown", function (e) {
+    tap = e.isPrimary ? { x: e.clientX, y: e.clientY, t: performance.now(), id: e.pointerId } : null;
   });
-  /* Index of the creature whose head is nearest (wx, wy), at most
-   * sqrt(maxD2) away, or -1. Ties go to the later creature. */
-  function nearestFish(wx, wy, maxD2) {
-    var n = Module._evo_creature_count();
-    var segs = new Float32Array(heap(), Module._evo_creature_segments(), n * 12);
-    var best = -1, bestD2 = maxD2;
-    for (var i = 0; i < n; i++) {
-      var dx = segs[12 * i] - wx, dy = segs[12 * i + 1] - wy;
-      var d2 = dx * dx + dy * dy;
-      if (d2 <= bestD2) { bestD2 = d2; best = i; }
-    }
-    return best;
-  }
-  function fishId(index) {
-    return new Float64Array(heap(), Module._evo_creature_ids(), index + 1)[index];
-  }
+  canvas.addEventListener("pointercancel", function () { tap = null; });
+  canvas.addEventListener("pointerup", function (e) {
+    if (!tap || e.pointerId !== tap.id) return;
+    var moved = Math.hypot(e.clientX - tap.x, e.clientY - tap.y), dt = performance.now() - tap.t;
+    tap = null;
+    if (moved > 8 || dt > 600) return;   /* a drag or a long press steered the camera */
+    if (!Module || turboState !== "live") return;
+    var s = snapshot(-1);
+    var reach = e.pointerType === "mouse" ? 18 : 30;
+    var best = scene ? scene.pick(s, e.clientX, e.clientY, reach) : pick2D(s, e.clientX, e.clientY, reach);
+    if (best >= 0) { selectedId = s.ids[best]; everSelected = true; }
+    else if (selectedId !== null) { selectedId = null; }
+  });
 
   window.addEventListener("keydown", function (e) {
-    /* Escape always closes the drawer, regardless of what has focus —
+    /* Escape always closes what is open, regardless of what has focus —
      * blurring the focused control so the sim shortcuts work again. */
     if (e.key === "Escape") {
-      setDrawer(false);
+      if (drawerEl.classList.contains("open")) setDrawer(false);
+      else if (statOpen) setStatPanel(false);
+      else selectedId = null;
       if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
       return;
     }
     var t = e.target;
     if (t && (t.tagName === "INPUT" || t.tagName === "BUTTON" ||
               t.tagName === "SELECT" || t.tagName === "SUMMARY")) return;
-    /* sim-mutating shortcuts are locked while turbo owns the trajectory
-     * (Escape/drawer above stays live) */
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.key === "c" || e.key === "C") { if (scene) scene.resetView(true); return; }
+    if (e.key === "f" || e.key === "F") { toggleFollow(); return; }
+    /* sim-mutating shortcuts are locked while turbo owns the trajectory */
     if (turboState !== "live") {
       if (e.code === "Space" || e.key === "ArrowUp" || e.key === "ArrowDown" ||
           e.key === "+" || e.key === "=" || e.key === "-" ||
           e.key === "r" || e.key === "R") {
-        showNote("exit turbo first");
+        showNote("Stop Turbo first.");
         e.preventDefault();
       }
       return;
@@ -1269,20 +1505,61 @@
       restart();
     }
   });
+  function toggleFollow() {
+    if (!scene || selectedId === null) return;
+    scene.setFollow(!scene.following());
+  }
+  function onFollowChange(on) {
+    el("followbtn").setAttribute("aria-pressed", on ? "true" : "false");
+    el("followbtn").title = on ? "Stop following (F)" : "Follow this fish (F)";
+    if (on) toast(coarseMQ.matches ? "Following. Drag to circle around it." : "Following. Drag to circle around it; F stops.");
+  }
 
-  /* ---- side drawer ---- */
+  /* ---- settings sheet: a bottom sheet on phones, a side panel on wide screens ---- */
   var drawerEl = el("drawer"), menuBtn = el("menubtn");
   function setDrawer(open) {
     if (open && dash()) dash().close();
     drawerEl.classList.toggle("open", open);
-    document.body.classList.toggle("menu-open", open);
-    menuBtn.textContent = open ? "✕" : "☰";
+    document.body.classList.toggle("sheet-open", open);
+    menuBtn.setAttribute("aria-expanded", open ? "true" : "false");
     if (!open) hideTip();
+    if (open) setStatPanel(false);
+    updateInsets();
+    setTimeout(updateInsets, 320);   /* after the slide */
   }
   menuBtn.addEventListener("click", function () {
     setDrawer(!drawerEl.classList.contains("open"));
     this.blur();
   });
+  el("drawerclose").addEventListener("click", function () { setDrawer(false); });
+  /* drag the sheet's grip (or header) down to close it */
+  (function () {
+    var start = null, grip = el("grip"), head = drawerEl.querySelector(".sheet-head");
+    function down(e) {
+      if (wideMQ.matches || e.target.closest("button")) return;
+      start = { y: e.clientY, id: e.pointerId, dy: 0 };
+      drawerEl.classList.add("dragging");
+      e.currentTarget.setPointerCapture(e.pointerId);
+    }
+    function move(e) {
+      if (!start || e.pointerId !== start.id) return;
+      start.dy = Math.max(0, e.clientY - start.y);
+      drawerEl.style.transform = "translateY(" + start.dy + "px)";
+    }
+    function up(e) {
+      if (!start || e.pointerId !== start.id) return;
+      drawerEl.classList.remove("dragging");
+      drawerEl.style.transform = "";
+      if (start.dy > Math.min(120, drawerEl.offsetHeight * 0.25)) setDrawer(false);
+      start = null;
+    }
+    [grip, head].forEach(function (n) {
+      n.addEventListener("pointerdown", down);
+      n.addEventListener("pointermove", move);
+      n.addEventListener("pointerup", up);
+      n.addEventListener("pointercancel", up);
+    });
+  })();
 
   /* ---- shared hover tooltip (one fixed div, styled in index.html) ---- */
   var tipEl = document.createElement("div");
@@ -1295,28 +1572,27 @@
   tipEl.appendChild(tipTry);
   document.body.appendChild(tipEl);
   var tipTimer = 0;
-  var tipFor = null;  /* the label whose tip is showing */
+  var tipFor = null;  /* the row whose tip is showing */
   function hideTip() {
     clearTimeout(tipTimer);
     tipEl.style.display = "none";
     tipFor = null;
   }
-  function showTip(labelEl, tip) {
+  function showTip(rowEl, tip) {
     tipDesc.textContent = tip.d;
     tipTry.textContent = tip.t;
     tipEl.style.display = "block";
-    tipFor = labelEl;
+    tipFor = rowEl;
     var dr = drawerEl.getBoundingClientRect();
-    var lr = labelEl.getBoundingClientRect();
+    var lr = rowEl.getBoundingClientRect();
     var left, top;
-    if (dr.left >= tipEl.offsetWidth + 16) {
-      /* to the LEFT of the drawer (outside its clipping), centred on the label */
+    if (wideMQ.matches && dr.left >= tipEl.offsetWidth + 16) {
+      /* to the LEFT of the side panel, centred on the row */
       left = Math.max(6, dr.left - 10 - tipEl.offsetWidth);
       top = lr.top + lr.height / 2 - tipEl.offsetHeight / 2;
     } else {
-      /* no room beside a wide drawer (phones): over it, below the label, or
-       * above it near the bottom of the screen */
-      left = dr.left + 8;
+      /* over the sheet: below the row, or above it near the bottom */
+      left = Math.max(8, Math.min(lr.left, window.innerWidth - tipEl.offsetWidth - 8));
       top = lr.bottom + 4;
       if (top + tipEl.offsetHeight > window.innerHeight - 6) top = lr.top - 4 - tipEl.offsetHeight;
     }
@@ -1324,83 +1600,67 @@
     tipEl.style.left = left + "px";
     tipEl.style.top = top + "px";
   }
-  /* Mouse: the tip shows on hover. Touch: tapping the parameter's name
-   * toggles it (and does not toggle the checkbox or focus the input). */
-  function attachTip(labelEl, key) {
+  /* Mouse: the tip shows on hover. Touch: tapping the setting's name toggles
+   * it (and does not toggle the switch or focus the input). */
+  function attachTip(rowEl, key) {
     var tip = TIPS[key];
     if (!tip) return;
-    labelEl.addEventListener("mouseenter", function () {
+    rowEl.addEventListener("mouseenter", function () {
       if (lastPointer !== "mouse") return;
       clearTimeout(tipTimer);
-      tipTimer = setTimeout(function () { showTip(labelEl, tip); }, 150);
+      tipTimer = setTimeout(function () { showTip(rowEl, tip); }, 200);
     });
-    labelEl.addEventListener("mouseleave", function () {
+    rowEl.addEventListener("mouseleave", function () {
       if (lastPointer === "mouse") hideTip();
     });
-    var name = labelEl.querySelector(".lt");
+    var name = rowEl.querySelector(".lt");
     if (name) name.addEventListener("click", function (e) {
       if (lastPointer === "mouse") return;
       e.preventDefault();
-      if (tipFor === labelEl) hideTip();
-      else showTip(labelEl, tip);
+      if (tipFor === rowEl) hideTip();
+      else showTip(rowEl, tip);
     });
   }
-  drawerEl.addEventListener("scroll", hideTip);
-  /* a touch anywhere but on a parameter name closes an open tip */
+  panelsEl.addEventListener("scroll", hideTip);
+  /* a touch anywhere but on a setting's name closes an open tip */
   document.addEventListener("pointerdown", function (e) {
     if (tipFor && e.pointerType !== "mouse" && !(e.target.closest && e.target.closest(".lt"))) hideTip();
   });
-  /* basic (static-HTML) parameter labels, resolved via their input ids */
-  ["seed", "population", "toroidal", "bodyModel", "predators", "foodPatches", "currentStrength", "predatorEconomy", "governor"]
-    .forEach(function (id) {
-      var l = el(id).closest("label");
-      if (l) attachTip(l, id);
-    });
 
   function btn(id, fn) {
     el(id).addEventListener("click", function () { fn(); this.blur(); });
   }
-  btn("restart", restart);
-  btn("pausebtn", function () { if (guardTurbo()) return; setPaused(!paused); });
-  btn("slower", function () { if (guardTurbo()) return; setSpeed(simSpeed - 1); });
-  btn("faster", function () { if (guardTurbo()) return; setSpeed(simSpeed + 1); });
-  btn("turbobtn", function () {
-    if (turboState === "live") enterTurbo();
-    else if (turboState === "turbo") exitTurbo();
-  });
-  btn("advreset", function () { resetAdvanced(); setPending(true); updateNeeds(); });
-  btn("iclose", function () { selectedId = null; });
 
   /* Settings that only matter while another one is on are dimmed, with the
    * reason under their name; they still save and restart as usual. */
   function hasPredators() { return intVal("predators", 0) > 0; }
   function hasCurrent() { return floatVal("currentStrength", 0) > 0; }
   var NEEDS = [
-    [["adv_foodPatchRadius"], "needs food patches > 0", function () { return intVal("foodPatches", 0) > 0; }],
-    [["adv_foodDrift", "adv_currentMode", "adv_currentDrift"], "needs a current (strength > 0)", hasCurrent],
-    [["adv_currentEddies", "adv_currentCore"], "needs a current in eddies mode",
+    [["adv_foodPatchRadius"], "needs food patches above 0", function () { return intVal("foodPatches", 0) > 0; }],
+    [["adv_foodDrift", "adv_currentMode", "adv_currentDrift"], "needs a current (strength above 0)", hasCurrent],
+    [["adv_currentEddies", "adv_currentCore"], "needs a current in the eddies shape",
       function () { return hasCurrent() && el("adv_currentMode").value === "0"; }],
     [["predatorEconomy", "adv_predatorSpeed", "adv_predatorPerception", "adv_predatorCaptureRadius",
-      "adv_predatorCooldown"], "needs predators > 0", hasPredators],
+      "adv_predatorCooldown"], "needs predators above 0", hasPredators],
     [["adv_predatorMeal", "adv_predatorMetabolism", "adv_predatorReproEnergy", "adv_predatorMaxAge"],
-      "needs predators with predator economy on", function () { return hasPredators() && el("predatorEconomy").checked; }],
-    [["adv_maxTurnRate"], "needs triangular motion on", function () { return el("adv_triangularMotion").checked; }],
-    [["adv_reproSoftWidth", "adv_reproGracePeriod"], "needs repro max distance ≥ 0",
+      "needs predators, with their economy on", function () { return hasPredators() && el("predatorEconomy").checked; }],
+    [["adv_maxTurnRate"], "needs fast-swims-straight on", function () { return el("adv_triangularMotion").checked; }],
+    [["adv_reproSoftWidth", "adv_reproGracePeriod"], "needs a breeding distance limit of 0 or more",
       function () { return floatVal("adv_reproMaxDistance", -1) >= 0; }],
-    [["adv_bodyMutation"], "needs body model on", function () { return el("bodyModel").checked; }]
+    [["adv_bodyMutation"], "needs evolving bodies on", function () { return el("bodyModel").checked; }]
   ];
   function updateNeeds() {
     NEEDS.forEach(function (rule) {
       var on = rule[2]();
       rule[0].forEach(function (id) {
-        var label = el(id).closest("label");
-        var hint = label.querySelector(".needs");
+        var row = el(id).closest(".field");
+        var hint = row.querySelector(".needs");
         if (!hint) {
           hint = document.createElement("span");
           hint.className = "needs";
-          label.appendChild(hint);
+          row.appendChild(hint);
         }
-        label.classList.toggle("inert", !on);
+        row.classList.toggle("inert", !on);
         hint.textContent = on ? "" : rule[1];
       });
     });
@@ -1410,25 +1670,56 @@
   function setPending(on) {
     var b = el("restart");
     b.classList.toggle("pending", on);
-    b.textContent = on ? "Restart to apply" : "Restart";
+    b.querySelector("span").textContent = on ? "Restart to apply" : "Restart";
   }
   function onEdit(e) {
     var t = e.target;
     updateNeeds();
+    updateTabDots();
     if (!t || !t.id || (t.id.indexOf("adv_") === 0 && LIVE[t.id.slice(4)])) return;  /* applies by itself */
+    if (t.id === "governor") return;
     setPending(true);
   }
-  ["controls", "adv"].forEach(function (id) {
-    el(id).addEventListener("input", onEdit);   /* while typing */
-    el(id).addEventListener("change", onEdit);  /* checkboxes, selects, spinners */
+
+  buildSettings();
+  panelsEl.addEventListener("input", onEdit);   /* while typing */
+  panelsEl.addEventListener("change", onEdit);  /* switches, selects, steppers */
+  btn("restart", restart);
+  btn("pausebtn", function () { if (guardTurbo()) return; setPaused(!paused); });
+  btn("slower", function () { if (guardTurbo()) return; setSpeed(simSpeed - 1); });
+  btn("faster", function () { if (guardTurbo()) return; setSpeed(simSpeed + 1); });
+  btn("turbobtn", function () {
+    if (turboState === "live") enterTurbo();
+    else if (turboState === "turbo") exitTurbo();
   });
+  btn("turboexit", exitTurbo);
+  btn("advreset", function () {
+    resetAdvanced();
+    Object.keys(BASIC_DEFAULTS).forEach(function (id) { setField(el(id), BASIC_DEFAULTS[id]); });
+    setPending(true); updateNeeds(); updateTabDots();
+    showNote("Every setting is back to its default. Restart to apply.");
+  });
+  btn("iclose", function () { selectedId = null; });
+  btn("iexpand", function () {
+    cardExpanded = !cardExpanded;
+    cardEl.classList.toggle("expanded", cardExpanded);
+    el("iexpand").setAttribute("aria-expanded", cardExpanded ? "true" : "false");
+    el("iexpand").title = cardExpanded ? "Hide its brain" : "Show its brain";
+    cardCache.sense = null;
+    updateInsets();
+  });
+  btn("followbtn", toggleFollow);
+  btn("viewbtn", function () { if (scene) scene.resetView(true); });
   btn("fitbtn", restart);
   btn("randombtn", randomize);
+  btn("randombig", randomize);
   btn("guidebtn", function () { if (window.EvoGuide) EvoGuide.start(); });
   var fitTimer = 0;
   window.addEventListener("resize", function () {
+    if (scene) scene.resize();
+    updateInsets();
     clearTimeout(fitTimer);
-    fitTimer = setTimeout(function () { if (Module) updateFitButton(); }, 250);
+    fitTimer = setTimeout(function () { if (Module) updateFitButton(); updateInsets(); }, 250);
   });
   btn("savecp", saveCheckpoint);
   btn("loadcp", function () { if (guardTurbo()) return; el("cpfile").click(); });
@@ -1445,7 +1736,7 @@
       autoCap = 0;
       el("adv_maxPopulation").value = String(cap);
       resetGovernor();
-    }, function (err) { showError("could not read file: " + err); });
+    }, function (err) { showError("Couldn't read that file: " + err); });
   });
   el("governor").addEventListener("change", function () {
     governorOn = this.checked;
@@ -1453,54 +1744,84 @@
     govNote = "";
     this.blur();
   });
+  reducedMQ.addEventListener && reducedMQ.addEventListener("change", function () {
+    if (scene) scene.setReducedMotion(reducedMQ.matches);
+  });
 
-  buildAdvancedUI();
   updateNeeds();
+  updateTabDots();
   setSpeed(simSpeed);
+  setPaused(false);
 
   /* ---- hooks for the first-visit guide (web/guide.js) ---- */
   var guideFish = null;   /* the fish the guide selected, released after its step */
   window.EvoApp = {
     ready: false,   /* the world is running; "evo:ready" fires on window then */
     touch: function () { return coarseMQ.matches; },
+    has3D: function () { return !!scene; },
     setDrawer: setDrawer,
+    setSheetTab: setSheetTab,
     /* Selects a fish for the guide to show, unless one is selected: the one
-     * nearest a point left of centre, clear of the desktop inspector. Leaves
-     * everSelected alone, so the "tap a fish" hint stays until the visitor
-     * picks one. */
+     * nearest a point left of centre. Leaves everSelected alone, so the
+     * one-time hint still comes until the visitor picks one. */
     inspectSomeFish: function () {
       if (!Module || turboState !== "live") return false;
       if (selectedId !== null) return true;
-      var best = nearestFish(WORLD_W * 0.35, WORLD_H * 0.5, Infinity);
+      var s = snapshot(-1), best = -1, bd = Infinity;
+      for (var i = 0; i < s.n; i++) {
+        var dx = s.segs[12 * i] - WORLD_W * 0.4, dy = s.segs[12 * i + 1] - WORLD_H * 0.45;
+        if (dx * dx + dy * dy < bd) { bd = dx * dx + dy * dy; best = i; }
+      }
       if (best < 0) return false;
-      selectedId = guideFish = fishId(best);
+      selectedId = guideFish = s.ids[best];
       return true;
     },
     releaseFish: function () {
       if (guideFish !== null && selectedId === guideFish) selectedId = null;
       guideFish = null;
     },
-    /* CSS rect of the inspector being shown, or null */
+    /* CSS rect of the fish card being shown, or null */
     inspectorRect: function () {
-      if (selectedId === null || turboState !== "live") return null;
-      if (compactMQ.matches) return inspDock ? inspEl.getBoundingClientRect() : null;
-      var cr = canvas.getBoundingClientRect(), c = cr.width / canvas.width;
-      return { left: cr.left + inspectorX() * c, top: cr.top + INSP_Y * c,
-               width: INSP_W * c, height: INSP_H * c };
+      return cardEl.hidden ? null : cardEl.getBoundingClientRect();
     }
   };
 
   /* ---- boot ---- */
+  function splashSay(msg) { el("splashstate").textContent = msg; }
   if (!window.EvoLoader || !ASSETS) {
+    splashSay("This page is missing loader.js.");
     showError("loader.js / EVO_ASSETS missing from the page");
     return;
   }
-  EvoLoader.load().then(function (r) {
+  var wants3D = window.EvoScene && PARAMS.get("gl") !== "0";
+  var sceneLib = wants3D
+    ? EvoScene.load().catch(function (e) { console.warn("evo_boids: 3D scene unavailable", e); return null; })
+    : Promise.resolve(null);
+  Promise.all([EvoLoader.load(), sceneLib]).then(function (res) {
+    var r = res[0];
     Module = r.Module;
     threaded = r.threaded;
     threadWhy = r.why;
     moduleUrls = { js: r.js, wasm: r.wasm };
     if (Module._evo_stats_len) STATS_LEN = Module._evo_stats_len();
+    if (res[1]) {
+      scene = EvoScene.create(canvas, {
+        coarse: coarseMQ.matches, reducedMotion: reducedMQ.matches,
+        bodyScale: bodyScale, onFollowChange: onFollowChange
+      });
+    }
+    if (!scene) {
+      /* a canvas that failed to make a WebGL context can still make a 2D one;
+       * one that made it (and then failed) cannot, so start from a fresh one */
+      var fresh = canvas.cloneNode(false);
+      canvas.parentNode.replaceChild(fresh, canvas);
+      canvas = fresh;
+      rebindCanvas();
+      ctx2d = canvas.getContext("2d", { alpha: false });
+      el("followbtn").hidden = true;
+      el("viewbtn").hidden = true;
+    }
+    updateInsets();
     if (dash() && Module._evo_rec_take) dash().attach({
       module: Module, heap: heap, actionNames: ACTION_NAMES, setDrawer: setDrawer,
       runConfig: function () { return runCfg; },
@@ -1514,24 +1835,26 @@
     /* Thread count: ?nthreads=N, else every pre-spawned worker plus this
      * thread (EvoLoader.poolThreads() — the -sPTHREAD_POOL_SIZE formula),
      * at most TOUCH_THREADS on a touch device. */
-    var nt = parseInt(new URLSearchParams(location.search).get("nthreads"), 10);
+    var nt = parseInt(PARAMS.get("nthreads"), 10);
     var touch = coarseMQ.matches;
     var pool = EvoLoader.poolThreads();
     if (threaded) Module._evo_set_threads(nt > 0 ? Math.min(nt, pool) : (touch ? Math.min(TOUCH_THREADS, pool) : pool));
     /* The single-threaded module starts with fewer creatures (see the
-     * benchmark in README.md); either default can be changed in the drawer. */
+     * benchmark in README.md); either default can be changed in the settings. */
     basePop = threaded ? (touch ? TOUCH_POP_THREADED : DEFAULT_POP_THREADED)
                        : (touch ? TOUCH_POP_SINGLE : DEFAULT_POP_SINGLE);
     el("population").value = String(basePop);
     el("turbobtn").title = threaded
-      ? "run headless in a worker at full speed — no rendering, keeps running in background tabs; the hand-off is exact, but a threaded run is not reproducible"
-      : "run headless in a worker at full speed — no rendering, keeps running in background tabs; toggling is bit-exact";
+      ? "Turbo: run headless in a worker at full speed. Keeps running in background tabs; the hand-off is exact, but a threaded run is not reproducible."
+      : "Turbo: run headless in a worker at full speed. Keeps running in background tabs; switching is bit-exact.";
     el("modeline").textContent = (threaded
-      ? "module: threaded (" + Module._evo_threads() + " threads) — fast, not reproducible from the seed"
-      : "module: single-threaded — reproducible from the seed (" + threadWhy + ")") +
-      "; drawing: " + (glScene ? "WebGL2" : "canvas 2D");
+      ? "Running the threaded module (" + Module._evo_threads() + " threads): fast, not reproducible from the seed."
+      : "Running the single-threaded module, reproducible from the seed (" + threadWhy + ").") +
+      " Drawing: " + (scene ? "3D (WebGL2)." : "2D canvas.");
     if (bench) {
       bench.i = 0;
+      WORLD_W = DEFAULT_W; WORLD_H = DEFAULT_H;
+      worldSized();
       benchNext();
       clearError();
     } else if (restart()) {
@@ -1541,8 +1864,31 @@
     if (!bench) {
       window.EvoApp.ready = true;
       window.dispatchEvent(new Event("evo:ready"));
+      /* one quiet hint, once, for visitors who skip the tour */
+      setTimeout(function () {
+        if (!everSelected && selectedId === null && !document.getElementById("guide"))
+          toast((coarseMQ.matches ? "Tap" : "Click") + " any fish to see its brain.");
+      }, 9000);
     }
   }).catch(function (err) {
+    splashSay("The simulation couldn't start: " + err);
     showError("failed to load wasm module: " + err);
   });
+
+  /* the 2D fallback swaps the canvas element; its listeners move with it */
+  function rebindCanvas() {
+    canvas.addEventListener("pointerdown", function (e) {
+      tap = e.isPrimary ? { x: e.clientX, y: e.clientY, t: performance.now(), id: e.pointerId } : null;
+    });
+    canvas.addEventListener("pointercancel", function () { tap = null; });
+    canvas.addEventListener("pointerup", function (e) {
+      if (!tap || e.pointerId !== tap.id) return;
+      var moved = Math.hypot(e.clientX - tap.x, e.clientY - tap.y);
+      tap = null;
+      if (moved > 8 || !Module || turboState !== "live") return;
+      var s = snapshot(-1);
+      var best = pick2D(s, e.clientX, e.clientY, e.pointerType === "mouse" ? 18 : 30);
+      if (best >= 0) { selectedId = s.ids[best]; everSelected = true; } else selectedId = null;
+    });
+  }
 })();

@@ -11,12 +11,12 @@
  * >= 3:1), one-hue blue ramp for magnitudes, text in ink colours only. */
 (function () {
   var T = {
-    surface: "#101c17", ink: "#dfe9e3", ink2: "#a9bdb1", muted: "#7f958a",
-    grid: "#1d2c25", axis: "#33473d",
+    surface: "#0f2727", ink: "#eaf5f2", ink2: "#c3d5d3", muted: "#9ab0ae",
+    grid: "#1d3535", axis: "#314e4c",
     series: ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#008300", "#9085e9", "#e66767"],
-    other: "#3f5048",
+    other: "#3b5957",
     /* sequential, dark mode: near the surface = none, light = most */
-    seq: ["#13241c", "#104281", "#1c5cab", "#2a78d6", "#5598e7", "#86b6ef", "#cde2fb"]
+    seq: ["#173030", "#104281", "#1c5cab", "#2a78d6", "#5598e7", "#86b6ef", "#cde2fb"]
   };
   var FONT = "11px system-ui, -apple-system, 'Segoe UI', sans-serif";
   var PAD = { l: 46, r: 14, t: 10, b: 24 };

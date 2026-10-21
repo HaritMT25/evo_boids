@@ -134,7 +134,7 @@ A switch in the settings' Run tab (or `?view=3d`) draws the same world as a shal
 
 The selected fish is shown as the card on every screen in the tank view (there is no canvas inspector), and the camera pans, zooms, tilts and follows a fish. three.js ships as a trimmed bundle, `web/vendor/three.bundle.min.js` (561 KB minified; about 115 KB brotli by #7's measurement), loaded only when the tank view is first turned on, so the default page is no heavier. `tools/three_bundle/build.sh` rebuilds it, and the rebuilt file is byte-identical to the committed one (three 0.186.1, esbuild 0.28.2). Without WebGL2 the switch says so and stays off.
 
-Cost, as measured in #7 on the benchmark machine below (Chrome with the Iris Xe GPU, threaded × 8, 1440×900): the tank holds a stable 60 fps up to 10,000 agents (52.2 fps at 12,000), against 12,000 for the flat view, and spends about 1.2 ms per frame drawing 2,000 agents against 0.8 ms. That cost is only paid with the tank on; the governor's first step there is to draw it with less detail.
+Cost, as measured in #7 on the benchmark machine below (Chrome with the Iris Xe GPU, threaded × 8, 1440×900): the tank holds a stable 60 fps up to 10,000 agents (52.2 fps at 12,000), against 12,000 for the flat view, and spends about 1.2 ms per frame drawing 2,000 agents against 0.8 ms. Re-measured 2026-10-20 on the same laptop, with `?bench` in headless Chrome 155 on that GPU (ANGLE, Direct3D 11), alternating the two views for 2 rounds each: drawing took 0.79–0.80 ms flat against 1.10–1.11 ms in the tank at 2,000 agents, 1.41–1.44 against 2.75–2.92 ms at 8,000, and 1.51–1.54 against 2.42–2.74 ms at 12,000. Both held a stable 60 fps up to 6,000 there, because on that run the simulation step (12.5–13 ms at 8,000) set the limit, not the drawing. In headless Firefox 155 the flat view itself already spends about 17–19 ms per frame drawing at 2,000 agents; see Benchmarks. That cost is only paid with the tank on; the governor's first step there is to draw it with less detail.
 
 ### Randomize and the first-visit guide
 
@@ -256,6 +256,18 @@ A repeat on AC power is not in the table, because the display refreshed at about
 - both canvas 2D rows: 2,000 (39–41 fps at 3,000)
 
 `?bench` now detects a display slower than 58 Hz and reports against its rate instead.
+
+### Drawing cost by browser and view
+
+Measured 2026-10-20 on the same laptop, on AC power, with `?bench` in headless browsers drawing on the Iris Xe GPU (ANGLE, Direct3D 11), threaded × 8, 1440×900 window. Each pair alternated in one browser; the median draw time per frame is the part `?bench` reports as "draw ms" (sync, snapshot and drawing, without the step). Headless frame pacing isn't the display's, so these compare drawing between views and browsers; they don't replace the table above.
+
+| browser | view | rounds | draw at 2,000 | draw at 8,000 | draw at 12,000 |
+|---|---|---:|---:|---:|---:|
+| Chrome 155 | flat (WebGL2) | 2 | 0.79–0.80 ms | 1.41–1.44 ms | 1.51–1.54 ms |
+| Chrome 155 | tank | 2 | 1.10–1.11 ms | 2.75–2.92 ms | 2.42–2.74 ms |
+| Firefox 155 (Playwright) | flat (WebGL2) | 2 | 16.9–18.7 ms | 21.0–24.8 ms | not reached |
+
+So headless Firefox runs the flat view at 46–52 fps at 2,000 agents, where Chrome holds 60, although its simulation step is quick (1.3–1.6 ms). The likely cost is the per-frame copy of the offscreen WebGL2 canvas onto the visible 2D canvas (`ctx.drawImage`), but that was not profiled, and whether a windowed Firefox does the same was not measured. The tank's numbers in Firefox were not measured either: that run was stopped when the laptop ran low on memory.
 
 The page starts the single-threaded module at 300 creatures and the threaded one at 600. Under the default settings, the population then settles between roughly 250 and 800.
 

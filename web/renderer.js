@@ -785,6 +785,7 @@
   var cardEl = el("fishcard"), inetCanvas = el("inetc"), inetCtx = inetCanvas.getContext("2d");
   var portrait = el("iportrait"), portraitCtx = portrait.getContext("2d");
   var cardExpanded = window.innerWidth >= 600, cardCache = {}, cardFor = null;
+  el("iexpand").setAttribute("aria-expanded", cardExpanded ? "true" : "false");   /* the tour reads it */
   var sensorNames = null, netNodes = [], netHover = -1, uiFont = "";
   function prettyName(n) {
     return String(n).replace(/_/g, " ").replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase();
@@ -1275,7 +1276,7 @@
     el("readout").setAttribute("aria-expanded", open ? "true" : "false");
     if (open) renderStatPanel();
   }
-  el("readout").addEventListener("click", function () { setStatPanel(!statOpen); });
+  el("readout").addEventListener("click", function () { setStatPanel(!statOpen); this.blur(); });
   document.addEventListener("pointerdown", function (e) {
     if (statOpen && !e.target.closest("#statpanel, #readout")) setStatPanel(false);
   });
@@ -1591,13 +1592,20 @@
     return new Float64Array(heap(), Module._evo_creature_ids(), index + 1)[index];
   }
 
+  /* Escape also closes the dashboards (dashboard.js) and ends the tour
+   * (guide.js), in their own keydown handlers. Seen here first, in the
+   * capture phase, so the same press doesn't also let go of the fish. */
+  var escHandledElsewhere = false;
+  window.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") escHandledElsewhere = !!(dash() && dash().isOpen()) || !!document.getElementById("guide");
+  }, true);
   window.addEventListener("keydown", function (e) {
     /* Escape always closes what is open, regardless of what has focus —
      * blurring the focused control so the sim shortcuts work again. */
     if (e.key === "Escape") {
       if (drawerEl.classList.contains("open")) setDrawer(false);
       else if (statOpen) setStatPanel(false);
-      else selectedId = null;
+      else if (!escHandledElsewhere) selectedId = null;
       if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
       return;
     }
@@ -1645,7 +1653,7 @@
     setDrawer(!drawerEl.classList.contains("open"));
     this.blur();
   });
-  el("drawerclose").addEventListener("click", function () { setDrawer(false); });
+  el("drawerclose").addEventListener("click", function () { setDrawer(false); this.blur(); });
   /* drag the sheet's grip (or header) down to close it */
   (function () {
     var start = null, grip = el("grip"), head = drawerEl.querySelector(".sheet-head");
@@ -1791,7 +1799,7 @@
     updateNeeds();
     updateTabDots();
     if (!t || !t.id || (t.id.indexOf("adv_") === 0 && LIVE[t.id.slice(4)])) return;  /* applies by itself */
-    if (t.id === "governor") return;
+    if (t.id === "governor" || t.id === "cpfile") return;   /* not settings Restart applies */
     setPending(true);
   }
 
@@ -1845,6 +1853,8 @@
       autoCap = 0;
       el("adv_maxPopulation").value = String(cap);
       resetGovernor();
+      updateNeeds();
+      updateTabDots();
     }, function (err) { showError("Couldn't read that file: " + err); });
   });
   el("governor").addEventListener("change", function () {

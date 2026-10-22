@@ -164,6 +164,9 @@
     position: fixed; z-index: var(--z-hud);
     top: calc(64px + var(--safe-t)); left: 10px;
     width: min(340px, calc(100vw - 20px));
+    /* above the dock, scrolling on short (landscape phone) screens */
+    max-height: calc(100dvh - 64px - var(--dock-h) - 34px - var(--safe-t) - var(--safe-b));
+    overflow-y: auto; overscroll-behavior: contain;
     padding: 14px 16px;
     border-radius: var(--r-md);
     font-size: 13px;
@@ -290,7 +293,7 @@
   #drawer.dragging { transition: none; }
   .sheet-grip { display: grid; place-items: center; height: 22px; cursor: grab; touch-action: none; }
   .sheet-grip::before { content: ""; width: 40px; height: 4px; border-radius: 2px; background: var(--line); }
-  .sheet-head { display: flex; align-items: center; gap: 8px; padding: 0 8px 4px 18px; }
+  .sheet-head { display: flex; align-items: center; gap: 8px; padding: 0 8px 4px 18px; touch-action: none; }   /* drags the sheet */
   .sheet-head h2 { flex: 1; font-size: 18px; font-weight: 650; }
   #tabs {
     display: flex; gap: 2px; padding: 0 10px;

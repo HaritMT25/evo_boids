@@ -663,6 +663,8 @@
     var s = {
       n: n, fc: fc, pc: pc, selIdx: selIdx,
       segs: new Float32Array(heap(), Module._evo_creature_segments(), n * 12),
+      /* the tank keys each fish's swim height, tail phase and trail to its id */
+      ids: new Float64Array(heap(), Module._evo_creature_ids(), n),
       /* N*2 alongside segs, same creature order; absent from pre-0.24 blobs */
       body: Module._evo_body_params
               ? new Float32Array(heap(), Module._evo_body_params(), n * 2)
@@ -800,6 +802,7 @@
   var cardEl = el("fishcard"), inetCanvas = el("inetc"), inetCtx = inetCanvas.getContext("2d");
   var portrait = el("iportrait"), portraitCtx = portrait.getContext("2d");
   var cardExpanded = window.innerWidth >= 600, cardCache = {}, cardFor = null;
+  el("iexpand").setAttribute("aria-expanded", cardExpanded ? "true" : "false");   /* the tour reads it */
   var sensorNames = null, netNodes = [], netHover = -1, uiFont = "";
   function prettyName(n) {
     return String(n).replace(/_/g, " ").replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase();
@@ -1198,6 +1201,11 @@
     workEma = 0; overFrames = 0; underFrames = 0; govNote = ""; governed = false;
     intervalEma = 0;
     warmupUntil = performance.now() + WARMUP_MS;
+    restoreDetail();
+  }
+  /* the tank's full detail again (a restart, a load, the governor off) */
+  function restoreDetail() {
+    if (scene && scene.setQuality(coarseMQ.matches ? 2 : 3) && Module) updateModeline();
   }
   /* After any action: forget the moving averages (they still remember the
    * frames before the action and would trigger a second, too-deep cut) and
@@ -1227,6 +1235,7 @@
       if (view3d && scene.degrade()) {
         /* the tank first: fewer pixels, then no shadows; the run is untouched */
         setGovNote("drew the tank with less detail to hold 60 fps");
+        updateModeline();
       } else if (simSpeed > 1) {
         /* work per frame is proportional to steps per frame, so the speed
          * that fits can be computed rather than found one notch at a time */
@@ -1308,7 +1317,7 @@
     el("readout").setAttribute("aria-expanded", open ? "true" : "false");
     if (open) renderStatPanel();
   }
-  el("readout").addEventListener("click", function () { setStatPanel(!statOpen); });
+  el("readout").addEventListener("click", function () { setStatPanel(!statOpen); this.blur(); });
   document.addEventListener("pointerdown", function (e) {
     if (statOpen && !e.target.closest("#statpanel, #readout")) setStatPanel(false);
   });
@@ -1636,7 +1645,8 @@
    * water lets go; a drag, pinch or long press belongs to the camera. */
   var tap = null;
   sceneCanvas.addEventListener("pointerdown", function (e) {
-    tap = e.isPrimary ? { x: e.clientX, y: e.clientY, t: performance.now(), id: e.pointerId } : null;
+    /* only the primary button picks; right and middle drag the camera */
+    tap = e.isPrimary && e.button === 0 ? { x: e.clientX, y: e.clientY, t: performance.now(), id: e.pointerId } : null;
   });
   sceneCanvas.addEventListener("pointercancel", function () { tap = null; });
   sceneCanvas.addEventListener("pointerup", function (e) {
@@ -1699,14 +1709,17 @@
       });
     return sceneLoad;
   }
-  function setView(on) {
+  /* fromUser: the switch was flipped, so the choice is remembered. A start
+   * from ?view= or from the remembered choice doesn't write it again; a
+   * tank that fails to start forgets it, so later visits don't retry. */
+  function setView(on, fromUser) {
     el("view3d").checked = on;
     if (!on) {
+      if (fromUser) remember(false);
       if (!view3d) return;
       if (scene.following()) scene.setFollow(false);
       view3d = false;
       document.body.classList.remove("view-3d");
-      remember(false);
       updateModeline();
       return;
     }
@@ -1716,7 +1729,8 @@
       el("view3d").disabled = false;
       if (!sc) {
         el("view3d").checked = false;
-        showError("The tank view needs WebGL2, which this browser didn't provide.");
+        remember(false);
+        showError("The tank view couldn't start here (it needs WebGL2, and three.js has to load).");
         return;
       }
       if (!el("view3d").checked) return;   /* switched off again while loading */
@@ -1725,18 +1739,25 @@
       sceneW = sceneH = 0;   /* (re)frame the tank on the next frame */
       scene.resize();
       updateInsets();
-      remember(true);
+      if (fromUser) remember(true);
       updateModeline();
     });
   }
 
+  /* Escape also closes the dashboards (dashboard.js) and ends the tour
+   * (guide.js), in their own keydown handlers. Seen here first, in the
+   * capture phase, so the same press doesn't also let go of the fish. */
+  var escHandledElsewhere = false;
+  window.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") escHandledElsewhere = !!(dash() && dash().isOpen()) || !!document.getElementById("guide");
+  }, true);
   window.addEventListener("keydown", function (e) {
     /* Escape always closes what is open, regardless of what has focus —
      * blurring the focused control so the sim shortcuts work again. */
     if (e.key === "Escape") {
       if (drawerEl.classList.contains("open")) setDrawer(false);
       else if (statOpen) setStatPanel(false);
-      else selectedId = null;
+      else if (!escHandledElsewhere) selectedId = null;
       if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
       return;
     }
@@ -1788,7 +1809,7 @@
     setDrawer(!drawerEl.classList.contains("open"));
     this.blur();
   });
-  el("drawerclose").addEventListener("click", function () { setDrawer(false); });
+  el("drawerclose").addEventListener("click", function () { setDrawer(false); this.blur(); });
   /* drag the sheet's grip (or header) down to close it */
   (function () {
     var start = null, grip = el("grip"), head = drawerEl.querySelector(".sheet-head");
@@ -1934,7 +1955,7 @@
     updateNeeds();
     updateTabDots();
     if (!t || !t.id || (t.id.indexOf("adv_") === 0 && LIVE[t.id.slice(4)])) return;  /* applies by itself */
-    if (t.id === "governor" || t.id === "view3d" || t.id === "fishShape") return;
+    if (t.id === "governor" || t.id === "view3d" || t.id === "fishShape" || t.id === "cpfile") return;   /* not settings Restart applies */
     setPending(true);
   }
 
@@ -1970,7 +1991,7 @@
   btn("guidebtn", function () { if (window.EvoGuide) EvoGuide.start(); });
   btn("followbtn", toggleFollow);
   btn("viewbtn", function () { if (view3d) scene.resetView(true); });
-  el("view3d").addEventListener("change", function () { setView(this.checked); this.blur(); });
+  el("view3d").addEventListener("change", function () { setView(this.checked, true); this.blur(); });
   el("fishShape").addEventListener("change", function () { setFishShape(this.checked); this.blur(); });
   /* Fish shapes: ?fish=1 / ?fish=0, else this visitor's last choice; off the
    * first time. WebGL2 only: in canvas 2D, Chrome fills the outlines at less
@@ -2024,11 +2045,14 @@
       autoCap = 0;
       el("adv_maxPopulation").value = String(cap);
       resetGovernor();
+      updateNeeds();
+      updateTabDots();
     }, function (err) { showError("Couldn't read that file: " + err); });
   });
   el("governor").addEventListener("change", function () {
     governorOn = this.checked;
     if (!governorOn && autoCap) { autoCap = 0; applyCap(); }
+    if (!governorOn) restoreDetail();
     govNote = "";
     this.blur();
   });
@@ -2114,10 +2138,20 @@
       ? "Turbo: run headless in a worker at full speed. Keeps running in background tabs; the hand-off is exact, but a threaded run is not reproducible."
       : "Turbo: run headless in a worker at full speed. Keeps running in background tabs; switching is bit-exact.";
     updateModeline();
-    /* the tank view: ?view=3d / ?view=flat, else this visitor's last choice */
+    /* the tank view: ?view=3d / ?view=flat, else this visitor's last choice;
+     * never with ?gl=0, which forces the flat canvas-2D view */
     var want = PARAMS.get("view"), saved = null;
     try { saved = localStorage.getItem(VIEW_KEY); } catch (e) { /* private mode */ }
     if (want !== "3d" && want !== "flat") want = saved === "3d" ? "3d" : "flat";
+    if (PARAMS.get("gl") === "0") {
+      want = "flat";
+      el("view3d").disabled = true;
+      var row = el("f_view3d"), hint = document.createElement("span");
+      row.classList.add("inert");
+      hint.className = "needs";
+      hint.textContent = "off with ?gl=0, which forces the flat canvas-2D view";
+      row.appendChild(hint);
+    }
     /* ?bench measures the view it starts in, so that one is loaded first */
     return Promise.resolve(want === "3d" ? setView(true) : null).then(start);
   }).catch(function (err) {

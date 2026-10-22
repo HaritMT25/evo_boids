@@ -145,13 +145,20 @@ A second switch in the Run tab (or `?fish=1`) draws each fish in the flat view a
 - **Width:** the half-width at each spine point is that point's circle radius, `RADII[i] × bodyScale(bodySize)` with the same floor, and runs linearly between them. The head is the head circle.
 - **The tail fin** is the one addition: 6 × 4.5 world px at body scale 1, scaled by the same `bodyScale`, at 55% opacity.
 - **Colour:** body and head are drawn opaque in the genome colour; the circles fade toward the tail instead.
-- **Drawing:** the WebGL path draws every fish as one instanced draw of a 55-vertex template, bent in the vertex shader, in the same creature order; the canvas-2D fallback draws the same outline. The native app still draws circles.
+- **Drawing:** WebGL2 only. Every fish is one instanced draw of a 55-vertex template, bent in the vertex shader, in the same creature order. The canvas-2D fallback (no WebGL2, or `?gl=0`) keeps the circles, and the switch says so: in Chrome, canvas 2D filled the outlines at less than half the frame rate of circles (250 bent fish in a test page: 20 against 45 fps in a windowed Chrome 155, 22 against 60 headless; Firefox filled both at about 60), because each filled polygon costs far more there than an arc. Splitting the outline into convex pieces made it slower, not faster. The native app still draws circles.
 
 **Measured faithfulness.** A test world holds 15 isolated, straight fish: body size 0.5, 0.75, 1, 1.5 and 2, each at elongation 0.5, 1 and 2. Differencing it against the same world without them gives each fish's pixels. With fish shapes, each fish is exactly as wide as its circles, and its length is within 1 px of the geometry (five spine segments, plus the head radius, plus the fin), in all 15 cases. That holds in Chrome 155, Playwright's WebKit build (installed 2026-10-20, Playwright 1.63) and Playwright's Firefox 155. As with circles, body sizes 1.5 and 2 draw the same width, because `bodyScale` levels off at 1.4×; their lengths still differ.
 
-**Across browsers** (same machine, same GPU through ANGLE): the WebGL path's fish pixels are identical in all three engines, circles and fish shapes alike. The canvas-2D path differs only in anti-aliasing (WebKit by at most 4/255; Firefox on 0.03–0.06% of fish pixels). In each browser the two paths agree on 99.8% or more of fish pixels.
+**Across browsers** (same machine, same GPU through ANGLE): the WebGL path's fish pixels are identical in all three engines, circles and fish shapes alike. The canvas-2D circles differ only in anti-aliasing (WebKit by at most 4/255; Firefox on 0.06% of fish pixels), and agree with the WebGL circles on 99.9% or more of fish pixels in each browser.
 
-**Cost** (`?bench`, headless, the laptop's Iris Xe, threaded × 8; circles and fish shapes alternated in one browser). In Chrome 155, over 3 rounds each, drawing took 0.89–1.24 ms with circles against 1.24–1.34 ms with fish shapes at 2,000 agents, and 2.75–3.14 against 3.38–3.79 ms at 8,000: about +0.1–0.35 ms and +0.75 ms. The machine was busy during those rounds (the step took 6–7 ms at 2,000, twice its usual), and the step, not the drawing, set the stable-60 limit (3,000–4,000 either way). In headless Firefox 155, 2 rounds each, both drew in 17–19 ms at 2,000 agents, so fish shapes added nothing measurable next to that browser's per-frame cost (see Benchmarks). The canvas-2D fallback wasn't compared: both runs fell below 30 fps before 2,000 agents, so `?bench` stopped early.
+**Cost** (`?bench`, headless, the laptop's Iris Xe, threaded × 8; circles and fish shapes alternated in one browser). Chrome 155, two sets of 3 rounds each:
+
+| set | draw at 2,000: circles | fish shapes | draw at 8,000: circles | fish shapes | stable 60 fps up to |
+|---|---:|---:|---:|---:|---|
+| 2026-10-20 | 0.89–1.24 ms | 1.24–1.34 ms | 2.75–3.14 ms | 3.38–3.79 ms | 3,000–4,000 / 3,000 |
+| 2026-10-22, on battery | 1.03–1.06 ms | 1.22–1.29 ms | 2.57–2.82 ms | 3.23–3.46 ms | 4,000 / 3,000–4,000 |
+
+So fish shapes add about 0.2 ms of drawing at 2,000 agents and 0.6–0.75 ms at 8,000 (about +20–25%). In both sets the step took 6–7.5 ms at 2,000 agents, against 3.9 ms in the flat-vs-tank rounds on AC power, so the step, not the drawing, set the stable-60 limit. A control run showed the fish branch with the switch off drawing exactly like the branch before it (1.075 vs 1.06 ms at 2,000). In headless Firefox 155 (2 rounds), both drew in 17–19 ms at 2,000 agents, so fish shapes added nothing measurable next to that browser's per-frame cost (see Benchmarks).
 
 ### Randomize and the first-visit guide
 

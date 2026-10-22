@@ -20,7 +20,7 @@
  * circle, and a tail fin is added whose size scales with the body (look.fin),
  * so body size and elongation show exactly as they do with circles. One
  * instanced draw of a template mesh, bent in the vertex shader; still
- * creature-major. renderer.js drawFish2D draws the same outline in 2D.
+ * creature-major. WebGL2 only: the 2D path keeps the circles.
  *
  * EvoGL.create(width, height, bgImage, look) -> renderer or null (no WebGL2).
  * renderer.draw(s) -> the canvas to blit; renderer.resize(w, h). */

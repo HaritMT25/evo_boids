@@ -229,7 +229,7 @@
     maxPopulation: { d: "Birth cap: no births while the population is at or above it (0 = none). Applies live.", t: "try: 0; the frame-budget governor may set a lower one" },
     minPopulation: { d: "Reseed floor: random founders are added when the population falls below it. Applies live.", t: "try: 50 (the default)" },
     governor: { d: "When frames take too long: first lower the speed (in the tank view, first draw the tank with less detail), then remove creatures at random (no trait favoured) and cap births at what this machine can run at 60 fps. Each step is reported; a governed run no longer replays from its seed.", t: "try: on; off to see the uncapped run (it may stutter)" },
-    fishShape: { d: "Draws each fish as one smooth body over the six spine points the simulation keeps, instead of a circle at each point. Its half-width at each point is that point's circle radius and its length is the spine itself, so body size and elongation show as they do with circles; the tail fin is an addition that grows with body size. The native app draws circles.", t: "try: on for a fish look; off to match the native window" },
+    fishShape: { d: "Draws each fish as one smooth body over the six spine points the simulation keeps, instead of a circle at each point. Its half-width at each point is that point's circle radius and its length is the spine itself, so body size and elongation show as they do with circles; the tail fin is an addition that grows with body size. Needs WebGL2 (the canvas-2D fallback keeps the circles); the native app draws circles.", t: "try: on for a fish look; off to match the native window" },
     view3d: { d: "Draws the same world as a 3D tank seen at an angle: fish bent along their spine in their genome colour, lit and shaded, plus motion the simulation does not have (tail beats, swim heights, drifting specks, caustic light). Distances look shorter far away, and the world still wraps at its edges. The simulation and every setting are unchanged.", t: "try: on for looks; off to see the world as the simulation sees it" }
   };
 
@@ -1096,7 +1096,6 @@
     for (var c = 0; c < s.n; c++) {
       var rgb = s.colors[3 * c] + "," + s.colors[3 * c + 1] + "," + s.colors[3 * c + 2];
       var bs = bodyScale(s.body ? s.body[2 * c] : 1);
-      if (LOOK.fishShape) { drawFish2D(s.segs, 12 * c, bs, rgb); continue; }
       for (var seg = 0; seg < 6; seg++) {
         ctx.fillStyle = "rgba(" + rgb + "," + SEG_ALPHA[seg] + ")";
         ctx.beginPath();
@@ -1110,80 +1109,6 @@
       ctx.fillStyle = s.preds[3 * p + 2] > 0 ? "rgb(150,60,60)" : "rgb(220,50,50)";
       ctx.beginPath();
       ctx.arc(s.preds[3 * p], s.preds[3 * p + 1], 6.5, 0, TAU);
-      ctx.fill();
-    }
-  }
-
-  /* ---- fish shapes in 2D: the outline gl_renderer.js draws (FISH_VS) ----
-   * A Catmull-Rom spine through the six points, 16 stations; the half-width
-   * at a station runs between the circle radii of its two points; the head is
-   * the head circle; the fin's size scales with the body. Body and head are
-   * one opaque fill (their overlap is filled once), the fin a second. */
-  var FP = new Float64Array(12), SA = [0, 0], SB = [0, 0], SC = [0, 0];
-  var FLX = new Float64Array(16), FLY = new Float64Array(16), FRX = new Float64Array(16), FRY = new Float64Array(16);
-  function spineAt(P, s, out) {
-    s = Math.max(0, Math.min(5, s));
-    var i = Math.min(Math.floor(s), 4), t = s - i, i0 = Math.max(i - 1, 0), i3 = Math.min(i + 2, 5);
-    var t2 = t * t, t3 = t2 * t;
-    for (var d = 0; d < 2; d++) {
-      var p0 = P[2 * i0 + d], p1 = P[2 * i + d], p2 = P[2 * (i + 1) + d], p3 = P[2 * i3 + d];
-      out[d] = 0.5 * ((2 * p1) + (-p0 + p2) * t + (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2 +
-                      (-p0 + 3 * p1 - 3 * p2 + p3) * t3);
-    }
-  }
-  function fishHalfWidth(s, bs) {
-    s = Math.max(0, Math.min(5, s));
-    var i = Math.min(Math.floor(s), 4), t = s - i;
-    var a = Math.max(MIN_RADIUS, RADII[i] * bs), b = Math.max(MIN_RADIUS, RADII[i + 1] * bs);
-    return a + (b - a) * t;
-  }
-  function drawFish2D(segs, o, bs, rgb) {
-    /* unwrap around the head, as gl_renderer.js fillFish does */
-    var halfW = WORLD_W / 2, halfH = WORLD_H / 2, px = segs[o], py = segs[o + 1];
-    var minX = px, maxX = px, minY = py, maxY = py, i;
-    FP[0] = px; FP[1] = py;
-    for (i = 1; i < 6; i++) {
-      var x = segs[o + 2 * i], y = segs[o + 2 * i + 1];
-      if (x - px > halfW) x -= WORLD_W; else if (px - x > halfW) x += WORLD_W;
-      if (y - py > halfH) y -= WORLD_H; else if (py - y > halfH) y += WORLD_H;
-      FP[2 * i] = x; FP[2 * i + 1] = y; px = x; py = y;
-      if (x < minX) minX = x; if (x > maxX) maxX = x;
-      if (y < minY) minY = y; if (y > maxY) maxY = y;
-    }
-    for (var k = 0; k < 16; k++) {
-      var st = k / 3;
-      spineAt(FP, st - 0.1, SA); spineAt(FP, st + 0.1, SB); spineAt(FP, st, SC);
-      var fx = SA[0] - SB[0], fy = SA[1] - SB[1], fl = Math.hypot(fx, fy);
-      if (fl > 1e-4) { fx /= fl; fy /= fl; } else { fx = 1; fy = 0; }
-      var w = fishHalfWidth(st, bs);
-      FLX[k] = SC[0] - fy * w; FLY[k] = SC[1] + fx * w;
-      FRX[k] = SC[0] + fy * w; FRY[k] = SC[1] - fx * w;
-    }
-    var kx = FP[10] - FP[8], ky = FP[11] - FP[9], kl = Math.hypot(kx, ky);
-    if (kl > 1e-4) { kx /= kl; ky /= kl; } else { kx = 1; ky = 0; }
-    var w0 = fishHalfWidth(0, bs), w5 = fishHalfWidth(5, bs);
-    var L = LOOK.fin.len * bs, S = LOOK.fin.spread * bs, ex = FP[10], ey = FP[11];
-    var dxs = minX < 0 ? [0, WORLD_W] : maxX >= WORLD_W ? [0, -WORLD_W] : [0];
-    var dys = minY < 0 ? [0, WORLD_H] : maxY >= WORLD_H ? [0, -WORLD_H] : [0];
-    for (var u = 0; u < dxs.length; u++) for (var v = 0; v < dys.length; v++) {
-      var ox = dxs[u], oy = dys[v];
-      ctx.fillStyle = "rgb(" + rgb + ")";
-      ctx.beginPath();
-      ctx.moveTo(FLX[0] + ox, FLY[0] + oy);
-      for (k = 1; k < 16; k++) ctx.lineTo(FLX[k] + ox, FLY[k] + oy);
-      for (k = 15; k >= 0; k--) ctx.lineTo(FRX[k] + ox, FRY[k] + oy);
-      ctx.closePath();
-      ctx.moveTo(FP[0] + ox + w0, FP[1] + oy);
-      ctx.arc(FP[0] + ox, FP[1] + oy, w0, 0, TAU);
-      ctx.fill();
-      ctx.fillStyle = "rgba(" + rgb + "," + LOOK.fin.alpha + ")";
-      ctx.beginPath();
-      ctx.moveTo(ex + ox + ky * w5, ey + oy - kx * w5);                         /* root, one side */
-      ctx.lineTo(ex + ox + kx * L + ky * S, ey + oy + ky * L - kx * S);         /* tip */
-      ctx.lineTo(ex + ox + kx * L * 0.55, ey + oy + ky * L * 0.55);             /* notch */
-      ctx.lineTo(ex + ox + kx * L - ky * S, ey + oy + ky * L + kx * S);         /* tip */
-      ctx.lineTo(ex + ox - ky * w5, ey + oy + kx * w5);                         /* root, other side */
-      ctx.closePath();
       ctx.fill();
     }
   }
@@ -2047,9 +1972,13 @@
   btn("viewbtn", function () { if (view3d) scene.resetView(true); });
   el("view3d").addEventListener("change", function () { setView(this.checked); this.blur(); });
   el("fishShape").addEventListener("change", function () { setFishShape(this.checked); this.blur(); });
-  /* fish shapes: ?fish=1 / ?fish=0, else this visitor's last choice; off the first time */
+  /* Fish shapes: ?fish=1 / ?fish=0, else this visitor's last choice; off the
+   * first time. WebGL2 only: in canvas 2D, Chrome fills the outlines at less
+   * than half the frame rate it fills circles, so the 2D fallback keeps the
+   * circles and the switch says why. */
   var FISH_KEY = "evo_boids.fishShape";
   function setFishShape(on) {
+    if (!glScene) return;
     LOOK.fishShape = on;
     el("fishShape").checked = on;
     try { localStorage.setItem(FISH_KEY, on ? "1" : "0"); } catch (e) { /* private mode */ }
@@ -2059,6 +1988,15 @@
     var want = PARAMS.get("fish"), saved = null;
     try { saved = localStorage.getItem(FISH_KEY); } catch (e) { /* private mode */ }
     if (want !== "1" && want !== "0") want = saved === "1" ? "1" : "0";
+    if (!glScene) {
+      var row = el("f_fishShape"), hint = document.createElement("span");
+      el("fishShape").disabled = true;
+      row.classList.add("inert");
+      hint.className = "needs";
+      hint.textContent = "needs WebGL2: this page is drawing with canvas 2D, which keeps the circles";
+      row.appendChild(hint);
+      return;
+    }
     LOOK.fishShape = want === "1";
     el("fishShape").checked = LOOK.fishShape;
   })();

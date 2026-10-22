@@ -661,6 +661,8 @@
     var s = {
       n: n, fc: fc, pc: pc, selIdx: selIdx,
       segs: new Float32Array(heap(), Module._evo_creature_segments(), n * 12),
+      /* the tank keys each fish's swim height, tail phase and trail to its id */
+      ids: new Float64Array(heap(), Module._evo_creature_ids(), n),
       /* N*2 alongside segs, same creature order; absent from pre-0.24 blobs */
       body: Module._evo_body_params
               ? new Float32Array(heap(), Module._evo_body_params(), n * 2)
@@ -1194,6 +1196,11 @@
     workEma = 0; overFrames = 0; underFrames = 0; govNote = ""; governed = false;
     intervalEma = 0;
     warmupUntil = performance.now() + WARMUP_MS;
+    restoreDetail();
+  }
+  /* the tank's full detail again (a restart, a load, the governor off) */
+  function restoreDetail() {
+    if (scene && scene.setQuality(coarseMQ.matches ? 2 : 3) && Module) updateModeline();
   }
   /* After any action: forget the moving averages (they still remember the
    * frames before the action and would trigger a second, too-deep cut) and
@@ -1223,6 +1230,7 @@
       if (view3d && scene.degrade()) {
         /* the tank first: fewer pixels, then no shadows; the run is untouched */
         setGovNote("drew the tank with less detail to hold 60 fps");
+        updateModeline();
       } else if (simSpeed > 1) {
         /* work per frame is proportional to steps per frame, so the speed
          * that fits can be computed rather than found one notch at a time */
@@ -1630,7 +1638,8 @@
    * water lets go; a drag, pinch or long press belongs to the camera. */
   var tap = null;
   sceneCanvas.addEventListener("pointerdown", function (e) {
-    tap = e.isPrimary ? { x: e.clientX, y: e.clientY, t: performance.now(), id: e.pointerId } : null;
+    /* only the primary button picks; right and middle drag the camera */
+    tap = e.isPrimary && e.button === 0 ? { x: e.clientX, y: e.clientY, t: performance.now(), id: e.pointerId } : null;
   });
   sceneCanvas.addEventListener("pointercancel", function () { tap = null; });
   sceneCanvas.addEventListener("pointerup", function (e) {
@@ -1693,14 +1702,17 @@
       });
     return sceneLoad;
   }
-  function setView(on) {
+  /* fromUser: the switch was flipped, so the choice is remembered. A start
+   * from ?view= or from the remembered choice doesn't write it again; a
+   * tank that fails to start forgets it, so later visits don't retry. */
+  function setView(on, fromUser) {
     el("view3d").checked = on;
     if (!on) {
+      if (fromUser) remember(false);
       if (!view3d) return;
       if (scene.following()) scene.setFollow(false);
       view3d = false;
       document.body.classList.remove("view-3d");
-      remember(false);
       updateModeline();
       return;
     }
@@ -1710,7 +1722,8 @@
       el("view3d").disabled = false;
       if (!sc) {
         el("view3d").checked = false;
-        showError("The tank view needs WebGL2, which this browser didn't provide.");
+        remember(false);
+        showError("The tank view couldn't start here (it needs WebGL2, and three.js has to load).");
         return;
       }
       if (!el("view3d").checked) return;   /* switched off again while loading */
@@ -1719,7 +1732,7 @@
       sceneW = sceneH = 0;   /* (re)frame the tank on the next frame */
       scene.resize();
       updateInsets();
-      remember(true);
+      if (fromUser) remember(true);
       updateModeline();
     });
   }
@@ -1971,7 +1984,7 @@
   btn("guidebtn", function () { if (window.EvoGuide) EvoGuide.start(); });
   btn("followbtn", toggleFollow);
   btn("viewbtn", function () { if (view3d) scene.resetView(true); });
-  el("view3d").addEventListener("change", function () { setView(this.checked); this.blur(); });
+  el("view3d").addEventListener("change", function () { setView(this.checked, true); this.blur(); });
   var fitTimer = 0;
   window.addEventListener("resize", function () {
     if (scene) { scene.resize(); updateInsets(); }
@@ -2003,6 +2016,7 @@
   el("governor").addEventListener("change", function () {
     governorOn = this.checked;
     if (!governorOn && autoCap) { autoCap = 0; applyCap(); }
+    if (!governorOn) restoreDetail();
     govNote = "";
     this.blur();
   });
@@ -2088,10 +2102,20 @@
       ? "Turbo: run headless in a worker at full speed. Keeps running in background tabs; the hand-off is exact, but a threaded run is not reproducible."
       : "Turbo: run headless in a worker at full speed. Keeps running in background tabs; switching is bit-exact.";
     updateModeline();
-    /* the tank view: ?view=3d / ?view=flat, else this visitor's last choice */
+    /* the tank view: ?view=3d / ?view=flat, else this visitor's last choice;
+     * never with ?gl=0, which forces the flat canvas-2D view */
     var want = PARAMS.get("view"), saved = null;
     try { saved = localStorage.getItem(VIEW_KEY); } catch (e) { /* private mode */ }
     if (want !== "3d" && want !== "flat") want = saved === "3d" ? "3d" : "flat";
+    if (PARAMS.get("gl") === "0") {
+      want = "flat";
+      el("view3d").disabled = true;
+      var row = el("f_view3d"), hint = document.createElement("span");
+      row.classList.add("inert");
+      hint.className = "needs";
+      hint.textContent = "off with ?gl=0, which forces the flat canvas-2D view";
+      row.appendChild(hint);
+    }
     /* ?bench measures the view it starts in, so that one is loaded first */
     return Promise.resolve(want === "3d" ? setView(true) : null).then(start);
   }).catch(function (err) {

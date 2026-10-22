@@ -57,9 +57,10 @@
       target: function () { return app().inspectorRect ? app().inspectorRect() : null; },
       body: function () {
         if (compact()) {
-          return "Tap any fish to see its energy, age and speed, and its brain, live: senses on " +
+          var tap = touch() ? "Tap" : "Click";
+          return tap + " any fish to see its energy, age and speed, and its brain, live: senses on " +
                  "one side, actions on the other. Lime links excite, orange ones inhibit; " +
-                 "brighter means stronger right now. Tap ✕ or empty water to let it go.";
+                 "brighter means stronger right now. " + tap + " ✕ or empty water to let it go.";
         }
         return (touch() ? "Tap" : "Click") + " any fish to see its brain, live: senses on the " +
                "left, hidden neurons in the middle, actions on the right. Green links excite, " +

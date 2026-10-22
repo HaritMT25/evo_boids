@@ -1999,7 +1999,7 @@
    * circles and the switch says why. */
   var FISH_KEY = "evo_boids.fishShape";
   function setFishShape(on) {
-    if (!glScene) return;
+    if (!glScene || !glScene.fishShapes) return;
     LOOK.fishShape = on;
     el("fishShape").checked = on;
     try { localStorage.setItem(FISH_KEY, on ? "1" : "0"); } catch (e) { /* private mode */ }
@@ -2009,12 +2009,13 @@
     var want = PARAMS.get("fish"), saved = null;
     try { saved = localStorage.getItem(FISH_KEY); } catch (e) { /* private mode */ }
     if (want !== "1" && want !== "0") want = saved === "1" ? "1" : "0";
-    if (!glScene) {
+    if (!glScene || !glScene.fishShapes) {
       var row = el("f_fishShape"), hint = document.createElement("span");
       el("fishShape").disabled = true;
       row.classList.add("inert");
       hint.className = "needs";
-      hint.textContent = "needs WebGL2: this page is drawing with canvas 2D, which keeps the circles";
+      hint.textContent = glScene ? "the fish-shape shader didn't compile in this browser; circles stay"
+                                 : "needs WebGL2: this page is drawing with canvas 2D, which keeps the circles";
       row.appendChild(hint);
       return;
     }

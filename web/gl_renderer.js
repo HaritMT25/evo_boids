@@ -58,7 +58,7 @@
   var FISH_VS = [
     "#version 300 es",
     "layout(location=0) in vec3 tpl;",
-    "layout(location=1) in vec4 iA;",       /* spine points 0, 1 (world px, unwrapped) */
+    "layout(location=1) in vec4 iA;",       /* spine points 0, 1 (world px) */
     "layout(location=2) in vec4 iB;",       /* spine points 2, 3 */
     "layout(location=3) in vec4 iC;",       /* spine points 4, 5 */
     "layout(location=4) in vec4 iCol;",     /* rgb 0..1, body scale */
@@ -190,24 +190,27 @@
                                            stencil: false, premultipliedAlpha: false,
                                            preserveDrawingBuffer: false });
     if (!gl) return null;
-    var circleProg, lineProg, bgProg, fishProg;
+    var circleProg, lineProg, bgProg, fishProg = null;
     try {
       circleProg = compile(gl, CIRCLE_VS, CIRCLE_FS);
       lineProg = compile(gl, LINE_VS, LINE_FS);
       bgProg = compile(gl, BG_VS, BG_FS);
-      fishProg = compile(gl, FISH_VS, FISH_FS);
     } catch (e) {
       console.warn("evo_boids: WebGL2 shaders failed, using the 2D renderer", e);
       return null;
     }
+    /* on its own: a failure here turns off fish shapes, not WebGL2 */
+    try { fishProg = compile(gl, FISH_VS, FISH_FS); }
+    catch (e) { console.warn("evo_boids: the fish-shape shader failed; circles only", e); }
     var uWorldCircle = gl.getUniformLocation(circleProg, "world");
     var uWorldLine = gl.getUniformLocation(lineProg, "world");
-    var uFish = { world: gl.getUniformLocation(fishProg, "world"), radii: gl.getUniformLocation(fishProg, "radii"),
-                  minR: gl.getUniformLocation(fishProg, "minR"), fin: gl.getUniformLocation(fishProg, "fin") };
+    var uFish = fishProg && { world: gl.getUniformLocation(fishProg, "world"), radii: gl.getUniformLocation(fishProg, "radii"),
+                              minR: gl.getUniformLocation(fishProg, "minR"), fin: gl.getUniformLocation(fishProg, "fin") };
 
     /* --- fish shapes: a template mesh + a per-instance buffer --- */
-    var FSTRIDE = 16;  /* six spine points (unwrapped), red, green, blue, body scale */
+    var FSTRIDE = 16;  /* six spine points, red, green, blue, body scale */
     var tpl = fishTemplate();
+    var folds = makeFoldTracker();
     var fishVao = gl.createVertexArray();
     gl.bindVertexArray(fishVao);
     var tplBuf = gl.createBuffer();
@@ -404,39 +407,28 @@
       gl.vertexAttribPointer(2, 4, gl.FLOAT, false, STRIDE * 4, 12);
     }
 
-    /* Fish shapes. Each creature's spine is unwrapped around its head (a body
-     * straddling the world's seam stays in one piece); one that then reaches
-     * past an edge is drawn again shifted by the world size, so its far part
-     * shows on the other side, where the circles would put it. */
-    var SX = [0, 0, 0, 0, 0, 0], SY = [0, 0, 0, 0, 0, 0];
+    /* Fish shapes, from the six spine points as exported. (Neighbouring points
+     * are never more than one segment apart: the core keeps the trail on the
+     * head's side of the world's edge.) A fish whose trail is folded ahead of
+     * its head goes to the circles instead (makeFoldTracker); returns the
+     * shape count, and the folded fish's indices in foldIdx[0 .. foldN). */
+    var foldIdx = new Int32Array(1024), foldN = 0;
     function fillFish(s, W, H) {
-      var k = 0, halfW = W / 2, halfH = H / 2;
-      fishInst = grow(fishInst, s.n * 4 * FSTRIDE);   /* at most four copies each (a corner) */
+      var k = 0;
+      fishInst = grow(fishInst, s.n * FSTRIDE);
+      if (foldIdx.length < s.n) foldIdx = new Int32Array(Math.max(s.n, 2 * foldIdx.length));
+      foldN = 0;
       for (var c = 0; c < s.n; c++) {
-        var b = 12 * c, px = s.segs[b], py = s.segs[b + 1];
-        var minX = px, maxX = px, minY = py, maxY = py;
-        SX[0] = px; SY[0] = py;
-        for (var i = 1; i < 6; i++) {
-          var x = s.segs[b + 2 * i], y = s.segs[b + 2 * i + 1];
-          if (x - px > halfW) x -= W; else if (px - x > halfW) x += W;
-          if (y - py > halfH) y -= H; else if (py - y > halfH) y += H;
-          SX[i] = x; SY[i] = y; px = x; py = y;
-          if (x < minX) minX = x; if (x > maxX) maxX = x;
-          if (y < minY) minY = y; if (y > maxY) maxY = y;
-        }
-        var r = s.colors[3 * c] / 255, g = s.colors[3 * c + 1] / 255, bl = s.colors[3 * c + 2] / 255;
-        var bs = look.bodyScale(s.body ? s.body[2 * c] : 1);
-        var dxs = minX < 0 ? [0, W] : maxX >= W ? [0, -W] : [0];
-        var dys = minY < 0 ? [0, H] : maxY >= H ? [0, -H] : [0];
-        for (var u = 0; u < dxs.length; u++) for (var v = 0; v < dys.length; v++) {
-          for (i = 0; i < 6; i++) { fishInst[k++] = SX[i] + dxs[u]; fishInst[k++] = SY[i] + dys[v]; }
-          fishInst[k++] = r; fishInst[k++] = g; fishInst[k++] = bl; fishInst[k++] = bs;
-        }
+        var b = 12 * c;
+        if (s.ids && folds.folded(s.ids[c], s.segs, b, W, H)) { foldIdx[foldN++] = c; continue; }
+        for (var i = 0; i < 12; i++) fishInst[k++] = s.segs[b + i];
+        fishInst[k++] = s.colors[3 * c] / 255; fishInst[k++] = s.colors[3 * c + 1] / 255;
+        fishInst[k++] = s.colors[3 * c + 2] / 255;
+        fishInst[k++] = look.bodyScale(s.body ? s.body[2 * c] : 1);
       }
       return k / FSTRIDE;
     }
-    function drawFish(s, W, H) {
-      var count = fillFish(s, W, H);
+    function drawFish(count, W, H) {
       if (!count) return;
       gl.useProgram(fishProg);
       gl.uniform2f(uFish.world, W, H);
@@ -453,27 +445,41 @@
       gl.bufferSubData(gl.ARRAY_BUFFER, 0, fishInst, 0, count * FSTRIDE);
       gl.drawElementsInstanced(gl.TRIANGLES, tpl.index.length, gl.UNSIGNED_SHORT, 0, count);
     }
-    /* food circles, fish shapes, predator circles: the 2D path's order */
+    /* food circles, fish shapes, the folded fish's circles, predator circles */
     function drawShapes(s, W, H) {
-      inst = grow(inst, (s.fc + s.pc) * STRIDE);
+      var shapes = fillFish(s, W, H);
+      var nf = foldN * 6;
+      inst = grow(inst, (s.fc + nf + s.pc) * STRIDE);
       var k = 0, i, f = look.food;
       for (i = 0; i < s.fc; i++) {
         inst[k++] = s.food[2 * i]; inst[k++] = s.food[2 * i + 1]; inst[k++] = 2.5;
         inst[k++] = f[0]; inst[k++] = f[1]; inst[k++] = f[2]; inst[k++] = 1;
+      }
+      var radii = look.radii, alpha = look.segAlpha, minR = look.minRadius;
+      for (var j = 0; j < foldN; j++) {   /* exactly what drawCircles draws for them */
+        var c = foldIdx[j], bs = look.bodyScale(s.body ? s.body[2 * c] : 1);
+        var r = s.colors[3 * c] / 255, g = s.colors[3 * c + 1] / 255, b = s.colors[3 * c + 2] / 255;
+        for (var seg = 0; seg < 6; seg++) {
+          inst[k++] = s.segs[12 * c + 2 * seg]; inst[k++] = s.segs[12 * c + 2 * seg + 1];
+          inst[k++] = Math.max(minR, radii[seg] * bs);
+          inst[k++] = r; inst[k++] = g; inst[k++] = b; inst[k++] = alpha[seg];
+        }
       }
       for (i = 0; i < s.pc; i++) {
         var pcol = s.preds[3 * i + 2] > 0 ? look.predDigesting : look.predHunting;
         inst[k++] = s.preds[3 * i]; inst[k++] = s.preds[3 * i + 1]; inst[k++] = 6.5;
         inst[k++] = pcol[0]; inst[k++] = pcol[1]; inst[k++] = pcol[2]; inst[k++] = 1;
       }
-      if (s.fc + s.pc) uploadCircles(s.fc + s.pc);
+      if (k) uploadCircles(k / STRIDE);
       circleRange(0, s.fc, W, H);
-      drawFish(s, W, H);
-      circleRange(s.fc, s.pc, W, H);
+      drawFish(shapes, W, H);
+      circleRange(s.fc, nf, W, H);
+      circleRange(s.fc + nf, s.pc, W, H);
     }
 
     return {
       canvas: canvas,
+      fishShapes: !!fishProg,   /* the fish-shape shader compiled */
       resize: function (w, h) {
         if (canvas.width !== w) canvas.width = w;
         if (canvas.height !== h) canvas.height = h;
@@ -486,7 +492,7 @@
         gl.clear(gl.COLOR_BUFFER_BIT);
         drawBackground(W, H);
         drawCurrents(s, W, H);
-        if (look.fishShape) drawShapes(s, W, H);
+        if (look.fishShape && fishProg) drawShapes(s, W, H);
         else drawCircles(s, W, H);
         gl.bindVertexArray(null);
         return canvas;
@@ -494,5 +500,51 @@
     };
   }
 
-  window.EvoGL = { create: create };
+  /* Which fish have their trail folded ahead of the head. The core wraps a
+   * creature's position into the world and then pulls its trail with the
+   * plain, unwrapped distance (World::step, Creature::updateBody), so right
+   * after crossing an edge the trail lies ahead of the head, on the new side,
+   * until the head swims through it. Circles show that as overlapping dots; a
+   * fish shape would swim backwards. So after a crossing, until the fish has
+   * travelled FOLD_RANGE px, while any segment of its trail points along its
+   * motion, folded() says so and the fish is drawn as its circles.
+   * Per id, in a small open-addressed table; a collision only costs that fish
+   * its history. Motion and distance only change when the fish moves, so a
+   * pause keeps the state. */
+  /* Unfolding takes about twice the trail's length of travel (the head swims
+   * through the folded points, then pulls them behind it): the longest trail
+   * is 5 x 4 x 2 x 2 = 80 px, so 260 px, with a margin. */
+  var FOLD_RANGE = 260;
+  function makeFoldTracker() {
+    var CAP = 1 << 15;
+    var tid = new Float64Array(CAP).fill(-1), hx = new Float32Array(CAP), hy = new Float32Array(CAP);
+    var mx = new Float32Array(CAP), my = new Float32Array(CAP), since = new Float32Array(CAP);
+    return {
+      folded: function (id, segs, o, W, H) {
+        var slot = id % CAP, x = segs[o], y = segs[o + 1];
+        if (tid[slot] !== id) {
+          tid[slot] = id; hx[slot] = x; hy[slot] = y; mx[slot] = 0; my[slot] = 0; since[slot] = 1e9;
+          return false;
+        }
+        var dx = x - hx[slot], dy = y - hy[slot];
+        hx[slot] = x; hy[slot] = y;
+        var crossed = false;
+        if (dx > W / 2) { dx -= W; crossed = true; } else if (dx < -W / 2) { dx += W; crossed = true; }
+        if (dy > H / 2) { dy -= H; crossed = true; } else if (dy < -H / 2) { dy += H; crossed = true; }
+        var d = Math.sqrt(dx * dx + dy * dy);
+        if (crossed) since[slot] = 0;
+        if (d > 0.05 && d < 400) {   /* up to 50 steps a frame; a load's jump is ignored */
+          mx[slot] = dx / d; my[slot] = dy / d; since[slot] += d; }
+        if (since[slot] > FOLD_RANGE) return false;
+        for (var k = 0; k < 5; k++) {
+          var sx = segs[o + 2 * k + 2] - segs[o + 2 * k], sy = segs[o + 2 * k + 3] - segs[o + 2 * k + 1];
+          var sl = Math.sqrt(sx * sx + sy * sy);
+          if (sl > 1e-3 && sx * mx[slot] + sy * my[slot] > 0.3 * sl) return true;
+        }
+        return false;
+      }
+    };
+  }
+
+  window.EvoGL = { create: create, _makeFoldTracker: makeFoldTracker };   /* the second for tests */
 })();

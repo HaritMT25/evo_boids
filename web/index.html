@@ -87,6 +87,17 @@
     background: #0F1E19;
     border: 1px solid var(--line-soft);
   }
+  /* Tank view (opt-in, web/scene3d.js): the same world as a 3D picture, on its
+   * own full-screen canvas; the camera owns drag, pinch and twist there. */
+  #scene3d { position: fixed; inset: 0; width: 100%; height: 100%; display: none; touch-action: none; background: var(--abyss); }
+  body.view-3d #scene3d { display: block; }
+  /* hidden, not removed: fittedWorld() measures the stage to shape a new world */
+  body.view-3d #stage { visibility: hidden; }
+  body.view-3d::after {   /* vignette: the tank's edges fall into deep water */
+    content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 1;
+    background: radial-gradient(ellipse 85% 80% at 50% 48%, transparent 58%, oklch(0.10 0.03 210 / 0.55));
+  }
+  body:not(.view-3d) .only-3d { display: none; }
 
   /* ---------- buttons ---------- */
   .btn {
@@ -588,11 +599,13 @@
     <symbol id="i-save" viewBox="0 0 24 24"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 19h14"/></symbol>
     <symbol id="i-load" viewBox="0 0 24 24"><path d="M12 15V4m0 0L8 8m4-4 4 4M5 19h14"/></symbol>
     <symbol id="i-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M9.6 9.5a2.5 2.5 0 1 1 3.3 2.4c-.6.2-.9.7-.9 1.3v.6"/><circle cx="12" cy="16.6" r=".6" fill="currentColor"/></symbol>
+    <symbol id="i-follow" viewBox="0 0 24 24"><circle cx="12" cy="12" r="6.5"/><circle cx="12" cy="12" r="2" fill="currentColor" stroke="none"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3"/></symbol>
     <symbol id="i-frame" viewBox="0 0 24 24"><path d="M4 9V5.5A1.5 1.5 0 0 1 5.5 4H9M15 4h3.5A1.5 1.5 0 0 1 20 5.5V9M20 15v3.5a1.5 1.5 0 0 1-1.5 1.5H15M9 20H5.5A1.5 1.5 0 0 1 4 18.5V15"/></symbol>
     <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m6 15 6-6 6 6"/></symbol>
   </svg>
 
   <div id="stage"><canvas id="canvas" width="1920" height="1080" aria-label="the simulated ocean: click or tap a fish to inspect it"></canvas></div>
+  <canvas id="scene3d" aria-label="the same world as a 3D tank: drag to move, pinch or scroll to zoom, tap a fish to inspect it"></canvas>
 
   <header id="topbar">
     <button id="readout" class="chip-surface" aria-expanded="false" aria-controls="statpanel" title="live numbers: tap for details">
@@ -616,6 +629,7 @@
     <div class="fc-head">
       <canvas id="iportrait" aria-hidden="true"></canvas>
       <div class="fc-title"><div id="ititle">Fish</div><div id="isub"></div></div>
+      <button id="followbtn" class="icon-btn only-3d" aria-pressed="false" title="Follow this fish (F)"><svg class="i"><use href="#i-follow"/></svg><span class="sr">follow</span></button>
       <button id="iexpand" class="icon-btn" aria-expanded="false" title="Show its brain"><svg class="i"><use href="#i-chevron"/></svg><span class="sr">brain</span></button>
       <button id="iclose" class="icon-btn" aria-label="close"><svg class="i"><use href="#i-close"/></svg></button>
     </div>
@@ -639,6 +653,7 @@
     </div>
     <button id="turbobtn" class="icon-btn" aria-pressed="false" title="Turbo: run headless in a worker at full speed"><svg class="i"><use href="#i-bolt"/></svg><span>Turbo</span></button>
     <button id="randombtn" class="icon-btn" title="Randomize: a new world from tested ranges" aria-label="randomize the world"><svg class="i"><use href="#i-dice"/></svg></button>
+    <button id="viewbtn" class="icon-btn only-3d" title="Fit the view (C)" aria-label="fit the view"><svg class="i"><use href="#i-frame"/></svg></button>
   </nav>
 
   <aside id="drawer" role="dialog" aria-label="settings" aria-modal="false">
@@ -660,6 +675,11 @@
         <div class="field" id="f_governor">
           <span><span class="name"><span class="lt">Hold 60 fps</span></span><span class="desc">Lowers the speed, then removes fish at random, when this device can't keep up.</span></span>
           <span class="ctl"><input id="governor" class="switch" type="checkbox" role="switch" checked aria-label="hold 60 fps"></span>
+        </div>
+        <h3>View</h3>
+        <div class="field" id="f_view3d">
+          <span><span class="name"><span class="lt">Tank view (3D)</span></span><span class="desc">The same world as a 3D picture, for looks. The flat view shows it as the simulation sees it.</span></span>
+          <span class="ctl"><input id="view3d" class="switch" type="checkbox" role="switch" aria-label="tank view"></span>
         </div>
         <p id="modeline"></p>
         <h3>Save &amp; load</h3>
@@ -726,11 +746,13 @@
       st: "evo_boids.js", stWasm: "evo_boids.wasm",
       mt: "evo_boids_mt.js", mtWasm: "evo_boids_mt.wasm",
       worker: "worker.js",
-      background: "../img/rocks.jpg"
+      background: "../img/rocks.jpg",
+      three: "vendor/three.bundle.min.js"
     };
   </script>
   <script src="loader.js"></script>
   <script src="gl_renderer.js"></script>
+  <script src="scene3d.js"></script>
   <script src="randomizer.js"></script>
   <script src="dash_data.js"></script>
   <script src="charts.js"></script>

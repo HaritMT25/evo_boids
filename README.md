@@ -47,8 +47,8 @@ tests/         core_tests, predator_smoke, core_bench (no SFML needed)
   - `evo_boids_mt` uses pthreads. It needs `SharedArrayBuffer`, which browsers allow only on cross-origin-isolated pages (COOP `same-origin` + COEP `require-corp`).
   - `evo_boids` is single-threaded.
   - `web/loader.js` checks `self.crossOriginIsolated` and picks one. Inside an iframe on a page without those headers, it always gets the single-threaded build.
-- **Drawing.** With WebGL2, the background, food, fish and predators are drawn with one instanced draw call per kind (`web/gl_renderer.js`). The result is copied onto a 2D canvas, which draws the HUD and the neural inspector on top, the way the native SFML window does. Without WebGL2, everything is drawn with canvas 2D, at one fill per body segment. The controls around the world (a live readout, a playback dock, the settings, Turbo) are HTML, outside the canvas.
-- **Frame budget.** When a frame takes too long, the page first lowers the simulation speed. Then it removes creatures uniformly at random and caps births, so the agent count drops instead of the frame rate. A message says when this happens, and the readout keeps an orange dot for the rest of the run, because a run changed this way can no longer be replayed from its seed. It can be switched off ("hold 60 fps").
+- **Drawing.** With WebGL2, the background, food, fish and predators are drawn with one instanced draw call per kind (`web/gl_renderer.js`). The result is copied onto a 2D canvas, which draws the HUD and the neural inspector on top, the way the native SFML window does. Without WebGL2, everything is drawn with canvas 2D, at one fill per body segment. The controls around the world (a live readout, a playback dock, the settings, Turbo) are HTML, outside the canvas. An opt-in **tank view** draws the same world in 3D instead (below).
+- **Frame budget.** When a frame takes too long, the page first lowers the simulation speed (in the tank view, it first draws the tank with less detail). Then it removes creatures uniformly at random and caps births, so the agent count drops instead of the frame rate. A message says when this happens, and the readout keeps an orange dot for the rest of the run, because a run changed this way can no longer be replayed from its seed. It can be switched off ("hold 60 fps").
 
 ## Build and run
 
@@ -88,8 +88,9 @@ Page options:
 | `?bench` | runs the frame-rate benchmark below |
 | `?gl=0` | forces canvas 2D drawing instead of WebGL2 |
 | `?guide=0` / `?guide=1` | never / always start the first-visit guide on load |
+| `?view=3d` / `?view=flat` | starts in the tank view / the flat view (otherwise the page remembers the visitor's last choice; flat the first time) |
 
-Keyboard: <kbd>Space</kbd> pause · <kbd>↑</kbd> <kbd>↓</kbd> speed · <kbd>R</kbd> a fresh world · <kbd>Esc</kbd> closes what is open (the settings, the live numbers, then the selected fish). Click a fish to inspect it, empty water to let it go.
+Keyboard: <kbd>Space</kbd> pause · <kbd>↑</kbd> <kbd>↓</kbd> speed · <kbd>R</kbd> a fresh world · <kbd>Esc</kbd> closes what is open (the settings, the live numbers, then the selected fish). Click a fish to inspect it, empty water to let it go. In the tank view also <kbd>F</kbd> follow the selected fish · <kbd>C</kbd> fit the view; drag to pan, scroll to zoom (towards the pointer), right-drag to tilt and turn.
 
 Browser requirements:
 - **WebAssembly.**
@@ -122,6 +123,18 @@ Every screen gets the same controls around the world: the live readout at the to
 - **Load.** Touch devices start with 200 creatures (single-threaded) or 400 (threaded), on at most 4 threads; `?nthreads=N` overrides the thread count. The threaded module still pre-spawns min(cores, 8) − 1 workers. The frame-budget governor works as everywhere else.
 
 So far this is measured in emulation only: Playwright's iPhone 13 profile in WebKit 26.6 and its Pixel 7 profile in Chrome 155, portrait and landscape. The world covers 99.7–99.8% of the screen in all four cases, of which the top bar and the dock float over about 11% (Pixel 7, portrait); the fish card with its network open covers 43% (Pixel 7) and 49% (iPhone 13). No real phone has been tested, so frame rate, battery use, memory, and whether the threaded module starts on iOS are unmeasured.
+
+### Tank view (opt-in)
+
+A switch in the settings' Run tab (or `?view=3d`) draws the same world as a shallow 3D tank seen at an angle, made with three.js (`web/scene3d.js`, by techy-Nik). It changes nothing in the simulation, only the picture, and it is off unless a visitor turns it on. The flat view stays the default because it shows the world as the simulation sees it; the tank is for looks, and takes liberties:
+
+- **What is drawn from the simulation:** every fish's six spine points (bent through with a spline), genome colour and body size; food positions; predator positions and whether they are hunting or digesting; the current's flow grid.
+- **What is added for looks:** a tail beat, a fixed swim height per fish (±4 world units), lighting, shading and fog (a fish's back is drawn darker than its genome colour, distant fish fade toward the water), shadows, caustic light, drifting specks of "marine snow" that are not food, and each predator's recent path used as its spine.
+- **What the perspective changes:** distant fish look smaller and distances aren't uniform across the screen. The tank has walls, but the world still wraps, so fish swim through one wall and come back at the opposite one.
+
+The selected fish is shown as the card on every screen in the tank view (there is no canvas inspector), and the camera pans, zooms, tilts and follows a fish. three.js ships as a trimmed bundle, `web/vendor/three.bundle.min.js` (561 KB minified; about 115 KB brotli by #7's measurement), loaded only when the tank view is first turned on, so the default page is no heavier. `tools/three_bundle/build.sh` rebuilds it, and the rebuilt file is byte-identical to the committed one (three 0.186.1, esbuild 0.28.2). Without WebGL2 the switch says so and stays off.
+
+Cost, as measured in #7 on the benchmark machine below (Chrome with the Iris Xe GPU, threaded × 8, 1440×900): the tank holds a stable 60 fps up to 10,000 agents (52.2 fps at 12,000), against 12,000 for the flat view, and spends about 1.2 ms per frame drawing 2,000 agents against 0.8 ms. Re-measured on the same laptop in a windowed Chrome 155 (AC power, 2 rounds alternating the views): the flat view held the display's rate up to 12,000 agents and the tank up to 10,000, as in #7, and drawing took 0.70 against 1.06–1.11 ms at 2,000 and 0.87–0.88 against 2.18–2.19 ms at 8,000. Headless (2026-10-20, 2 rounds): drawing took 0.79–0.80 ms flat against 1.10–1.11 ms in the tank at 2,000 agents, 1.41–1.44 against 2.75–2.92 ms at 8,000, and 1.51–1.54 against 2.42–2.74 ms at 12,000. Both held a stable 60 fps up to 6,000 there, because on that run the simulation step (12.5–13 ms at 8,000) set the limit, not the drawing. In a windowed Firefox 155 (Playwright's build), drawing took 1.26–2.34 ms flat against 0.8–2.12 ms in the tank, at every count up to 12,000 (see Benchmarks). That cost is only paid with the tank on; the governor's first step there is to draw it with less detail.
 
 ### Randomize and the first-visit guide
 
@@ -243,6 +256,25 @@ A repeat on AC power is not in the table, because the display refreshed at about
 - both canvas 2D rows: 2,000 (39–41 fps at 3,000)
 
 `?bench` now detects a display slower than 58 Hz and reports against its rate instead.
+
+### Drawing cost by browser and view
+
+Measured on the same laptop with `?bench`, in browsers drawing on the Iris Xe GPU (ANGLE, Direct3D 11), threaded × 8, 1440×900 window: headless on AC power on 2026-10-20; on 2026-10-22 Firefox's tank rounds, one of its headless flat rounds and its windowed runs on battery, and the windowed Chrome runs on AC power. Each pair alternated in one browser; the median draw time per frame is the part `?bench` reports as "draw ms" (sync, snapshot and drawing, without the step). Headless frame pacing isn't the display's, so these compare drawing between views and browsers; they don't replace the table above.
+
+| browser | view | rounds | draw at 2,000 | draw at 8,000 | draw at 12,000 |
+|---|---|---:|---:|---:|---:|
+| Chrome 155 | flat (WebGL2) | 2 | 0.79–0.80 ms | 1.41–1.44 ms | 1.51–1.54 ms |
+| Chrome 155 | tank | 2 | 1.10–1.11 ms | 2.75–2.92 ms | 2.42–2.74 ms |
+| Chrome 155, windowed | flat (WebGL2) | 2 | 0.70 ms | 0.87–0.88 ms | 1.24–1.25 ms |
+| Chrome 155, windowed | tank | 2 | 1.06–1.11 ms | 2.18–2.19 ms | 2.51–3.94 ms |
+| Firefox 155 (Playwright), headless | flat (WebGL2) | 3 | 15.9–18.7 ms | 19.0–24.8 ms | not reached |
+| Firefox 155 (Playwright), headless | tank | 2 | 0.82–1.56 ms | 2.16–2.24 ms | not reached |
+| Firefox 155 (Playwright), windowed, on battery | flat (WebGL2) | 1 | 1.72 ms | 2.12 ms | 2.34 ms |
+| Firefox 155 (Playwright), windowed, on battery | tank | 1 | 1.44 ms | 2.10 ms | 2.12 ms |
+
+In the windowed Chrome runs (AC power, a display at about 56.6 Hz, so stable means holding that rate), the flat view held it up to 12,000 agents in both rounds and the tank up to 10,000 (38.7 and 51 fps at 12,000): the same limits #7 measured.
+
+Headless Firefox adds a fixed ~16 ms to every flat-view frame, whatever the number of agents (16.2 ms at 250, 15.9 ms at 2,000; one more battery run stopped at 250 agents, at 35.9 ms). The cost is the per-frame copy of the offscreen WebGL2 canvas onto the visible 2D canvas (`ctx.drawImage`): in a test page, that copy took 16.4 ms of JavaScript per frame in headless Firefox, against 1.4 ms when the WebGL2 canvas is shown directly with a 2D overlay, and 0.5–0.8 ms in a windowed Firefox. Windowed, on the real page, the flat view drew in under 2.4 ms at every count up to 12,000. So the headless number is an artifact of headless Firefox, not what visitors see. Playwright's windowed Firefox paced every page here, a bare WebGL2 canvas included, at about 35 fps, so its frame rate says nothing about a regular Firefox; Chrome held about 57 fps (the display's rate on battery) in the same tests.
 
 The page starts the single-threaded module at 300 creatures and the threaded one at 600. Under the default settings, the population then settles between roughly 250 and 800.
 

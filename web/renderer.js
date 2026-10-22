@@ -8,7 +8,11 @@
  * native SFML window draws it. Compact screens leave the HUD and the inspector
  * off the canvas and show them as DOM instead (the readout and the fish card).
  * Everything around the world (top bar, dock, settings, Turbo, toasts) is DOM,
- * laid out in CSS px. */
+ * laid out in CSS px.
+ *
+ * Tank view (opt-in: the Run tab's switch, or ?view=3d) draws the same world
+ * as a 3D picture instead (web/scene3d.js, three.js, loaded on first use) on
+ * its own canvas; the selected fish is then the card on every screen. */
 (function () {
   var DEFAULT_W = 1920, DEFAULT_H = 1080, TAU = Math.PI * 2;
   var WORLD_W = DEFAULT_W, WORLD_H = DEFAULT_H; /* may change on checkpoint load */
@@ -224,7 +228,8 @@
     fastTanh: { d: "~1.25x faster tanh approximation — changes the numbers.", t: "try: off to reproduce native runs" },
     maxPopulation: { d: "Birth cap: no births while the population is at or above it (0 = none). Applies live.", t: "try: 0; the frame-budget governor may set a lower one" },
     minPopulation: { d: "Reseed floor: random founders are added when the population falls below it. Applies live.", t: "try: 50 (the default)" },
-    governor: { d: "When frames take too long: first lower the speed, then remove creatures at random (no trait favoured) and cap births at what this machine can run at 60 fps. Each step is reported; a governed run no longer replays from its seed.", t: "try: on; off to see the uncapped run (it may stutter)" }
+    governor: { d: "When frames take too long: first lower the speed (in the tank view, first draw the tank with less detail), then remove creatures at random (no trait favoured) and cap births at what this machine can run at 60 fps. Each step is reported; a governed run no longer replays from its seed.", t: "try: on; off to see the uncapped run (it may stutter)" },
+    view3d: { d: "Draws the same world as a 3D tank seen at an angle: fish bent along their spine in their genome colour, lit and shaded, plus motion the simulation does not have (tail beats, swim heights, drifting specks, caustic light). Distances look shorter far away, and the world still wraps at its edges. The simulation and every setting are unchanged.", t: "try: on for looks; off to see the world as the simulation sees it" }
   };
 
   var ASSETS = window.EVO_ASSETS;
@@ -244,6 +249,13 @@
 
   var canvas = document.getElementById("canvas");
   var ctx = canvas.getContext("2d", { alpha: false });
+  /* the tank view: off by default; scene3d.js and three.js load on first use */
+  var PARAMS = new URLSearchParams(location.search);
+  var VIEW_KEY = "evo_boids.view";
+  var view3d = false, scene = null, sceneLoad = null, sceneW = 0, sceneH = 0;
+  var sceneCanvas = document.getElementById("scene3d");
+  var animT = 0;   /* the tank's animation clock: runs with the world, stops when it stops */
+  var reducedMQ = window.matchMedia("(prefers-reduced-motion: reduce)");
   var bgImage = new Image();  /* background texture — shared with the native app (img/rocks.jpg) */
   bgImage.src = ASSETS.background;
   function el(id) { return document.getElementById(id); }
@@ -445,6 +457,7 @@
     });
     el("panel-run").setAttribute("role", "tabpanel");
     attachTip(el("f_governor"), "governor");
+    attachTip(el("f_view3d"), "view3d");
     var saved = null;
     try { saved = localStorage.getItem("evo_boids.tab"); } catch (e) { /* private mode */ }
     setSheetTab(saved && el("panel-" + saved) ? saved : "run");
@@ -648,6 +661,8 @@
     var s = {
       n: n, fc: fc, pc: pc, selIdx: selIdx,
       segs: new Float32Array(heap(), Module._evo_creature_segments(), n * 12),
+      /* the tank keys each fish's swim height, tail phase and trail to its id */
+      ids: new Float64Array(heap(), Module._evo_creature_ids(), n),
       /* N*2 alongside segs, same creature order; absent from pre-0.24 blobs */
       body: Module._evo_body_params
               ? new Float32Array(heap(), Module._evo_body_params(), n * 2)
@@ -816,6 +831,7 @@
   }
   function hideCard() {
     if (cardEl.hidden) return;
+    if (scene && scene.following()) scene.setFollow(false);
     cardEl.hidden = true;
     cardFor = null;
     netHover = -1;
@@ -861,8 +877,13 @@
     if (cardEl.hidden) showCard();
     /* layout reads first, DOM writes last, so a frame never forces a
      * synchronous reflow (except right after a rare side change) */
-    var cr = canvas.getBoundingClientRect(), c = cr.width / canvas.width;
-    placeCard(cr.left + s.segs[12 * s.selIdx] * c, cr.top + s.segs[12 * s.selIdx + 1] * c);
+    if (view3d) {
+      var p = scene.project(s, s.selIdx);   /* null: behind the camera */
+      if (p) placeCard(p.x, p.y);
+    } else {
+      var cr = canvas.getBoundingClientRect(), c = cr.width / canvas.width;
+      placeCard(cr.left + s.segs[12 * s.selIdx] * c, cr.top + s.segs[12 * s.selIdx + 1] * c);
+    }
     var info = s.info, id = Math.round(info[0]);
     var rgb = [s.colors[3 * s.selIdx], s.colors[3 * s.selIdx + 1], s.colors[3 * s.selIdx + 2]];
     var pkey = id + "|" + rgb.join() + "|" + info[4].toFixed(2) + "|" + info[5].toFixed(2);
@@ -1017,7 +1038,13 @@
     glScene = EvoGL.create(WORLD_W, WORLD_H, bgImage, LOOK);
   }
 
-  function draw(s) {
+  function draw(s, stepped) {
+    if (view3d) {   /* the tank view: no canvas overlays, the card on every screen */
+      if (sceneW !== WORLD_W || sceneH !== WORLD_H) { sceneW = WORLD_W; sceneH = WORLD_H; scene.setWorld(WORLD_W, WORLD_H); }
+      scene.render(s, { animT: animT, dtSim: stepped / 60, selIdx: s.selIdx });
+      updateCard(s);
+      return;
+    }
     if (glScene) glScene.resize(WORLD_W, WORLD_H);  /* world size changes on checkpoint load */
     var layer = glScene ? glScene.draw(s, WORLD_W, WORLD_H) : null;
     if (layer) ctx.drawImage(layer, 0, 0);
@@ -1169,6 +1196,11 @@
     workEma = 0; overFrames = 0; underFrames = 0; govNote = ""; governed = false;
     intervalEma = 0;
     warmupUntil = performance.now() + WARMUP_MS;
+    restoreDetail();
+  }
+  /* the tank's full detail again (a restart, a load, the governor off) */
+  function restoreDetail() {
+    if (scene && scene.setQuality(coarseMQ.matches ? 2 : 3) && Module) updateModeline();
   }
   /* After any action: forget the moving averages (they still remember the
    * frames before the action and would trigger a second, too-deep cut) and
@@ -1195,7 +1227,11 @@
       overFrames = 0;
       var ema = workEma;  /* settle() clears it; size the cut first */
       settle();
-      if (simSpeed > 1) {
+      if (view3d && scene.degrade()) {
+        /* the tank first: fewer pixels, then no shadows; the run is untouched */
+        setGovNote("drew the tank with less detail to hold 60 fps");
+        updateModeline();
+      } else if (simSpeed > 1) {
         /* work per frame is proportional to steps per frame, so the speed
          * that fits can be computed rather than found one notch at a time */
         setSpeed(Math.min(simSpeed - 1, Math.floor(simSpeed * (BUDGET_MS * 0.8) / ema)));
@@ -1257,7 +1293,7 @@
       ["Step time", stepEma ? stepEma.toFixed(2) + " ms" : "–"],
       ["Frames per second", String(fps)],
       ["Module", mode],
-      ["Drawing", glScene ? "WebGL2" : "canvas 2D"]
+      ["Drawing", drawingName()]
     ];
     if (cap) rows.push(["Population cap", cap + (autoCap && cap === autoCap ? " (auto)" : "")]);
     var html = "<dl>" + rows.map(function (r) { return "<dt>" + r[0] + "</dt><dd>" + r[1] + "</dd>"; }).join("") + "</dl>";
@@ -1281,14 +1317,21 @@
     if (statOpen && !e.target.closest("#statpanel, #readout")) setStatPanel(false);
   });
 
-  var splashDone = false, turboPaint = 0;
+  function drawingName() {
+    return view3d ? "3D tank, detail " + scene.quality() + " of 3" : (glScene ? "WebGL2" : "canvas 2D");
+  }
+
+  var splashDone = false, turboPaint = 0, lastNow = 0;
   function frame(now) {
     if (Module) {
+      var dt = lastNow ? Math.min(0.1, (now - lastNow) / 1000) : 0;
+      lastNow = now;
       var t0 = performance.now();
       var stepped = 0;
       if (turboState === "live" && !paused) {
         stepped = bench ? 1 : simSpeed;
         Module._evo_step(stepped);
+        animT += dt * Math.min(simSpeed, 2);
       }
       if (dash()) dash().pump();   /* what the recorder saw (also a restart's first sample) */
       var t1 = performance.now();
@@ -1298,7 +1341,7 @@
       var s = snapshot(turboState === "live" ? resolveSelection() : -1);
       /* the dashboards cover the whole page: no point drawing the ocean */
       var covered = dash() && dash().isOpen();
-      if (!covered) draw(s);
+      if (!covered) draw(s, stepped);
       if (turboState !== "live" && now - turboPaint > 250) { turboPaint = now; paintTurbo(); }
       var t2 = performance.now();
       if (stepped) {
@@ -1382,7 +1425,7 @@
       crossOriginIsolated: self.crossOriginIsolated === true,
       module: threaded ? "threaded" : "single-threaded",
       threads: Module._evo_threads ? Module._evo_threads() : 1,
-      renderer: glScene ? "webgl2" : "canvas2d",
+      renderer: view3d ? scene.renderer + ", detail " + scene.quality() : (glScene ? "webgl2" : "canvas2d"),
       canvas: canvas.width + "x" + canvas.height,
       devicePixelRatio: window.devicePixelRatio
     };
@@ -1591,6 +1634,108 @@
   function fishId(index) {
     return new Float64Array(heap(), Module._evo_creature_ids(), index + 1)[index];
   }
+  /* The tank: a short tap or click picks the fish nearest it on screen, empty
+   * water lets go; a drag, pinch or long press belongs to the camera. */
+  var tap = null;
+  sceneCanvas.addEventListener("pointerdown", function (e) {
+    /* only the primary button picks; right and middle drag the camera */
+    tap = e.isPrimary && e.button === 0 ? { x: e.clientX, y: e.clientY, t: performance.now(), id: e.pointerId } : null;
+  });
+  sceneCanvas.addEventListener("pointercancel", function () { tap = null; });
+  sceneCanvas.addEventListener("pointerup", function (e) {
+    if (!tap || e.pointerId !== tap.id) return;
+    var moved = Math.hypot(e.clientX - tap.x, e.clientY - tap.y), held = performance.now() - tap.t;
+    tap = null;
+    if (moved > 8 || held > 600 || !view3d || !Module || turboState !== "live") return;
+    var best = scene.pick(snapshot(-1), e.clientX, e.clientY, e.pointerType === "mouse" ? 18 : 30);
+    selectedId = best >= 0 ? fishId(best) : null;
+    if (best >= 0) everSelected = true;
+  });
+  function toggleFollow() {
+    if (!view3d || selectedId === null) return;
+    scene.setFollow(!scene.following());
+  }
+  function onFollowChange(on) {
+    el("followbtn").setAttribute("aria-pressed", on ? "true" : "false");
+    el("followbtn").title = on ? "Stop following (F)" : "Follow this fish (F)";
+    if (on) toast(coarseMQ.matches ? "Following. Drag to circle around it." : "Following. Drag to circle around it; F stops.");
+  }
+
+  /* The part of the screen the tank is framed in: below the top bar and above
+   * the dock on a desktop (like the flat world's stage), the whole screen on
+   * compact ones, where the controls float over it; less the open settings. */
+  function updateInsets() {
+    if (!scene) return;
+    var vh = window.innerHeight, open = drawerEl.classList.contains("open");
+    var top = 0, bottom = 0, right = 0;
+    if (!compactMQ.matches) {
+      top = el("topbar").getBoundingClientRect().bottom + 6;
+      bottom = vh - el("dock").getBoundingClientRect().top + 6;
+    }
+    if (open && wideMQ.matches) right = drawerEl.getBoundingClientRect().width;
+    else if (open) {
+      /* a phone's sheet leaves a strip too small to frame the whole tank
+       * in; then the view stays put and the sheet simply covers its foot */
+      var sheetTop = drawerEl.getBoundingClientRect().top;
+      bottom = sheetTop - top >= vh * 0.3 ? vh - sheetTop : bottom;
+    }
+    scene.setInsets({ top: Math.round(top), right: Math.round(right), bottom: Math.round(Math.max(0, bottom)), left: 0 });
+  }
+
+  /* ---- switching between the flat world and the tank ---- */
+  function remember(on) { try { localStorage.setItem(VIEW_KEY, on ? "3d" : "flat"); } catch (e) { /* private mode */ } }
+  function loadScene() {
+    if (sceneLoad) return sceneLoad;
+    sceneLoad = (window.EvoScene ? EvoScene.load() : Promise.reject(new Error("scene3d.js missing")))
+      .then(function () {
+        scene = EvoScene.create(sceneCanvas, {
+          coarse: coarseMQ.matches, reducedMotion: reducedMQ.matches,
+          bodyScale: bodyScale, onFollowChange: onFollowChange
+        });
+        if (!scene) throw new Error("no WebGL2");
+        return scene;
+      })
+      .catch(function (e) {
+        console.warn("evo_boids: tank view unavailable", e);
+        sceneLoad = null;
+        return null;
+      });
+    return sceneLoad;
+  }
+  /* fromUser: the switch was flipped, so the choice is remembered. A start
+   * from ?view= or from the remembered choice doesn't write it again; a
+   * tank that fails to start forgets it, so later visits don't retry. */
+  function setView(on, fromUser) {
+    el("view3d").checked = on;
+    if (!on) {
+      if (fromUser) remember(false);
+      if (!view3d) return;
+      if (scene.following()) scene.setFollow(false);
+      view3d = false;
+      document.body.classList.remove("view-3d");
+      updateModeline();
+      return;
+    }
+    if (view3d) return;
+    el("view3d").disabled = true;
+    return loadScene().then(function (sc) {
+      el("view3d").disabled = false;
+      if (!sc) {
+        el("view3d").checked = false;
+        remember(false);
+        showError("The tank view couldn't start here (it needs WebGL2, and three.js has to load).");
+        return;
+      }
+      if (!el("view3d").checked) return;   /* switched off again while loading */
+      view3d = true;
+      document.body.classList.add("view-3d");
+      sceneW = sceneH = 0;   /* (re)frame the tank on the next frame */
+      scene.resize();
+      updateInsets();
+      if (fromUser) remember(true);
+      updateModeline();
+    });
+  }
 
   /* Escape also closes the dashboards (dashboard.js) and ends the tour
    * (guide.js), in their own keydown handlers. Seen here first, in the
@@ -1613,6 +1758,9 @@
     if (t && (t.tagName === "INPUT" || t.tagName === "BUTTON" ||
               t.tagName === "SELECT" || t.tagName === "SUMMARY")) return;
     if (e.ctrlKey || e.metaKey || e.altKey) return;
+    /* the tank's camera */
+    if (view3d && (e.key === "c" || e.key === "C")) { scene.resetView(true); return; }
+    if (view3d && (e.key === "f" || e.key === "F")) { toggleFollow(); return; }
     /* sim-mutating shortcuts are locked while turbo owns the trajectory
      * (Escape above stays live) */
     if (turboState !== "live") {
@@ -1648,6 +1796,7 @@
     menuBtn.setAttribute("aria-expanded", open ? "true" : "false");
     if (!open) hideTip();
     if (open) setStatPanel(false);
+    if (scene) { updateInsets(); setTimeout(updateInsets, 320); }   /* and after the slide */
   }
   menuBtn.addEventListener("click", function () {
     setDrawer(!drawerEl.classList.contains("open"));
@@ -1799,7 +1948,7 @@
     updateNeeds();
     updateTabDots();
     if (!t || !t.id || (t.id.indexOf("adv_") === 0 && LIVE[t.id.slice(4)])) return;  /* applies by itself */
-    if (t.id === "governor" || t.id === "cpfile") return;   /* not settings Restart applies */
+    if (t.id === "governor" || t.id === "view3d" || t.id === "cpfile") return;   /* not settings Restart applies */
     setPending(true);
   }
 
@@ -1833,10 +1982,17 @@
   btn("randombtn", randomize);
   btn("randombig", randomize);
   btn("guidebtn", function () { if (window.EvoGuide) EvoGuide.start(); });
+  btn("followbtn", toggleFollow);
+  btn("viewbtn", function () { if (view3d) scene.resetView(true); });
+  el("view3d").addEventListener("change", function () { setView(this.checked, true); this.blur(); });
   var fitTimer = 0;
   window.addEventListener("resize", function () {
+    if (scene) { scene.resize(); updateInsets(); }
     clearTimeout(fitTimer);
-    fitTimer = setTimeout(function () { if (Module) updateFitButton(); }, 250);
+    fitTimer = setTimeout(function () { if (Module) updateFitButton(); if (scene) updateInsets(); }, 250);
+  });
+  if (reducedMQ.addEventListener) reducedMQ.addEventListener("change", function () {
+    if (scene) scene.setReducedMotion(reducedMQ.matches);
   });
   btn("savecp", saveCheckpoint);
   btn("loadcp", function () { if (guardTurbo()) return; el("cpfile").click(); });
@@ -1860,6 +2016,7 @@
   el("governor").addEventListener("change", function () {
     governorOn = this.checked;
     if (!governorOn && autoCap) { autoCap = 0; applyCap(); }
+    if (!governorOn) restoreDetail();
     govNote = "";
     this.blur();
   });
@@ -1874,7 +2031,9 @@
   window.EvoApp = {
     ready: false,   /* the world is running; "evo:ready" fires on window then */
     touch: function () { return coarseMQ.matches; },
-    compact: function () { return compactMQ.matches; },
+    /* the selected fish is the card (compact screens, and the tank view) */
+    compact: function () { return compactMQ.matches || view3d; },
+    has3D: function () { return view3d; },
     setDrawer: setDrawer,
     setSheetTab: setSheetTab,
     /* Selects a fish for the guide to show, unless one is selected: the one
@@ -1884,7 +2043,7 @@
     inspectSomeFish: function () {
       if (!Module || turboState !== "live") return false;
       if (selectedId !== null) return true;
-      var best = nearestFish(WORLD_W * 0.35, WORLD_H * 0.5, Infinity);
+      var best = nearestFish(WORLD_W * (view3d ? 0.4 : 0.35), WORLD_H * (view3d ? 0.45 : 0.5), Infinity);
       if (best < 0) return false;
       selectedId = guideFish = fishId(best);
       return true;
@@ -1897,7 +2056,7 @@
      * screens, the canvas panel elsewhere), or null */
     inspectorRect: function () {
       if (selectedId === null || turboState !== "live") return null;
-      if (compactMQ.matches) return cardEl.hidden ? null : cardEl.getBoundingClientRect();
+      if (compactMQ.matches || view3d) return cardEl.hidden ? null : cardEl.getBoundingClientRect();
       var cr = canvas.getBoundingClientRect(), c = cr.width / canvas.width;
       return { left: cr.left + inspectorX() * c, top: cr.top + INSP_Y * c,
                width: INSP_W * c, height: INSP_H * c };
@@ -1942,10 +2101,34 @@
     el("turbobtn").title = threaded
       ? "Turbo: run headless in a worker at full speed. Keeps running in background tabs; the hand-off is exact, but a threaded run is not reproducible."
       : "Turbo: run headless in a worker at full speed. Keeps running in background tabs; switching is bit-exact.";
+    updateModeline();
+    /* the tank view: ?view=3d / ?view=flat, else this visitor's last choice;
+     * never with ?gl=0, which forces the flat canvas-2D view */
+    var want = PARAMS.get("view"), saved = null;
+    try { saved = localStorage.getItem(VIEW_KEY); } catch (e) { /* private mode */ }
+    if (want !== "3d" && want !== "flat") want = saved === "3d" ? "3d" : "flat";
+    if (PARAMS.get("gl") === "0") {
+      want = "flat";
+      el("view3d").disabled = true;
+      var row = el("f_view3d"), hint = document.createElement("span");
+      row.classList.add("inert");
+      hint.className = "needs";
+      hint.textContent = "off with ?gl=0, which forces the flat canvas-2D view";
+      row.appendChild(hint);
+    }
+    /* ?bench measures the view it starts in, so that one is loaded first */
+    return Promise.resolve(want === "3d" ? setView(true) : null).then(start);
+  }).catch(function (err) {
+    splashSay("The simulation couldn't start: " + err);
+    showError("failed to load wasm module: " + err);
+  });
+  function updateModeline() {
     el("modeline").textContent = (threaded
       ? "Running the threaded module (" + Module._evo_threads() + " threads): fast, not reproducible from the seed."
       : "Running the single-threaded module, reproducible from the seed (" + threadWhy + ").") +
-      " Drawing: " + (glScene ? "WebGL2." : "canvas 2D.");
+      " Drawing: " + drawingName() + ".";
+  }
+  function start() {
     if (bench) {
       bench.i = 0;
       benchNext();
@@ -1963,8 +2146,5 @@
           toast((coarseMQ.matches ? "Tap" : "Click") + " any fish to see its brain.");
       }, 9000);
     }
-  }).catch(function (err) {
-    splashSay("The simulation couldn't start: " + err);
-    showError("failed to load wasm module: " + err);
-  });
+  }
 })();

@@ -636,6 +636,7 @@
       ok = Module._evo_init(seed, WORLD_W, WORLD_H, population, 0);
     }
     selectedId = null;
+    if (glScene && glScene.forgetFish) glScene.forgetFish();
     userCap = cfg.maxPopulation || 0;
     autoCap = 0;
     resetGovernor();
@@ -1512,6 +1513,7 @@
       if (Module._evo_rec_reset) Module._evo_rec_reset(1);   /* the loaded fish, as the tree's roots */
     }
     selectedId = null;
+    if (glScene && glScene.forgetFish) glScene.forgetFish();
     warmupUntil = performance.now() + WARMUP_MS;  /* a load is a restart for frame timing */
     workEma = 0;
     var w = Module._evo_width(), h = Module._evo_height();
@@ -2000,6 +2002,7 @@
   var FISH_KEY = "evo_boids.fishShape";
   function setFishShape(on) {
     if (!glScene || !glScene.fishShapes) return;
+    if (on && !LOOK.fishShape) glScene.forgetFish();   /* history from before is stale */
     LOOK.fishShape = on;
     el("fishShape").checked = on;
     try { localStorage.setItem(FISH_KEY, on ? "1" : "0"); } catch (e) { /* private mode */ }

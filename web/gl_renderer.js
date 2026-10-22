@@ -480,6 +480,9 @@
     return {
       canvas: canvas,
       fishShapes: !!fishProg,   /* the fish-shape shader compiled */
+      /* a new world, a load or a Turbo hand-back: the fold tracker's history
+       * no longer applies (ids restart with a new run, and fish teleport) */
+      forgetFish: function () { folds = makeFoldTracker(); },
       resize: function (w, h) {
         if (canvas.width !== w) canvas.width = w;
         if (canvas.height !== h) canvas.height = h;
@@ -528,9 +531,10 @@
         }
         var dx = x - hx[slot], dy = y - hy[slot];
         hx[slot] = x; hy[slot] = y;
-        var crossed = false;
-        if (dx > W / 2) { dx -= W; crossed = true; } else if (dx < -W / 2) { dx += W; crossed = true; }
-        if (dy > H / 2) { dy -= H; crossed = true; } else if (dy < -H / 2) { dy += H; crossed = true; }
+        /* a wrap lands near the opposite edge; any other jump is a teleport */
+        var crossed = false, E = 400;
+        if (dx > W / 2) { dx -= W; crossed = x > W - E; } else if (dx < -W / 2) { dx += W; crossed = x < E; }
+        if (dy > H / 2) { dy -= H; crossed = crossed || y > H - E; } else if (dy < -H / 2) { dy += H; crossed = crossed || y < E; }
         var d = Math.sqrt(dx * dx + dy * dy);
         if (crossed) since[slot] = 0;
         if (d > 0.05 && d < 400) {   /* up to 50 steps a frame; a load's jump is ignored */

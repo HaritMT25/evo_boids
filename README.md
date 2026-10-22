@@ -47,8 +47,8 @@ tests/         core_tests, predator_smoke, core_bench (no SFML needed)
   - `evo_boids_mt` uses pthreads. It needs `SharedArrayBuffer`, which browsers allow only on cross-origin-isolated pages (COOP `same-origin` + COEP `require-corp`).
   - `evo_boids` is single-threaded.
   - `web/loader.js` checks `self.crossOriginIsolated` and picks one. Inside an iframe on a page without those headers, it always gets the single-threaded build.
-- **Drawing.** With WebGL2, the background, food, fish and predators are drawn with one instanced draw call per kind (`web/gl_renderer.js`). The result is copied onto a 2D canvas, which draws the HUD and the neural inspector on top. Without WebGL2, everything is drawn with canvas 2D, at one fill per body segment.
-- **Frame budget.** When a frame takes too long, the page first lowers the simulation speed. Then it removes creatures uniformly at random and caps births, so the agent count drops instead of the frame rate. The status line reports when this happens, because a run changed this way can no longer be replayed from its seed. It can be switched off ("hold 60 fps").
+- **Drawing.** With WebGL2, the background, food, fish and predators are drawn with one instanced draw call per kind (`web/gl_renderer.js`). The result is copied onto a 2D canvas, which draws the HUD and the neural inspector on top, the way the native SFML window does. Without WebGL2, everything is drawn with canvas 2D, at one fill per body segment. The controls around the world (a live readout, a playback dock, the settings, Turbo) are HTML, outside the canvas.
+- **Frame budget.** When a frame takes too long, the page first lowers the simulation speed. Then it removes creatures uniformly at random and caps births, so the agent count drops instead of the frame rate. A message says when this happens, and the readout keeps an orange dot for the rest of the run, because a run changed this way can no longer be replayed from its seed. It can be switched off ("hold 60 fps").
 
 ## Build and run
 
@@ -89,6 +89,8 @@ Page options:
 | `?gl=0` | forces canvas 2D drawing instead of WebGL2 |
 | `?guide=0` / `?guide=1` | never / always start the first-visit guide on load |
 
+Keyboard: <kbd>Space</kbd> pause · <kbd>↑</kbd> <kbd>↓</kbd> speed · <kbd>R</kbd> a fresh world · <kbd>Esc</kbd> closes what is open (the settings, the live numbers, then the selected fish). Click a fish to inspect it, empty water to let it go.
+
 Browser requirements:
 - **WebAssembly.**
 - **WebGL2**, optional: without it the fish are drawn with canvas 2D, which is slower at high counts.
@@ -111,18 +113,19 @@ Safari on macOS/iOS has not been tested.
 
 ### Phones and touch screens
 
-The page adapts to small and touch screens. A desktop browser with a mouse, in a landscape window, gets the layout above unchanged.
+Every screen gets the same controls around the world: the live readout at the top left (fish, generation, frame rate; tap it for the rest), the dashboards and settings buttons at the top right, and a playback dock at the bottom (pause, speed, Turbo, Randomize). On a desktop with a mouse they sit around the world, not over it, and the world itself is drawn exactly as before: the canvas is pixel-identical to the previous page's for a fixed checkpoint, HUD and inspector included. Small and touch screens differ:
 
-- **World shape.** In portrait, or on any touch screen, a start or restart creates a world with the area of 1920×1080 but the shape of the screen, so it fills the screen instead of a 16:9 strip. Food density and crowding stay the same. Rotating the device keeps the running world, and a "fit to screen" button restarts it with a fitted one. A checkpoint keeps its own size, and `?bench` always uses 1920×1080.
-- **Inspector.** On screens 700 px wide or less, and on touch screens, the selected fish's network is drawn in a panel docked to the screen edge away from the fish, with 11–12 px text, instead of on the canvas. The on-canvas HUD is left out there; the status line carries the essentials.
-- **Touch.** A tap selects the nearest fish within about 24 CSS px. Tapping a parameter's name (marked ⓘ) shows its explanation. Inputs use 16 px text, so iOS does not zoom the page on focus, and buttons and rows are at least 44 px tall.
+- **World shape.** In portrait, or on any touch screen, a start or restart creates a world with the area of 1920×1080 but the shape of the screen, so it fills the screen instead of a 16:9 strip. Food density and crowding stay the same. Rotating the device keeps the running world, and a "fit to screen" button restarts it with a fitted one. A checkpoint keeps its own size, and `?bench` always uses 1920×1080. The controls float over the world here.
+- **The selected fish.** On screens 700 px wide or less, and on touch screens, the inspector is a card instead of a canvas panel: energy (with the breeding threshold marked), age and speed, and the live network below, where tapping a node names it. The card sits at the bottom of a phone (on the right of a wider screen) and moves to the other side when the fish swims under it. The on-canvas HUD is left out there; the readout carries the essentials.
+- **Settings** open as a bottom sheet you can drag down to close; on screens 960 px wide or more they sit beside the world instead.
+- **Touch.** A tap selects the nearest fish within about 24 CSS px. Tapping a setting's name shows its explanation. Inputs use 16 px text, so iOS does not zoom the page on focus, and buttons and rows are at least 44 px tall.
 - **Load.** Touch devices start with 200 creatures (single-threaded) or 400 (threaded), on at most 4 threads; `?nthreads=N` overrides the thread count. The threaded module still pre-spawns min(cores, 8) − 1 workers. The frame-budget governor works as everywhere else.
 
-So far this is measured in emulation only: Playwright's iPhone 13 profile in WebKit 26.6 and its Pixel 7 profile in Chrome 155, portrait and landscape. The world covers 95% of the screen in all four cases (before: 31%, 26%, 75% and 69%). No real phone has been tested, so frame rate, battery use, memory, and whether the threaded module starts on iOS are unmeasured.
+So far this is measured in emulation only: Playwright's iPhone 13 profile in WebKit 26.6 and its Pixel 7 profile in Chrome 155, portrait and landscape. The world covers 99.7–99.8% of the screen in all four cases, of which the top bar and the dock float over about 11% (Pixel 7, portrait); the fish card with its network open covers 43% (Pixel 7) and 49% (iPhone 13). No real phone has been tested, so frame rate, battery use, memory, and whether the threaded module starts on iOS are unmeasured.
 
-### 🎲 Randomize and the first-visit guide
+### Randomize and the first-visit guide
 
-**🎲 Randomize** (top of the ☰ menu) draws a whole setup, restarts, and lists what it picked. Every value also lands in the form, so you can tweak it and press Restart.
+**Randomize** (the dice in the dock, or the top of the settings' Run tab) draws a whole setup, restarts, and lists what it picked. Every value also lands in the settings, so you can tweak it and press Restart.
 
 Each value is drawn from a range. The range comes from the experiments (`docs/evo_boids_flags.md`, the research log) where one exists, and otherwise from the "try:" suggestions in the settings' explanations. `web/randomizer.js` lists every range next to its source. Knobs that only work together are drawn together:
 - **Currents** come with patchy, drifting food and a thrust cost. Fish only fight or ride a current when food is patchy and swimming costs energy.
@@ -148,17 +151,17 @@ Measured headless: the single-threaded module under Node, 20,000–30,000 steps 
 Uncapped rich-food setups reached ~2,400 fish headless; in the browser, the frame-budget governor sizes that to the device.
 
 **First-visit guide.** A first visit gets a one-minute spotlight tour:
-- what you're looking at, a fish's brain, and the status line
+- what you're looking at, a fish's brain, and the live readout
 - the keyboard (with a mouse only)
-- the 📊 dashboards, the ☰ menu, 🎲 Randomize, playback (including what Turbo's "headless" means), settings, and checkpoints
+- the playback dock (including what Turbo's "headless" means), the dashboards, the settings, Randomize, your own settings, and checkpoints
 
-**Settings.** On screens 960 px wide or more, the open menu sits beside the world rather than over it, so a change can be watched. Settings that only matter while another one is on, such as patch radius without food patches or eddy count without a current, are dimmed with the reason. Changes other than the ones marked *live* turn the Restart button into **Restart to apply**. That button is pinned to the bottom edge of the menu, so it stays in reach from any setting, advanced ones included.
+**Settings.** They are grouped in tabs: Run (Randomize, hold 60 fps, save and load), World, Food, Life, Predators and Ocean. Each setting shows its config key under its name, and a dot on a tab means something in it differs from the default. On screens 960 px wide or more, the open settings sit beside the world rather than over it, so a change can be watched. Settings that only matter while another one is on, such as patch radius without food patches or eddy count without a current, are dimmed with the reason. Changes other than the ones marked *live* turn the Restart button into **Restart to apply**. That button is pinned to the bottom edge of the settings, so it stays in reach from any tab.
 
-The tour's text adapts to touch screens. The page stays usable during the tour. "? Guide" in the menu replays it, and it's remembered in `localStorage`; `?guide=0` / `?guide=1` override that.
+The tour's text adapts to touch screens. The page stays usable during the tour. "Tour" in the settings replays it, and it's remembered in `localStorage`; `?guide=0` / `?guide=1` override that.
 
-### 📊 Dashboards
+### Dashboards
 
-The 📊 button beside ☰ opens charts of the running world. Each chart says in one sentence what to look for, and charts that need a feature (predators, a current, the body model) say how to turn it on.
+The chart button beside the settings button opens charts of the running world. Each chart says in one sentence what to look for, and charts that need a feature (predators, a current, the body model) say how to turn it on.
 
 | tab | charts |
 |---|---|

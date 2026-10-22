@@ -2,602 +2,722 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>evo_boids — wasm</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%230F1E19'/%3E%3Ccircle cx='10' cy='8' r='3' fill='%2397C632'/%3E%3Ccircle cx='6' cy='8' r='2' fill='%2397C632' opacity='.7'/%3E%3Ccircle cx='3' cy='8' r='1.3' fill='%2397C632' opacity='.45'/%3E%3C/svg%3E">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#071f20">
+<meta name="description" content="Fish with tiny neural networks evolve in your browser. Nothing scores them: the ones that find food and partners leave children.">
+<title>evo_boids</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230b1d1f'/%3E%3Cpath d='M6 16c4-6 11-7 16-3l4-4v14l-4-4c-5 4-12 3-16-3z' fill='%23b6e64a'/%3E%3Ccircle cx='11' cy='15' r='1.4' fill='%230b1d1f'/%3E%3C/svg%3E">
 <style>
+  /* ---------- tokens ---------- */
+  :root {
+    color-scheme: dark;
+    --abyss: oklch(0.22 0.03 200);
+    --surface: oklch(0.255 0.03 196);
+    --surface-2: oklch(0.295 0.032 194);
+    --surface-3: oklch(0.34 0.035 192);
+    --line: oklch(0.44 0.036 190);
+    --line-soft: oklch(0.35 0.032 192);
+    --ink: oklch(0.96 0.012 180);
+    --ink-2: oklch(0.86 0.02 185);
+    --ink-3: oklch(0.74 0.025 188);
+    --plankton: oklch(0.86 0.19 125);
+    --plankton-ink: oklch(0.22 0.06 130);
+    --plankton-soft: oklch(0.86 0.19 125 / 0.16);
+    --ember: oklch(0.72 0.18 38);
+    --ember-soft: oklch(0.72 0.18 38 / 0.16);
+    --current: oklch(0.83 0.10 225);
+    --focus: oklch(0.90 0.17 125);
+    --r-sm: 8px; --r-md: 12px; --r-lg: 18px;
+    --shadow: 0 12px 32px oklch(0.08 0.03 210 / 0.6);
+    --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+    --ease: cubic-bezier(0.22, 1, 0.36, 1);   /* ease-out-quint */
+    --safe-t: env(safe-area-inset-top, 0px);
+    --safe-b: env(safe-area-inset-bottom, 0px);
+    --top-h: 64px;     /* the top bar's band: 10 px + 48 px buttons + 6 px */
+    --dock-h: 60px;
+    --dock-b: calc(12px + var(--safe-b));
+    /* z scale */
+    --z-hud: 10; --z-card: 20; --z-dock: 30; --z-sheet: 40; --z-turbo: 45;
+    --z-dash: 50; --z-toast: 60; --z-guide: 70; --z-tip: 80; --z-splash: 90;
+  }
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  html, body { background: #0a120e; color: #c8c8c8; font: 13px/1.5 monospace; height: 100%; }
-  /* Full-viewport stage; all controls live in the slide-in drawer. */
+  html, body { height: 100%; }
   body {
-    height: 100dvh;
-    display: flex;
-    flex-direction: column;
-    padding: 6px;
+    background: var(--abyss);
+    color: var(--ink);
+    font: 15px/1.45 var(--font);
     overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+    -webkit-text-size-adjust: 100%;
   }
+  button, input, select { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+  button, label, summary, input, select, a { -webkit-tap-highlight-color: transparent; }
+  /* no double-tap zoom on what gets tapped repeatedly (pinch zoom still works) */
+  canvas, button, label, input, select { touch-action: manipulation; }
+  :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+  .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  svg.i { width: 22px; height: 22px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.8;
+          stroke-linecap: round; stroke-linejoin: round; }
+
+  /* ---------- the world ----------
+   * The canvas is the world at 1 px per world unit (renderer.js), scaled to
+   * fit the stage. On a desktop with a mouse the stage sits between the top
+   * bar and the dock, so nothing covers the world; on compact screens (phones,
+   * touch, narrow windows) it is the whole screen and the controls float over
+   * it. On wide screens the open settings sit beside it. */
   #stage {
-    flex: 1 1 auto;
-    width: 100%;
-    min-height: 0;
-    display: flex;
-    justify-content: center;
-    align-items: center;
+    position: fixed;
+    top: calc(var(--top-h) + var(--safe-t)); bottom: calc(var(--dock-h) + 24px + var(--safe-b));
+    left: 6px; right: 6px;
+    display: flex; justify-content: center; align-items: center;
+    transition: right 300ms var(--ease);
   }
-  canvas {
+  @media (max-width: 700px), (pointer: coarse) {
+    #stage { top: var(--safe-t); bottom: var(--safe-b); left: 0; right: 0; }
+  }
+  #canvas {
     display: block;
     /* replaced element with intrinsic size: both max constraints apply and the
      * aspect is preserved, even after a checkpoint changes the world size */
-    max-width: 100%;
-    max-height: 100%;
-    width: auto;
-    height: auto;
+    max-width: 100%; max-height: 100%;
+    width: auto; height: auto;
     background: #0F1E19;
-    border: 1px solid #1e3a2e;
+    border: 1px solid var(--line-soft);
   }
-  /* no double-tap zoom on what gets tapped repeatedly (pinch zoom still works) */
-  canvas, button, label, summary, input, select {
-    touch-action: manipulation;
-    -webkit-tap-highlight-color: transparent;
+
+  /* ---------- buttons ---------- */
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+    min-height: 44px; padding: 0 16px;
+    border: 1px solid var(--line); border-radius: var(--r-md);
+    background: var(--surface-2); color: var(--ink);
+    font-size: 14px; font-weight: 600;
+    transition: background-color 150ms var(--ease), transform 150ms var(--ease), border-color 150ms var(--ease);
   }
-  /* hamburger: fixed top-right, above the drawer */
-  #menubtn {
-    position: fixed;
-    top: 10px;
-    right: 10px;
-    z-index: 30;
-    width: 36px;
-    height: 36px;
-    padding: 0;
-    font-size: 16px;
-    line-height: 1;
-    background: rgba(26,58,42,0.8);
-    color: #cfe8d8;
-    border: 1px solid #3a6a4e;
-    border-radius: 4px;
-    cursor: pointer;
+  .btn:hover { background: var(--surface-3); }
+  .btn:active { transform: scale(0.97); }
+  .btn.primary { background: var(--plankton); color: var(--plankton-ink); border-color: transparent; }
+  .btn.primary:hover { background: oklch(0.90 0.19 125); }
+  .btn.ghost { background: transparent; border-color: transparent; color: var(--ink-2); }
+  .btn.ghost:hover { background: var(--surface-2); }
+  .btn:disabled, .btn.locked { opacity: 0.45; cursor: default; }
+  .btn:disabled:active, .btn.locked:active { transform: none; }
+  .icon-btn {
+    display: inline-grid; place-items: center;
+    width: 44px; height: 44px; flex: none;
+    border: 0; border-radius: 999px;
+    background: transparent; color: var(--ink-2);
+    transition: background-color 150ms var(--ease), color 150ms var(--ease), transform 150ms var(--ease);
   }
-  #menubtn:hover, #dashbtn:hover { background: rgba(35,80,56,0.95); }
-  /* dashboards: beside the hamburger (web/dashboard.js) */
-  #dashbtn {
-    position: fixed;
-    top: 10px;
-    right: 54px;
-    z-index: 30;
-    width: 36px;
-    height: 36px;
-    padding: 0;
-    font-size: 17px;
-    line-height: 1;
-    background: rgba(26,58,42,0.8);
-    border: 1px solid #3a6a4e;
-    border-radius: 4px;
-    cursor: pointer;
+  .icon-btn:hover { background: var(--surface-3); color: var(--ink); }
+  .icon-btn:active { transform: scale(0.94); }
+  .icon-btn[aria-pressed="true"], .icon-btn[aria-expanded="true"] { background: var(--plankton-soft); color: var(--plankton); }
+  .icon-btn.locked, .icon-btn:disabled { opacity: 0.4; cursor: default; }
+  .chip-surface {
+    background: oklch(0.255 0.03 196 / 0.92);
+    border: 1px solid var(--line-soft);
+    box-shadow: var(--shadow);
   }
-  /* hidden while the menu is open: it would float over the settings column
-   * as the menu scrolls (opening the menu closes the dashboards anyway) */
-  body.menu-open #dashbtn { display: none; }
-  /* shown on compact screens when the world no longer matches the screen's
-   * shape (the phone was rotated): restarts with a fitted world */
+
+  /* ---------- top bar: live readout + tools ---------- */
+  #topbar {
+    position: fixed; z-index: var(--z-hud);
+    top: calc(10px + var(--safe-t)); left: 10px; right: 10px;
+    display: flex; justify-content: space-between; align-items: flex-start; gap: 8px;
+    pointer-events: none;
+  }
+  #topbar > * { pointer-events: auto; }
+  #readout {
+    display: inline-flex; align-items: center; gap: 10px;
+    min-height: 44px; max-width: calc(100vw - 132px);
+    padding: 0 14px 0 10px;
+    border-radius: 999px;
+    font-size: 13px; color: var(--ink-2); text-align: left;
+    white-space: nowrap; overflow: hidden;
+  }
+  #readout .mark { display: inline-flex; align-items: center; gap: 6px; color: var(--ink); font-family: var(--mono); font-size: 13px; }
+  #readout .mark svg { width: 20px; height: 20px; }
+  #readout .mark span { display: none; }
+  #readout b { color: var(--ink); font-weight: 600; }
+  #readout .sep { width: 1px; height: 16px; background: var(--line); }
+  #readout .warn { color: var(--ember); }
+  /* the frame budget changed this run: it no longer replays from its seed */
+  #ro-gov { width: 8px; height: 8px; flex: none; border-radius: 50%; background: var(--ember); }
+  #ro-gov[hidden] { display: none; }
+  #tools { display: flex; gap: 6px; padding: 0; border-radius: 999px; }
+  #tools .icon-btn { width: 48px; height: 48px; }
+
+  #statpanel {
+    position: fixed; z-index: var(--z-hud);
+    top: calc(64px + var(--safe-t)); left: 10px;
+    width: min(340px, calc(100vw - 20px));
+    /* above the dock, scrolling on short (landscape phone) screens */
+    max-height: calc(100dvh - 64px - var(--dock-h) - 34px - var(--safe-t) - var(--safe-b));
+    overflow-y: auto; overscroll-behavior: contain;
+    padding: 14px 16px;
+    border-radius: var(--r-md);
+    font-size: 13px;
+  }
+  #statpanel[hidden] { display: none; }
+  #statpanel dl { display: grid; grid-template-columns: auto 1fr; gap: 6px 16px; }
+  #statpanel dt { color: var(--ink-3); }
+  #statpanel dd { color: var(--ink); text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  #statpanel .notes { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line-soft); color: var(--ink-2); line-height: 1.5; }
+  #statpanel .notes p + p { margin-top: 4px; }
+
+  /* ---------- playback dock ---------- */
+  #dock {
+    position: fixed; z-index: var(--z-dock);
+    left: 50%; bottom: var(--dock-b);
+    transform: translateX(-50%);
+    width: min(calc(100vw - 20px), 400px);
+    height: var(--dock-h);
+    display: flex; align-items: center; justify-content: space-between; gap: 2px;
+    padding: 0 6px;
+    border-radius: 999px;
+    transition: transform 260ms var(--ease), opacity 200ms var(--ease);
+  }
+  #dock .speed { display: flex; align-items: center; }
+  #dock .speed .icon-btn { width: 38px; }
+  #speedlabel { min-width: 3.2em; text-align: center; font-family: var(--mono); font-size: 14px; color: var(--ink); }
+  #pausebtn { color: var(--ink); background: var(--surface-3); }
+  #turbobtn { width: auto; padding: 0 12px; gap: 6px; border-radius: 999px; font-size: 13px; font-weight: 600; color: var(--ink-2); display: inline-flex; }
+  #turbobtn[aria-pressed="true"] { background: var(--ember-soft); color: var(--ember); }
+  #turbobtn span { display: none; }
+  body.sheet-open #dock { transform: translateX(-50%) translateY(140%); opacity: 0; pointer-events: none; }
+
+  /* ---------- fit-to-screen and toasts ---------- */
   #fitbtn {
-    position: fixed;
-    top: 10px;
-    left: 10px;
-    z-index: 25;
-    min-height: 44px;
-    background: rgba(26,58,42,0.9);
+    position: fixed; z-index: var(--z-hud);
+    top: calc(64px + var(--safe-t)); left: 50%; transform: translateX(-50%);
+    border-radius: 999px;
   }
   #fitbtn[hidden] { display: none; }
-  /* out of the docked inspector's way (and of the status line it moves);
-   * closing the inspector brings the button back */
-  body[data-dock] #fitbtn { display: none; }
-  /* right-side drawer */
+  /* out of the fish card's way; closing the card brings the button back */
+  body.card-open #fitbtn { display: none; }
+  #toasts {
+    position: fixed; z-index: var(--z-toast);
+    left: 50%; transform: translateX(-50%);
+    bottom: calc(var(--dock-b) + var(--dock-h) + 12px);
+    width: min(calc(100vw - 24px), 440px);
+    display: flex; flex-direction: column; gap: 8px; align-items: center;
+    pointer-events: none;
+  }
+  @media (max-width: 599px) {
+    /* phones: under the top bar, clear of the fish card and the dock */
+    #toasts { top: calc(66px + var(--safe-t)); bottom: auto; }
+  }
+  .toast {
+    padding: 10px 14px; border-radius: var(--r-md);
+    background: var(--surface-2); border: 1px solid var(--line);
+    box-shadow: var(--shadow);
+    font-size: 13px; color: var(--ink); line-height: 1.4;
+    animation: toast-in 220ms var(--ease);
+  }
+  .toast.error { border-color: var(--ember); }
+  .toast.out { opacity: 0; transform: translateY(6px); transition: opacity 200ms, transform 200ms; }
+  @keyframes toast-in { from { opacity: 0; transform: translateY(8px); } }
+
+  /* ---------- the selected fish (compact screens) ----------
+   * Desktop draws the inspector on the canvas, matching the native window
+   * (renderer.js drawInspector). Compact screens get this card instead, laid
+   * out in CSS px; it moves to the other side when the fish swims under it
+   * (.flip: the top on narrow screens, the left on wider ones). */
+  #fishcard {
+    position: fixed; z-index: var(--z-card);
+    left: 10px; right: 10px;
+    bottom: calc(var(--dock-b) + var(--dock-h) + 10px);
+    max-height: calc(100dvh - var(--dock-h) - 96px - var(--safe-t) - var(--safe-b));
+    display: flex; flex-direction: column;
+    border-radius: var(--r-lg);
+    overflow-x: hidden; overflow-y: auto;   /* a landscape phone is shorter than the card */
+    overscroll-behavior: contain;
+    animation: card-in 240ms var(--ease);
+  }
+  #fishcard.flip { top: calc(64px + var(--safe-t)); bottom: auto; }
+  #fishcard[hidden] { display: none; }
+  @keyframes card-in { from { opacity: 0; transform: translateY(12px); } }
+  .fc-head { display: flex; align-items: center; gap: 12px; padding: 10px 6px 6px 12px; }
+  #iportrait { width: 56px; height: 40px; flex: none; }
+  .fc-title { flex: 1; min-width: 0; }
+  #ititle { font-size: 16px; font-weight: 650; line-height: 1.2; }
+  #isub { font-size: 13px; color: var(--ink-3); }
+  .fc-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px 14px; padding: 4px 14px 12px; }
+  .stat { min-width: 0; }
+  .stat .k { font-size: 12px; color: var(--ink-3); }
+  .stat .v { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 14px; color: var(--ink); white-space: nowrap; }
+  .bar { position: relative; height: 4px; margin-top: 5px; border-radius: 2px; background: var(--surface-3); overflow: hidden; }
+  .bar i { position: absolute; inset: 0; border-radius: 2px; background: var(--plankton);
+           transform-origin: left center; transform: scaleX(0); transition: transform 300ms var(--ease); }
+  .bar .tick { position: absolute; top: -2px; bottom: -2px; width: 2px; background: var(--ink-2); }
+  #iage i { background: var(--current); }
+  #ispeed i { background: var(--ink-2); }
+  .fc-brain { display: none; flex: none; flex-direction: column; border-top: 1px solid var(--line-soft); }
+  #fishcard.expanded .fc-brain { display: flex; }
+  /* small enough that the card, brain open, stays under half a phone screen */
+  .fc-brain .inet { position: relative; height: clamp(140px, 22dvh, 300px); }
+  .fc-brain canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+  #isense { min-height: 2.9em; padding: 6px 14px 10px; font-size: 12.5px; color: var(--ink-2); line-height: 1.4; }
+  #isense b { color: var(--ink); font-weight: 600; }
+  #iexpand svg { transition: transform 200ms var(--ease); }
+  #fishcard.expanded #iexpand svg { transform: rotate(180deg); }
+
+  /* ---------- settings sheet ---------- */
   #drawer {
-    position: fixed;
-    top: 0;
-    right: 0;
-    height: 100dvh;
-    width: 360px;
-    max-width: 90vw;
-    z-index: 20;
-    background: #0d1813;
-    border-left: 1px solid #1e3a2e;
-    padding: 12px;
-    overflow-y: auto;
-    transform: translateX(100%);
-    transition: transform 0.2s ease;
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
+    position: fixed; z-index: var(--z-sheet);
+    left: 0; right: 0; bottom: 0;
+    height: min(70dvh, 680px);
+    display: flex; flex-direction: column;
+    background: var(--surface);
+    border-top: 1px solid var(--line);
+    border-radius: 20px 20px 0 0;
+    box-shadow: 0 -12px 40px oklch(0.08 0.03 210 / 0.6);
+    transform: translateY(105%);
+    transition: transform 300ms var(--ease);
+    visibility: hidden;
   }
-  #drawer.open { transform: translateX(0); }
-  #drawer h1 {
-    font-size: 14px;
-    font-weight: normal;
-    color: #7ea08c;
-    letter-spacing: 1px;
-    margin-right: 40px; /* keep clear of the ✕ button */
+  #drawer.open { transform: translateY(0); visibility: visible; }
+  #drawer.dragging { transition: none; }
+  .sheet-grip { display: grid; place-items: center; height: 22px; cursor: grab; touch-action: none; }
+  .sheet-grip::before { content: ""; width: 40px; height: 4px; border-radius: 2px; background: var(--line); }
+  .sheet-head { display: flex; align-items: center; gap: 8px; padding: 0 8px 4px 18px; touch-action: none; }   /* drags the sheet */
+  .sheet-head h2 { flex: 1; font-size: 18px; font-weight: 650; }
+  #tabs {
+    display: flex; gap: 2px; padding: 0 10px;
+    overflow-x: auto; scrollbar-width: none;
+    border-bottom: 1px solid var(--line-soft);
   }
-  #bar, #controls {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    width: 100%;
+  #tabs::-webkit-scrollbar { display: none; }
+  #tabs button {
+    flex: none; min-height: 44px; padding: 0 12px;
+    border: 0; border-bottom: 2px solid transparent;
+    background: none; color: var(--ink-3);
+    font-size: 14px; font-weight: 600; white-space: nowrap;
+    transition: color 150ms var(--ease), border-color 150ms var(--ease);
   }
-  label { display: inline-flex; align-items: center; gap: 4px; color: #8fa89a; }
-  /* parameter rows: name left, control in one right-aligned column down the drawer */
-  #controls fieldset { flex-direction: column; align-items: stretch; gap: 4px; }
-  #controls fieldset label, #advgrid label {
-    display: grid;
-    grid-template-columns: 1fr auto;
-    align-items: center;
-    column-gap: 8px;
+  #tabs button:hover { color: var(--ink); }
+  #tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--plankton); }
+  #tabs button .dot { display: inline-block; width: 6px; height: 6px; margin-left: 6px; border-radius: 3px; background: var(--plankton); vertical-align: 2px; }
+  #panels { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 4px 18px 24px; }
+  .panel[hidden] { display: none; }
+  .panel h3 { margin: 18px 0 2px; font-size: 13px; font-weight: 600; color: var(--ink-3); }
+
+  .field {
+    display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center;
+    column-gap: 14px; row-gap: 2px;
+    min-height: 56px; padding: 8px 0;
+    border-bottom: 1px solid var(--line-soft);
   }
-  #controls fieldset input[type="checkbox"], #advgrid input[type="checkbox"] { justify-self: end; }
-  /* hover-info affordance on parameter names */
-  .lt { justify-self: start; border-bottom: 1px dotted #3a5a48; cursor: help; }
-  input[type="number"], select {
-    width: 6.5em;
-    background: #10201a;
-    color: #d5e5da;
-    border: 1px solid #2a4a3a;
-    border-radius: 3px;
-    padding: 3px 5px;
-    font: inherit;
+  .field:last-child { border-bottom: 0; }
+  .field .name { display: block; font-size: 14px; color: var(--ink); line-height: 1.3; }
+  .field .lt { cursor: help; text-decoration: underline dotted var(--line); text-underline-offset: 3px; }
+  .field .key { display: block; font-family: var(--mono); font-size: 11px; color: var(--ink-3); }
+  .field .desc { display: block; margin-top: 2px; font-size: 12px; color: var(--ink-3); line-height: 1.4; }
+  .field .ctl { justify-self: end; display: flex; align-items: center; }
+  .livetag {
+    display: inline-block; margin-left: 6px; padding: 0 6px;
+    border-radius: 999px; background: var(--plankton-soft); color: var(--plankton);
+    font-size: 11px; font-weight: 600; line-height: 18px; vertical-align: 1px;
+    text-decoration: none;
   }
-  input[type="checkbox"] { accent-color: #4a8a64; }
-  fieldset {
-    border: 1px solid #1e3a2e;
-    border-radius: 4px;
-    padding: 3px 10px 6px;
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 6px 12px;
-    min-width: 0;
+  .field.inert .name, .field.inert .ctl { opacity: 0.5; }
+  .needs { grid-column: 1 / -1; font-size: 12px; color: var(--ink-3); }
+  .needs:empty { display: none; }
+
+  .stepper { display: flex; align-items: stretch; height: 40px; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--surface-2); }
+  .stepper button { width: 36px; border: 0; background: none; color: var(--ink-2); display: grid; place-items: center; }
+  .stepper button:hover { background: var(--surface-3); color: var(--ink); }
+  .stepper button svg { width: 18px; height: 18px; }
+  .stepper input {
+    width: 6.2em; border: 0; border-inline: 1px solid var(--line-soft);
+    background: transparent; text-align: center;
+    font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 14px;
+    -moz-appearance: textfield; appearance: textfield;
   }
-  legend {
-    font-size: 10px;
-    text-transform: lowercase;
-    letter-spacing: 1px;
-    color: #6f927e;
-    padding: 0 5px;
+  .stepper input::-webkit-outer-spin-button, .stepper input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+  .stepper input:focus { outline: none; background: var(--surface-3); }
+  .stepper:focus-within { border-color: var(--plankton); }
+  select {
+    height: 40px; padding: 0 30px 0 12px; border: 1px solid var(--line); border-radius: 10px;
+    background: var(--surface-2) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23b8cbc6' stroke-width='2.4' stroke-linecap='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E") no-repeat right 10px center;
+    appearance: none; font-size: 14px;
   }
-  button {
-    background: #1a3a2a;
-    color: #cfe8d8;
-    border: 1px solid #3a6a4e;
-    border-radius: 3px;
-    padding: 4px 14px;
-    font: inherit;
+  input.switch {
+    appearance: none; -webkit-appearance: none;
+    position: relative; width: 48px; height: 28px; flex: none;
+    border-radius: 999px; background: var(--surface-3); border: 1px solid var(--line);
+    transition: background-color 180ms var(--ease), border-color 180ms var(--ease);
     cursor: pointer;
   }
-  button:hover { background: #235038; }
-  /* interlocked (turbo) and in-transition buttons */
-  button.locked, button:disabled { opacity: .45; cursor: default; }
-  button.locked:hover, button:disabled:hover { background: #1a3a2a; }
-  #slower, #faster { padding: 4px 10px; }
-  #speedlabel { color: #8fa89a; min-width: 7.5em; text-align: center; }
-  .row { display: flex; align-items: center; gap: 10px; }
-  #err { color: #e05a5a; min-height: 1em; }
-  /* Borderless container so its section fieldsets sit at the same inset as
-   * the basic groups — one globally aligned control column down the drawer. */
-  #adv {
-    width: 100%;
-    padding: 0;
+  input.switch::before {
+    content: ""; position: absolute; top: 3px; left: 3px;
+    width: 20px; height: 20px; border-radius: 50%;
+    background: var(--ink-2);
+    transition: transform 180ms var(--ease), background-color 180ms var(--ease);
   }
-  #adv summary { cursor: pointer; color: #7ea08c; user-select: none; padding: 4px 0; }
-  #advgrid {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    margin: 8px 0;
-  }
-  #advgrid fieldset { display: block; padding: 1px 10px 6px; }
-  #advgrid .agrid {
-    display: grid;
-    grid-template-columns: 1fr; /* one knob per row in the drawer */
-    gap: 4px;
-  }
-  #advgrid input[type="number"], #advgrid select { width: 6.5em; }
-  /* shared hover tooltip (element created by renderer.js) */
-  #tooltip {
-    display: none;
-    position: fixed;
-    z-index: 40;
-    max-width: 280px;
-    background: rgba(10,24,17,0.94);
-    border: 1px solid #2a4a3a;
-    border-radius: 4px;
-    padding: 8px 10px;
-    font-size: 12px;
-    line-height: 1.45;
-    pointer-events: none;
-  }
-  #tooltip .tipd { color: #cfe0d5; }
-  #tooltip .tipt { color: #8fb89f; margin-top: 2px; }
-  /* live status line over the canvas: fixed px size, so it stays readable
-   * when the 1920-wide canvas is scaled down (small windows, iframes) */
-  #status {
-    position: fixed;
-    left: 12px;
-    bottom: 10px;
-    right: 56px;
-    z-index: 10;
-    font-size: 12px;
-    color: #cfe0d5;
-    text-shadow: 0 0 3px #000, 0 0 2px #000;
-    pointer-events: none;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  /* Wide screens: the open menu sits beside the world instead of over it,
-   * so a change can be watched (renderer.js setDrawer toggles the class). */
-  body { transition: padding-right 0.2s ease; }
-  @media (min-width: 960px) {
-    body.menu-open { padding-right: 366px; }
-    body.menu-open #status { right: 378px; }
-  }
-  /* settings that need another one switched on (renderer.js updateNeeds) */
-  label.inert { opacity: 0.5; }
-  .needs { grid-column: 1 / -1; font-size: 10px; color: #8fb89f; }
-  .needs:empty { display: none; }
-  /* settings changed since the last restart */
-  #restart.pending { background: #2f6b4a; border-color: #9fd3b0; color: #eaf6ee; font-weight: bold; }
-  /* Restart and its messages stay pinned to the bottom of the menu, so a
-   * change made anywhere in it, advanced settings included, is one click
-   * from applying. The bar spans the drawer's padding. */
-  #applybar {
-    position: sticky;
-    bottom: -12px;
-    margin: 0 -12px -12px;
-    padding: 10px 12px;
-    background: #0d1813;
-    border-top: 1px solid #1e3a2e;
-    box-shadow: 0 -8px 14px rgba(13,24,19,0.9);
-    z-index: 1;
-  }
-  #applybar #err { flex: 1; min-width: 0; font-size: 12px; line-height: 1.35; }
-  /* narrow (portrait phone) screens: wrap instead of cutting the line off */
-  @media (max-width: 600px) {
-    #status { white-space: normal; line-height: 1.5; right: 12px; }
-  }
-  /* Compact-screen inspector (renderer.js: compactMQ). The desktop one is
-   * drawn on the canvas in world px and shrinks with it; this one is laid out
-   * in CSS px, docked to the screen edge away from the selected fish. */
-  #inspector {
-    display: none;
-    position: fixed;
-    z-index: 15;
-    flex-direction: column;
-    background: rgba(10,22,30,0.88);
-    border: 0 solid rgba(90,140,150,0.86);
-    color: #dcebf0;
-    font-size: 12px;
-  }
-  #inspector.top, #inspector.bottom {
-    display: flex;
-    left: 0;
-    right: 0;
-    max-width: 560px;
-    margin: 0 auto;
-    height: min(46vh, 380px);   /* fallback where dvh is unknown */
-    height: min(46dvh, 380px);
-  }
-  #inspector.top { top: 0; border-bottom-width: 1px; }
-  #inspector.bottom { bottom: 0; border-top-width: 1px; }
-  #inspector.left, #inspector.right {
-    display: flex;
-    top: 0;
-    bottom: 0;
-    width: min(320px, 46vw);
-  }
-  #inspector.left { left: 0; border-right-width: 1px; }
-  #inspector.right { right: 0; border-left-width: 1px; }
-  #inspector .ihead {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    min-height: 44px;
-    padding-left: 10px;
-  }
-  /* keep the close button clear of the fixed 📊 and ☰ buttons */
-  #inspector.top .ihead { padding-right: 112px; }
-  #inspector.right .ihead { padding-right: 112px; min-height: 56px; }
-  #inspector .itext { flex: 1; min-width: 0; line-height: 1.4; }
-  #isub { color: #becdd2; font-size: 11px; }
-  #iclose {
-    width: 44px;
-    height: 44px;
-    padding: 0;
-    border: 0;
-    background: none;
-    font-size: 18px;
-  }
-  #inspector .inet { position: relative; flex: 1 1 auto; min-height: 0; }
-  #inspector .inet canvas {
-    position: absolute;
-    inset: 0;
-    width: 100%;
-    height: 100%;
-    max-width: none;
-    max-height: none;
-    border: 0;
-    background: none;
-  }
-  /* the status line steps out of the docked inspector's way */
-  body[data-dock="bottom"] #status { bottom: auto; top: 12px; right: 120px; }
-  body[data-dock="left"] #status { left: calc(min(320px, 46vw) + 12px); }
-  body[data-dock="right"] #status { right: calc(min(320px, 46vw) + 12px); }
-  @media (pointer: coarse) {
-    /* 16px stops iOS zooming the page when an input gets focus */
-    input[type="number"], select { font-size: 16px; min-height: 40px; }
-    /* touch targets of at least 44 px */
-    button, summary { min-height: 44px; }
-    #slower, #faster { min-width: 44px; }
-    #menubtn { width: 44px; height: 44px; font-size: 20px; }
-    #dashbtn { width: 44px; height: 44px; right: 62px; font-size: 20px; }
-    input[type="checkbox"] { width: 24px; height: 24px; }
-    #controls fieldset label, #advgrid label { min-height: 44px; }
-    /* parameter names are tapped for their explanation (renderer.js attachTip) */
-    .lt::after { content: " \24D8"; color: #6f927e; }
-  }
-  #randombtn { font-weight: bold; }
-  #randnote { font-size: 11px; color: #9fd3b0; line-height: 1.45; }
+  input.switch:checked { background: var(--plankton); border-color: transparent; }
+  input.switch:checked::before { transform: translateX(20px); background: var(--plankton-ink); }
+
+  .run-hero { margin-top: 14px; padding: 16px; border-radius: var(--r-md); background: var(--surface-2); border: 1px solid var(--line-soft); }
+  .run-hero .btn { width: 100%; min-height: 50px; font-size: 15px; }
+  .run-hero p { margin-top: 10px; font-size: 13px; color: var(--ink-3); }
+  #randnote { margin-top: 10px; font-size: 13px; color: var(--plankton); line-height: 1.5; }
   #randnote:empty { display: none; }
-  /* First-visit guide (web/guide.js). The shade is a huge shadow around the
-   * spotlight and never takes clicks, so the page stays usable mid-tour. */
-  #guide { position: fixed; inset: 0; z-index: 50; pointer-events: none; }
+  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; }
+  #modeline { margin-top: 6px; font-size: 12px; color: var(--ink-3); line-height: 1.5; }
+  #credit { margin-top: 24px; font-size: 12px; color: var(--ink-3); }
+  #credit a { color: var(--ink-2); }
+
+  #applybar {
+    display: flex; align-items: center; gap: 12px;
+    padding: 12px 16px calc(12px + var(--safe-b));
+    border-top: 1px solid var(--line-soft);
+    background: var(--surface);
+  }
+  #restart { flex: none; min-width: 120px; }
+  #restart.pending { background: var(--plankton); color: var(--plankton-ink); border-color: transparent; }
+  #err { flex: 1; min-width: 0; font-size: 13px; line-height: 1.35; color: var(--ink-3); }
+  #err.error { color: var(--ember); }
+
+  /* ---------- turbo ---------- */
+  #turbo {
+    position: fixed; inset: 0; z-index: var(--z-turbo);
+    display: grid; place-items: center; padding: 20px;
+    background: oklch(0.12 0.03 205 / 0.55);
+    pointer-events: none;
+  }
+  #turbo[hidden] { display: none; }
+  #turbo .card {
+    pointer-events: auto;
+    width: min(400px, 100%);
+    padding: 22px 22px 18px;
+    border-radius: var(--r-lg);
+    text-align: center;
+  }
+  #turbo h2 { display: flex; align-items: center; justify-content: center; gap: 8px; font-size: 20px; font-weight: 650; color: var(--ember); }
+  #turbo p { margin-top: 6px; font-size: 14px; color: var(--ink-2); }
+  #turbostats { margin-top: 14px; display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; text-align: left; }
+  #turbostats div { padding: 10px 12px; border-radius: var(--r-sm); background: var(--surface-2); }
+  #turbostats span { display: block; font-size: 12px; color: var(--ink-3); }
+  #turbostats b { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 16px; font-weight: 600; }
+  #turbo .btn { margin-top: 16px; width: 100%; }
+
+  /* ---------- loading ---------- */
+  #splash {
+    position: fixed; inset: 0; z-index: var(--z-splash);
+    display: grid; place-items: center; text-align: center;
+    background: radial-gradient(ellipse at 50% 40%, oklch(0.30 0.045 192), var(--abyss) 70%);
+    transition: opacity 500ms var(--ease), visibility 500ms;
+  }
+  #splash.done { opacity: 0; visibility: hidden; }
+  #splash .word { font-family: var(--mono); font-size: 28px; letter-spacing: -0.01em; color: var(--ink); display: inline-flex; align-items: center; gap: 10px; }
+  #splash .word svg { width: 40px; height: 40px; }
+  #splash p { margin-top: 8px; color: var(--ink-2); font-size: 15px; max-width: 30ch; }
+  #splashstate { margin-top: 18px; font-size: 13px; color: var(--ink-3); }
+  #splash .swim { display: block; width: 120px; height: 2px; margin: 18px auto 0; border-radius: 1px; background: var(--surface-3); overflow: hidden; position: relative; }
+  #splash .swim::after { content: ""; position: absolute; inset: 0 auto 0 0; width: 40%; background: var(--plankton); animation: swim 1.1s var(--ease) infinite; }
+  @keyframes swim { from { transform: translateX(-100%); } to { transform: translateX(260%); } }
+
+  /* ---------- tooltip ---------- */
+  #tooltip {
+    display: none; position: fixed; z-index: var(--z-tip);
+    max-width: 300px; padding: 10px 12px;
+    border-radius: var(--r-md); background: var(--surface-2); border: 1px solid var(--line);
+    box-shadow: var(--shadow);
+    font-size: 13px; line-height: 1.45; pointer-events: none;
+  }
+  #tooltip .tipd { color: var(--ink); }
+  #tooltip .tipt { margin-top: 4px; color: var(--plankton); }
+
+  /* ---------- first-visit guide (web/guide.js) ----------
+   * The shade is a huge shadow around the spotlight and never takes clicks,
+   * so the page stays usable mid-tour. */
+  #guide { position: fixed; inset: 0; z-index: var(--z-guide); pointer-events: none; }
   #guide .spot {
-    position: fixed;
-    border-radius: 8px;
-    box-shadow: 0 0 0 200vmax rgba(0,0,0,0.55);
-    outline: 2px solid #9fd3b0;
-    outline-offset: 0;
-    transition: left .2s ease, top .2s ease, width .2s ease, height .2s ease;
+    position: fixed; left: 0; top: 0; border-radius: 14px;
+    box-shadow: 0 0 0 200vmax oklch(0.08 0.03 210 / 0.6);
+    outline: 2px solid var(--plankton); outline-offset: 0;
+    transition: transform 220ms var(--ease);
   }
   #guide .spot.none { outline: 0; }
   #guide .card {
-    position: fixed;
-    pointer-events: auto;
+    position: fixed; pointer-events: auto;
     width: min(340px, calc(100vw - 24px));
-    background: #0f1f18;
-    border: 1px solid #3a6a4e;
-    border-radius: 8px;
-    padding: 14px 16px 12px;
-    color: #d5e5da;
-    line-height: 1.5;
-    box-shadow: 0 8px 30px rgba(0,0,0,0.5);
+    padding: 16px 18px 14px;
+    border-radius: var(--r-lg);
+    background: var(--surface); border: 1px solid var(--line);
+    box-shadow: var(--shadow);
+    color: var(--ink-2); line-height: 1.5; font-size: 14px;
   }
-  #guide h2 { font-size: 14px; font-weight: bold; color: #9fd3b0; margin-bottom: 6px; }
+  #guide h2 { font-size: 17px; font-weight: 650; color: var(--ink); margin-bottom: 6px; }
   #guide p { margin-bottom: 4px; }
-  #guide kbd {
-    border: 1px solid #3a6a4e;
-    border-bottom-width: 2px;
-    border-radius: 3px;
-    padding: 0 4px;
-    background: #10201a;
-    font: inherit;
-  }
-  #guide .nav { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
-  #guide .count { flex: 1; color: #6f927e; font-size: 11px; }
-  #guide .skip { background: none; border: 0; color: #8fa89a; text-decoration: underline; padding: 4px 6px; }
-  #guide .next { font-weight: bold; }
-  #modeline { color: #6f927e; font-size: 11px; }
-  #credit { margin-top: auto; padding-top: 8px; font-size: 11px; color: #5f7d6c; }
-  #credit a { color: #7ea08c; }
-  .livetag {
-    margin-left: 6px;
-    font-size: 9px;
-    color: #9fd3b0;
-    border: 1px solid #2f5a40;
-    border-radius: 3px;
-    padding: 0 3px;
-    vertical-align: 1px;
-  }
-  /* ---- dashboards (web/dashboard.js, charts in web/charts.js) ---- */
+  #guide b { color: var(--ink); }
+  #guide kbd { padding: 0 5px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; background: var(--surface-2); font: 12px var(--mono); color: var(--ink); }
+  #guide .nav { display: flex; align-items: center; gap: 8px; margin-top: 14px; }
+  #guide .count { flex: 1; font-size: 12px; color: var(--ink-3); font-family: var(--mono); }
+  #guide button { min-height: 40px; padding: 0 14px; border-radius: 10px; font-size: 14px; font-weight: 600; border: 1px solid var(--line); background: var(--surface-2); }
+  #guide button:hover { background: var(--surface-3); }
+  #guide .skip { border-color: transparent; background: none; color: var(--ink-3); }
+  #guide .next { background: var(--plankton); color: var(--plankton-ink); border-color: transparent; }
+
+  /* ---------- dashboards (web/dashboard.js, charts in web/charts.js) ---------- */
   #dash {
-    position: fixed;
-    inset: 0;
-    z-index: 35;
-    display: flex;
-    flex-direction: column;
-    background: #0a120e;
-    color: #dfe9e3;
-    font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+    position: fixed; inset: 0; z-index: var(--z-dash);
+    display: flex; flex-direction: column;
+    background: var(--abyss); color: var(--ink);
+    padding-top: var(--safe-t);
   }
   #dash[hidden] { display: none; }
-  #dash .dhead { display: flex; align-items: center; gap: 10px 14px; padding: 10px 16px 0; flex-wrap: wrap; }
-  #dash h2 { font-size: 16px; font-weight: 600; white-space: nowrap; }
-  #dtabs { display: flex; gap: 2px; flex: 1 1 auto; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+  #dash .dhead { display: flex; align-items: center; gap: 8px 12px; padding: 10px 12px 0 16px; flex-wrap: wrap; }
+  #dash h2 { display: inline-flex; align-items: center; gap: 8px; font-size: 18px; font-weight: 650; white-space: nowrap; }
+  #dtabs { order: 3; flex-basis: 100%; display: flex; gap: 2px; min-width: 0; overflow-x: auto; scrollbar-width: none; }
   #dtabs::-webkit-scrollbar { display: none; }
-  #dash button { font: 13px system-ui, -apple-system, "Segoe UI", sans-serif; }
   #dtabs button {
-    background: none;
-    border: 0;
-    border-bottom: 2px solid transparent;
-    border-radius: 0;
-    color: #a9bdb1;
-    padding: 8px 10px;
-    white-space: nowrap;
+    flex: none; min-height: 44px; padding: 0 12px;
+    border: 0; border-bottom: 2px solid transparent; border-radius: 0;
+    background: none; color: var(--ink-3); font-size: 14px; font-weight: 600; white-space: nowrap;
   }
-  #dtabs button:hover { background: #12231b; }
-  #dtabs button[aria-selected="true"] { color: #eaf6ee; border-bottom-color: #3987e5; }
+  #dtabs button:hover { color: var(--ink); }
+  #dtabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--plankton); }
   #dash .dtools { display: flex; gap: 6px; margin-left: auto; }
-  #dash .dtools button { padding: 5px 10px; }
-  #dclose { width: 36px; padding: 0 !important; font-size: 16px !important; }
-  #dnote { padding: 6px 16px 8px; font-size: 12px; color: #7f958a; border-bottom: 1px solid #1d2c25; }
+  #dash .dtools .btn { min-height: 40px; padding: 0 12px; font-size: 13px; }
+  #dnote { padding: 8px 16px 10px; font-size: 13px; color: var(--ink-3); border-bottom: 1px solid var(--line-soft); }
   #dgrid {
-    flex: 1 1 auto;
-    overflow-y: auto;
-    padding: 14px 16px 28px;
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(440px, 1fr));
-    gap: 14px;
-    align-content: start;
+    flex: 1 1 auto; overflow-y: auto; overscroll-behavior: contain;
+    padding: 12px 12px calc(28px + var(--safe-b));
+    display: grid; grid-template-columns: 1fr; gap: 12px; align-content: start;
   }
-  .dcard { background: #101c17; border: 1px solid #1d2c25; border-radius: 8px; padding: 12px 14px 10px; min-width: 0; }
+  .dcard { background: var(--surface); border: 1px solid var(--line-soft); border-radius: var(--r-md); padding: 12px 12px 10px; min-width: 0; }
   .dcard.wide { grid-column: 1 / -1; }
-  .dcard h3 { font-size: 13px; font-weight: 600; }
-  .dcard .cap { font-size: 12px; color: #a9bdb1; line-height: 1.45; margin: 3px 0 8px; }
-  .dcard .cbox { position: relative; height: 210px; }
-  .dcard .cbox.tall { height: 340px; }
+  .dcard h3 { font-size: 14px; font-weight: 650; }
+  .dcard .cap { font-size: 13px; color: var(--ink-3); line-height: 1.45; margin: 3px 0 8px; max-width: 70ch; }
+  .dcard .cbox { position: relative; height: 200px; }
+  .dcard .cbox.tall { height: 300px; }
   .dcard .cbox.huge { height: min(70vh, 640px); }
-  .dcard .cbox.xtall { height: 560px; }
-  .dcard .cbox canvas {
-    position: absolute;
-    inset: 0;
-    width: 100%;
-    height: 100%;
-    max-width: none;
-    max-height: none;
-    border: 0;
-    background: none;
-    touch-action: pan-y;
-  }
-  .dcard .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 6px; font-size: 11px; color: #a9bdb1; }
+  .dcard .cbox.xtall { height: 540px; }
+  .dcard .cbox canvas { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: pan-y; }
+  .dcard .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 6px; font-size: 12px; color: var(--ink-3); }
   .dcard .legend:empty { display: none; }
   .legend .li { display: inline-flex; align-items: center; gap: 5px; }
   .legend i, .charttip i { display: inline-block; flex: none; width: 12px; height: 10px; border-radius: 2px; }
-  .legend b { color: #dfe9e3; font-weight: 600; }
+  .legend b { color: var(--ink); font-weight: 600; }
   .legend .scale { display: inline-block; width: 140px; height: 10px; border-radius: 2px; }
-  .dcard .cnote { font-size: 11px; color: #7f958a; margin-top: 4px; }
+  .dcard .cnote { font-size: 12px; color: var(--ink-3); margin-top: 4px; }
   .dcard .cnote:empty { display: none; }
   .dcard.off .cbox, .dcard.off .legend { display: none; }
-  .dcard.off .cnote { color: #a9bdb1; font-size: 12px; }
+  .dcard.off .cnote { color: var(--ink-2); font-size: 13px; }
   .charttip {
-    position: fixed;
-    z-index: 60;
-    display: none;
-    pointer-events: none;
-    min-width: 130px;
-    max-width: 300px;
-    background: rgba(8,16,12,0.96);
-    border: 1px solid #2a4a3a;
-    border-radius: 6px;
-    padding: 6px 9px;
-    font: 12px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
-    color: #dfe9e3;
+    position: fixed; z-index: var(--z-tip); display: none; pointer-events: none;
+    min-width: 130px; max-width: 300px; padding: 7px 10px;
+    border-radius: var(--r-sm); background: var(--surface-2); border: 1px solid var(--line);
+    font: 12px/1.45 var(--font); color: var(--ink);
   }
-  .charttip .th { color: #a9bdb1; margin-bottom: 2px; }
+  .charttip .th { color: var(--ink-3); margin-bottom: 2px; }
   .charttip .tr { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
-  .charttip .tr span { flex: 1; color: #a9bdb1; }
+  .charttip .tr span { flex: 1; color: var(--ink-3); }
   .charttip .tr b { font-weight: 600; font-variant-numeric: tabular-nums; }
-  @media (max-width: 700px) {
-    #dash .dhead { padding: 8px 10px 0; }
-    #dtabs { order: 3; flex-basis: 100%; }
-    #dnote { padding: 4px 10px 6px; }
-    #dgrid { grid-template-columns: 1fr; padding: 10px 10px 24px; gap: 10px; }
-    .dcard { padding: 10px 10px 8px; }
-    .dcard .cbox { height: 190px; }
-    .dcard .cbox.tall { height: 300px; }
-    .dcard .cbox.xtall { height: 540px; }
+
+  #benchout {
+    position: fixed; left: 12px; top: 72px; z-index: var(--z-toast);
+    max-width: calc(100vw - 24px); overflow: auto;
+    padding: 12px 14px; border-radius: var(--r-md);
+    background: var(--surface); border: 1px solid var(--line);
+    font: 12px/1.5 var(--mono); color: var(--ink); white-space: pre;
+  }
+
+  /* ---------- larger screens ---------- */
+  @media (min-width: 600px) {
+    #readout .mark span { display: inline; }
+    #turbobtn span { display: inline; }
+    #fishcard { left: auto; right: 16px; width: 380px; }
+    #fishcard.flip { left: 16px; right: auto; top: auto; bottom: calc(var(--dock-b) + var(--dock-h) + 10px); }
+    #dgrid { grid-template-columns: repeat(auto-fill, minmax(440px, 1fr)); padding: 14px 16px 28px; gap: 14px; }
+    #dtabs { order: 0; flex: 1 1 auto; flex-basis: auto; }
+    .dcard { padding: 14px 16px 12px; }
+    .dcard .cbox { height: 210px; }
+    .dcard .cbox.tall { height: 340px; }
+    .dcard .cbox.xtall { height: 560px; }
+  }
+  @media (min-width: 960px) {
+    /* the settings sit beside the world so a change can be watched */
+    #drawer {
+      left: auto; top: 0; width: 400px; height: 100dvh;
+      border-top: 0; border-left: 1px solid var(--line);
+      border-radius: 0;
+      transform: translateX(100%);
+      padding-top: var(--safe-t);
+    }
+    .sheet-grip { display: none; }
+    .sheet-head { padding-top: 14px; }
+    body.sheet-open #stage { right: 406px; }
+    body.sheet-open #dock { transform: translateX(calc(-50% - 200px)); opacity: 1; pointer-events: auto; }
+    body.sheet-open #fishcard { right: 416px; }
+    body.sheet-open #tools { margin-right: 400px; }
+    body.sheet-open #toasts { transform: translateX(calc(-50% - 200px)); }
+    #fishcard, #fishcard.flip { top: calc(76px + var(--safe-t)); bottom: auto; max-height: calc(100dvh - 180px); }
+    #fishcard.expanded .fc-brain .inet { height: 320px; }
   }
   @media (pointer: coarse) {
-    #dclose { width: 44px; }
-    #dtabs button { min-height: 44px; }
+    .stepper { height: 44px; }
+    .stepper button { width: 44px; }
+    .stepper input, select { font-size: 16px; }   /* 16px keeps iOS from zooming on focus */
   }
-  #benchout {
-    position: fixed;
-    left: 12px;
-    top: 12px;
-    z-index: 15;
-    max-width: calc(100vw - 80px);
-    overflow: auto;
-    background: rgba(8,18,13,0.92);
-    border: 1px solid #2a4a3a;
-    border-radius: 4px;
-    padding: 10px 12px;
-    font-size: 12px;
-    color: #d5e5da;
-    white-space: pre;
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: 1ms !important; transition-duration: 1ms !important; }
+    #splash .swim::after { animation: none; width: 100%; }
   }
 </style>
 </head>
 <body>
-  <div id="stage"><canvas id="canvas" width="1920" height="1080"></canvas></div>
-  <div id="status" aria-live="off">loading…</div>
-  <div id="inspector">
-    <div class="ihead">
-      <div class="itext"><div id="ititle"></div><div id="isub"></div></div>
-      <button id="iclose" aria-label="close the inspector">&#10005;</button>
+  <!-- icons: one stroke set, used through <use> -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <symbol id="i-fish" viewBox="0 0 24 24"><path d="M3 12c3-4.5 8.5-5.5 13-2.5L20 6v12l-4-3.5C11.5 17.5 6 16.5 3 12Z"/><circle cx="8" cy="11.3" r=".9" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4.5v15l12-7.5-12-7.5Z" fill="currentColor"/></symbol>
+    <symbol id="i-pause" viewBox="0 0 24 24"><rect x="6" y="4.5" width="4" height="15" rx="1.2" fill="currentColor" stroke="none"/><rect x="14" y="4.5" width="4" height="15" rx="1.2" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="i-minus" viewBox="0 0 24 24"><path d="M5 12h14"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 2.5 4.5 14H11l-1 7.5 8.5-11.5H12l1-7.5Z"/></symbol>
+    <symbol id="i-dice" viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="17" height="17" rx="4"/><circle cx="8.5" cy="8.5" r="1.1" fill="currentColor" stroke="none"/><circle cx="15.5" cy="15.5" r="1.1" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.1" fill="currentColor" stroke="none"/><circle cx="15.5" cy="8.5" r="1.1" fill="currentColor" stroke="none"/><circle cx="8.5" cy="15.5" r="1.1" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2.2"/><circle cx="10" cy="17" r="2.2"/></symbol>
+    <symbol id="i-chart" viewBox="0 0 24 24"><path d="M4 20h16M7 16v-5M12 16V6M17 16v-8"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+    <symbol id="i-restart" viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 2.4-5.7M4 4v4.5h4.5"/></symbol>
+    <symbol id="i-save" viewBox="0 0 24 24"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 19h14"/></symbol>
+    <symbol id="i-load" viewBox="0 0 24 24"><path d="M12 15V4m0 0L8 8m4-4 4 4M5 19h14"/></symbol>
+    <symbol id="i-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M9.6 9.5a2.5 2.5 0 1 1 3.3 2.4c-.6.2-.9.7-.9 1.3v.6"/><circle cx="12" cy="16.6" r=".6" fill="currentColor"/></symbol>
+    <symbol id="i-frame" viewBox="0 0 24 24"><path d="M4 9V5.5A1.5 1.5 0 0 1 5.5 4H9M15 4h3.5A1.5 1.5 0 0 1 20 5.5V9M20 15v3.5a1.5 1.5 0 0 1-1.5 1.5H15M9 20H5.5A1.5 1.5 0 0 1 4 18.5V15"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m6 15 6-6 6 6"/></symbol>
+  </svg>
+
+  <div id="stage"><canvas id="canvas" width="1920" height="1080" aria-label="the simulated ocean: click or tap a fish to inspect it"></canvas></div>
+
+  <header id="topbar">
+    <button id="readout" class="chip-surface" aria-expanded="false" aria-controls="statpanel" title="live numbers: tap for details">
+      <span class="mark"><svg class="i"><use href="#i-fish"/></svg><span>evo_boids</span></span>
+      <span class="sep" aria-hidden="true"></span>
+      <span><b id="ro-fish" class="num">–</b> fish</span>
+      <span>gen <b id="ro-gen" class="num">–</b></span>
+      <span><b id="ro-fps" class="num">–</b> fps</span>
+      <span id="ro-gov" hidden title="the frame budget changed this run: it no longer replays from its seed"><span class="sr">governed run</span></span>
+    </button>
+    <div id="tools" class="chip-surface">
+      <button id="dashbtn" class="icon-btn" aria-label="dashboards: charts of this run" aria-expanded="false" title="Dashboards"><svg class="i"><use href="#i-chart"/></svg></button>
+      <button id="menubtn" class="icon-btn" aria-label="settings" aria-expanded="false" aria-controls="drawer" title="Settings"><svg class="i"><use href="#i-sliders"/></svg></button>
     </div>
-    <div class="inet"><canvas id="inetc"></canvas></div>
+  </header>
+  <div id="statpanel" class="chip-surface" hidden aria-live="off"></div>
+  <button id="fitbtn" class="btn chip-surface" hidden><svg class="i"><use href="#i-frame"/></svg>Fit the world to this screen</button>
+  <div id="toasts" aria-live="polite"></div>
+
+  <section id="fishcard" class="chip-surface" hidden aria-label="the selected fish">
+    <div class="fc-head">
+      <canvas id="iportrait" aria-hidden="true"></canvas>
+      <div class="fc-title"><div id="ititle">Fish</div><div id="isub"></div></div>
+      <button id="iexpand" class="icon-btn" aria-expanded="false" title="Show its brain"><svg class="i"><use href="#i-chevron"/></svg><span class="sr">brain</span></button>
+      <button id="iclose" class="icon-btn" aria-label="close"><svg class="i"><use href="#i-close"/></svg></button>
+    </div>
+    <div class="fc-stats">
+      <div class="stat"><div class="k">Energy</div><div class="v" id="ienergyv">–</div><div class="bar" id="ienergy"><i></i><span class="tick"></span></div></div>
+      <div class="stat"><div class="k">Age</div><div class="v" id="iagev">–</div><div class="bar" id="iage"><i></i></div></div>
+      <div class="stat"><div class="k">Speed</div><div class="v" id="ispeedv">–</div><div class="bar" id="ispeed"><i></i></div></div>
+    </div>
+    <div class="fc-brain">
+      <div class="inet"><canvas id="inetc" aria-label="its neural network, live"></canvas></div>
+      <p id="isense"></p>
+    </div>
+  </section>
+
+  <nav id="dock" class="chip-surface" aria-label="playback">
+    <button id="pausebtn" class="icon-btn" title="Pause (Space)" aria-label="pause"><svg class="i"><use href="#i-pause"/></svg></button>
+    <div class="speed" role="group" aria-label="speed">
+      <button id="slower" class="icon-btn" title="Slower (↓)" aria-label="slower"><svg class="i"><use href="#i-minus"/></svg></button>
+      <output id="speedlabel" aria-live="polite">1×</output>
+      <button id="faster" class="icon-btn" title="Faster (↑)" aria-label="faster"><svg class="i"><use href="#i-plus"/></svg></button>
+    </div>
+    <button id="turbobtn" class="icon-btn" aria-pressed="false" title="Turbo: run headless in a worker at full speed"><svg class="i"><use href="#i-bolt"/></svg><span>Turbo</span></button>
+    <button id="randombtn" class="icon-btn" title="Randomize: a new world from tested ranges" aria-label="randomize the world"><svg class="i"><use href="#i-dice"/></svg></button>
+  </nav>
+
+  <aside id="drawer" role="dialog" aria-label="settings" aria-modal="false">
+    <div class="sheet-grip" id="grip" aria-hidden="true"></div>
+    <div class="sheet-head">
+      <h2>Settings</h2>
+      <button id="guidebtn" class="btn ghost" title="replay the tour"><svg class="i"><use href="#i-help"/></svg>Tour</button>
+      <button id="drawerclose" class="icon-btn" aria-label="close settings"><svg class="i"><use href="#i-close"/></svg></button>
+    </div>
+    <nav id="tabs" role="tablist" aria-label="settings sections"></nav>
+    <div id="panels">
+      <section class="panel" data-tab="run" id="panel-run">
+        <div class="run-hero">
+          <button id="randombig" class="btn primary"><svg class="i"><use href="#i-dice"/></svg>Randomize the world</button>
+          <p>Draws a whole setup from ranges that worked in experiments (predators, currents, schooling rules) and restarts.</p>
+          <p id="randnote"></p>
+        </div>
+        <h3>Playback</h3>
+        <div class="field" id="f_governor">
+          <span><span class="name"><span class="lt">Hold 60 fps</span></span><span class="desc">Lowers the speed, then removes fish at random, when this device can't keep up.</span></span>
+          <span class="ctl"><input id="governor" class="switch" type="checkbox" role="switch" checked aria-label="hold 60 fps"></span>
+        </div>
+        <p id="modeline"></p>
+        <h3>Save &amp; load</h3>
+        <div class="row2">
+          <button id="savecp" class="btn"><svg class="i"><use href="#i-save"/></svg>Save world</button>
+          <button id="loadcp" class="btn"><svg class="i"><use href="#i-load"/></svg>Load world</button>
+        </div>
+        <input id="cpfile" type="file" accept=".json" hidden>
+        <h3>Defaults</h3>
+        <button id="advreset" class="btn ghost" style="margin-top:8px">Reset every setting</button>
+        <p id="credit">evo_boids © 2026 Harit Tarwani ·
+          <a href="https://creativecommons.org/licenses/by-nc/4.0/" target="_blank" rel="noopener noreferrer">CC BY-NC 4.0</a></p>
+      </section>
+      <!-- the other panels are built by renderer.js (SETTINGS_TABS) -->
+    </div>
+    <div id="applybar">
+      <button id="restart" class="btn"><svg class="i"><use href="#i-restart"/></svg><span>Restart</span></button>
+      <span id="err" role="status"></span>
+    </div>
+  </aside>
+
+  <div id="turbo" hidden>
+    <div class="card chip-surface" role="status">
+      <h2><svg class="i"><use href="#i-bolt"/></svg>Turbo</h2>
+      <p id="turbomsg">Running headless in a background worker. Nothing is drawn, so it goes many times faster.</p>
+      <div id="turbostats">
+        <div><span>Steps / s</span><b id="ts-rate">–</b></div>
+        <div><span>Steps this run</span><b id="ts-steps">–</b></div>
+        <div><span>Fish</span><b id="ts-pop">–</b></div>
+        <div><span>Food</span><b id="ts-food">–</b></div>
+      </div>
+      <button id="turboexit" class="btn primary">Stop Turbo and watch</button>
+    </div>
   </div>
-  <button id="fitbtn" hidden>&#10530; fit to screen (restarts)</button>
-  <button id="dashbtn" aria-label="open the dashboards" aria-expanded="false" title="dashboards: charts of this run">&#128202;</button>
-  <button id="menubtn" aria-label="open controls">&#9776;</button>
+
   <div id="dash" role="dialog" aria-label="dashboards" hidden>
     <div class="dhead">
-      <h2>&#128202; Dashboards</h2>
+      <h2><svg class="i"><use href="#i-chart"/></svg>Dashboards</h2>
       <nav id="dtabs" role="tablist"></nav>
       <div class="dtools">
-        <button id="dcsv" title="every recorded sample, as a spreadsheet">&#10515; CSV</button>
-        <button id="dtree" title="the family tree in Newick format, for tree viewers such as FigTree or iTOL">&#10515; Tree</button>
-        <button id="dclose" aria-label="close the dashboards">&#10005;</button>
+        <button id="dcsv" class="btn" title="every recorded sample, as a spreadsheet"><svg class="i"><use href="#i-save"/></svg>CSV</button>
+        <button id="dtree" class="btn" title="the family tree in Newick format, for tree viewers such as FigTree or iTOL"><svg class="i"><use href="#i-save"/></svg>Tree</button>
+        <button id="dclose" class="icon-btn" aria-label="close the dashboards"><svg class="i"><use href="#i-close"/></svg></button>
       </div>
     </div>
     <p id="dnote"></p>
     <div id="dgrid"></div>
   </div>
-  <div id="drawer">
-    <h1>evo_boids — wasm</h1>
-    <div class="row" id="quick">
-      <button id="randombtn" title="draw a setup from ranges that worked in our experiments, and restart">&#127922; Randomize</button>
-      <button id="guidebtn" title="replay the first-visit tour">? Guide</button>
-    </div>
-    <p id="randnote"></p>
-    <div id="bar">
-      <fieldset>
-        <legend>playback</legend>
-        <button id="pausebtn">Pause</button>
-        <button id="slower">&minus;</button>
-        <span id="speedlabel">speed 1x</span>
-        <button id="faster">+</button>
-        <button id="turbobtn" title="run headless in a worker at full speed — no rendering, keeps running in background tabs; toggling is bit-exact">Turbo</button>
-        <label><span class="lt">hold 60 fps</span><input id="governor" type="checkbox" checked></label>
-        <span id="modeline"></span>
-      </fieldset>
-      <fieldset>
-        <legend>checkpoint</legend>
-        <button id="savecp">Save checkpoint</button>
-        <button id="loadcp">Load checkpoint</button>
-        <input id="cpfile" type="file" accept=".json" hidden>
-      </fieldset>
-    </div>
-    <div id="controls">
-      <fieldset>
-        <legend>world</legend>
-        <label><span class="lt">seed</span><input id="seed" type="number" value="42" min="0" step="1"></label>
-        <label><span class="lt">population</span><input id="population" type="number" value="300" min="1" step="1"></label>
-        <label><span class="lt">toroidal</span><input id="toroidal" type="checkbox"></label>
-        <label><span class="lt">body model</span><input id="bodyModel" type="checkbox"></label>
-      </fieldset>
-      <fieldset>
-        <legend>predators</legend>
-        <label><span class="lt">predators</span><input id="predators" type="number" value="0" min="0" step="1"></label>
-        <label><span class="lt">predator economy</span><input id="predatorEconomy" type="checkbox"></label>
-      </fieldset>
-      <fieldset>
-        <legend>environment</legend>
-        <label><span class="lt">food patches</span><input id="foodPatches" type="number" value="0" min="0" step="1"></label>
-        <label><span class="lt">current strength</span><input id="currentStrength" type="number" value="0" min="0" step="1"></label>
-      </fieldset>
-    </div>
-    <details id="adv">
-      <summary>advanced settings</summary>
-      <div id="advgrid"></div>
-      <button id="advreset">reset to defaults</button>
-    </details>
-    <p id="credit">evo_boids © 2026 Harit Tarwani ·
-      <a href="https://creativecommons.org/licenses/by-nc/4.0/" target="_blank" rel="noopener noreferrer">CC BY-NC 4.0</a></p>
-    <!-- pinned to the menu's bottom edge: in reach from any setting -->
-    <div class="row" id="applybar">
-      <button id="restart">Restart</button>
-      <span id="err"></span>
+
+  <div id="splash" aria-live="polite">
+    <div>
+      <div class="word"><svg class="i"><use href="#i-fish"/></svg>evo_boids</div>
+      <p>Fish with tiny brains, evolving in your browser.</p>
+      <span class="swim" aria-hidden="true"></span>
+      <div id="splashstate">Starting the world…</div>
     </div>
   </div>
+
   <script>
     /* Asset URLs, relative to this page. web/ served from the repo root uses
      * them as-is; the deploy build (wasm/build_site.sh) rewrites this block

@@ -42,15 +42,20 @@
     { drawer: false, title: function () { return tank() ? "The tank" : "The ocean"; },
       target: function () { return rectOf(tank() ? "#scene3d" : "#canvas"); },
       body: function () {
+        var brain = app().colourByBrain && app().colourByBrain();
         if (tank()) {
           return "This is the tank view: the same world drawn in 3D, for looks. Glowing specks are " +
-                 "food, colour follows the genes, and the dark fish with glowing eyes are predators. " +
+                 "food, " + (brain ? "colour follows the brain's wiring" : "each family has its own colour") +
+                 ", and the dark fish with glowing eyes are predators. " +
                  (touch() ? "Drag to look around, pinch to zoom, twist with two fingers to turn. "
                           : "Drag to look around, scroll to zoom, right-drag to tilt and turn. ") +
                  "The flat view, in the settings, shows the world as the simulation sees it.";
         }
-        return "Green dots are food. Fish that find enough of it have children. Colour follows " +
-               "the genes, so look-alikes are relatives. Red dots, when there are any, are " +
+        return "Green dots are food. Fish that find enough of it have children. " +
+               (brain ? "Colour follows the brain's wiring, so look-alikes think alike. "
+                      : "Each family (every fish descended from one starting fish) has its own colour; " +
+                        "the Run settings can colour by brain instead. ") +
+               "Red dots, when there are any, are " +
                "predators: bright while they hunt, dim while they digest.";
       } },
     { drawer: false, title: "A fish's brain", fish: true,

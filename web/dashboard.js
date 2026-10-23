@@ -93,14 +93,27 @@
   };
   function pct(v) { return Math.round(v * 100) + "%"; }
   function lineName(id) { return "line #" + id; }
+  /* A family line's colour is the one its fish are drawn in by family
+   * (evo_family_color: a hash of the line's id), so a band here and its fish
+   * in the ocean match, and a line keeps its colour across restarts and
+   * checkpoint loads. Before 2026-10-23 lines took the palette's slots first-come,
+   * so whichever family was biggest when a recording began came out blue. */
+  var famColor = new Map();
   function lineColor(lin) {
-    var s = lines.slotOf.get(lin);
-    return s === undefined ? T.other : S[s];
+    var c = famColor.get(lin);
+    if (c === undefined) {
+      if (!M || !M._evo_family_color) {   /* an older module: the slot colour */
+        var s = lines.slotOf.get(lin);
+        return s === undefined ? T.other : S[s];
+      }
+      c = "#" + (0x1000000 | M._evo_family_color(lin)).toString(16).slice(1);
+      famColor.set(lin, c);
+    }
+    return c;
   }
 
-  /* Muller layers: each coloured family line's share per sample, stacked in
-   * colour-slot order (so neighbouring bands are neighbours in the validated
-   * palette order), the uncoloured rest on top */
+  /* Muller layers: each named family line's share per sample, stacked in the
+   * order the lines were named (stable as the chart grows), the rest on top */
   function mullerData() {
     var ids = Array.from(lines.slotOf.keys()).sort(function (a, b) { return lines.slotOf.get(a) - lines.slotOf.get(b); });
     var n = hist.n, ys = ids.map(function () { return new Array(n).fill(0); }), other = new Array(n);
@@ -113,7 +126,7 @@
       }
       other[i] = Math.max(0, 1 - sum);
     }
-    var layers = ids.map(function (id, k) { return { name: lineName(id), y: ys[k], color: S[lines.slotOf.get(id)] }; });
+    var layers = ids.map(function (id, k) { return { name: lineName(id), y: ys[k], color: lineColor(id) }; });
     layers.push({ name: "other lines", y: other, color: T.other });
     return { t: view.t, layers: layers, empty: "family lines appear after a few seconds" };
   }
@@ -347,13 +360,13 @@
     ] },
     { id: "lines", name: "Family lines", cards: [
       { id: "muller", title: "Family lines over time (Muller plot)", wide: true, tall: true, draw: C.stack,
-        cap: "Every fish belongs to the family line of its first parent's line, back to a starting fish. Each colour is one line's share of all fish; a colour spreading over the chart is a line taking over. Grey is all the smaller lines.",
+        cap: "Every fish belongs to the family line of its first parent's line, back to a starting fish. Each colour is one line's share of all fish, in the colour its fish have in the ocean; a colour spreading over the chart is a line taking over. Grey is all the smaller lines.",
         data: mullerData,
         legend: function () {
           var last = hist.n - 1, top = last >= 0 ? hist.top(last) : [], pop = last >= 0 ? hist.get(last, COL.pop) || 1 : 1;
           var share = new Map(top.map(function (p) { return [p[0], p[1] / pop]; }));
           var items = Array.from(lines.slotOf.keys()).map(function (id) {
-            return { id: id, name: lineName(id), color: S[lines.slotOf.get(id)], square: true, share: share.get(id) || 0 };
+            return { id: id, name: lineName(id), color: lineColor(id), square: true, share: share.get(id) || 0 };
           }).sort(function (a, b) { return b.share - a.share || a.id - b.id; });
           items.forEach(function (it) { it.value = it.share ? (it.share * 100).toFixed(0) + "%" : "gone"; });
           items.push({ name: "other lines", color: T.other, square: true });
@@ -393,16 +406,17 @@
         legendRange: function (d) { return d ? ["alike " + d.lo.toFixed(1), d.max.toFixed(1) + " different"] : null; },
         note: function (d) { return d ? d.m + " fish · sampled at " + C.fmtTime(d.frame * DT) + " · refreshes every 10 s" : ""; } },
       { id: "simmap", title: "Genome map", tall: true, draw: C.scatter, ondemand: true,
-        cap: "The same fish, placed so similar brains sit close together (classical MDS), each in its own colour from the ocean. Separate clouds are groups drifting apart.",
+        cap: "The same fish, placed so similar brains sit close together (classical MDS), each in its colour from the ocean: by family line, or by brain with that switch on. Separate clouds are groups drifting apart; one family split across clouds is a family diverging.",
         data: function () {
           var d = similarity();
           if (!d) return null;
+          var brain = host && host.colourByBrain && host.colourByBrain();
           return { x: Array.from({ length: d.m }, function (_, i) { return d.xy[2 * i]; }),
                    y: Array.from({ length: d.m }, function (_, i) { return d.xy[2 * i + 1]; }),
-                   color: function (i) { return d.rgb[i]; },
+                   color: function (i) { return brain ? d.rgb[i] : lineColor(d.lins[i]); },
                    tip: function (i) {
-                     return "<div class='th'>fish #" + d.ids[i] + "</div>" + C.tipRow(d.rgb[i], "colour in the ocean", "", true) +
-                       C.tipRow(lineColor(d.lins[i]), "family line", "#" + d.lins[i]);
+                     return "<div class='th'>fish #" + d.ids[i] + "</div>" + C.tipRow(lineColor(d.lins[i]), "family line", "#" + d.lins[i]) +
+                       C.tipRow(d.rgb[i], "brain colour", "", true);
                    } };
         } },
       { id: "simhist", title: "How far apart pairs are", tall: true, draw: C.hist, ondemand: true,

@@ -33,8 +33,8 @@
     if (!(b > 0)) return 1;  /* absent buffer (older wasm blob) or NaN */
     return 1 + BODY_SPAN * Math.tanh(BODY_GAIN * (b - 1));
   }
-  /* evo_inspect_info(): id, speed, foodReserves, age, bodySize, bodyElong, generation. */
-  var INSPECT_INFO_LEN = 7;
+  /* evo_inspect_info(): id, speed, foodReserves, age, bodySize, bodyElong, generation, lineageId. */
+  var INSPECT_INFO_LEN = 8;
   var CUR_TAIL = "rgba(110,170,215," + (60 / 255).toFixed(4) + ")";
   var CUR_HEAD = "rgba(150,205,235," + (130 / 255).toFixed(4) + ")";
   var RING_STYLE = "rgba(255,235,120," + (230 / 255).toFixed(4) + ")";
@@ -243,6 +243,7 @@
     minPopulation: { d: "Reseed floor: random founders are added when the population falls below it. Applies live.", t: "try: 50 (the default)" },
     governor: { d: "When frames take too long: first lower the speed (in the tank view, first draw the tank with less detail), then remove creatures at random (no trait favoured) and cap births at what this machine can run at 60 fps. Each step is reported; a governed run no longer replays from its seed.", t: "try: on; off to see the uncapped run (it may stutter)" },
     fishShape: { d: "Draws each fish as one smooth body over the six spine points the simulation keeps, instead of a circle at each point. Its half-width at each point is that point's circle radius and its length is the spine itself, so body size and elongation show as they do with circles; the tail fin is an addition that grows with body size. Needs WebGL2 (the canvas-2D fallback keeps the circles); the native app draws circles.", t: "try: on for a fish look; off to match the native window" },
+    colourBrain: { d: "Off: each family line (every fish descended from the same starting fish) has its own colour, the one it has in the dashboards, so you can watch families spread and take over. On: the colour comes from the genome's wiring, so similar brains look alike. Long runs tend to turn blue there, because evolution keeps finding the same rules for using a fish's own energy, and those happen to point at blue (README).", t: "try: off to follow families, on to see what their brains converged on" },
     view3d: { d: "Draws the same world as a 3D tank seen at an angle: fish bent along their spine in their genome colour, lit and shaded, plus motion the simulation does not have (tail beats, swim heights, drifting specks, caustic light). Distances look shorter far away, and the world still wraps at its edges. The simulation and every setting are unchanged.", t: "try: on for looks; off to see the world as the simulation sees it" }
   };
 
@@ -475,6 +476,7 @@
     attachTip(el("f_governor"), "governor");
     attachTip(el("f_view3d"), "view3d");
     attachTip(el("f_fishShape"), "fishShape");
+    attachTip(el("f_colourBrain"), "colourBrain");
     var saved = null;
     try { saved = localStorage.getItem("evo_boids.tab"); } catch (e) { /* private mode */ }
     setSheetTab(saved && el("panel-" + saved) ? saved : "run");
@@ -907,7 +909,7 @@
     var pkey = id + "|" + rgb.join() + "|" + info[4].toFixed(2) + "|" + info[5].toFixed(2);
     if (cardFor !== pkey) { cardFor = pkey; drawPortrait(rgb, info[4], info[5]); }
     setText("ititle", "Fish #" + id);
-    setText("isub", "Generation " + Math.round(info[6]) +
+    setText("isub", "Generation " + Math.round(info[6]) + " · family #" + Math.round(info[7]) +
             (cfgVal("bodyModel", false) ? " · body " + info[4].toFixed(2) + " × " + info[5].toFixed(2) : ""));
     var reproE = cfgVal("reproEnergy", 20), maxAge = cfgVal("maxAge", 120), maxSpd = cfgVal("maxSpeed", 150);
     setText("ienergyv", info[2].toFixed(1));
@@ -1339,8 +1341,9 @@
   });
 
   function drawingName() {
-    return view3d ? "3D tank, detail " + scene.quality() + " of 3"
-                  : (glScene ? "WebGL2" : "canvas 2D") + (LOOK.fishShape ? ", fish shapes" : "");
+    return (view3d ? "3D tank, detail " + scene.quality() + " of 3"
+                   : (glScene ? "WebGL2" : "canvas 2D") + (LOOK.fishShape ? ", fish shapes" : "")) +
+           (colourBrain ? ", coloured by brain" : ", coloured by family");
   }
 
   var splashDone = false, turboPaint = 0, lastNow = 0;
@@ -1975,7 +1978,7 @@
     updateNeeds();
     updateTabDots();
     if (!t || !t.id || (t.id.indexOf("adv_") === 0 && LIVE[t.id.slice(4)])) return;  /* applies by itself */
-    if (t.id === "governor" || t.id === "view3d" || t.id === "fishShape" || t.id === "cpfile") return;   /* not settings Restart applies */
+    if (t.id === "governor" || t.id === "view3d" || t.id === "fishShape" || t.id === "colourBrain" || t.id === "cpfile") return;   /* not settings Restart applies */
     setPending(true);
   }
 
@@ -2043,6 +2046,34 @@
     LOOK.fishShape = want === "1";
     el("fishShape").checked = LOOK.fishShape;
   })();
+  /* Fish colour: by family line (the default) or by brain similarity — the
+   * genome colour the native app draws. ?colour=brain / ?colour=family, else
+   * this visitor's last choice (remembered only when they flip the switch).
+   * Display only: the shim fills the one colour buffer every renderer reads
+   * from one or the other (evo_set_colour_mode), and the run is the same. */
+  var COLOUR_KEY = "evo_boids.colourBy", colourBrain = false;
+  function applyColourMode() {
+    if (!Module || !Module._evo_set_colour_mode) return;
+    Module._evo_set_colour_mode(colourBrain ? 0 : 1);
+    Module._evo_sync();
+  }
+  function setColourBrain(on, remember) {
+    colourBrain = on;
+    el("colourBrain").checked = on;
+    if (remember) {
+      try { localStorage.setItem(COLOUR_KEY, on ? "brain" : "family"); } catch (e) { /* private mode */ }
+    }
+    applyColourMode();
+    if (Module) updateModeline();
+  }
+  (function () {
+    var want = PARAMS.get("colour"), saved = null;
+    try { saved = localStorage.getItem(COLOUR_KEY); } catch (e) { /* private mode */ }
+    if (want !== "brain" && want !== "family") want = saved === "brain" ? "brain" : "family";
+    colourBrain = want === "brain";
+    el("colourBrain").checked = colourBrain;
+  })();
+  el("colourBrain").addEventListener("change", function () { setColourBrain(this.checked, true); this.blur(); });
   var fitTimer = 0;
   window.addEventListener("resize", function () {
     if (scene) { scene.resize(); updateInsets(); }
@@ -2092,6 +2123,8 @@
     /* the selected fish is the card (compact screens, and the tank view) */
     compact: function () { return compactMQ.matches || view3d; },
     has3D: function () { return view3d; },
+    /* fish coloured by brain similarity (else by family line) */
+    colourByBrain: function () { return colourBrain; },
     /* the Turbo intro's "Try Turbo" */
     startTurbo: function () { if (Module && turboState === "live") enterTurbo(); },
     setDrawer: setDrawer,
@@ -2136,9 +2169,12 @@
     threadWhy = r.why;
     moduleUrls = { js: r.js, wasm: r.wasm };
     if (Module._evo_stats_len) STATS_LEN = Module._evo_stats_len();
+    applyColourMode();
     if (dash() && Module._evo_rec_take) dash().attach({
       module: Module, heap: heap, actionNames: ACTION_NAMES, setDrawer: setDrawer,
       runConfig: function () { return runCfg; },
+      /* fish drawn by brain (genome colour) instead of by family line */
+      colourByBrain: function () { return colourBrain; },
       /* the sampling interval, here and in a running Turbo worker */
       setRecEvery: function (every) {
         Module._evo_rec_config(every, -1);

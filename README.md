@@ -47,7 +47,7 @@ tests/         core_tests, predator_smoke, core_bench (no SFML needed)
   - `evo_boids_mt` uses pthreads. It needs `SharedArrayBuffer`, which browsers allow only on cross-origin-isolated pages (COOP `same-origin` + COEP `require-corp`).
   - `evo_boids` is single-threaded.
   - `web/loader.js` checks `self.crossOriginIsolated` and picks one. Inside an iframe on a page without those headers, it always gets the single-threaded build.
-- **Drawing.** With WebGL2, the background, food, fish and predators are drawn with one instanced draw call per kind (`web/gl_renderer.js`). The result is copied onto a 2D canvas, which draws the HUD and the neural inspector on top, the way the native SFML window does. Without WebGL2, everything is drawn with canvas 2D, at one fill per body segment. The controls around the world (a live readout, a playback dock, the settings, Turbo) are HTML, outside the canvas. An opt-in **tank view** draws the same world in 3D instead (below).
+- **Drawing.** With WebGL2, the background, food, fish and predators are drawn with one instanced draw call per kind (`web/gl_renderer.js`). The result is copied onto a 2D canvas, which draws the HUD and the neural inspector on top, the way the native SFML window does. Without WebGL2, everything is drawn with canvas 2D, at one fill per body segment. The controls around the world (a live readout, a playback dock, the settings, Turbo) are HTML, outside the canvas. The **tank view**, the default, draws the same world in 3D instead (below); the flat view is the native window's picture.
 - **Frame budget.** When a frame takes too long, the page first lowers the simulation speed (in the tank view, it first draws the tank with less detail). Then it removes creatures uniformly at random and caps births, so the agent count drops instead of the frame rate. A message says when this happens, and the readout keeps an orange dot for the rest of the run, because a run changed this way can no longer be replayed from its seed. It can be switched off ("hold 60 fps").
 
 ## Build and run
@@ -87,8 +87,9 @@ Page options:
 | `?nthreads=N` | sets the thread count |
 | `?bench` | runs the frame-rate benchmark below |
 | `?gl=0` | forces canvas 2D drawing instead of WebGL2 |
-| `?guide=0` / `?guide=1` | never / always start the first-visit guide on load |
-| `?view=3d` / `?view=flat` | starts in the tank view / the flat view (otherwise the page remembers the visitor's last choice; flat the first time) |
+| `?guide=0` / `?guide=1` | never start the first-visit Turbo card and tour / always start the tour on load |
+| `?intro=1` | always show the first-visit Turbo card |
+| `?view=3d` / `?view=flat` | starts in the tank view / the flat view (otherwise the visitor's last choice; the tank the first time, and the flat view under `?bench`, so its numbers compare with the tables below) |
 | `?fish=1` / `?fish=0` | draws the flat view's fish as fish shapes / as circles (otherwise remembered; circles the first time) |
 
 Keyboard: <kbd>Space</kbd> pause · <kbd>↑</kbd> <kbd>↓</kbd> speed · <kbd>R</kbd> a fresh world · <kbd>Esc</kbd> closes what is open (the settings, the live numbers, then the selected fish). Click a fish to inspect it, empty water to let it go. In the tank view also <kbd>F</kbd> follow the selected fish · <kbd>C</kbd> fit the view; drag to pan, scroll to zoom (towards the pointer), right-drag to tilt and turn.
@@ -115,7 +116,7 @@ Safari on macOS/iOS has not been tested.
 
 ### Phones and touch screens
 
-Every screen gets the same controls around the world: the live readout at the top left (fish, generation, frame rate; tap it for the rest), the dashboards and settings buttons at the top right, and a playback dock at the bottom (pause, speed, Turbo, Randomize). On a desktop with a mouse they sit around the world, not over it, and the world itself is drawn exactly as before: the canvas is pixel-identical to the previous page's for a fixed checkpoint, HUD and inspector included. Small and touch screens, and windows 560 px tall or less (such as an embed), differ:
+Every screen gets the same controls around the world: the live readout at the top left (fish, generation, frame rate; tap it for the rest), the dashboards and settings buttons at the top right, and a playback dock at the bottom (pause, speed, Turbo, Randomize). On a desktop with a mouse they sit around the world, not over it, and the flat view draws the world exactly as before: the canvas is pixel-identical to the previous page's for a fixed checkpoint, HUD and inspector included. Small and touch screens, and windows 560 px tall or less (such as an embed), differ:
 
 - **World shape.** In portrait, or on any touch screen, a start or restart creates a world with the area of 1920×1080 but the shape of the screen, so it fills the screen instead of a 16:9 strip. Food density and crowding stay the same. Rotating the device keeps the running world, and a "fit to screen" button restarts it with a fitted one. A checkpoint keeps its own size, and `?bench` always uses 1920×1080. The controls float over the world here.
 - **The selected fish.** On screens 700 px wide or less, windows 560 px tall or less, and touch screens, the inspector is a card instead of a canvas panel: energy (with the breeding threshold marked), age and speed, and the live network below, where tapping a node names it. The card sits at the bottom of a phone (on the right of a wider screen) and moves to the other side when the fish swims under it. The on-canvas HUD is left out there; the readout carries the essentials.
@@ -125,15 +126,15 @@ Every screen gets the same controls around the world: the live readout at the to
 
 So far this is measured in emulation only: Playwright's iPhone 13 profile in WebKit 26.6 and its Pixel 7 profile in Chrome 155, portrait and landscape. The world covers 99.7–99.8% of the screen in all four cases, of which the top bar and the dock float over about 11% (Pixel 7, portrait); the fish card with its network open covers 43% (Pixel 7) and 49% (iPhone 13). No real phone has been tested, so frame rate, battery use, memory, and whether the threaded module starts on iOS are unmeasured.
 
-### Tank view (opt-in)
+### Tank view (the default)
 
-A switch in the settings' Run tab (or `?view=3d`) draws the same world as a shallow 3D tank seen at an angle, made with three.js (`web/scene3d.js`, by techy-Nik). It changes nothing in the simulation, only the picture, and it is off unless a visitor turns it on. The flat view stays the default because it shows the world as the simulation sees it; the tank is for looks, and takes liberties:
+The page draws the world as a shallow 3D tank seen at an angle, made with three.js (`web/scene3d.js`, by techy-Nik). It changes nothing in the simulation, only the picture. A first visit gets it; the switch in the settings' Run tab (or `?view=flat`) turns it off, and the page remembers the choice. The flat view shows the world as the simulation sees it, as the native app does; the tank is for looks, and takes liberties:
 
 - **What is drawn from the simulation:** every fish's six spine points (bent through with a spline), genome colour and body size; food positions; predator positions and whether they are hunting or digesting; the current's flow grid.
 - **What is added for looks:** a tail beat, a fixed swim height per fish (±4 world units), lighting, shading and fog (a fish's back is drawn darker than its genome colour, distant fish fade toward the water), shadows, caustic light, drifting specks of "marine snow" that are not food, and each predator's recent path used as its spine.
 - **What the perspective changes:** distant fish look smaller and distances aren't uniform across the screen. The tank has walls, but the world still wraps, so fish swim through one wall and come back at the opposite one.
 
-The selected fish is shown as the card on every screen in the tank view (there is no canvas inspector), and the camera pans, zooms, tilts and follows a fish. three.js ships as a trimmed bundle, `web/vendor/three.bundle.min.js` (561 KB minified; about 115 KB brotli by #7's measurement), loaded only when the tank view is first turned on, so the default page is no heavier. `tools/three_bundle/build.sh` rebuilds it, and the rebuilt file is byte-identical to the committed one (three 0.186.1, esbuild 0.28.2). Without WebGL2 the switch says so and stays off.
+The selected fish is shown as the card on every screen in the tank view (there is no canvas inspector), and the camera pans, zooms, tilts and follows a fish. three.js ships as a trimmed bundle, `web/vendor/three.bundle.min.js` (561 KB minified; about 115 KB brotli by #7's measurement), loaded with the tank, so a first visit downloads it; the flat view never does. `tools/three_bundle/build.sh` rebuilds it, and the rebuilt file is byte-identical to the committed one (three 0.186.1, esbuild 0.28.2). Without WebGL2 the switch says so and stays off.
 
 Cost, as measured in #7 on the benchmark machine below (Chrome with the Iris Xe GPU, threaded × 8, 1440×900): the tank holds a stable 60 fps up to 10,000 agents (52.2 fps at 12,000), against 12,000 for the flat view, and spends about 1.2 ms per frame drawing 2,000 agents against 0.8 ms. Re-measured on the same laptop in a windowed Chrome 155 (AC power, 2 rounds alternating the views): the flat view held the display's rate up to 12,000 agents and the tank up to 10,000, as in #7, and drawing took 0.70 against 1.06–1.11 ms at 2,000 and 0.87–0.88 against 2.18–2.19 ms at 8,000. Headless (2026-10-20, 2 rounds): drawing took 0.79–0.80 ms flat against 1.10–1.11 ms in the tank at 2,000 agents, 1.41–1.44 against 2.75–2.92 ms at 8,000, and 1.51–1.54 against 2.42–2.74 ms at 12,000. Both held a stable 60 fps up to 6,000 there, because on that run the simulation step (12.5–13 ms at 8,000) set the limit, not the drawing. In a windowed Firefox 155 (Playwright's build), drawing took 1.26–2.34 ms flat against 0.8–2.12 ms in the tank, at every count up to 12,000 (see Benchmarks). That cost is only paid with the tank on; the governor's first step there is to draw it with less detail.
 
@@ -189,14 +190,16 @@ Measured headless: the single-threaded module under Node, 20,000–30,000 steps 
 
 Uncapped rich-food setups reached ~2,400 fish headless; in the browser, the frame-budget governor sizes that to the device.
 
-**First-visit guide.** A first visit gets a one-minute spotlight tour:
+**Turbo, first.** A first visit opens with one card that points at the Turbo button and says what it does: evolution is slow to watch, and Turbo runs the simulation headless, many times faster, and keeps going in a background tab. **Try Turbo** starts it; **Cancel** (or Escape) closes the card, and then the tour below offers itself. The card is remembered in `localStorage` (`?intro=1` shows it again).
+
+**First-visit guide.** After that card, a first visit is offered a one-minute spotlight tour:
 - what you're looking at, a fish's brain, and the live readout
 - the keyboard (with a mouse only)
 - the playback dock (including what Turbo's "headless" means), the dashboards, the settings, Randomize, your own settings, and checkpoints
 
 **Settings.** They are grouped in tabs: Run (Randomize, hold 60 fps, save and load), World, Food, Life, Predators and Ocean. Each setting shows its config key under its name, and a dot on a tab means something in it differs from the default. On screens 960 px wide or more, the open settings sit beside the world rather than over it, so a change can be watched. Settings that only matter while another one is on, such as patch radius without food patches or eddy count without a current, are dimmed with the reason. Changes other than the ones marked *live* turn the Restart button into **Restart to apply**. That button is pinned to the bottom edge of the settings, so it stays in reach from any tab.
 
-The tour's text adapts to touch screens. The page stays usable during the tour. "Tour" in the settings replays it, and it's remembered in `localStorage`; `?guide=0` / `?guide=1` override that.
+The tour's text adapts to touch screens. The page stays usable during the tour. "Tour" in the settings replays it, and it's remembered in `localStorage`; `?guide=0` keeps it and the Turbo card from starting on their own, `?guide=1` always starts it.
 
 ### Dashboards
 

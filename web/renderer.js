@@ -10,9 +10,10 @@
  * Everything around the world (top bar, dock, settings, Turbo, toasts) is DOM,
  * laid out in CSS px.
  *
- * Tank view (opt-in: the Run tab's switch, or ?view=3d) draws the same world
- * as a 3D picture instead (web/scene3d.js, three.js, loaded on first use) on
- * its own canvas; the selected fish is then the card on every screen. */
+ * The tank view (the default; the Run tab's switch, or ?view=flat / ?view=3d)
+ * draws the same world as a 3D picture instead (web/scene3d.js, three.js,
+ * loaded when first needed) on its own canvas; the selected fish is then the
+ * card on every screen. The flat view is the native window's picture. */
 (function () {
   var DEFAULT_W = 1920, DEFAULT_H = 1080, TAU = Math.PI * 2;
   var WORLD_W = DEFAULT_W, WORLD_H = DEFAULT_H; /* may change on checkpoint load */
@@ -2076,6 +2077,8 @@
     /* the selected fish is the card (compact screens, and the tank view) */
     compact: function () { return compactMQ.matches || view3d; },
     has3D: function () { return view3d; },
+    /* the Turbo intro's "Try Turbo" */
+    startTurbo: function () { if (Module && turboState === "live") enterTurbo(); },
     setDrawer: setDrawer,
     setSheetTab: setSheetTab,
     /* Selects a fish for the guide to show, unless one is selected: the one
@@ -2144,11 +2147,12 @@
       ? "Turbo: run headless in a worker at full speed. Keeps running in background tabs; the hand-off is exact, but a threaded run is not reproducible."
       : "Turbo: run headless in a worker at full speed. Keeps running in background tabs; switching is bit-exact.";
     updateModeline();
-    /* the tank view: ?view=3d / ?view=flat, else this visitor's last choice;
-     * never with ?gl=0, which forces the flat canvas-2D view */
+    /* the tank view: ?view=3d / ?view=flat, else this visitor's last choice,
+     * else the tank (?bench: the flat view, so its numbers compare with the
+     * README's); never with ?gl=0, which forces the flat canvas-2D view */
     var want = PARAMS.get("view"), saved = null;
     try { saved = localStorage.getItem(VIEW_KEY); } catch (e) { /* private mode */ }
-    if (want !== "3d" && want !== "flat") want = saved === "3d" ? "3d" : "flat";
+    if (want !== "3d" && want !== "flat") want = saved === "3d" || saved === "flat" ? saved : (bench ? "flat" : "3d");
     if (PARAMS.get("gl") === "0") {
       want = "flat";
       el("view3d").disabled = true;

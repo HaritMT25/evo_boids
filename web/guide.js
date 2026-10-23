@@ -1,9 +1,11 @@
 "use strict";
 /* evo_boids first-visit guide: a short spotlight tour of the page.
  *
- * It offers itself on a first visit once the world is running (renderer.js
- * fires "evo:ready"); "Tour" in the settings replays it. ?guide=0 keeps it
- * from starting on its own (tests), ?guide=1 always starts it. "Seen" lives in
+ * A first visit starts with a single card that points at Turbo and says what
+ * it does (Cancel / Try Turbo); after Cancel the tour offers itself (renderer.js
+ * fires "evo:ready" once the world runs). "Tour" in the settings replays the
+ * tour. ?guide=0 keeps both from starting on their own (tests), ?guide=1 always
+ * starts the tour, ?intro=1 always shows the Turbo card. "Seen" lives in
  * localStorage; where that is unavailable the guide simply offers itself again
  * next visit. The shade takes no clicks, so the simulation keeps running and
  * every control still works mid-tour (the keyboard step invites trying them).
@@ -20,6 +22,9 @@
   function compact() { return !!(app().compact && app().compact()); }
   function seen() { try { return localStorage.getItem(KEY) === "1"; } catch (e) { return false; } }
   function markSeen() { try { localStorage.setItem(KEY, "1"); } catch (e) { /* private mode */ } }
+  var INTRO_KEY = "evo_boids.turboIntroSeen.v1";
+  function introSeen() { try { return localStorage.getItem(INTRO_KEY) === "1"; } catch (e) { return false; } }
+  function markIntroSeen() { try { localStorage.setItem(INTRO_KEY, "1"); } catch (e) { /* private mode */ } }
   function wide() { return window.matchMedia("(min-width: 960px)").matches; }
 
   /* One step: title, body() (trusted HTML), target() -> box or null (centred
@@ -122,6 +127,16 @@
       body: function () { return "Replay this tour any time with <b>Tour</b> in the settings. Enjoy!"; } }
   ];
 
+  /* The first-visit Turbo card: one step, its own buttons (show()). */
+  var INTRO = { intro: true, drawer: false, title: "Turbo: evolution, fast-forwarded",
+    target: function () { return rectOf("#turbobtn"); },
+    place: ["above", "below", "left", "right"],
+    body: function () {
+      return "Behaviour evolves over many generations, which is slow to watch. <b>Turbo</b> runs the " +
+             "simulation headless, in a background thread, many times faster, and it keeps going " +
+             "in a background tab. Stop it whenever you like to see how far evolution got.";
+    } };
+
   var root = null, spot = null, card = null;
   var steps = [], idx = -1, timer = 0, lastKey = "";
   function drawerOpen() { var d = q("#drawer"); return !!d && d.classList.contains("open"); }
@@ -161,7 +176,13 @@
     card.querySelector("h2").textContent = typeof s.title === "function" ? s.title() : s.title;
     card.querySelector("p").innerHTML = s.body();
     var nav = card.querySelector(".nav");
-    if (s.welcome) {
+    if (s.intro) {
+      var gap = document.createElement("span");
+      gap.className = "count";
+      nav.appendChild(gap);
+      nav.appendChild(button("Cancel", "skip", function () { endIntro(false); }));
+      nav.appendChild(button("Try Turbo", "next", function () { endIntro(true); }));
+    } else if (s.welcome) {
       var none = document.createElement("span");
       none.className = "count";
       nav.appendChild(none);
@@ -186,6 +207,8 @@
    * right after the simulation's per-frame DOM writes. */
   function tick() {
     var s = steps[idx];
+    /* Turbo started some other way (its own button): the card has done its job */
+    if (s.intro) { var tb = q("#turbo"); if (tb && !tb.hidden) { endIntro(false, true); return; } }
     /* a settings step whose settings got closed: nothing to point at until they reopen */
     var r = s.target && !(s.drawer && !drawerOpen()) ? s.target() : null;
     if (r && !(r.width > 0 && r.height > 0)) r = null;
@@ -247,8 +270,27 @@
     show(replay ? 1 : 0);
     timer = setInterval(tick, 100);
   }
+  function startIntro() {
+    if (idx >= 0) return;
+    if (!root) build();
+    document.body.appendChild(root);
+    steps = [INTRO];
+    show(0);
+    timer = setInterval(tick, 100);
+  }
+  /* tryIt: start Turbo; otherwise (Cancel) the tour offers itself next, as on
+   * any first visit, unless it has been seen */
+  function endIntro(tryIt, quiet) {
+    markIntroSeen();
+    clearInterval(timer);
+    if (root && root.parentNode) root.parentNode.removeChild(root);
+    idx = -1;
+    if (tryIt) { if (app().startTurbo) app().startTurbo(); }
+    else if (!quiet && !seen()) start(false);
+  }
   window.addEventListener("keydown", function (e) {
     if (idx < 0) return;
+    if (steps[idx] && steps[idx].intro) { if (e.key === "Escape") endIntro(false, true); return; }
     var t = e.target && e.target.tagName;
     if (t === "INPUT" || t === "SELECT" || t === "TEXTAREA") return;
     if (e.key === "Escape") finish();
@@ -259,9 +301,12 @@
   window.EvoGuide = { start: function () { start(true); } };
   /* renderer.js never fires evo:ready under ?bench, so no tour there */
   function auto() {
-    var g = new URLSearchParams(location.search).get("guide");
+    var p = new URLSearchParams(location.search), g = p.get("guide");
+    if (p.get("intro") === "1") { startIntro(); return; }
     if (g === "0") return;
-    if (g === "1" || !seen()) start(false);
+    if (g === "1") { start(false); return; }
+    if (!introSeen()) startIntro();
+    else if (!seen()) start(false);
   }
   if (app().ready) auto();
   else window.addEventListener("evo:ready", auto, { once: true });

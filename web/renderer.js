@@ -267,7 +267,9 @@
    * are unreadable, so there the inspector is the fish card, laid out in CSS
    * px, and the HUD is left to the readout. Elsewhere the canvas versions
    * stay, matching the native SFML window. */
-  var compactMQ = window.matchMedia("(max-width: 700px), (pointer: coarse)");
+  /* short windows too: an embed (the portfolio's is 890x453) would otherwise
+   * spend a third of its height on the bars around the world */
+  var compactMQ = window.matchMedia("(max-width: 700px), (max-height: 560px), (pointer: coarse)");
   var coarseMQ = window.matchMedia("(pointer: coarse)");
   /* the settings sit beside the world from here up, and are a bottom sheet below */
   var wideMQ = window.matchMedia("(min-width: 960px)");

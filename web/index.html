@@ -66,8 +66,9 @@
    * The canvas is the world at 1 px per world unit (renderer.js), scaled to
    * fit the stage. On a desktop with a mouse the stage sits between the top
    * bar and the dock, so nothing covers the world; on compact screens (phones,
-   * touch, narrow windows) it is the whole screen and the controls float over
-   * it. On wide screens the open settings sit beside it. */
+   * touch, narrow or short windows, such as an embed) it is the whole screen
+   * and the controls float over it. On wide screens the open settings sit
+   * beside it. */
   #stage {
     position: fixed;
     top: calc(var(--top-h) + var(--safe-t)); bottom: calc(var(--dock-h) + 24px + var(--safe-b));
@@ -75,7 +76,7 @@
     display: flex; justify-content: center; align-items: center;
     transition: right 300ms var(--ease);
   }
-  @media (max-width: 700px), (pointer: coarse) {
+  @media (max-width: 700px), (max-height: 560px), (pointer: coarse) {   /* renderer.js compactMQ */
     #stage { top: var(--safe-t); bottom: var(--safe-b); left: 0; right: 0; }
   }
   #canvas {

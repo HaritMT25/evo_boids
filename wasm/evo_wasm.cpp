@@ -78,6 +78,45 @@ struct InitArgs {
 
 constexpr int kCurrentStep = 64;   // overlay lattice pitch, mirrors SfmlRenderer
 
+// ---- Fish colour: by family line or by brain -------------------------------
+// Display only: nothing here touches World, so a run and its checkpoints are
+// the same in either mode. g_colors is what every renderer draws a fish in.
+//   0 = by brain: Creature::color, the genome's frozen projection
+//       (genome_color.hpp) — similar brains look alike; the default here, so
+//       the shim's output is what it always was unless the page asks.
+//   1 = by family: one stable colour per lineageId (familyColor below); the
+//       the page's default (2026-10-23).
+int g_colourMode = 0;
+
+// A family line's colour, from its id alone: a 32-bit hash picks a hue (6 x 256
+// steps) and one of 4 tones, then HSV -> RGB in integers, so the same id gives
+// the same bytes in every build and the dashboards (evo_family_color) can draw a
+// line in the colour its fish have. Neighbouring ids — the founders are
+// consecutive — land on unrelated hues. Hues within ~20 degrees of pure red
+// are skipped: the flat view draws predators as red circles.
+void familyColor(std::uint64_t id, std::uint8_t* out) {
+    std::uint32_t h = (std::uint32_t)(id ^ (id >> 32));
+    h ^= h >> 16; h *= 0x7feb352dU; h ^= h >> 15; h *= 0x846ca68bU; h ^= h >> 16;
+    static const int kSat[4] = {200, 165, 225, 185}, kVal[4] = {240, 215, 195, 255};
+    const int tone = (int)((h >> 12) & 3u);
+    const int s = kSat[tone], v = kVal[tone];
+    constexpr int kRedGap = 85;   // of 1536 hue steps, either side of red
+    const int hue = kRedGap + (int)(h % (1536u - 2 * kRedGap)), sector = hue >> 8, f = hue & 255;
+    const int p = v * (255 - s) / 255;
+    const int q = v * (65025 - s * f) / 65025;
+    const int t = v * (65025 - s * (255 - f)) / 65025;
+    int r, g, b;
+    switch (sector) {
+        case 0: r = v; g = t; b = p; break;
+        case 1: r = q; g = v; b = p; break;
+        case 2: r = p; g = v; b = t; break;
+        case 3: r = p; g = q; b = v; break;
+        case 4: r = t; g = p; b = v; break;
+        default: r = v; g = p; b = q; break;
+    }
+    out[0] = (std::uint8_t)r; out[1] = (std::uint8_t)g; out[2] = (std::uint8_t)b;
+}
+
 // The same defensive clamps main.cpp applies before init.
 void clampConfig(SimConfig& c) {
     if (c.minSpeed > c.maxSpeed) std::swap(c.minSpeed, c.maxSpeed);
@@ -716,9 +755,13 @@ EVO_EXPORT void evo_sync() {
         // disagree about creature order or count.
         g_bodyParams[i * 2 + 0] = c.bodySize;
         g_bodyParams[i * 2 + 1] = c.bodyElong;
-        g_colors[i * 3 + 0] = c.color.r;
-        g_colors[i * 3 + 1] = c.color.g;
-        g_colors[i * 3 + 2] = c.color.b;
+        if (g_colourMode == 1) {
+            familyColor(c.lineageId, &g_colors[i * 3]);
+        } else {
+            g_colors[i * 3 + 0] = c.color.r;
+            g_colors[i * 3 + 1] = c.color.g;
+            g_colors[i * 3 + 2] = c.color.b;
+        }
         g_ids[i] = (double)c.id;
     }
 
@@ -778,6 +821,15 @@ EVO_EXPORT const float* evo_creature_segments() { return g_segments.data(); }
 // every reader.
 EVO_EXPORT const float* evo_body_params()       { return g_bodyParams.data(); }
 EVO_EXPORT const uint8_t* evo_creature_colors() { return g_colors.data(); }
+// What evo_creature_colors holds from the next evo_sync: 0 = by brain (the
+// genome colour, the default), 1 = by family line. Display only.
+EVO_EXPORT void evo_set_colour_mode(int mode) { g_colourMode = mode == 1 ? 1 : 0; }
+// A family line's colour as 0xRRGGBB — the one its fish get in family mode.
+EVO_EXPORT int evo_family_color(double lineageId) {
+    std::uint8_t c[3];
+    familyColor((std::uint64_t)lineageId, c);
+    return (c[0] << 16) | (c[1] << 8) | c[2];
+}
 EVO_EXPORT const double* evo_creature_ids()     { return g_ids.data(); }
 EVO_EXPORT int evo_food_count()                 { return g_world ? (int)g_world->food.size() : 0; }
 EVO_EXPORT const float* evo_food_xy()           { return g_food.data(); }
@@ -842,9 +894,9 @@ EVO_EXPORT const char* evo_last_error() { return g_error.c_str(); }
 // drawNeuralOverlay): lastSensors / neuron outputs / lastActions, and the
 // flattened connection list decoded via asGene().
 namespace {
-// 7 doubles, in this order — web/renderer.js reads INSPECT_INFO_LEN of them and
+// 8 doubles, in this order — web/renderer.js reads INSPECT_INFO_LEN of them and
 // the two must be changed together.
-double g_inspInfo[7] = {};                 // id, speed, foodReserves, age, bodySize, bodyElong, generation
+double g_inspInfo[8] = {};                 // id, speed, foodReserves, age, bodySize, bodyElong, generation, lineageId
 std::vector<float> g_inspSensors;          // NUM_SENSES
 std::vector<float> g_inspHidden;           // MAX_INTERNAL_NEURONS
 std::vector<float> g_inspActions;          // NUM_ACTIONS
@@ -862,6 +914,7 @@ EVO_EXPORT int evo_inspect(int index) {
     g_inspInfo[4] = (double)c.bodySize;
     g_inspInfo[5] = (double)c.bodyElong;
     g_inspInfo[6] = (double)c.generation;
+    g_inspInfo[7] = (double)c.lineageId;       // its family line
 
     g_inspSensors.assign(c.lastSensors, c.lastSensors + NUM_SENSES);
     g_inspActions.assign(c.lastActions, c.lastActions + NUM_ACTIONS);

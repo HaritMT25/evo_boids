@@ -229,6 +229,7 @@
     maxPopulation: { d: "Birth cap: no births while the population is at or above it (0 = none). Applies live.", t: "try: 0; the frame-budget governor may set a lower one" },
     minPopulation: { d: "Reseed floor: random founders are added when the population falls below it. Applies live.", t: "try: 50 (the default)" },
     governor: { d: "When frames take too long: first lower the speed (in the tank view, first draw the tank with less detail), then remove creatures at random (no trait favoured) and cap births at what this machine can run at 60 fps. Each step is reported; a governed run no longer replays from its seed.", t: "try: on; off to see the uncapped run (it may stutter)" },
+    fishShape: { d: "Draws each fish as one smooth body over the six spine points the simulation keeps, instead of a circle at each point. Its half-width at each point is that point's circle radius and its length is the spine itself, so body size and elongation show as they do with circles; the tail fin is an addition that grows with body size. Needs WebGL2 (the canvas-2D fallback keeps the circles); the native app draws circles.", t: "try: on for a fish look; off to match the native window" },
     view3d: { d: "Draws the same world as a 3D tank seen at an angle: fish bent along their spine in their genome colour, lit and shaded, plus motion the simulation does not have (tail beats, swim heights, drifting specks, caustic light). Distances look shorter far away, and the world still wraps at its edges. The simulation and every setting are unchanged.", t: "try: on for looks; off to see the world as the simulation sees it" }
   };
 
@@ -458,6 +459,7 @@
     el("panel-run").setAttribute("role", "tabpanel");
     attachTip(el("f_governor"), "governor");
     attachTip(el("f_view3d"), "view3d");
+    attachTip(el("f_fishShape"), "fishShape");
     var saved = null;
     try { saved = localStorage.getItem("evo_boids.tab"); } catch (e) { /* private mode */ }
     setSheetTab(saved && el("panel-" + saved) ? saved : "run");
@@ -634,6 +636,7 @@
       ok = Module._evo_init(seed, WORLD_W, WORLD_H, population, 0);
     }
     selectedId = null;
+    if (glScene && glScene.forgetFish) glScene.forgetFish();
     userCap = cfg.maxPopulation || 0;
     autoCap = 0;
     resetGovernor();
@@ -1026,6 +1029,9 @@
    * ?gl=0 forces 2D. Overlays (ring, HUD, inspector) are always 2D, on top. */
   var LOOK = {
     radii: RADII, segAlpha: SEG_ALPHA, minRadius: MIN_RADIUS, bodyScale: bodyScale,
+    /* fish shapes (opt-in): one body over the six spine points; the fin's
+     * length and spread are world px at body scale 1 */
+    fishShape: false, fin: { len: 6, spread: 4.5, alpha: 0.55 },
     clear: [0x0F / 255, 0x1E / 255, 0x19 / 255],
     food: [0x97 / 255, 0xC6 / 255, 0x32 / 255],
     predDigesting: [150 / 255, 60 / 255, 60 / 255],
@@ -1318,7 +1324,8 @@
   });
 
   function drawingName() {
-    return view3d ? "3D tank, detail " + scene.quality() + " of 3" : (glScene ? "WebGL2" : "canvas 2D");
+    return view3d ? "3D tank, detail " + scene.quality() + " of 3"
+                  : (glScene ? "WebGL2" : "canvas 2D") + (LOOK.fishShape ? ", fish shapes" : "");
   }
 
   var splashDone = false, turboPaint = 0, lastNow = 0;
@@ -1425,7 +1432,8 @@
       crossOriginIsolated: self.crossOriginIsolated === true,
       module: threaded ? "threaded" : "single-threaded",
       threads: Module._evo_threads ? Module._evo_threads() : 1,
-      renderer: view3d ? scene.renderer + ", detail " + scene.quality() : (glScene ? "webgl2" : "canvas2d"),
+      renderer: view3d ? scene.renderer + ", detail " + scene.quality()
+                       : (glScene ? "webgl2" : "canvas2d") + (LOOK.fishShape ? "+fish" : ""),
       canvas: canvas.width + "x" + canvas.height,
       devicePixelRatio: window.devicePixelRatio
     };
@@ -1505,6 +1513,7 @@
       if (Module._evo_rec_reset) Module._evo_rec_reset(1);   /* the loaded fish, as the tree's roots */
     }
     selectedId = null;
+    if (glScene && glScene.forgetFish) glScene.forgetFish();
     warmupUntil = performance.now() + WARMUP_MS;  /* a load is a restart for frame timing */
     workEma = 0;
     var w = Module._evo_width(), h = Module._evo_height();
@@ -1948,7 +1957,7 @@
     updateNeeds();
     updateTabDots();
     if (!t || !t.id || (t.id.indexOf("adv_") === 0 && LIVE[t.id.slice(4)])) return;  /* applies by itself */
-    if (t.id === "governor" || t.id === "view3d" || t.id === "cpfile") return;   /* not settings Restart applies */
+    if (t.id === "governor" || t.id === "view3d" || t.id === "fishShape" || t.id === "cpfile") return;   /* not settings Restart applies */
     setPending(true);
   }
 
@@ -1985,6 +1994,37 @@
   btn("followbtn", toggleFollow);
   btn("viewbtn", function () { if (view3d) scene.resetView(true); });
   el("view3d").addEventListener("change", function () { setView(this.checked, true); this.blur(); });
+  el("fishShape").addEventListener("change", function () { setFishShape(this.checked); this.blur(); });
+  /* Fish shapes: ?fish=1 / ?fish=0, else this visitor's last choice; off the
+   * first time. WebGL2 only: in canvas 2D, Chrome fills the outlines at less
+   * than half the frame rate it fills circles, so the 2D fallback keeps the
+   * circles and the switch says why. */
+  var FISH_KEY = "evo_boids.fishShape";
+  function setFishShape(on) {
+    if (!glScene || !glScene.fishShapes) return;
+    if (on && !LOOK.fishShape) glScene.forgetFish();   /* history from before is stale */
+    LOOK.fishShape = on;
+    el("fishShape").checked = on;
+    try { localStorage.setItem(FISH_KEY, on ? "1" : "0"); } catch (e) { /* private mode */ }
+    if (Module) updateModeline();
+  }
+  (function () {
+    var want = PARAMS.get("fish"), saved = null;
+    try { saved = localStorage.getItem(FISH_KEY); } catch (e) { /* private mode */ }
+    if (want !== "1" && want !== "0") want = saved === "1" ? "1" : "0";
+    if (!glScene || !glScene.fishShapes) {
+      var row = el("f_fishShape"), hint = document.createElement("span");
+      el("fishShape").disabled = true;
+      row.classList.add("inert");
+      hint.className = "needs";
+      hint.textContent = glScene ? "the fish-shape shader didn't compile in this browser; circles stay"
+                                 : "needs WebGL2: this page is drawing with canvas 2D, which keeps the circles";
+      row.appendChild(hint);
+      return;
+    }
+    LOOK.fishShape = want === "1";
+    el("fishShape").checked = LOOK.fishShape;
+  })();
   var fitTimer = 0;
   window.addEventListener("resize", function () {
     if (scene) { scene.resize(); updateInsets(); }

@@ -14,7 +14,7 @@ Every creature has a **genome**: a list of 16–80 genes, where each gene is one
 
 The question the project asks is which environmental pressures (food scarcity, a cost on movement, ocean currents, predators) are enough to produce a collective behaviour such as schooling.
 
-Optional mechanisms, all off by default: predators that eat, breed and starve; food in patches; ocean currents; heritable body size and elongation; a genetic-distance limit on who can pair with whom.
+Optional mechanisms, all off by default: predators that eat, breed and starve (with an optional floor and cap on their numbers, and heritable speed and budding threshold); food in patches; ocean currents; heritable body size and elongation; a genetic-distance limit on who can pair with whom.
 
 ## Architecture
 
@@ -170,7 +170,7 @@ So fish shapes add about 0.2 ms of drawing at 2,000 agents, and 0.4 ms (windowed
 Each value is drawn from a range. The range comes from the experiments (`docs/evo_boids_flags.md`, the research log) where one exists, and otherwise from the "try:" suggestions in the settings' explanations. `web/randomizer.js` lists every range next to its source. Knobs that only work together are drawn together:
 - **Currents** come with patchy, drifting food and a thrust cost. Fish only fight or ride a current when food is patchy and swimming costs energy.
 - **Predators** come in the experiments' arena: abundant uniform food and a population cap, so predation, not starvation, does the selecting.
-- **The predator economy's meal** is set relative to what a hunt costs, using the break-even formula from the flags doc. The factor's range was measured for browser-length runs (below).
+- **The predator economy's meal** is set relative to what a hunt costs, using the break-even formula from the flags doc: 1.2–1.4× break-even, enough for the hunters to breed. It comes with a **predator cap** of 8 × the digesting time (24–40) and a **floor** of 2, because without the cap a breeding economy booms and crashes (below).
 - **The match gate** only comes with its soft ramp; hard, it collapses the population below a threshold of ~16.
 
 Measured headless: the single-threaded module under Node, 20,000–30,000 steps per setup (about 5.5–8 simulated minutes). A setup counts as healthy when the fish never sink to the reseed floor and, with predators, the predators are still alive at the end.
@@ -207,8 +207,8 @@ The chart button beside the settings button opens charts of the running world. E
 
 | tab | charts |
 |---|---|
-| Population | fish and food; predators; births and deaths per second; causes of death; the boom-and-bust loop as a phase plot (fish vs food, and fish vs predators) |
-| Evolution | generations; genetic diversity; genome length, swim speed, body size and age as median with 50% / 80% bands |
+| Population | fish and food; predators (and how many a predator floor has put back); births and deaths per second; causes of death; the boom-and-bust loop as a phase plot (fish vs food, and fish vs predators) |
+| Evolution | generations; genetic diversity; genome length, swim speed, body size and age as median with 50% / 80% bands; the hunters' inherited speed and budding threshold (with predator inheritance on) |
 | Family lines | Muller plot of the founder lines (`lineageId`), the lines still alive, breeding groups (`reproComponents`) |
 | Family tree | up to 300 living fish traced back through each one's first parent, with their most recent common ancestor |
 | Similarity | 150 fish sampled evenly: the match-distance matrix ordered by a UPGMA tree, a classical-MDS genome map, the distance histogram with the breeding gate marked |

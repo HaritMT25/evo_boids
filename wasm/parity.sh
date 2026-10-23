@@ -91,6 +91,23 @@ run_case "body_tri_s42"  42   2000 --tri --body-model
 # nowhere else. Measured at step 2000: 55 insertions, 54 of them soft-admitted,
 # bodySize spread 0.902-1.117 (53 creatures off the default body).
 run_case "soft_body_s42" 42   2000 --repro-max-distance 16 --repro-soft-width 5 --body-model
+# Predator floor, ceiling and heritable traits (v0.26.0). The floor and
+# inheritance ADD TO THE RANDOM STREAM (three draws per refill, two per bud),
+# the ceiling decides which buds happen. Each case is measured to bite at its
+# compare step rather than assumed to:
+#   pinherit_s42  562 buds = 1124 trait draws; speedFactor 0.62-1.48 and
+#                 buddingFactor 0.50-1.32 across 441 predators at step 2000.
+#   pfloor_s42    meal 0: every predator starves, and the floor refills 9 times
+#                 (27 draws) to hold 3.
+#   pcap_s42      the absorb meal that grows --rich to 295 predators by step
+#                 2000 is held at 8 (4 buds, then refused).
+#   pall_s42      all three in one run, so their draws interleave inside single
+#                 steps: 11 buds, 2 refills and 13 starvations by step 6000,
+#                 between a floor of 20 and a ceiling of 24.
+run_case "pinherit_s42" 42   2000 --rich --pred-inherit
+run_case "pfloor_s42"   42   2000 --rich --pred-meal 0 --pred-floor 3
+run_case "pcap_s42"     42   2000 --rich --pred-cap 8
+run_case "pall_s42"     42   6000 --rich --pred-count 20 --pred-meal 12 --pred-floor 20 --pred-inherit --pred-cap 24
 run_case "long_s42"    42    10000
 
 if [ "$FAILED" = "1" ]; then

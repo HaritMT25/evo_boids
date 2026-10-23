@@ -80,7 +80,9 @@
       ["predatorSpeed", 110], ["predatorPerception", 150], ["predatorCaptureRadius", 14],
       ["predatorCooldown", 3, { step: 0.5, min: 0 }],
       ["predatorMeal", -1, { step: 0.5 }],
-      ["predatorMetabolism", 2], ["predatorReproEnergy", 60], ["predatorMaxAge", 0]
+      ["predatorMetabolism", 2], ["predatorReproEnergy", 60], ["predatorMaxAge", 0],
+      ["predatorMinPopulation", 0, { step: 1, min: 0 }], ["predatorMaxPopulation", 0, { step: 1, min: 0 }],
+      ["predatorInheritance", false], ["predatorTraitMutation", 0.1, { step: 0.01, min: 0 }]
     ]],
     ["currents", [
       ["currentMode", 0, { options: ["Eddies", "Gyre"] }],
@@ -108,7 +110,8 @@
   var LIVE = { maxPopulation: 1, minPopulation: 1, targetFood: 1, foodSpawnBase: 1,
                foodSpawnAmp: 1, foodEnergy: 1, metabolicRate: 1, moveCost: 1, geneCost: 1,
                maxAge: 1, reproEnergy: 1, newbornEnergy: 1, mutationMultiplier: 1,
-               minSpeed: 1, maxSpeed: 1 };
+               minSpeed: 1, maxSpeed: 1,
+               predatorMinPopulation: 1, predatorMaxPopulation: 1, predatorTraitMutation: 1 };
 
   /* The settings: tabs, then groups of keys ("b:" = a basic setting). */
   var SETTINGS_TABS = [
@@ -129,7 +132,8 @@
     { id: "predators", title: "Predators", groups: [
       ["Predators", ["b:predators", "b:predatorEconomy"]],
       ["Hunting", ["predatorSpeed", "predatorPerception", "predatorCaptureRadius", "predatorCooldown"]],
-      ["Their economy", ["predatorMeal", "predatorMetabolism", "predatorReproEnergy", "predatorMaxAge"]]] },
+      ["Their economy", ["predatorMeal", "predatorMetabolism", "predatorReproEnergy", "predatorMaxAge"]],
+      ["Limits and inheritance", ["predatorMinPopulation", "predatorMaxPopulation", "predatorInheritance", "predatorTraitMutation"]]] },
     { id: "ocean", title: "Ocean", groups: [
       ["Currents", ["b:currentStrength", "currentMode", "currentEddies", "currentCore", "currentDrift"]]] }
   ];
@@ -153,14 +157,17 @@
     predatorSpeed: "Predator speed", predatorPerception: "Predator sight", predatorCaptureRadius: "Catch distance",
     predatorCooldown: "Digesting time (s)", predatorMeal: "Energy per catch",
     predatorMetabolism: "Predator energy burn", predatorReproEnergy: "Energy to bud a child",
-    predatorMaxAge: "Predator lifespan", currentMode: "Current shape", currentEddies: "Eddies",
+    predatorMaxAge: "Predator lifespan", predatorMinPopulation: "Predator floor",
+    predatorMaxPopulation: "Predator cap", predatorInheritance: "Hunters inherit traits",
+    predatorTraitMutation: "Trait mutation", currentMode: "Current shape", currentEddies: "Eddies",
     currentCore: "Eddy radius", currentDrift: "How fast the flow changes", fastTanh: "Fast tanh"
   };
   var HINTS = {
     maxPopulation: "0 = none", minPopulation: "founders added below this",
     maxNeighbors: "0 = everyone in range", reproMaxDistance: "-1 = off",
     reproSoftWidth: "0 = a hard limit", reproGracePeriod: "0 = off", predatorMeal: "-1 = the prey's whole store",
-    predatorMaxAge: "0 = until it starves", currentDrift: "0 = a still pattern", fastTanh: "changes the numbers"
+    predatorMaxAge: "0 = until it starves", predatorMinPopulation: "0 = off; put back below this",
+    predatorMaxPopulation: "0 = none", currentDrift: "0 = a still pattern", fastTanh: "changes the numbers"
   };
   /* what one press of − / + changes */
   var BTN_STEP = {
@@ -173,6 +180,7 @@
     reproMaxDistance: 0.5, reproSoftWidth: 0.5, reproGracePeriod: 10, bodyMutation: 0.01,
     predatorSpeed: 5, predatorPerception: 5, predatorCaptureRadius: 1, predatorCooldown: 0.5,
     predatorMeal: 0.5, predatorMetabolism: 0.1, predatorReproEnergy: 5, predatorMaxAge: 10,
+    predatorMinPopulation: 1, predatorMaxPopulation: 5, predatorTraitMutation: 0.01,
     currentEddies: 1, currentCore: 10, currentDrift: 0.1
   };
 
@@ -183,7 +191,7 @@
     predators: { d: "Number of scripted hunters chasing prey (0 = none).", t: "try: 3-4 with predator economy on" },
     foodPatches: { d: "Cluster food into N spatial patches (0 = uniform scatter).", t: "try: 5-6; patchy food makes currents matter" },
     currentStrength: { d: "Peak ocean-flow speed in world units/sec (0 = still water).", t: "try: 80 with eddies = a lively ocean" },
-    predatorEconomy: { d: "Predators eat, breed and starve (Stage B) instead of being immortal.", t: "try: on with 3-4 predators" },
+    predatorEconomy: { d: "Predators eat, breed and starve (Stage B) instead of being immortal.", t: "try: on with 4 predators, energy per catch 9 and a predator cap of 15 (held both sides in 12 of 12 measured runs at 9-11)" },
     toroidal: { d: "Senses wrap across the world seam — no walls, no sensory dead zone at edges.", t: "try: on; cures the wall-hugger phenotype" },
     reproMaxDistance: { d: "Reproductive isolation: parents farther apart than this in wiring space cannot breed (-1 = off).", t: "try: 18 bites gently, 14 hard; below 12 breeding stops" },
     reproSoftWidth: { d: "Softens the isolation gate into a ramp: past the gate distance breeding fades out over this width instead of stopping dead (0 = hard cliff).", t: "try: 4-5 with the gate at 14-16; needs the gate on" },
@@ -218,10 +226,14 @@
     predatorPerception: { d: "Predator's prey-detection radius; above prey's 80 = ambush edge.", t: "try: 80 for symmetric sight" },
     predatorCaptureRadius: { d: "Contact distance at which a prey is caught.", t: "try: 10-20 around the default 14" },
     predatorCooldown: { d: "Seconds a predator digests after a catch before it can catch again — caps its kill rate.", t: "try: 3-5; 5 eases the chase" },
-    predatorMeal: { d: "Energy a predator gains per catch (economy on). -1 = it absorbs the prey's whole reserve, which lets predators explode.", t: "try: 1.0-1.1 × break-even, which is cooldown × (metabolism + thrust cost × 110²): ≈6 at the defaults, ≈8.5 with thrust cost 7e-5" },
+    predatorMeal: { d: "Energy a predator gains per catch (economy on). -1 = it absorbs the prey's whole reserve, which lets predators explode.", t: "try: 1.2 × break-even, which is cooldown × (metabolism + thrust cost × 110²) = 6 at the defaults, so 7; at 1.0 hunters never bud, and richer than ~1.3 they over-eat the fish unless a predator cap holds them" },
     predatorMetabolism: { d: "Predator energy burn per second (economy on); prey burn 1.5.", t: "try: 2-3; higher = must hunt more" },
     predatorReproEnergy: { d: "Energy a predator needs to bud a child (economy on).", t: "try: 40-80; higher = slower breeding" },
     predatorMaxAge: { d: "Predator death age; 0 = immortal until starved.", t: "try: 0, or 120 to age them out" },
+    predatorMinPopulation: { d: "Predator floor: fresh hunters are put back whenever fewer than this are alive, so they can't die out (economy on; 0 = off). The Predators chart counts how many it put back. Applies live.", t: "try: 2; it stops extinction but not a crash (the fish stay low while it feeds hunters), so pair it with a cap" },
+    predatorMaxPopulation: { d: "Predator cap: a well-fed hunter doesn't bud while this many are alive; it keeps the energy and buds once there is room (economy on; 0 = none). Applies live.", t: "try: 15 with the default 3 s digesting time. Each capped hunter catches about once per digesting time, so keep cap ÷ digesting time below the fish births per second (Dashboards → Population)" },
+    predatorInheritance: { d: "Each bud inherits its parent's speed and budding threshold (×0.5 to ×2), each with a small mutation, so hunters evolve. Speed only costs energy when the swimming cost (moveCost) is above 0.", t: "try: on with a swimming cost (0.00007), a predator lifespan (120) and a cap; measured that way, hunters evolved slower (×0.83) and quicker to bud (×0.85). With free swimming, speed climbs toward ×2 and they over-eat" },
+    predatorTraitMutation: { d: "How far a bud's traits can stray from its parent's, per trait per bud. Applies live.", t: "try: 0.1 (the default); 0 copies exactly" },
     currentMode: { d: "eddies = moving vortices; gyre = two counter-rotating basins.", t: "try: eddies with strength 80" },
     currentEddies: { d: "Number of vortices in eddies mode.", t: "try: 3-8 around the default 5" },
     currentCore: { d: "Eddy radius — the distance of peak flow speed.", t: "try: 100-250 around the default 150" },
@@ -1925,8 +1937,11 @@
       function () { return hasCurrent() && el("adv_currentMode").value === "0"; }],
     [["predatorEconomy", "adv_predatorSpeed", "adv_predatorPerception", "adv_predatorCaptureRadius",
       "adv_predatorCooldown"], "needs predators above 0", hasPredators],
-    [["adv_predatorMeal", "adv_predatorMetabolism", "adv_predatorReproEnergy", "adv_predatorMaxAge"],
+    [["adv_predatorMeal", "adv_predatorMetabolism", "adv_predatorReproEnergy", "adv_predatorMaxAge",
+      "adv_predatorMinPopulation", "adv_predatorMaxPopulation", "adv_predatorInheritance"],
       "needs predators, with their economy on", function () { return hasPredators() && el("predatorEconomy").checked; }],
+    [["adv_predatorTraitMutation"], "needs hunters inherit traits on",
+      function () { return hasPredators() && el("predatorEconomy").checked && el("adv_predatorInheritance").checked; }],
     [["adv_maxTurnRate"], "needs fast-swims-straight on", function () { return el("adv_triangularMotion").checked; }],
     [["adv_reproSoftWidth", "adv_reproGracePeriod"], "needs a breeding distance limit of 0 or more",
       function () { return floatVal("adv_reproMaxDistance", -1) >= 0; }],

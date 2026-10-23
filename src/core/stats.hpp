@@ -234,6 +234,17 @@ struct WorldStats {
     // which of the two mechanisms did the rescuing.
     int   totalGraceBirths              = 0;
     int   totalSoftBirths               = 0;
+
+    // --- Predator floor + heritable traits (v0.26.0) ---
+    // totalPredatorReseeds is cumulative, like the predator births, and NOT a
+    // subset of them: a predator the floor added was not born. The three means
+    // are over the live predators, instantaneous, and 0 when there are none
+    // (the predatorAvgEnergy convention). With inheritance off the two trait
+    // means sit at exactly 1; the generation mean counts buds either way.
+    int   totalPredatorReseeds          = 0;
+    float predatorSpeedFactor           = 0.0f;
+    float predatorBuddingFactor         = 0.0f;
+    float predatorGeneration            = 0.0f;
 };
 
 // Generation depth across the live set, for the two HUDs. Deliberately not a
@@ -284,6 +295,17 @@ inline WorldStats computeStats(const World& w) {
         double pe = 0.0;
         for (const Predator& p : w.predators) pe += p.energy;
         s.predatorAvgEnergy = static_cast<float>(pe / w.predators.size());
+    }
+    s.totalPredatorReseeds = static_cast<int>(w.totalPredatorReseeds);
+    if (!w.predators.empty()) {
+        double sf = 0.0, bf = 0.0, gen = 0.0;
+        for (const Predator& p : w.predators) {
+            sf += p.speedFactor; bf += p.buddingFactor; gen += (double)p.generation;
+        }
+        const double inv = 1.0 / (double)w.predators.size();
+        s.predatorSpeedFactor   = static_cast<float>(sf * inv);
+        s.predatorBuddingFactor = static_cast<float>(bf * inv);
+        s.predatorGeneration    = static_cast<float>(gen * inv);
     }
 
     const std::vector<Creature>& cs = w.creatures;
@@ -434,7 +456,10 @@ inline std::string statsCsvHeader() {
            "repro_components,"
            // Appended for the same reason (v0.24.0). Cumulative, like
            // births_cum, and both subsets of it; 0 unless the mitigations are on.
-           "grace_births_cum,soft_births_cum";
+           "grace_births_cum,soft_births_cum,"
+           // Appended (v0.26.0): the predator floor's refills (cumulative) and
+           // the live predators' mean traits and generation (instantaneous).
+           "predator_reseeds_cum,predator_speed_factor,predator_budding_factor,predator_generation";
 }
 
 inline std::string statsCsvRow(const WorldStats& s,
@@ -483,6 +508,10 @@ inline std::string statsCsvRow(const WorldStats& s,
       << s.predatorAvgEnergy << ','
       << s.reproComponents << ','   // appended (v0.22.0) — see the header note
       << s.totalGraceBirths << ','  // appended (v0.24.0) — likewise
-      << s.totalSoftBirths;
+      << s.totalSoftBirths << ','
+      << s.totalPredatorReseeds << ','   // appended (v0.26.0) — likewise
+      << s.predatorSpeedFactor << ','
+      << s.predatorBuddingFactor << ','
+      << s.predatorGeneration;
     return o.str();
 }

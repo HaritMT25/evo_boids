@@ -221,8 +221,10 @@ struct SimConfig {
     // predatorMaxAge). The whole point is the coupled oscillator: prey crash ->
     // predators starve -> predator decline -> prey rebound -> predators recover.
     // TUNE meal/metabolism/repro on real runs until NEITHER population's trough
-    // hits zero (there is deliberately no predator reseed floor — extinction is
-    // an observable failure mode, not something to mask). See context §9/§11.
+    // hits zero (by default there is no predator reseed floor — extinction is
+    // an observable failure mode, not something to mask; the opt-in
+    // predatorMinPopulation below masks it on purpose, and counts every
+    // predator it adds). See context §9/§11.
     // NOTE: Stage B adds NO sensors, so NUM_SENSES is unchanged (41) and 0.9.x
     // predator runs stay comparable. (Genome/neural predators are Stage C.)
     bool  predatorEconomy       = false;  // master switch: false => Stage A (immortal)
@@ -240,6 +242,35 @@ struct SimConfig {
                                           // tune); >=0 => a fixed meal value (gentler).
     float predatorMaxAge        = 0.0f;   // predator death age. 0 => immortal-until-starved
                                           // (the lean); >0 => predators also die of old age.
+
+    // --- Predator floor, ceiling and heritable traits (v0.26.0; economy only;
+    // OFF by default => byte-identical to 0.25.0) ---
+    // predatorMinPopulation is the predators' --min-pop: after each step's
+    // births and deaths, fresh scripted predators (random position and heading,
+    // predatorNewbornEnergy, traits 1.0/1.0) are added until at least this many
+    // are alive. 0 = off: extinction stays final. Three rng draws per refilled
+    // predator, and none unless the floor actually refills, so a run that never
+    // falls below it is unchanged. Every refill is counted
+    // (World::totalPredatorReseeds, CSV predator_reseeds_cum): a run held up by
+    // the floor is not evidence of coexistence, and the column says how much
+    // holding up it did.
+    int   predatorMinPopulation = 0;
+    // predatorMaxPopulation is the predators' --max-pop: a predator that has
+    // reached its budding threshold does not bud while this many are alive
+    // (counted with this step's buds, exactly like the prey cap); it keeps the
+    // energy and buds once there is room. 0 = no cap. Draws nothing — a refused
+    // bud takes no draws, which is the same as no bud. The floor is not capped:
+    // a floor above the ceiling wins.
+    int   predatorMaxPopulation = 0;
+    // predatorInheritance: a bud inherits its parent's speedFactor and
+    // buddingFactor (predator.hpp), each plus one U(-m, +m) draw, clamped to
+    // [0.5, 2.0], m = predatorTraitMutation. Off => no draws and every trait
+    // stays 1.0. Speed only has a price when the kinetic cost is non-zero
+    // (--predator-move-cost, or a --move-cost it reuses): with both at 0,
+    // faster is free and selection walks speed to the clamp.
+    bool  predatorInheritance   = false;
+    float predatorTraitMutation = 0.10f;  // uniform half-width per trait per bud (the
+                                          // --body-mutation default)
 
     // --- Inspection & analysis (visual/diagnostic; do not affect dynamics) ---
     // Capture each creature's last sensor inputs / action outputs every step so a
@@ -369,6 +400,14 @@ struct SimConfig {
           << " predatorMaxAge="   << (predatorMaxAge > 0.0f
                                       ? std::to_string(predatorMaxAge)
                                       : std::string("immortal")) << "\n"
+          << "predatorMinPopulation=" << (predatorMinPopulation > 0
+                                      ? std::to_string(predatorMinPopulation)
+                                      : std::string("off (no predator floor)"))
+          << " predatorMaxPopulation=" << (predatorMaxPopulation > 0
+                                      ? std::to_string(predatorMaxPopulation)
+                                      : std::string("unlimited"))
+          << " predatorInheritance=" << (predatorInheritance ? "on (heritable speed/budding)" : "off")
+          << " predatorTraitMutation=" << predatorTraitMutation << "\n"
           << "reproWindow="       << reproWindow
           << " reproMinCluster="  << reproMinCluster
           << " reproLog="         << (reproLog ? "on" : "off")

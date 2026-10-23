@@ -14,7 +14,9 @@
  *    abundant food and a population cap, so predation, not starvation, does
  *    the selecting;
  *  - the predator economy also comes with a fixed meal: the default (absorb
- *    the prey's reserves) lets predators explode;
+ *    the prey's reserves) lets predators explode; and with a predator cap and
+ *    floor (v0.26.0): a meal that lets hunters breed booms and crashes
+ *    without the cap, and the cap is what holds both sides alive (measured);
  *  - the match gate comes only with its soft ramp: hard, it collapses the
  *    population below a threshold of ~16.
  * No page code here: draw() returns plain values, so tests can sample it. */
@@ -38,7 +40,9 @@
     maxTurnRate:         [3, 5, 0.5, "try: 2-6 around the default 4"],
     hunters:             [3, 5, 1, "the arena runs used 6; measured: 3, 4 and 5 all healthy in the arena (30k steps x 4 each)"],
     economyHunters:      [3, 4, 1, "try: 3-4 with the economy on"],
-    mealFactor:          [1, 1.1, 0.05, "meal / break-even; break-even = cooldown x (metabolism + thrust cost x 110^2), flags doc. Measured, 30k steps x 4 setups each: 0.9 starves the predators, 1.0-1.1 keeps both alive, 1.2 booms then crashes, 1.3 collapses the prey"],
+    mealFactor:          [1.2, 1.4, 0.05, "meal / break-even; break-even = cooldown x (metabolism + thrust cost x 110^2), flags doc. Measured (v0.26.0, research log 13.4, 6 seeds x 30k steps): at 1.0 the predators never bud and fade out; 1.2-1.4 breeds them, and with the predator cap below both sides stay alive (12/12 per cap and meal)"],
+    predatorCapPerCooldown: [8, 8, 1, "cap = this x cooldown (s): each capped hunter catches about once per cooldown, so the cap sets the kill rate, about 8/s here. Measured: cap 25 and 40 (cooldown 3: 7.7 and 12 catches/s) held both sides 12/12 each; cap 60 (~20/s, above the prey's ~15-18 births/s) crashed 2/6 at meal 1.4"],
+    predatorFloor:       [2, 2, 1, "the floor stops extinction, not a crash (research log 13.4); 2 keeps a seed population if one happens"],
     predatorMetabolism:  [2, 3, 0.5, "try: 2-3"],
     predatorReproEnergy: [50, 70, 5, "the economy runs used 60; try: 40-80"],
     predatorCooldown:    [3, 5, 0.5, "default 3; 5 eases the chase, the usual binding constraint"],
@@ -111,7 +115,10 @@
                                              round(range("mealFactor") * breakEven, 0.5)));
         adv.predatorReproEnergy = range("predatorReproEnergy");
         adv.minPopulation = 20;
-        labels.push(form.predators + " predators that must eat to breed (meal " + adv.predatorMeal + ")");
+        adv.predatorMaxPopulation = Math.round(range("predatorCapPerCooldown") * adv.predatorCooldown);
+        adv.predatorMinPopulation = range("predatorFloor");
+        labels.push(form.predators + " predators that must eat to breed (meal " + adv.predatorMeal + "), kept between " +
+                    adv.predatorMinPopulation + " and " + adv.predatorMaxPopulation);
       } else {
         labels.push(form.predators + " hunting predators");
       }

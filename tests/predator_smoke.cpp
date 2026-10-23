@@ -16,10 +16,17 @@
 //     is a legitimate, observable Stage-B outcome (there is no predator reseed
 //     floor), so the harness only checks the bookkeeping stays sound through it.
 //
+//   Stage B + limits (v0.26.0): the same economy with a predator floor of 3, a
+//     ceiling of 20 and heritable traits. Asserts every step that the count sits
+//     in [floor, ceiling], that every trait stays finite and inside [0.5, 2], that
+//     the refill counter never decreases, and that budding (with inheritance)
+//     happened.
+//
 // It also prints the predator CSV columns so the output can be eyeballed.
 
 #include <cstdio>
 #include <cmath>
+#include <algorithm>
 #include "core/world.hpp"
 #include "core/stats.hpp"
 
@@ -40,9 +47,14 @@ struct RunResult {
     // Stage B only:
     bool predPopNonNeg = true, predEnergyFinite = true, countersMonotone = true;
     long long lastBirths = 0, lastStarv = 0, lastAge = 0;
+    // Stage B + limits only:
+    bool withinLimits = true, traitsInBand = true;
+    long long lastReseeds = 0;
 };
 
-void runWorld(const char* tag, bool econ, int steps, int logEvery) {
+void runWorld(const char* tag, bool econ, int steps, int logEvery,
+              int predFloor = 0, int predCap = 0, bool inherit = false) {
+    const bool limits = predFloor > 0 || predCap > 0 || inherit;
     rng.seed(42u);
     World w;
     w.cfg.minPopulation = 50;        // prey reseed floor (default)
@@ -58,6 +70,9 @@ void runWorld(const char* tag, bool econ, int steps, int logEvery) {
         w.cfg.predatorMeal       = 14.0f;
         w.cfg.predatorMetabolism = 2.0f;
         w.cfg.predatorReproEnergy = 60.0f;
+        w.cfg.predatorMinPopulation = predFloor;
+        w.cfg.predatorMaxPopulation = predCap;
+        w.cfg.predatorInheritance   = inherit;
     }
     w.init(1920, 1080, 300);
 
@@ -86,6 +101,16 @@ void runWorld(const char* tag, bool econ, int steps, int logEvery) {
             r.lastAge    = w.totalPredatorDeathsAge;
             if (w.totalPredatorBirths > 0) predBornEver = true;
             if (w.totalPredatorDeathsStarvation + w.totalPredatorDeathsAge > 0) predDiedEver = true;
+            if (limits) {
+                const int n = (int)w.predators.size();
+                if (n < predFloor || (predCap > 0 && n > std::max(predCap, predFloor))) r.withinLimits = false;
+                for (const auto& p : w.predators)
+                    if (!(p.speedFactor >= PRED_TRAIT_MIN && p.speedFactor <= PRED_TRAIT_MAX) ||
+                        !(p.buddingFactor >= PRED_TRAIT_MIN && p.buddingFactor <= PRED_TRAIT_MAX))
+                        r.traitsInBand = false;
+                if (w.totalPredatorReseeds < r.lastReseeds) r.countersMonotone = false;
+                r.lastReseeds = w.totalPredatorReseeds;
+            }
         }
 
         if (s % logEvery == 0) {
@@ -134,6 +159,13 @@ void runWorld(const char* tag, bool econ, int steps, int logEvery) {
         check(r.countersMonotone,  "predator birth/death counters never decreased");
         check(predBornEver,        "Stage B: predator reproduction occurred (economy live)");
         check(predDiedEver,        "Stage B: predator death occurred (economy live)");
+        if (limits) {
+            check(r.withinLimits,  "predator count stayed inside [floor, ceiling] every tick");
+            check(r.traitsInBand,  "every predator trait stayed finite and in [0.5, 2]");
+            const WorldStats fin = computeStats(w);
+            std::printf("  (floor refills %lld, mean speed trait %.3f, mean budding trait %.3f)\n",
+                        w.totalPredatorReseeds, fin.predatorSpeedFactor, fin.predatorBuddingFactor);
+        }
     }
     std::printf("\n");
 }
@@ -146,6 +178,8 @@ int main() {
 
     runWorld("Stage A: immortal/fixed-count", /*econ=*/false, steps, logEvery);
     runWorld("Stage B: energy economy",       /*econ=*/true,  steps, logEvery);
+    runWorld("Stage B + floor 3, ceiling 20, inheritance", /*econ=*/true, steps, logEvery,
+             /*predFloor=*/3, /*predCap=*/20, /*inherit=*/true);
 
     if (g_fails == 0) { std::printf("SMOKE OK\n"); return 0; }
     std::printf("SMOKE FAILED (%d)\n", g_fails);

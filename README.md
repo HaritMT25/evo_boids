@@ -187,6 +187,7 @@ Measured headless: the single-threaded module under Node, 20,000–30,000 steps 
 
    Scripted hunters in the arena: 3, 4 and 5 all healthy (12/12).
 3. **Final check of the shipped ranges, 48 fresh setups:** all healthy. Predators were alive in all 28 predator worlds, with 3–70 economy predators at the end.
+4. **Re-checked in v0.26.0, with the predator cap.** Native runs, 6 seeds × 30,000 steps per setting (`docs/evo_boids_flags.md`, predator floor and ceiling section) showed that at 1.0–1.1× break-even the predators never bud: "both sides alive" in step 2 was predators fading out. A meal that breeds them, 1.2× and up, booms and crashes unless their number is capped. A capped hunter catches about once per digesting time, so the cap sets the catch rate, and both sides persist while it stays under the fish's birth rate. Randomize now draws 1.2–1.4× with a cap of 8 × the digesting time and a floor of 2. **21 fresh economy setups, 30,000 steps:** both sides alive in 21/21, the fish never at their floor, the predators at their cap at the end in all 21. In two of them, the fish were held well below their own cap (a median of 178 of 600; dips to 213 of 400).
 
 Uncapped rich-food setups reached ~2,400 fish headless; in the browser, the frame-budget governor sizes that to the device.
 

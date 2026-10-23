@@ -87,6 +87,11 @@ void clampConfig(SimConfig& c) {
     if (c.maxNeighbors < 0) c.maxNeighbors = 0;
     if (c.maxNeighbors > MAX_TOPOLOGICAL_NEIGHBORS)
         c.maxNeighbors = MAX_TOPOLOGICAL_NEIGHBORS;
+    // The predator floor refills every step, so a page-supplied value must not
+    // be able to ask for millions of predators. Negative means off, as 0 does.
+    if (c.predatorMinPopulation < 0) c.predatorMinPopulation = 0;
+    if (c.predatorMinPopulation > 2000) c.predatorMinPopulation = 2000;
+    if (c.predatorMaxPopulation < 0) c.predatorMaxPopulation = 0;
 }
 
 // ---- Dashboard recorder ------------------------------------------------------
@@ -128,6 +133,9 @@ enum RecCol {
     RC_PRED_BIRTHS, RC_PRED_STARVED, RC_PRED_AGED, RC_PRED_ENERGY,  // births/deaths cumulative
     RC_COMPONENTS, RC_GEN_MEAN, RC_GEN_MAX, RC_LINES,
     RC_BODY_SIZE, RC_BODY_ELONG, RC_CURRENT, RC_CULLED,
+    // v0.26.0: the predator floor's refills (cumulative) and the live
+    // predators' mean speed / budding traits and generation (0 with none alive)
+    RC_PRED_RESEEDS, RC_PRED_SPEED, RC_PRED_BUDDING, RC_PRED_GEN,
     RC_Q_SPEED, RC_Q_GLEN = RC_Q_SPEED + kRecQ, RC_Q_BODY = RC_Q_GLEN + kRecQ,
     RC_Q_AGE = RC_Q_BODY + kRecQ,
     RC_SENSORS = RC_Q_AGE + kRecQ,                    // NUM_SENSES usage shares
@@ -260,6 +268,10 @@ void recSample(const World& w) {
     r[RC_GEN_MAX] = (double)gen.max;
     r[RC_CURRENT] = w.currentActive() ? 1.0 : 0.0;
     r[RC_CULLED] = (double)g_rec.culled;
+    r[RC_PRED_RESEEDS] = (double)w.totalPredatorReseeds;
+    r[RC_PRED_SPEED] = s.predatorSpeedFactor;
+    r[RC_PRED_BUDDING] = s.predatorBuddingFactor;
+    r[RC_PRED_GEN] = s.predatorGeneration;
 
     const std::size_t n = w.creatures.size();
     std::vector<float> speed, glen, body, age;
@@ -360,6 +372,12 @@ EVO_EXPORT int evo_init(unsigned seed, int width, int height, int population,
         g_error = "bodyMutation must be finite and >= 0";
         return 0;
     }
+    // The same refusal for the predator trait mutation (v0.26.0), for the same
+    // reasons: it feeds rng.range at every bud.
+    if (!(cfg.predatorTraitMutation >= 0.0f) || !std::isfinite(cfg.predatorTraitMutation)) {
+        g_error = "predatorTraitMutation must be finite and >= 0";
+        return 0;
+    }
     // Same refusal main.cpp makes for the gate knobs, so the frontends agree
     // there too. Negative is legal and means off (the reproMaxDistance
     // convention); non-finite is not: every comparison against NaN is false, so
@@ -416,6 +434,9 @@ EVO_EXPORT int evo_set_param(const char* name, double value) {
         "maxPopulation", "minPopulation", "targetFood", "foodSpawnBase", "foodSpawnAmp",
         "foodEnergy", "metabolicRate", "moveCost", "geneCost", "maxAge", "reproEnergy",
         "newbornEnergy", "mutationMultiplier", "minSpeed", "maxSpeed",
+        // v0.26.0: the predator floor, ceiling and trait mutation are read
+        // fresh every step too (refill, bud check, bud draw)
+        "predatorMinPopulation", "predatorMaxPopulation", "predatorTraitMutation",
     };
     bool live = false;
     for (const char* k : kLive) if (name && std::strcmp(name, k) == 0) { live = true; break; }

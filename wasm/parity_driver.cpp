@@ -33,6 +33,13 @@
 //            plus TWO rng draws per insertion — a dynamics knob that adds to the
 //            random stream, so §6.2 requires native==wasm proven with it on.
 //            bodyMutation stays at its 0.1 default.
+//   --pred-floor N / --pred-cap N / --pred-inherit  (v0.26.0) the predator floor,
+//            ceiling and heritable traits. They act on the economy, so use them
+//            with --rich. The floor and inheritance ADD TO THE RANDOM STREAM
+//            (three draws per refill, two per bud), so like --body-model each
+//            needs native==wasm proven on its own path.
+//   --pred-count N / --pred-meal F  override --rich's 4 predators / absorb meal,
+//            to reach a regime where the floor or the cap actually bites.
 //   --trace  print "frame fingerprint" to stderr every N steps (divergence bisection)
 #include <cstdio>
 #include <cstdlib>
@@ -75,6 +82,14 @@ static uint64_t fingerprint(const World& w) {
     for (const auto& p : w.predators) {
         mix(&p.pos, sizeof p.pos);
         mix(&p.vel, sizeof p.vel);
+        // v0.26.0 predator traits, for the reason above — but only when
+        // inheritance is on, so the default trace stays the 0.25.0 trace and
+        // §6.1 can compare it against a pre-0.26 driver line for line. Off,
+        // the traits are 1.0 by construction and carry no information.
+        if (w.cfg.predatorInheritance) {
+            mix(&p.speedFactor, sizeof p.speedFactor);
+            mix(&p.buddingFactor, sizeof p.buddingFactor);
+        }
     }
     if (!w.signals.data().empty())
         mix(w.signals.data().data(), w.signals.data().size());
@@ -101,6 +116,9 @@ int main(int argc, char** argv) {
     bool rich = false, tri = false, tor = false, bodyModel = false;
     float reproMaxDistance = -1.0f;
     float reproSoftWidth = 0.0f, reproGracePeriod = 0.0f;
+    int predFloor = 0, predCap = 0, predCount = -1;
+    bool predInherit = false;
+    float predMeal = -2.0f;   // < -1.5 => leave the config default alone
     const char* engineVersion = "parity";
     long traceEvery = 0;
     for (int i = 3; i < argc; ++i) {
@@ -114,6 +132,15 @@ int main(int argc, char** argv) {
             reproSoftWidth = (float)std::atof(argv[++i]);
         else if (!std::strcmp(argv[i], "--repro-grace") && i + 1 < argc)
             reproGracePeriod = (float)std::atof(argv[++i]);
+        else if (!std::strcmp(argv[i], "--pred-floor") && i + 1 < argc)
+            predFloor = std::atoi(argv[++i]);
+        else if (!std::strcmp(argv[i], "--pred-cap") && i + 1 < argc)
+            predCap = std::atoi(argv[++i]);
+        else if (!std::strcmp(argv[i], "--pred-count") && i + 1 < argc)
+            predCount = std::atoi(argv[++i]);
+        else if (!std::strcmp(argv[i], "--pred-meal") && i + 1 < argc)
+            predMeal = (float)std::atof(argv[++i]);
+        else if (!std::strcmp(argv[i], "--pred-inherit")) predInherit = true;
         else if (!std::strcmp(argv[i], "--engine-version") && i + 1 < argc) engineVersion = argv[++i];
         else if (!std::strcmp(argv[i], "--trace") && i + 1 < argc) traceEvery = std::strtol(argv[++i], nullptr, 10);
         else { std::fprintf(stderr, "unknown arg %s\n", argv[i]); return 2; }
@@ -141,6 +168,11 @@ int main(int argc, char** argv) {
     world.cfg.reproMaxDistance = reproMaxDistance;
     world.cfg.reproSoftWidth   = reproSoftWidth;
     world.cfg.reproGracePeriod = reproGracePeriod;
+    world.cfg.predatorMinPopulation = predFloor;
+    world.cfg.predatorMaxPopulation = predCap;
+    world.cfg.predatorInheritance   = predInherit;   // predatorTraitMutation stays at 0.1
+    if (predCount >= 0) world.cfg.predatorCount = predCount;
+    if (predMeal > -1.5f) world.cfg.predatorMeal = predMeal;
     world.init(1920, 1080, 300);
 
     const auto t0 = std::chrono::steady_clock::now();

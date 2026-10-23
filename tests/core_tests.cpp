@@ -1004,6 +1004,7 @@ static std::uint64_t deepFingerprint(const World& w) {
     mixI(w.totalGraceBirths); mixI(w.totalSoftBirths);
     mixI(w.totalDeathsPredation); mixI(w.totalDeathsStarvation); mixI(w.totalDeathsAge);
     mixI(w.totalPredatorBirths);
+    mixI(w.totalPredatorReseeds);   // v0.26.0, serialized — same rule as above
     mixI((long long)w.creatures.size()); mixI((long long)w.food.size());
     mixI((long long)w.predators.size());
 
@@ -1026,6 +1027,8 @@ static std::uint64_t deepFingerprint(const World& w) {
     for (const auto& p : w.predators) {
         mixF(p.pos.x); mixF(p.pos.y); mixF(p.vel.x); mixF(p.vel.y);
         mixF(p.digestTimer); mixF(p.energy); mixF(p.age);
+        // v0.26.0 heritable traits + generation, for the body-model reason above.
+        mixF(p.speedFactor); mixF(p.buddingFactor); mixI((long long)p.generation);
     }
     for (uint8_t v : w.signals.data()) mixBytes(&v, 1);
     return h;
@@ -1831,9 +1834,11 @@ static void test_repro_graph() {
         commas = 0; at = 0;
         while (at < h.size() && commas < 31) { if (h[at] == ',') ++commas; ++at; }
         CHECK(h.compare(at, 16, "repro_components") == 0);
-        // The v0.24.0 columns are the last two header fields, so a later append
-        // cannot silently order itself ahead of them and desync from the row.
-        const std::string tail = ",grace_births_cum,soft_births_cum";
+        // The v0.24.0 columns follow it, and the v0.26.0 predator columns are
+        // the last four header fields, so a later append cannot silently order
+        // itself ahead of them and desync from the row.
+        const std::string tail = ",grace_births_cum,soft_births_cum,predator_reseeds_cum,"
+                                 "predator_speed_factor,predator_budding_factor,predator_generation";
         CHECK(h.size() > tail.size() &&
               h.compare(h.size() - tail.size(), tail.size(), tail) == 0);
 
@@ -1845,6 +1850,8 @@ static void test_repro_graph() {
         WorldStats sv;
         sv.totalBirths = 999; sv.reproComponents = 111;
         sv.totalGraceBirths = 222; sv.totalSoftBirths = 333;
+        sv.totalPredatorReseeds = 444; sv.predatorSpeedFactor = 1.25f;
+        sv.predatorBuddingFactor = 0.75f; sv.predatorGeneration = 7.5f;
         const std::string vrow = statsCsvRow(sv, 0.0, 0.0, 0, 0, 0, 0, 0, 0, 0, 0);
         auto field = [](const std::string& s, int col) {   // 1-based CSV column
             std::size_t from = 0;
@@ -1861,6 +1868,10 @@ static void test_repro_graph() {
         CHECK(field(vrow, 32) == "111");   // repro_components
         CHECK(field(vrow, 33) == "222");   // grace_births_cum
         CHECK(field(vrow, 34) == "333");   // soft_births_cum
+        CHECK(field(vrow, 35) == "444");   // predator_reseeds_cum
+        CHECK(field(vrow, 36) == "1.250"); // predator_speed_factor
+        CHECK(field(vrow, 37) == "0.750"); // predator_budding_factor
+        CHECK(field(vrow, 38) == "7.500"); // predator_generation
     }
 }
 
@@ -3022,8 +3033,10 @@ static void test_generation() {
         same = r.creatures[i].generation == w.creatures[i].generation;
     CHECK(same);
 
+    // The creatures' column: the predators block, written first, has its own
+    // "generation" (v0.26.0).
     const std::string key = ",\"generation\":[";
-    const size_t at = blob.find(key);
+    const size_t at = blob.find(key, blob.find("\"creatures\""));
     CHECK(at != std::string::npos);
     if (at == std::string::npos) return;
 
@@ -3081,6 +3094,416 @@ static void test_thread_pool() {
 }
 #endif
 
+// ---------------------------------------------------------------
+// Predator floor + heritable predator traits (v0.26.0). Both opt-in. The
+// claims: off, nothing changes and nothing is drawn; the floor refills to
+// exactly N with baseline founders and counts them, and only with the economy
+// on; inheritance draws exactly when a bud happens, keeps every trait in
+// [0.5, 2], and the traits really move speed, burn and the budding threshold;
+// checkpoints carry all of it and still load pre-0.26 files.
+static void test_predator_floor_inherit() {
+    std::printf("predator floor + heritable traits...\n");
+
+    // --- 1. defaults are off, and a default predator is the 0.25 predator ---
+    {
+        SimConfig c;
+        CHECK(c.predatorMinPopulation == 0);
+        CHECK(!c.predatorInheritance);
+        CHECK(bitEq(c.predatorTraitMutation, 0.10f));
+        Predator p;
+        CHECK(bitEq(p.speedFactor, 1.0f) && bitEq(p.buddingFactor, 1.0f) && p.generation == 0u);
+        const float xs[] = {110.0f, 60.0f, 0.0f, 1.0f / 3.0f, 123.456f, 7e-5f};
+        for (float x : xs) CHECK(bitEq(x * p.speedFactor, x) && bitEq(x * p.buddingFactor, x));
+    }
+
+    // A starving world: economy on, no prey ever (min-pop 0), 5 predators with
+    // 30 energy burning exactly 2/s, so all five starve together at step 938.
+    auto starving = [](unsigned seed, int floor) {
+        rng.seed(seed);
+        World w;
+        w.cfg.predatorCount = 5;
+        w.cfg.predatorEconomy = true;
+        w.cfg.predatorMetabolism = 2.0f;
+        w.cfg.predatorMoveCost = 0.0f;
+        w.cfg.predatorNewbornEnergy = 30.0f;
+        w.cfg.predatorMinPopulation = floor;
+        w.cfg.minPopulation = 0;
+        w.init(640, 480, 0);
+        w.creatures.clear();
+        return w;
+    };
+
+    // --- 2. floor off: extinction is final, nothing refilled ---------------
+    {
+        World w = starving(11u, 0);
+        for (int s = 0; s < 1500; ++s) w.update(0.016f);
+        CHECK(w.predators.empty());
+        CHECK(w.totalPredatorReseeds == 0);
+    }
+
+    // --- 3. floor on: refilled to exactly N, with baseline founders --------
+    {
+        World w = starving(11u, 3);
+        bool neverShort = true;
+        for (int s = 0; s < 1500; ++s) {
+            w.update(0.016f);
+            if (w.predators.size() < 3u) neverShort = false;
+        }
+        CHECK(neverShort);
+        CHECK(w.totalPredatorDeathsStarvation == 5);   // the five starved...
+        CHECK(w.totalPredatorReseeds == 3);            // ...and three came back
+        CHECK(w.totalPredatorBirths == 0);             // refills are not births
+        CHECK(w.predators.size() == 3u);
+        bool founders = w.predators.size() == 3u;
+        for (const auto& p : w.predators)
+            if (p.generation != 0u || !bitEq(p.speedFactor, 1.0f) || !bitEq(p.buddingFactor, 1.0f) ||
+                !(p.energy > 0.0f && p.energy <= 30.0f) || !(p.pos.x >= 0.0f && p.pos.x < 640.0f))
+                founders = false;
+        CHECK(founders);
+        // and they go on starving: the floor refills, it does not feed
+        for (int s = 0; s < 1000; ++s) w.update(0.016f);
+        CHECK(w.totalPredatorDeathsStarvation == 8);
+        CHECK(w.totalPredatorReseeds == 6);
+    }
+
+    // --- 4. the floor needs the economy: Stage A stays fixed-count ---------
+    {
+        rng.seed(5u);
+        World w;
+        w.cfg.predatorCount = 2;
+        w.cfg.predatorMinPopulation = 5;               // economy off => inert
+        w.init(640, 480, 60);
+        for (int s = 0; s < 200; ++s) w.update(0.016f);
+        CHECK(w.predators.size() == 2u);
+        CHECK(w.totalPredatorReseeds == 0);
+    }
+
+#ifdef EVO_DETERMINISTIC
+    // --- 5. a floor that never has to act draws nothing --------------------
+    // Rich world (4 economy predators; none starve within 300 steps): a floor
+    // of 2 is never short, so the run must be bit-identical to the floor-off one.
+    {
+        auto run = [](int floor) {
+            rng.seed(4321u);
+            World w;
+            configureRichWorld(w);
+            w.cfg.predatorMinPopulation = floor;
+            w.init(900, 700, 260);
+            for (int i = 0; i < 300; ++i) w.update(0.016f);
+            return std::make_pair(deepFingerprint(w), w.totalPredatorReseeds);
+        };
+        const auto off = run(0), idle = run(2);
+        CHECK(idle.second == 0);
+        CHECK(off.first == idle.first);
+    }
+
+    // --- 6. inheritance draws only when a bud happens ----------------------
+    // On with no buds (threshold out of reach) == off; on with buds and m = 0
+    // keeps every trait at exactly 1.0 but still takes its two draws per bud,
+    // so the run moves off the inheritance-off trajectory.
+    {
+        auto run = [](bool inherit, float mut, float reproEnergy) {
+            rng.seed(2468u);
+            World w;
+            configureRichWorld(w);
+            w.cfg.predatorInheritance = inherit;
+            w.cfg.predatorTraitMutation = mut;
+            w.cfg.predatorReproEnergy = reproEnergy;
+            w.init(900, 700, 260);
+            for (int i = 0; i < 400; ++i) w.update(0.016f);
+            bool unit = true;
+            for (const auto& p : w.predators)
+                if (!bitEq(p.speedFactor, 1.0f) || !bitEq(p.buddingFactor, 1.0f)) unit = false;
+            return std::make_tuple(deepFingerprint(w), w.totalPredatorBirths, unit);
+        };
+        const auto offNoBud = run(false, 0.1f, 1e9f), onNoBud = run(true, 0.1f, 1e9f);
+        CHECK(std::get<1>(onNoBud) == 0);
+        CHECK(std::get<0>(offNoBud) == std::get<0>(onNoBud));
+        const auto off = run(false, 0.0f, 60.0f), onZero = run(true, 0.0f, 60.0f);
+        CHECK(std::get<1>(off) > 0);                    // buds happened
+        CHECK(std::get<2>(off) && std::get<2>(onZero)); // m = 0: traits stay 1.0
+        CHECK(std::get<0>(off) != std::get<0>(onZero)); // ...but the draws were taken
+    }
+#endif
+
+    // --- 7. one bud: generation, trait band, and the two draws' values ----
+    {
+        auto bud = [](unsigned seed, bool inherit, float mut) {
+            rng.seed(seed);
+            World w;
+            w.cfg.predatorCount = 1;
+            w.cfg.predatorEconomy = true;
+            w.cfg.predatorMetabolism = 2.0f;
+            w.cfg.predatorMoveCost = 0.0f;
+            w.cfg.predatorReproEnergy = 40.0f;
+            w.cfg.predatorNewbornEnergy = 30.0f;
+            w.cfg.predatorInheritance = inherit;
+            w.cfg.predatorTraitMutation = mut;
+            w.cfg.minPopulation = 0;
+            w.init(640, 480, 0);
+            w.creatures.clear();
+            w.predators[0].energy = 50.0f;
+            w.predators[0].speedFactor = 1.2f;
+            w.predators[0].buddingFactor = 0.9f;
+            w.predators[0].generation = 4;
+            w.update(0.016f);
+            return w;
+        };
+        World on = bud(13u, true, 0.1f);
+        CHECK(on.predators.size() == 2u);
+        if (on.predators.size() == 2u) {
+            const Predator& kid = on.predators[1];
+            CHECK(kid.generation == 5u);
+            CHECK(kid.speedFactor >= 1.2f - 0.1f - 1e-6f && kid.speedFactor <= 1.2f + 0.1f + 1e-6f);
+            CHECK(kid.buddingFactor >= 0.9f - 0.1f - 1e-6f && kid.buddingFactor <= 0.9f + 0.1f + 1e-6f);
+            CHECK(!bitEq(kid.speedFactor, 1.2f) || !bitEq(kid.buddingFactor, 0.9f));   // a draw landed
+            CHECK(bitEq(on.predators[0].speedFactor, 1.2f));   // the parent is untouched
+        }
+        World off = bud(13u, false, 0.1f);
+        CHECK(off.predators.size() == 2u);
+        if (off.predators.size() == 2u) {
+            CHECK(off.predators[1].generation == 5u);          // counted either way
+            CHECK(bitEq(off.predators[1].speedFactor, 1.0f) && bitEq(off.predators[1].buddingFactor, 1.0f));
+        }
+        // Clamp: a parent at the ceiling with a huge mutation stays in band.
+        bool inBand = true;
+        for (unsigned s = 100; s < 140; ++s) {
+            rng.seed(s);
+            World w;
+            w.cfg.predatorCount = 1;
+            w.cfg.predatorEconomy = true;
+            w.cfg.predatorMoveCost = 0.0f;
+            w.cfg.predatorReproEnergy = 40.0f;
+            w.cfg.predatorInheritance = true;
+            w.cfg.predatorTraitMutation = 5.0f;
+            w.cfg.minPopulation = 0;
+            w.init(640, 480, 0);
+            w.creatures.clear();
+            w.predators[0].energy = 100.0f;
+            w.predators[0].speedFactor = PRED_TRAIT_MAX;
+            w.predators[0].buddingFactor = PRED_TRAIT_MIN;
+            w.update(0.016f);
+            for (const auto& p : w.predators)
+                if (!(p.speedFactor >= PRED_TRAIT_MIN && p.speedFactor <= PRED_TRAIT_MAX) ||
+                    !(p.buddingFactor >= PRED_TRAIT_MIN && p.buddingFactor <= PRED_TRAIT_MAX)) inBand = false;
+        }
+        CHECK(inBand);
+    }
+
+    // --- 8. the traits do what they say -----------------------------------
+    {
+        // speedFactor scales the cruise and the kinetic burn: one step, no
+        // prey, no current, centre of the world so nothing wraps.
+        auto step = [](float sf, Vec2& moved, float& burned) {
+            rng.seed(99u);
+            World w;
+            w.cfg.predatorCount = 1;
+            w.cfg.predatorEconomy = true;
+            w.cfg.predatorMetabolism = 2.0f;
+            w.cfg.predatorMoveCost = 1e-4f;
+            w.cfg.predatorSpeed = 100.0f;
+            w.cfg.predatorReproEnergy = 1000.0f;
+            w.cfg.minPopulation = 0;
+            w.init(640, 480, 0);
+            w.creatures.clear();
+            w.predators[0].pos = {320.0f, 240.0f};
+            w.predators[0].energy = 50.0f;
+            w.predators[0].speedFactor = sf;
+            w.update(0.016f);
+            moved = w.predators[0].pos - Vec2{320.0f, 240.0f};
+            burned = 50.0f - w.predators[0].energy;
+        };
+        Vec2 m1, m2; float b1, b2;
+        step(1.0f, m1, b1);
+        step(2.0f, m2, b2);
+        const float d1 = std::sqrt(m1.x * m1.x + m1.y * m1.y), d2 = std::sqrt(m2.x * m2.x + m2.y * m2.y);
+        CHECK(approx(d1, 100.0f * 0.016f, 1e-3f));
+        CHECK(approx(d2, 200.0f * 0.016f, 1e-3f));
+        CHECK(approx(b1, (2.0f + 1e-4f * 100.0f * 100.0f) * 0.016f, 1e-4f));
+        CHECK(approx(b2, (2.0f + 1e-4f * 200.0f * 200.0f) * 0.016f, 1e-4f));
+
+        // buddingFactor scales the threshold: 50 energy buds at x0.75 (45),
+        // not at x1.0 (60).
+        auto buds = [](float bf) {
+            rng.seed(21u);
+            World w;
+            w.cfg.predatorCount = 1;
+            w.cfg.predatorEconomy = true;
+            w.cfg.predatorMoveCost = 0.0f;
+            w.cfg.predatorReproEnergy = 60.0f;
+            w.cfg.minPopulation = 0;
+            w.init(640, 480, 0);
+            w.creatures.clear();
+            w.predators[0].energy = 50.0f;
+            w.predators[0].buddingFactor = bf;
+            w.update(0.016f);
+            return w.totalPredatorBirths;
+        };
+        CHECK(buds(1.0f) == 0);
+        CHECK(buds(0.75f) == 1);
+    }
+
+    // --- 8b. the ceiling: no bud at the cap, the energy is kept ----------
+    {
+        auto capped = [](int cap, int preds) {
+            rng.seed(23u);
+            World w;
+            w.cfg.predatorCount = preds;
+            w.cfg.predatorEconomy = true;
+            w.cfg.predatorMetabolism = 2.0f;
+            w.cfg.predatorMoveCost = 0.0f;
+            w.cfg.predatorReproEnergy = 40.0f;
+            w.cfg.predatorNewbornEnergy = 30.0f;
+            w.cfg.predatorMaxPopulation = cap;
+            w.cfg.minPopulation = 0;
+            w.init(640, 480, 0);
+            w.creatures.clear();
+            for (auto& p : w.predators) p.energy = 100.0f;   // every one ready to bud
+            w.update(0.016f);
+            return w;
+        };
+        const float burn = 2.0f * 0.016f;
+        World none = capped(0, 3);                  // no cap: all three bud
+        CHECK(none.totalPredatorBirths == 3 && none.predators.size() == 6u);
+        World full = capped(3, 3);                  // at the cap: none bud
+        CHECK(full.totalPredatorBirths == 0 && full.predators.size() == 3u);
+        bool kept = full.predators.size() == 3u;
+        for (const auto& p : full.predators) if (!approx(p.energy, 100.0f - burn, 1e-3f)) kept = false;
+        CHECK(kept);
+        World room = capped(5, 3);                  // room for two: this step's buds count
+        CHECK(room.totalPredatorBirths == 2 && room.predators.size() == 5u);
+        // a floor above the ceiling wins (the floor is not capped)
+        World fl = starving(11u, 4);
+        fl.cfg.predatorMaxPopulation = 2;
+        for (int s = 0; s < 1000; ++s) fl.update(0.016f);
+        CHECK(fl.predators.size() == 4u);
+    }
+
+    // --- 9. a live run: traits spread, stay in band, generations climb ----
+    World live;
+    {
+        rng.seed(777u);
+        configureRichWorld(live);
+        live.cfg.predatorInheritance = true;
+        live.cfg.predatorMinPopulation = 3;
+        live.init(900, 700, 260);
+        for (int i = 0; i < 1500; ++i) live.update(0.016f);
+        CHECK(live.totalPredatorBirths > 0);
+        bool band = !live.predators.empty(), varied = false;
+        std::uint32_t maxGen = 0;
+        for (const auto& p : live.predators) {
+            if (!(p.speedFactor >= PRED_TRAIT_MIN && p.speedFactor <= PRED_TRAIT_MAX) ||
+                !(p.buddingFactor >= PRED_TRAIT_MIN && p.buddingFactor <= PRED_TRAIT_MAX)) band = false;
+            if (!bitEq(p.speedFactor, 1.0f)) varied = true;
+            maxGen = std::max(maxGen, p.generation);
+        }
+        CHECK(band);
+        CHECK(varied);
+        CHECK(maxGen >= 1u);
+        const WorldStats st = computeStats(live);
+        CHECK(st.totalPredatorReseeds == (int)live.totalPredatorReseeds);
+        CHECK(st.predatorSpeedFactor >= PRED_TRAIT_MIN && st.predatorSpeedFactor <= PRED_TRAIT_MAX);
+        CHECK(st.predatorGeneration >= 0.0f && st.predatorGeneration <= (float)maxGen);
+    }
+
+    // --- 10. checkpoints: round trip, resume, old files, corrupt files ----
+    {
+        const std::string blob = checkpoint::serialize(live, "test");
+        std::string err;
+        World r;
+        CHECK(checkpoint::deserialize(blob, r, err));
+        CHECK(r.cfg.predatorInheritance && r.cfg.predatorMinPopulation == 3);
+        CHECK(r.totalPredatorReseeds == live.totalPredatorReseeds);
+        bool same = r.predators.size() == live.predators.size();
+        for (size_t i = 0; same && i < r.predators.size(); ++i)
+            same = bitEq(r.predators[i].speedFactor, live.predators[i].speedFactor) &&
+                   bitEq(r.predators[i].buddingFactor, live.predators[i].buddingFactor) &&
+                   r.predators[i].generation == live.predators[i].generation;
+        CHECK(same);
+        CHECK(checkpoint::serialize(r, "test") == blob);
+#ifdef EVO_DETERMINISTIC
+        {
+            // Uninterrupted: a copy of the saved world, continued from the
+            // saved rng state (a load restores it). Resumed: a fresh load.
+            World a = live;
+            World b;
+            CHECK(checkpoint::deserialize(blob, b, err));
+            for (int i = 0; i < 300; ++i) a.update(0.016f);
+            const std::uint64_t uninterrupted = deepFingerprint(a);
+            CHECK(checkpoint::deserialize(blob, b, err));
+            for (int i = 0; i < 300; ++i) b.update(0.016f);
+            CHECK(deepFingerprint(b) == uninterrupted);
+            CHECK(b.totalPredatorReseeds == a.totalPredatorReseeds);
+        }
+#endif
+        // Erase `,"key":[...]` (or `,"key":value`) — the first one at or after `from`.
+        auto eraseKey = [](std::string s, const std::string& key, size_t from = 0) {
+            const std::string k = ",\"" + key + "\":";
+            const size_t at = s.find(k, from);
+            if (at == std::string::npos) return s;
+            size_t end = at + k.size();
+            if (s[end] == '[') end = s.find(']', end) + 1;
+            else end = s.find_first_of(",}", end);
+            s.erase(at, end - at);
+            return s;
+        };
+        const size_t predAt = blob.find("\"predators\"");
+        CHECK(predAt != std::string::npos);
+
+        // A pre-0.26 checkpoint: no trait columns, no generation, no counter,
+        // no config keys. Loads, at 1.0/1.0/0 and the defaults.
+        std::string old = eraseKey(blob, "speedFactor");
+        old = eraseKey(old, "buddingFactor");
+        old = eraseKey(old, "generation", old.find("\"predators\""));
+        old = eraseKey(old, "totalPredatorReseeds");
+        old = eraseKey(old, "predatorMinPopulation");
+        old = eraseKey(old, "predatorInheritance");
+        old = eraseKey(old, "predatorTraitMutation");
+        CHECK(old.find("speedFactor") == std::string::npos);
+        World o;
+        CHECK(checkpoint::deserialize(old, o, err));
+        bool base = o.predators.size() == live.predators.size();
+        for (const auto& p : o.predators)
+            if (!bitEq(p.speedFactor, 1.0f) || !bitEq(p.buddingFactor, 1.0f) || p.generation != 0u) base = false;
+        CHECK(base);
+        CHECK(o.totalPredatorReseeds == 0 && o.cfg.predatorMinPopulation == 0 && !o.cfg.predatorInheritance);
+        // the creatures' generation column survived the predator erase
+        bool creaturesKept = !o.creatures.empty() && o.creatures.size() == live.creatures.size();
+        for (size_t i = 0; creaturesKept && i < o.creatures.size(); ++i)
+            creaturesKept = o.creatures[i].generation == live.creatures[i].generation;
+        CHECK(creaturesKept);
+
+        // only one of the two traits: corrupt
+        World x1;
+        CHECK(!checkpoint::deserialize(eraseKey(blob, "buddingFactor"), x1, err));
+        // out of range, and NaN: corrupt
+        auto setFirst = [&](const std::string& key, const std::string& v) {
+            std::string s = blob;
+            const size_t at = s.find("\"" + key + "\":[");
+            const size_t v0 = at + key.size() + 4;
+            s.replace(v0, s.find_first_of(",]", v0) - v0, v);
+            return s;
+        };
+        World x2, x3, x4;
+        CHECK(!live.predators.empty());
+        CHECK(!checkpoint::deserialize(setFirst("speedFactor", "2.5"), x2, err));
+        CHECK(!checkpoint::deserialize(setFirst("buddingFactor", "nan"), x3, err));
+        CHECK(checkpoint::deserialize(setFirst("speedFactor", "0.5"), x4, err));   // the edge is legal
+        // a negative or non-finite mutation in the config: corrupt
+        auto setCfg = [&](const std::string& v) {
+            std::string s = blob;
+            const std::string k = "\"predatorTraitMutation\":";
+            const size_t at = s.find(k) + k.size();
+            s.replace(at, s.find_first_of(",}", at) - at, v);
+            return s;
+        };
+        World x5, x6, x7;
+        CHECK(!checkpoint::deserialize(setCfg("-0.1"), x5, err));
+        CHECK(!checkpoint::deserialize(setCfg("nan"), x6, err));
+        CHECK(checkpoint::deserialize(setCfg("0"), x7, err));
+    }
+}
+
 int main() {
     std::printf("=== evo_boids core tests (no SFML linked) ===\n");
     test_portable_mt19937();
@@ -3106,6 +3529,7 @@ int main() {
     test_body_model();
     test_repro_mitigations();
     test_generation();
+    test_predator_floor_inherit();
 #ifdef EVO_POOL_THREADS
     test_thread_pool();
 #endif

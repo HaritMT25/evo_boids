@@ -197,6 +197,10 @@ public:
     long long totalPredatorBirths           = 0;
     long long totalPredatorDeathsStarvation = 0;
     long long totalPredatorDeathsAge        = 0;
+    // Predators the floor added (cfg.predatorMinPopulation, v0.26.0). Not
+    // births: kept apart so a population the floor holds up can be told from
+    // one that breeds. 0 unless the floor is on.
+    long long totalPredatorReseeds          = 0;
 
     // Death-cluster map (cfg.clusterMap). One point per creature death: the 2-D
     // projection of its network plus the death ordinal (so colour can band by
@@ -797,6 +801,10 @@ public:
         // creatureGrid_ indices still line up with `creatures` (the dead-removal
         // erase below would invalidate them). No-op when there are no predators.
         updatePredators(dt);
+        // The predator floor (v0.26.0) runs even when the hunt was a no-op —
+        // an extinct population is exactly the case it exists for. Gated here
+        // so the default path makes no call and draws nothing.
+        if (cfg.predatorEconomy && cfg.predatorMinPopulation > 0) refillPredators();
 
         creatures.erase(
             std::remove_if(creatures.begin(), creatures.end(),
@@ -874,16 +882,18 @@ private:
         // Predator kinetic coefficient: reuse the prey --move-cost when <0.
         const float pmc      = (cfg.predatorMoveCost >= 0.0f) ? cfg.predatorMoveCost
                                                               : cfg.moveCost;
-        // Predators cruise at a fixed speed (Stage A/B), so the per-second burn is
-        // constant: fixed metabolism + the quadratic kinetic cost of that cruise.
-        const float burnRate = cfg.predatorMetabolism
-                             + pmc * cfg.predatorSpeed * cfg.predatorSpeed;
+        // Each predator cruises at a fixed speed (Stage A/B) — cfg.predatorSpeed
+        // times its speedFactor, which is 1.0 (the product is cfg.predatorSpeed
+        // bit for bit) unless inheritance has varied it — so its per-second burn
+        // is constant: fixed metabolism + the quadratic kinetic cost of that cruise.
         const float detect2  = cfg.predatorPerception * cfg.predatorPerception;
         const float capture2 = cfg.predatorCaptureRadius * cfg.predatorCaptureRadius;
 
         std::vector<Predator> newborns;   // budded this frame (appended after the loop)
         std::vector<int> near;
         for (Predator& p : predators) {
+            const float speed    = cfg.predatorSpeed * p.speedFactor;
+            const float burnRate = cfg.predatorMetabolism + pmc * speed * speed;
             p.digestTimer -= dt;
             if (econ) {
                 p.age    += dt;
@@ -921,8 +931,8 @@ private:
 
             // Advance at a fixed cruise speed. The current carries the predator
             // too, so phase 2 (current on) stays kinematically consistent.
-            p.pos.x += dir.x * cfg.predatorSpeed * dt;
-            p.pos.y += dir.y * cfg.predatorSpeed * dt;
+            p.pos.x += dir.x * speed * dt;
+            p.pos.y += dir.y * speed * dt;
             if (current_.active()) {
                 const Vec2 cur = current_.velocityAt(p.pos);
                 p.pos.x += cur.x * dt;
@@ -962,7 +972,13 @@ private:
                 } else if (cfg.predatorMaxAge > 0.0f && p.age >= cfg.predatorMaxAge) {
                     p.alive = false;
                     totalPredatorDeathsAge++;
-                } else if (p.energy >= cfg.predatorReproEnergy) {
+                } else if (p.energy >= cfg.predatorReproEnergy * p.buddingFactor &&
+                           // The predator ceiling (v0.26.0), counted exactly
+                           // like the prey --max-pop: a predator at the cap
+                           // keeps its energy and buds once there is room.
+                           // 0 => no cap, and the test short-circuits.
+                           (cfg.predatorMaxPopulation <= 0 ||
+                            (int)predators.size() + (int)newborns.size() < cfg.predatorMaxPopulation)) {
                     Predator child;
                     // Place the child a hair off the parent with a random heading.
                     // (Toroidal: wrap instead of pinning the child to the wall;
@@ -978,6 +994,22 @@ private:
                     child.vel    = {evomath::cosf(a), evomath::sinf(a)};
                     child.energy = cfg.predatorNewbornEnergy;
                     p.energy    -= cfg.predatorNewbornEnergy;   // energy-conserving
+                    child.generation = p.generation + 1;
+                    // Heritable traits (v0.26.0). The random stream is defined
+                    // here: draws ONLY under cfg.predatorInheritance, EXACTLY two
+                    // per bud (speedFactor, then buddingFactor), each a single
+                    // rng.range with no rejection, so the count never depends on
+                    // the values — the same contract as the body model's two
+                    // draws, and what keeps native and wasm bit-identical. They
+                    // come after the bud's position and heading draws. Off, the
+                    // child keeps 1.0/1.0 and the sequence is the 0.25.0 one.
+                    if (cfg.predatorInheritance) {
+                        const float m = cfg.predatorTraitMutation;
+                        child.speedFactor   = std::clamp(p.speedFactor + rng.range(-m, m),
+                                                         PRED_TRAIT_MIN, PRED_TRAIT_MAX);
+                        child.buddingFactor = std::clamp(p.buddingFactor + rng.range(-m, m),
+                                                         PRED_TRAIT_MIN, PRED_TRAIT_MAX);
+                    }
                     newborns.push_back(child);
                     totalPredatorBirths++;
                 }
@@ -992,6 +1024,27 @@ private:
                 std::remove_if(predators.begin(), predators.end(),
                                [](const Predator& p) { return !p.alive; }),
                 predators.end());
+        }
+    }
+
+    // The predator floor (cfg.predatorMinPopulation, v0.26.0): the predators'
+    // --min-pop. Called after updatePredators has applied births and removed the
+    // dead, only with the economy on and the floor > 0. Each refilled predator
+    // is a founder like the initial spawn: the same three draws in the same
+    // order (x, y, heading), predatorNewbornEnergy, generation 0 and traits
+    // 1.0/1.0 — with inheritance on, the floor is a steady source of baseline
+    // traits, the predator analogue of the random founders the prey floor
+    // injects (§7.1). Nothing is drawn unless the count is actually short.
+    void refillPredators() {
+        while ((int)predators.size() < cfg.predatorMinPopulation) {
+            Predator p;
+            p.pos = {rng.range(10.0f, (float)width - 10.0f),
+                     rng.range(10.0f, (float)height - 10.0f)};
+            const float a = rng.range(0.0f, 6.2832f);
+            p.vel = {evomath::cosf(a), evomath::sinf(a)};
+            p.energy = cfg.predatorNewbornEnergy;
+            predators.push_back(p);
+            totalPredatorReseeds++;
         }
     }
 

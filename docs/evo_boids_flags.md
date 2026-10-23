@@ -1,7 +1,16 @@
-# evo_boids — CLI reference (v0.25.0)
+# evo_boids — CLI reference (v0.26.0)
 
 Headless runner for the evolutionary boids simulation. Defaults reproduce the
 original behaviour, so any flag is an opt-in change.
+
+> **v0.26.0 — predator floor, ceiling and heritable traits** (`--predator-min-pop`,
+> `--predator-max-pop`, `--predator-inherit`, `--predator-trait-mutation`; see the
+> section after the predator economy): the predators' own `--min-pop` and `--max-pop`,
+> and two heritable predator traits (speed and budding threshold) passed to each bud
+> with a mutation. Four CSV columns appended (35–38). All off by default and
+> byte-identical to v0.25.0 when off. Measured: **the ceiling is what keeps both
+> populations alive** (it fixes the predators' catch rate); the floor stops extinction
+> but not a crash; inheritance does not stabilise anything on its own.
 
 > **v0.25.0 — browser build** (no new CLI flags): a threaded WebAssembly module
 > alongside the single-threaded one, a static Vercel deploy, and a per-creature
@@ -246,8 +255,10 @@ Stage A also runs an **energy economy**: it gains energy by capturing prey, burn
 above an energy threshold, and **starves** below 0 energy (and optionally dies of
 old age). `predator_pop` becomes time-varying — this is the whole point: the coupled
 (Lotka–Volterra-ish) oscillator where prey crash → predators starve → predator
-decline → prey rebound → predators recover. There is **no predator reseed floor** —
-predator extinction is a legitimate, observable failure mode, not something masked.
+decline → prey rebound → predators recover. By default there is **no predator reseed
+floor** — predator extinction is a legitimate, observable failure mode, not something
+masked. (v0.26.0 adds an opt-in floor that masks it on purpose and counts every
+predator it adds; see the next section.)
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -287,6 +298,61 @@ The win condition is the band in between: evasion evolves (it shows up as **scho
 — rising `neighbor_align`, *not* `predator_align`; see CSV columns) **and neither side
 goes extinct**. Note schooling is a **stochastic phase transition** (~1.2M+ steps, not
 every run) — judge it across **replicates**, not one run (see the reproducibility note).
+
+## Predator floor, ceiling and heritable traits (v0.26.0)
+
+Three opt-in additions to the Stage-B economy, **all off by default** (and inert
+without `--predator-economy`). Off, a run is byte-identical to v0.25.0: step-by-step
+fingerprints and checkpoints match a pre-change build across 4 seeds × 7 modes, apart
+from the new checkpoint fields; native == wasm parity holds on 23 cases, 4 of them
+with these flags on.
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--predator-min-pop N` | 0 | **The predators' `--min-pop`.** After each step's buds and deaths, fresh scripted predators are added until at least N are alive: random position and heading, `--predator-newborn-energy`, generation 0, traits 1.0. 0 = off (extinction is final). Draws nothing unless it refills. Every refill is counted in `predator_reseeds_cum` — **a run the floor holds up is not evidence of coexistence**, and that column says how much holding up it did. |
+| `--predator-max-pop N` | 0 | **The predators' `--max-pop`.** A predator at its budding threshold does not bud while N are alive (counted with this step's buds, as the prey cap is); it keeps its energy and buds once there is room. 0 = no cap. Draws nothing. The floor is not capped: a floor above the ceiling wins. |
+| `--predator-inherit` | off | **Heritable predator traits.** Each predator carries two multipliers, `speedFactor` (× `--predator-speed`) and `buddingFactor` (× `--predator-repro-energy`), both in [0.5, 2]. A bud copies its parent's and adds one uniform draw to each: `clamp(parent + U(−m, m), 0.5, 2)`. Off, every trait stays 1.0 and nothing is drawn. Spawned and floor-refilled predators start at 1.0. |
+| `--predator-trait-mutation F` | 0.1 | The half-width `m` above (the `--body-mutation` default). Must be finite and ≥ 0. |
+
+**What the traits cost.** Speed buys catches, and the kinetic burn is quadratic in it
+(`metabolism + move_cost · (speed · speedFactor)²`), so **speed is only priced when the
+kinetic cost is non-zero** (`--predator-move-cost`, or a `--move-cost` it reuses): with
+both at 0, faster is free and selection walks it to the clamp. A lower budding threshold
+breeds sooner and leaves the parent a thinner reserve (it still pays
+`--predator-newborn-energy` per bud). These are two heritable numbers, not a genome or a
+brain: the hunt is still scripted (a neural predator is Stage C).
+
+**Reading it.** The console's economy segment gains ` pR<n>` (refills so far) with the
+floor on and `pSpd <x>` (mean speed factor) with inheritance on. The CSV gains four
+columns (35–38, below). Checkpoints carry the traits, each predator's generation and the
+refill count; older checkpoints load at 1.0/1.0/0.
+
+**Measured (6 seeds × 30k steps per setting, serial build; two worlds: the Stage-B
+arena above and the web page's defaults).**
+- **A meal at break-even never breeds predators**; they starve one by one. Breeding
+  needs about 1.2× break-even, and uncapped that is a one-shot boom and crash in the
+  arena (extinct 6/6 at 1.4×) and a settle onto the prey floor in the page's world at
+  1.5× and above (6/6). At 1.2× the page's food-limited world coexists with no new
+  knob at all (5/6).
+- **The ceiling keeps both alive.** A capped predator catches about once per cooldown,
+  so the cap fixes the catch rate at `cap ÷ cooldown` per second. Keep that under the
+  prey's birth rate (read it off `births_interval`) with margin. In the arena (prey
+  replace up to ~15–18/s) caps 12, 25 and 40 held both sides in all 96 runs at 1.2×
+  and 1.4×, with 50–85 % of prey deaths being catches, and cap 60 crashed 2/6 at 1.4×.
+  In the page's world (~9/s) cap 15 held both at the cap in 17/18 runs (in the 18th
+  the predators dwindled to 1), and cap 30 did not hold at 1.5× and above. Capped
+  predators bank their surplus energy.
+- **The floor stops extinction, not the crash.** After a crash, prey stayed at their
+  own floor for the rest of 90k-step runs, with the floor's predators living off the
+  prey reseeds.
+- **Inheritance alone makes things worse**, and needs a kinetic cost. Uncapped, it
+  raised extinctions from 1/6 to 4/6 (arena, 1.2×), because buds that bud sooner boom
+  faster. With no kinetic cost, speed walked to ×1.65–1.79 and predators exploded.
+  Under a cap, nothing buds unless predators die, so the traits stay put. **With turnover
+  they do evolve:** cap 40 + floor 2 + `--predator-max-age 120`, 60k steps, meal 1.2×:
+  speed ×0.83 and budding ×0.85 (medians, 6/6 seeds), so a cheaper cruise and an earlier
+  bud. That evolved population filled the cap and caught twice as many prey. At 1.4×
+  the traits barely moved. Use it with a kinetic cost, a lifespan and a cap.
 
 ## Environment — currents & spatial food
 
@@ -434,7 +500,7 @@ sensors sitting near their random-chance baseline.
 > runs because the axes are data-dependent). Lineage = founder of the **maternal**
 > line (parent1 at each birth); crossover means a clade's genomes still recombine.
 
-## CSV columns (one row per `--log-every` interval) — **34 cols as of v0.24.0**
+## CSV columns (one row per `--log-every` interval) — **38 cols as of v0.26.0**
 
 `step, elapsed_s, steps_per_sec, population, food, births_cum, deaths_cum,
 births_interval, deaths_interval, avg_age, max_age, avg_energy, avg_speed,
@@ -443,7 +509,8 @@ genetic_diversity, species, flow_align,
 predator_pop, kills_interval, deaths_starvation, deaths_age, predator_align,
 neighbor_align, neighbor_count,
 predator_births_interval, predator_deaths_starv, predator_deaths_age, predator_avg_energy,
-repro_components, grace_births_cum, soft_births_cum`
+repro_components, grace_births_cum, soft_births_cum,
+predator_reseeds_cum, predator_speed_factor, predator_budding_factor, predator_generation`
 
 - `genetic_diversity`: RMS distance from the population mean in connectivity space
   (~14 scale, exact). Coupled to genome length. Not comparable to pre-rework CSVs.
@@ -473,6 +540,15 @@ repro_components, grace_births_cum, soft_births_cum`
   column by a per-interval column yields a "share" that grows without bound). A
   mitigation that is carrying the whole birth rate at equilibrium has made the gate
   inert, which is the failure mode to watch for.
+- `predator_reseeds_cum` (35th, appended in v0.26.0): predators the
+  `--predator-min-pop` floor has added, cumulative. **Not** a subset of the predator
+  births — a refilled predator was not born. 0 with the floor off. Survives a
+  checkpoint resume.
+- `predator_speed_factor` / `predator_budding_factor` / `predator_generation`
+  (36th–38th, v0.26.0): the live predators' mean speed trait, budding-threshold trait
+  and generation (buds since a spawned or refilled founder), instantaneous. **0 when no
+  predator is alive** (the `predator_avg_energy` convention), exactly 1.000 for the two
+  traits with inheritance off; the generation counts buds either way.
 
 **New in v0.9.0 (5 columns, appended last → existing column-by-name parsing is
 unaffected):**

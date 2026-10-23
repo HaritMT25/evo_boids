@@ -20,7 +20,8 @@
               "avgAge", "maxAge", "avgEnergy", "avgSpeed", "avgGlen", "glenStd", "diversity",
               "flowAlign", "predAlign", "neighAlign", "neighCount",
               "predBirths", "predStarved", "predAged", "predEnergy",
-              "components", "genMean", "genMax", "lines", "bodySize", "bodyElong", "current", "culled"];
+              "components", "genMean", "genMax", "lines", "bodySize", "bodyElong", "current", "culled",
+              "predReseeds", "predSpeed", "predBudding", "predGen"];
   var COL = {};
   BASE.forEach(function (name, i) { COL[name] = i; });
   ["speed", "glen", "body", "age"].forEach(function (t, k) {

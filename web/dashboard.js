@@ -61,7 +61,11 @@
       pred: anyRow(function (i) { return hist.get(i, COL.pred) > 0; }),
       current: last >= 0 && hist.get(last, COL.current) > 0,
       body: anyRow(function (i) { return hist.get(i, COL.q_body) !== 1 || hist.get(i, COL.q_body + 4) !== 1; }),
-      culled: last >= 0 && hist.get(last, COL.culled) > 0
+      culled: last >= 0 && hist.get(last, COL.culled) > 0,
+      predFloor: last >= 0 && hist.get(last, COL.predReseeds) > 0,
+      predTraits: anyRow(function (i) {
+        return hist.get(i, COL.pred) > 0 && (hist.get(i, COL.predSpeed) !== 1 || hist.get(i, COL.predBudding) !== 1);
+      })
     };
   }
   function line(name, y, color) { return { name: name, y: y, color: color }; }
@@ -260,8 +264,15 @@
         legend: function () { return [{ name: "fish", color: K.fish }, { name: "food", color: K.food }]; } },
       { id: "preds", title: "Predators", draw: C.lines, when: function () { return view.f.pred; },
         needs: "Shows up when the world has predators (Settings → Predators).",
-        cap: "With the predator economy on, hunters breed when well fed and starve when fish are scarce, so their peaks trail the fish's.",
-        data: function () { return { t: view.t, series: [line("predators", col(COL.pred), K.pred)] }; } },
+        cap: "With the predator economy on, hunters breed when well fed and starve when fish are scarce, so their peaks trail the fish's. With a predator floor, the second line counts the hunters it has put back.",
+        data: function () {
+          var s = [line("predators", col(COL.pred), K.pred)];
+          if (view.f.predFloor) s.push(line("put back by the floor (total)", col(COL.predReseeds), S[6]));
+          return { t: view.t, series: s };
+        },
+        legend: function () {
+          return view.f.predFloor ? [{ name: "predators", color: K.pred }, { name: "put back by the floor (total)", color: S[6] }] : [];
+        } },
       { id: "flux", title: "Births and deaths per second (5 s average)", draw: C.lines,
         cap: "While births outrun deaths the population grows; the two lines crossing is a boom ending.",
         data: function () {
@@ -310,6 +321,26 @@
         cap: "Inherited body size, 1 = the founders'. Bigger is slower and costs more energy, so watch which way it drifts.",
         data: function () { return fan(COL.q_body, S[3], function (v) { return v.toFixed(2); }); },
         legend: function () { return FAN_LEGEND(S[3]); } },
+      { id: "predtraits", title: "Hunters' inherited traits (average)", draw: C.lines, when: function () { return view.f.predTraits; },
+        needs: "Shows up once a hunter buds with inheritance on (Settings → Predators → Hunters inherit traits).",
+        cap: "1 = the configured hunter. Speed above 1 catches more but burns more; a budding threshold below 1 breeds sooner on a thinner reserve. Hunters put back by a floor start at 1 again.",
+        data: function () {
+          /* the means are 0 while no hunter is alive: a gap, not a dive to 0;
+           * and the axis hugs the data (at least 0.9-1.1), since the drift is small */
+          var p = col(COL.pred), lo = 0.9, hi = 1.1;
+          function live(y) {
+            return y.map(function (v, i) {
+              if (!(p[i] > 0)) return NaN;
+              lo = Math.min(lo, v); hi = Math.max(hi, v);
+              return v;
+            });
+          }
+          var sp = live(col(COL.predSpeed)), bd = live(col(COL.predBudding));
+          return { t: view.t, zero: false, yMin: Math.floor(lo * 20) / 20, yMax: Math.ceil(hi * 20) / 20,
+                   yFmt: function (v) { return v.toFixed(2); },
+                   series: [line("speed ×", sp, K.pred), line("energy to bud ×", bd, S[3])] };
+        },
+        legend: function () { return [{ name: "speed ×", color: K.pred }, { name: "energy to bud ×", color: S[3] }]; } },
       { id: "age", title: "Age of the living fish (s)", draw: C.lines,
         cap: "A young population is turning over fast, through starvation or hunters; an old one is living out its lifespan.",
         data: function () { return fan(COL.q_age, S[6]); }, legend: function () { return FAN_LEGEND(S[6]); } }

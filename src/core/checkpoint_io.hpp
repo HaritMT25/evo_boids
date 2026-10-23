@@ -159,6 +159,10 @@ inline void writeConfig(jsonm::Writer& w, const SimConfig& c) {
     w.field("predatorNewbornEnergy", c.predatorNewbornEnergy);
     w.field("predatorMeal", c.predatorMeal);
     w.field("predatorMaxAge", c.predatorMaxAge);
+    w.field("predatorMinPopulation", c.predatorMinPopulation);
+    w.field("predatorMaxPopulation", c.predatorMaxPopulation);
+    w.field("predatorInheritance", c.predatorInheritance);
+    w.field("predatorTraitMutation", c.predatorTraitMutation);
     w.field("fastTanh", c.fastTanh);
     w.endObject();
 }
@@ -236,6 +240,12 @@ inline void readConfig(const jsonm::Value& j, SimConfig& c) {
     c.predatorNewbornEnergy = o->floatOr("predatorNewbornEnergy", c.predatorNewbornEnergy);
     c.predatorMeal = o->floatOr("predatorMeal", c.predatorMeal);
     c.predatorMaxAge = o->floatOr("predatorMaxAge", c.predatorMaxAge);
+    // Absent in checkpoints written before v0.26.0; the defaults (no floor, no
+    // inheritance) are what those runs actually used, so they resume unchanged.
+    c.predatorMinPopulation = o->intOr("predatorMinPopulation", c.predatorMinPopulation);
+    c.predatorMaxPopulation = o->intOr("predatorMaxPopulation", c.predatorMaxPopulation);
+    c.predatorInheritance = o->boolOr("predatorInheritance", c.predatorInheritance);
+    c.predatorTraitMutation = o->floatOr("predatorTraitMutation", c.predatorTraitMutation);
     c.fastTanh = o->boolOr("fastTanh", c.fastTanh);
 }
 
@@ -282,6 +292,7 @@ inline std::string serialize(const World& world, const char* engineVersion) {
     w.field("totalPredatorBirths", world.totalPredatorBirths);
     w.field("totalPredatorDeathsStarvation", world.totalPredatorDeathsStarvation);
     w.field("totalPredatorDeathsAge", world.totalPredatorDeathsAge);
+    w.field("totalPredatorReseeds", world.totalPredatorReseeds);
     w.field("totalDeathsLogged", world.totalDeathsLogged_);
     w.field("clusterStride", world.clusterStride_);
     w.field("totalBirthsLogged", world.totalBirthsLogged_);
@@ -339,6 +350,12 @@ inline std::string serialize(const World& world, const char* engineVersion) {
     w.key("energy"); w.beginArray(); for (const Predator& p : world.predators) w.value(p.energy); w.endArray();
     w.key("age"); w.beginArray(); for (const Predator& p : world.predators) w.value(p.age); w.endArray();
     w.key("alive"); w.beginArray(); for (const Predator& p : world.predators) w.value((int)(p.alive ? 1 : 0)); w.endArray();
+    // Heritable traits + generation (v0.26.0). ALWAYS written, like the prey
+    // body columns, so a checkpoint is a complete record whatever the flags;
+    // OPTIONAL on read — see deserialize().
+    w.key("speedFactor"); w.beginArray(); for (const Predator& p : world.predators) w.value(p.speedFactor); w.endArray();
+    w.key("buddingFactor"); w.beginArray(); for (const Predator& p : world.predators) w.value(p.buddingFactor); w.endArray();
+    w.key("generation"); w.beginArray(); for (const Predator& p : world.predators) w.value((unsigned long long)p.generation); w.endArray();
     w.endObject();
     w.newline();
 
@@ -468,6 +485,13 @@ inline bool deserialize(const std::string& text, World& world, std::string& erro
         error = "config 'bodyMutation' must be finite and >= 0";
         return false;
     }
+    // Same rule, same reasons, for the predator trait mutation (v0.26.0): its
+    // only legal writers (--predator-trait-mutation, evo_init) refuse negative
+    // and non-finite values, and a NaN here would turn every bud's traits NaN.
+    if (!(world.cfg.predatorTraitMutation >= 0.0f) || !std::isfinite(world.cfg.predatorTraitMutation)) {
+        error = "config 'predatorTraitMutation' must be finite and >= 0";
+        return false;
+    }
 
     // Build an empty world of the right geometry, then overwrite every piece of
     // state. init() draws from the rng (vortices, food patches), which is
@@ -500,6 +524,8 @@ inline bool deserialize(const std::string& text, World& world, std::string& erro
         world.totalPredatorBirths = jc->llOr("totalPredatorBirths", 0);
         world.totalPredatorDeathsStarvation = jc->llOr("totalPredatorDeathsStarvation", 0);
         world.totalPredatorDeathsAge = jc->llOr("totalPredatorDeathsAge", 0);
+        // Absent before v0.26.0, when there was no floor to count.
+        world.totalPredatorReseeds = jc->llOr("totalPredatorReseeds", 0);
         world.totalDeathsLogged_ = jc->llOr("totalDeathsLogged", 0);
         world.clusterStride_ = jc->llOr("clusterStride", 1);
         world.totalBirthsLogged_ = jc->llOr("totalBirthsLogged", 0);
@@ -556,6 +582,38 @@ inline bool deserialize(const std::string& text, World& world, std::string& erro
             !jsonm::readFloats(*jp, "age", ag, n) || !jsonm::readInts(*jp, "alive", alive, n)) {
             error = "malformed 'predators' arrays"; return false;
         }
+        // Traits + generation (v0.26.0): OPTIONAL, on the prey body columns'
+        // terms. A pre-0.26 checkpoint has none of them and its predators ran
+        // at 1.0/1.0, so that is the restoration. The two traits are
+        // both-or-neither (serialize() writes both, always) and must lie in
+        // [PRED_TRAIT_MIN, PRED_TRAIT_MAX], the only values inheritance can
+        // produce; anything else is corruption or hand editing, and a speed
+        // factor of NaN or -1 is not survivable. Negated range test for NaN.
+        std::vector<float> sf, bf;
+        std::vector<long long> gen;
+        const bool hasSf = jp->find("speedFactor") != nullptr;
+        const bool hasBf = jp->find("buddingFactor") != nullptr;
+        if (hasSf != hasBf) {
+            error = "checkpoint has only one of 'speedFactor'/'buddingFactor' (both or neither)";
+            return false;
+        }
+        if (hasSf && (!jsonm::readFloats(*jp, "speedFactor", sf, n) ||
+                      !jsonm::readFloats(*jp, "buddingFactor", bf, n))) {
+            error = "malformed predator trait arrays (length mismatch?)"; return false;
+        }
+        for (size_t i = 0; i < sf.size(); ++i) {
+            if (!(sf[i] >= PRED_TRAIT_MIN && sf[i] <= PRED_TRAIT_MAX) ||
+                !(bf[i] >= PRED_TRAIT_MIN && bf[i] <= PRED_TRAIT_MAX)) {
+                error = "predator trait value out of range [0.5, 2]"; return false;
+            }
+        }
+        const bool hasGen = jp->find("generation") != nullptr;
+        if (hasGen && !jsonm::readInts(*jp, "generation", gen, n)) {
+            error = "malformed predator 'generation' array (length mismatch?)"; return false;
+        }
+        for (long long v : gen) {
+            if (v < 0 || v > (long long)UINT32_MAX) { error = "predator 'generation' value out of range"; return false; }
+        }
         world.predators.resize(n);
         for (size_t i = 0; i < n; ++i) {
             Predator& p = world.predators[i];
@@ -565,6 +623,9 @@ inline bool deserialize(const std::string& text, World& world, std::string& erro
             p.energy = en[i];
             p.age = ag[i];
             p.alive = alive[i] != 0;
+            p.speedFactor   = hasSf ? sf[i] : 1.0f;
+            p.buddingFactor = hasBf ? bf[i] : 1.0f;
+            p.generation    = hasGen ? (std::uint32_t)gen[i] : 0u;
         }
     }
 

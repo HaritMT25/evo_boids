@@ -120,7 +120,15 @@ void printUsage(const char* prog) {
         "  --predator-repro-energy F energy needed to bud a child (default 60)\n"
         "  --predator-newborn-energy F  child / initial predator energy (default 30)\n"
         "  --predator-meal F         energy per kill; <0 absorbs the victim's reserves (default absorb)\n"
-        "  --predator-max-age F      predator death age; 0=immortal-until-starved (default 0)\n\n"
+        "  --predator-max-age F      predator death age; 0=immortal-until-starved (default 0)\n"
+        "  --predator-min-pop N      [economy] refill to at least N predators each step;\n"
+        "                            0=off, extinction is final (default 0). Refills are\n"
+        "                            counted in predator_reseeds_cum\n"
+        "  --predator-max-pop N      [economy] no budding while N predators are alive;\n"
+        "                            0=no cap (default 0)\n"
+        "  --predator-inherit        [economy] buds inherit the parent's speed and budding\n"
+        "                            threshold (x0.5..x2) with a mutation (default off)\n"
+        "  --predator-trait-mutation F  uniform mutation half-width per trait per bud (default 0.1)\n\n"
         "Analysis / inspection:\n"
         "  --cluster-map             at end of run, write <name>.deaths.csv + <name>.cluster.svg\n"
         "                            (a 2-D projection of each dead creature's network)\n"
@@ -258,7 +266,12 @@ int main(int argc, char** argv) {
         else if (arg == "--predator-newborn-energy")cfg.predatorNewbornEnergy = std::atof(next("--predator-newborn-energy"));
         else if (arg == "--predator-meal")          cfg.predatorMeal        = std::atof(next("--predator-meal"));
         else if (arg == "--predator-max-age")       cfg.predatorMaxAge      = std::atof(next("--predator-max-age"));
-        else if (arg == "--cluster-map")             cfg.clusterMap          = true;
+        // --- predator floor + heritable traits (v0.26.0) ---
+        else if (arg == "--predator-min-pop")       cfg.predatorMinPopulation = std::atoi(next("--predator-min-pop"));
+        else if (arg == "--predator-max-pop")       cfg.predatorMaxPopulation = std::atoi(next("--predator-max-pop"));
+        else if (arg == "--predator-inherit")       cfg.predatorInheritance = true;
+        else if (arg == "--predator-trait-mutation")cfg.predatorTraitMutation = std::atof(next("--predator-trait-mutation"));
+        else if (arg == "--cluster-map")            cfg.clusterMap          = true;
         else if (arg == "--cluster-max")             cfg.clusterMax          = std::atoi(next("--cluster-max"));
         else if (arg == "--cluster-epoch")           cfg.clusterEpoch        = std::max(1, std::atoi(next("--cluster-epoch")));
         else if (arg == "--cluster-pca")             cfg.clusterPca          = true;
@@ -322,6 +335,21 @@ int main(int argc, char** argv) {
         std::cerr << "Error: --body-mutation must be finite and >= 0 (got " << cfg.bodyMutation << ").\n";
         return 1;
     }
+    // The predator trait mutation feeds rng.range the same way, with the same
+    // failure modes, so it is refused on the same terms.
+    if (!(cfg.predatorTraitMutation >= 0.0f) || !std::isfinite(cfg.predatorTraitMutation)) {
+        std::cerr << "Error: --predator-trait-mutation must be finite and >= 0 (got "
+                  << cfg.predatorTraitMutation << ").\n";
+        return 1;
+    }
+    // The floor, the ceiling and inheritance act on the economy only; say so
+    // instead of letting the flag be silently inert.
+    if (!cfg.predatorEconomy && (cfg.predatorMinPopulation > 0 || cfg.predatorMaxPopulation > 0 ||
+                                 cfg.predatorInheritance))
+        std::cerr << "Note: --predator-min-pop, --predator-max-pop and --predator-inherit need"
+                     " --predator-economy; ignored.\n";
+    if (cfg.predatorMaxPopulation > 0 && cfg.predatorMinPopulation > cfg.predatorMaxPopulation)
+        std::cerr << "Note: --predator-min-pop is above --predator-max-pop; the floor wins.\n";
     // A NEGATIVE soft width or grace period is not an error — like
     // --repro-max-distance, anything <= 0 means off. Non-finite is different:
     // std::atof parses "nan" and "inf", and both silently inverts the soft
@@ -509,6 +537,13 @@ int main(int argc, char** argv) {
                     std::cout << "  pE " << std::setprecision(1) << std::setw(6) << st.predatorAvgEnergy
                               << "  p+" << std::setw(3) << pBirthsInt
                               << " p-" << std::setw(3) << (pStarvInt + pAgeInt);
+                    // v0.26.0, each only when its flag is on (so every
+                    // existing configuration prints what it printed before):
+                    // the floor's refills so far, and the mean speed trait.
+                    if (world.cfg.predatorMinPopulation > 0)
+                        std::cout << " pR" << st.totalPredatorReseeds;
+                    if (world.cfg.predatorInheritance)
+                        std::cout << "  pSpd " << std::setprecision(2) << st.predatorSpeedFactor;
                 }
             }
             std::cout << "  ("     << std::setprecision(1) << elapsed << "s, "

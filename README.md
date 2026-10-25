@@ -40,7 +40,8 @@ tests/         core_tests, predator_smoke, core_bench (no SFML needed)
 - **Determinism.**
   - The single-threaded build reproduces a run exactly from its seed.
   - Floating point is compiled with `-ffp-contract=off` and never `-ffast-math`, and the core uses its own copies of the math functions it needs.
-  - With that, the native single-threaded build and the single-threaded WebAssembly module write byte-identical checkpoints for the same seed and step count. `wasm/parity.sh` checks this across 19 seed/config cases.
+  - With that, the native single-threaded build and the single-threaded WebAssembly module write byte-identical checkpoints for the same seed and step count. `wasm/parity.sh` checks this across 23 seed/config cases.
+  - Vectorised code changes nothing: each lane does the same IEEE operations. The neural network's `tanh` runs as `evomath::tanhfArray`, which computes every case of musl's `tanhf` and selects the answer rather than branching to it, so the compiler can vectorise it; it matches `tanhf` on all 2^32 inputs.
 - **Browser module.**
   - JavaScript calls a small C API (`wasm/evo_wasm.cpp`): `evo_init`, `evo_step(n)`, `evo_reset`, `evo_set_param`, `evo_sync`, plus getters.
   - The getters return pointers into the wasm heap, and the renderer reads them as typed-array views every frame. No copies, no JSON.
@@ -97,7 +98,7 @@ Page options:
 Keyboard: <kbd>Space</kbd> pause · <kbd>↑</kbd> <kbd>↓</kbd> speed · <kbd>R</kbd> a fresh world · <kbd>Esc</kbd> closes what is open (the settings, the live numbers, then the selected fish). Click a fish to inspect it, empty water to let it go. In the tank view also <kbd>F</kbd> follow the selected fish · <kbd>C</kbd> fit the view; drag to pan, scroll to zoom (towards the pointer), right-drag to tilt and turn.
 
 Browser requirements:
-- **WebAssembly.**
+- **WebAssembly with SIMD**: Chrome 91+, Firefox 89+, Safari 16.4+. Both modules are built with it, so the neural network's activations are computed four at a time. Without it the page says so instead of starting.
 - **WebGL2**, optional: without it the fish are drawn with canvas 2D, which is slower at high counts.
 - **Cross-origin isolation** for the threaded module: Chrome 92+, Firefox 79+ and Safari 15.2+ support it. Anywhere else, the page runs the single-threaded module.
 
@@ -324,7 +325,18 @@ Measured against the previous version in one process: both builds side by side o
 | 8,000 (an evolved world) | 2.02× | 1.68× | 1.78× | 1.67× |
 | 12,000 | | | 1.98× | 1.87× |
 
-The thread pool is the code the browser's threaded module runs, built natively. The wasm module gains less because its `tanhf` costs more than twice as much as native, so the neural network is a larger share of its step. The table below predates this change.
+The thread pool is the code the browser's threaded module runs, built natively. The wasm module gained less because its `tanhf` costs more than twice as much as native, so the neural network is a larger share of its step.
+
+That was the next step: the neural network's `tanh` is now computed without branches, four values at a time, natively with SSE2 and in the browser with WebAssembly SIMD. It gives the same bits as before on every one of the 2^32 possible inputs (checked exhaustively, natively and in wasm). On top of the table above, with the same method:
+
+| creatures | native, 1 thread | wasm, 1 thread (Node 22) |
+|---:|---:|---:|
+| 300 | 1.10× | 1.16× |
+| 1,000 | 1.12× | 1.19× |
+| 3,000 | 1.09× | 1.15× |
+| 8,000 (an evolved world) | 1.07× | 1.14× |
+
+Of the wasm gain, 1.02–1.04× comes from building with SIMD at all, the rest from the branch-free `tanh`. The table below predates both changes.
 
 ### Step time at a fixed creature count
 

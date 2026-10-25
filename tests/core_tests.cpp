@@ -189,6 +189,7 @@ static void test_spatial_grid_matches_quadtree() {
             qt.insert(pts[i], i);
             grid.insert(pts[i], i);
         }
+        grid.build();
 
         // Every radius the World actually issues, plus a couple of extremes.
         const float radii[] = {5.f, 10.f, 20.f, 30.f, 80.f, 150.f, 200.f};
@@ -205,6 +206,131 @@ static void test_spatial_grid_matches_quadtree() {
         }
     }
     CHECK(mismatches == 0);
+}
+
+// The step's exact shortcuts: each one must give the same bits as the code it
+// replaced, or every run changes. (The whole-run evidence is the parity suite
+// and a checkpoint compare against the previous main; these pin the pieces.)
+static std::uint32_t floatBits(float f) {
+    std::uint32_t u;
+    std::memcpy(&u, &f, sizeof u);
+    return u;
+}
+
+static void test_exact_shortcuts() {
+    std::printf("exact shortcuts (grid order, decay, count tanh, similarity, still water)...\n");
+
+    // --- The cell-ordered grid lists hits in the order a vector per cell did:
+    // cells row by row, each cell's entries in insertion order. ---
+    {
+        rng.seed(4242u);
+        const int W = 1920, H = 1080;
+        const float cell = 80.0f;
+        bool orderSame = true, visitSame = true, countSame = true;
+        for (int trial = 0; trial < 10; ++trial) {
+            const int n = rng.intRange(50, 3000);
+            SpatialGrid grid;
+            grid.init(W, H, cell);
+            const int cols = (int)(W * (1.0f / cell)) + 1, rows = (int)(H * (1.0f / cell)) + 1;
+            std::vector<std::vector<std::pair<Vec2, int>>> buckets((size_t)cols * rows);
+            for (int i = 0; i < n; ++i) {
+                const Vec2 p{rng.range(0.0f, (float)W - 0.001f), rng.range(0.0f, (float)H - 0.001f)};
+                grid.insert(p, i);
+                const int cx = std::clamp((int)(p.x * (1.0f / cell)), 0, cols - 1);
+                const int cy = std::clamp((int)(p.y * (1.0f / cell)), 0, rows - 1);
+                buckets[(size_t)cy * cols + cx].push_back({p, i});
+            }
+            grid.build();
+            const float radii[] = {10.f, 20.f, 30.f, 80.f, 160.f};
+            for (int q = 0; q < 100; ++q) {
+                const Vec2 c{rng.range(-20.f, (float)W + 20.f), rng.range(-20.f, (float)H + 20.f)};
+                const float r = radii[q % 5], r2 = r * r;
+                std::vector<int> want;
+                const float inv = 1.0f / cell;
+                const int x0 = std::clamp((int)((c.x - r) * inv), 0, cols - 1);
+                const int x1 = std::clamp((int)((c.x + r) * inv), 0, cols - 1);
+                const int y0 = std::clamp((int)((c.y - r) * inv), 0, rows - 1);
+                const int y1 = std::clamp((int)((c.y + r) * inv), 0, rows - 1);
+                for (int cy = y0; cy <= y1; ++cy)
+                    for (int cx = x0; cx <= x1; ++cx)
+                        for (const auto& [p, idx] : buckets[(size_t)cy * cols + cx]) {
+                            const float dx = p.x - c.x, dy = p.y - c.y;
+                            if (dx * dx + dy * dy <= r2) want.push_back(idx);
+                        }
+                std::vector<int> got;
+                grid.queryRadius(c, r, got);
+                if (got != want) orderSame = false;
+                std::vector<int> seen;
+                grid.forEachInRadius(c, r, [&](int idx, Vec2) { seen.push_back(idx); });
+                if (seen != want) visitSame = false;
+                if (grid.countRadius(c, r) != (int)want.size()) countSame = false;
+                std::vector<int> wrapped;
+                grid.queryRadiusWrapped(c, r, wrapped);
+                if (grid.countRadiusWrapped(c, r) != (int)wrapped.size()) countSame = false;
+            }
+        }
+        CHECK(orderSame);
+        CHECK(visitSame);
+        CHECK(countSame);
+    }
+
+    // --- Pheromone decay in fixed point == the float expression, all bytes ---
+    {
+        int differ = 0;
+        for (int v = 0; v < 256; ++v) {
+            const auto viaFloat = static_cast<uint8_t>(static_cast<uint8_t>(v) * 0.97f);
+            const auto viaFixed = static_cast<uint8_t>((static_cast<uint32_t>(v) * 63570u) >> 16);
+            if (viaFloat != viaFixed) ++differ;
+        }
+        CHECK(differ == 0);
+    }
+
+    // --- Count tables == the tanh call, in the table and past both ends ---
+    {
+        int differ = 0;
+        for (int k = -2000; k <= 2000; ++k) {
+            if (floatBits(tanhCountOver5(k))  != floatBits(evomath::tanhf((float)k / 5.0f)))  ++differ;
+            if (floatBits(tanhCountOver10(k)) != floatBits(evomath::tanhf((float)k / 10.0f))) ++differ;
+            if (floatBits(tanhCountOver15(k)) != floatBits(evomath::tanhf((float)k / 15.0f))) ++differ;
+        }
+        CHECK(differ == 0);
+    }
+
+    // --- genomeSimilarity without the short-circuit == the && version ---
+    {
+        rng.seed(31337u);
+        auto reference = [](const Genome& g1, const Genome& g2) {
+            const size_t minLen = std::min(g1.size(), g2.size());
+            if (minLen == 0) return 0.0f;
+            int matches = 0;
+            for (size_t i = 0; i < minLen; ++i)
+                if (g1[i].sourceType == g2[i].sourceType && g1[i].sinkType == g2[i].sinkType)
+                    matches++;
+            return static_cast<float>(matches) / static_cast<float>(minLen);
+        };
+        int differ = 0;
+        for (int t = 0; t < 2000; ++t) {
+            const Genome a = makeRandomGenome(rng.intRange(0, 4) == 0 ? 0 : 16, 80);
+            const Genome b = makeRandomGenome(16, 80);
+            if (floatBits(genomeSimilarity(a, b)) != floatBits(reference(a, b))) ++differ;
+            if (floatBits(genomeSimilarity(b, a)) != floatBits(reference(b, a))) ++differ;
+        }
+        CHECK(differ == 0);
+    }
+
+    // --- Still water: the signed zero the current sensors used to compute ---
+    {
+        const float comps[] = {1.0f, -1.0f, 0.0f, -0.0f, 0.6f, -0.8f, 1e-30f, -1e-30f};
+        int differ = 0;
+        for (float fx : comps)
+            for (float fy : comps) {
+                const Vec2 cur{0.0f, 0.0f};
+                const float old = evomath::tanhf((cur.x * fx + cur.y * fy) / 100.0f);
+                const float now = (std::signbit(fx) && std::signbit(fy)) ? -0.0f : 0.0f;
+                if (floatBits(old) != floatBits(now)) ++differ;
+            }
+        CHECK(differ == 0);
+    }
 }
 
 // ---------------------------------------------------------------
@@ -1210,6 +1336,7 @@ static void test_toroidal() {
             pts.push_back(p);
             grid.insert(p, i);
         }
+        grid.build();
         auto mi = [](float d, float span) {
             if (d > 0.5f * span) return d - span;
             if (d < -0.5f * span) return d + span;
@@ -3511,6 +3638,7 @@ int main() {
     test_color();
     test_quadtree();
     test_spatial_grid_matches_quadtree();
+    test_exact_shortcuts();
     test_genome_and_net();
     test_feedforward_equivalence();
     test_fast_tanh();

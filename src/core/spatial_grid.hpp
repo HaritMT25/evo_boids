@@ -1,6 +1,7 @@
 #pragma once
 #include <vector>
 #include <cmath>
+#include <algorithm>
 #include "vec2.hpp"
 
 // ============================================================
@@ -10,13 +11,20 @@
 //     init(width, height, cellSize)   // once, in World::init
 //     clear()                         // once per frame (retains capacity)
 //     insert(pos, index)              // per entity per frame
+//     build()                         // after the inserts, before any query
 //     queryRadius(center, r, out)     // identical RESULT SET to QuadTree
 //
-// A flat 1-D array of buckets indexed by (cellY * cols + cellX); each bucket
-// stores (pos, index) pairs. A radius query touches only the rectangle of
-// cells covering the query's bounding box, then distance-tests each point —
-// no tree descent, no per-node pointer chasing, and the structure is reused
-// across frames instead of being rebuilt with new/delete every tick.
+// The entries live in ONE array ordered by cell (a compressed-sparse-row
+// layout). build() is a stable counting sort, so every cell lists its entries
+// in insertion order, and the cells of one grid row are adjacent, so a query
+// scans each row of its cell rectangle as one contiguous run. That visits the
+// same entries in the same order as walking the cells one at a time (which is
+// what the vector-per-cell layout this replaced did), so every result list,
+// and with it every simulation result, is unchanged bit for bit; it is faster
+// because a row is one run of memory rather than one heap block per cell.
+// A query touches only the rectangle of cells covering the query's bounding
+// box, then distance-tests each point; the arrays are reused across frames,
+// so the steady state does no per-frame heap allocation.
 //
 // queryRadius returns the same set of indices as QuadTree::queryRadius; only
 // the ORDER differs (cell-iteration order vs tree-traversal order). All World
@@ -32,44 +40,47 @@ public:
         invCell_ = 1.0f / cellSize;
         cols_    = static_cast<int>(width  * invCell_) + 1;
         rows_    = static_cast<int>(height * invCell_) + 1;
-        buckets_.assign(static_cast<std::size_t>(cols_) * rows_, {});
+        const std::size_t cells = static_cast<std::size_t>(cols_) * rows_;
+        start_.assign(cells + 1, 0);
+        cursor_.assign(cells, 0);
+        staged_.clear();
+        entries_.clear();
     }
 
-    // Empty every bucket but keep its allocated capacity, so the steady state
-    // does no per-frame heap allocation.
-    void clear() {
-        for (auto& b : buckets_) b.clear();
-    }
+    // Forget the entries but keep every array's capacity.
+    void clear() { staged_.clear(); }
 
     void insert(Vec2 pos, int index) {
         if (std::isnan(pos.x) || std::isnan(pos.y)) return;
         int cx = clampCol(static_cast<int>(pos.x * invCell_));
         int cy = clampRow(static_cast<int>(pos.y * invCell_));
-        buckets_[static_cast<std::size_t>(cy) * cols_ + cx].push_back({pos, index});
+        staged_.push_back({pos, index, cy * cols_ + cx});
+    }
+
+    // Lay the inserted entries out cell by cell: count per cell, prefix-sum
+    // into each cell's start, then place them in insertion order.
+    void build() {
+        std::fill(start_.begin(), start_.end(), 0);
+        for (const Staged& s : staged_) ++start_[s.cell + 1];
+        const std::size_t cells = cursor_.size();
+        for (std::size_t c = 0; c < cells; ++c) {
+            start_[c + 1] += start_[c];
+            cursor_[c] = start_[c];
+        }
+        entries_.resize(staged_.size());
+        for (const Staged& s : staged_) entries_[cursor_[s.cell]++] = {s.pos, s.index};
     }
 
     void queryRadius(Vec2 center, float radius, std::vector<int>& results) const {
-        const float r2 = radius * radius;
-
         // Cell rectangle covering [center - r, center + r]. floor() is
         // monotonic, so this rectangle is a guaranteed superset of every cell
         // that can hold a point within the radius; the per-point distance test
-        // below prunes it to the exact disk.
-        int minCx = clampCol(static_cast<int>((center.x - radius) * invCell_));
-        int maxCx = clampCol(static_cast<int>((center.x + radius) * invCell_));
-        int minCy = clampRow(static_cast<int>((center.y - radius) * invCell_));
-        int maxCy = clampRow(static_cast<int>((center.y + radius) * invCell_));
-
-        for (int cy = minCy; cy <= maxCy; ++cy) {
-            const std::size_t rowBase = static_cast<std::size_t>(cy) * cols_;
-            for (int cx = minCx; cx <= maxCx; ++cx) {
-                for (const Entry& e : buckets_[rowBase + cx]) {
-                    float dx = e.pos.x - center.x;
-                    float dy = e.pos.y - center.y;
-                    if (dx * dx + dy * dy <= r2) results.push_back(e.index);
-                }
-            }
-        }
+        // prunes it to the exact disk.
+        const int minCx = clampCol(static_cast<int>((center.x - radius) * invCell_));
+        const int maxCx = clampCol(static_cast<int>((center.x + radius) * invCell_));
+        const int minCy = clampRow(static_cast<int>((center.y - radius) * invCell_));
+        const int maxCy = clampRow(static_cast<int>((center.y + radius) * invCell_));
+        collect(center.x, center.y, radius * radius, minCx, maxCx, minCy, maxCy, results);
     }
 
     // Toroidal radius query: the disk wraps across the world seam. Implemented
@@ -100,18 +111,81 @@ public:
             const int maxCx = clampCol(static_cast<int>(std::min(hix, W) * invCell_));
             const int minCy = clampRow(static_cast<int>(std::max(loy, 0.0f) * invCell_));
             const int maxCy = clampRow(static_cast<int>(std::min(hiy, H) * invCell_));
+            collect(cx0, cy0, r2, minCx, maxCx, minCy, maxCy, results);
+        }
+    }
+
+    // The scans behind the two queries, handing each hit to a visitor instead
+    // of a list: f(index, storedPos) for exactly the entries the query would
+    // return, in the same order. storedPos is the position given to insert().
+    template <class F>
+    void forEachInRadius(Vec2 center, float radius, F&& f) const {
+        const float r2 = radius * radius;
+
+        // Cell rectangle covering [center - r, center + r]. floor() is
+        // monotonic, so this rectangle is a guaranteed superset of every cell
+        // that can hold a point within the radius; the per-point distance test
+        // below prunes it to the exact disk.
+        int minCx = clampCol(static_cast<int>((center.x - radius) * invCell_));
+        int maxCx = clampCol(static_cast<int>((center.x + radius) * invCell_));
+        int minCy = clampRow(static_cast<int>((center.y - radius) * invCell_));
+        int maxCy = clampRow(static_cast<int>((center.y + radius) * invCell_));
+
+        for (int cy = minCy; cy <= maxCy; ++cy) {
+            const std::size_t rowBase = static_cast<std::size_t>(cy) * cols_;
+            const Entry* e   = entries_.data() + start_[rowBase + minCx];
+            const Entry* end = entries_.data() + start_[rowBase + maxCx + 1];
+            for (; e != end; ++e) {
+                float dx = e->pos.x - center.x;
+                float dy = e->pos.y - center.y;
+                if (dx * dx + dy * dy <= r2) f(e->index, e->pos);
+            }
+        }
+    }
+
+    template <class F>
+    void forEachInRadiusWrapped(Vec2 center, float radius, F&& f) const {
+        static const int order[9][2] = {
+            {0, 0}, {-1, -1}, {-1, 0}, {-1, 1}, {0, -1}, {0, 1}, {1, -1}, {1, 0}, {1, 1}};
+        const float r2 = radius * radius;
+        const float W = static_cast<float>(width_), H = static_cast<float>(height_);
+
+        for (const auto& im : order) {
+            const float cx0 = center.x + im[0] * W;
+            const float cy0 = center.y + im[1] * H;
+            // Clip the image's query rect against the world; skip empty clips.
+            const float lox = cx0 - radius, hix = cx0 + radius;
+            const float loy = cy0 - radius, hiy = cy0 + radius;
+            if (hix < 0.0f || lox >= W || hiy < 0.0f || loy >= H) continue;
+
+            const int minCx = clampCol(static_cast<int>(std::max(lox, 0.0f) * invCell_));
+            const int maxCx = clampCol(static_cast<int>(std::min(hix, W) * invCell_));
+            const int minCy = clampRow(static_cast<int>(std::max(loy, 0.0f) * invCell_));
+            const int maxCy = clampRow(static_cast<int>(std::min(hiy, H) * invCell_));
 
             for (int cy = minCy; cy <= maxCy; ++cy) {
                 const std::size_t rowBase = static_cast<std::size_t>(cy) * cols_;
-                for (int cx = minCx; cx <= maxCx; ++cx) {
-                    for (const Entry& e : buckets_[rowBase + cx]) {
-                        const float dx = e.pos.x - cx0;
-                        const float dy = e.pos.y - cy0;
-                        if (dx * dx + dy * dy <= r2) results.push_back(e.index);
-                    }
+                const Entry* e   = entries_.data() + start_[rowBase + minCx];
+                const Entry* end = entries_.data() + start_[rowBase + maxCx + 1];
+                for (; e != end; ++e) {
+                    const float dx = e->pos.x - cx0;
+                    const float dy = e->pos.y - cy0;
+                    if (dx * dx + dy * dy <= r2) f(e->index, e->pos);
                 }
             }
         }
+    }
+
+    // How many indices queryRadius / queryRadiusWrapped would return.
+    int countRadius(Vec2 center, float radius) const {
+        int n = 0;
+        forEachInRadius(center, radius, [&n](int, Vec2) { ++n; });
+        return n;
+    }
+    int countRadiusWrapped(Vec2 center, float radius) const {
+        int n = 0;
+        forEachInRadiusWrapped(center, radius, [&n](int, Vec2) { ++n; });
+        return n;
     }
 
 private:
@@ -119,14 +193,52 @@ private:
         Vec2 pos;
         int  index;
     };
+    struct Staged {
+        Vec2 pos;
+        int  index;
+        int  cell;
+    };
 
     int   width_   = 0;
     int   height_  = 0;
     int   cols_    = 0;
     int   rows_    = 0;
     float invCell_ = 1.0f;
-    std::vector<std::vector<Entry>> buckets_;
+    std::vector<int>    start_;    // cells + 1: cell c is entries_[start_[c], start_[c + 1])
+    std::vector<int>    cursor_;   // build() scratch, one per cell
+    std::vector<Staged> staged_;   // this frame's inserts, in insertion order
+    std::vector<Entry>  entries_;  // the same entries, ordered by cell
 
     int clampCol(int c) const { return c < 0 ? 0 : (c >= cols_ ? cols_ - 1 : c); }
     int clampRow(int r) const { return r < 0 ? 0 : (r >= rows_ ? rows_ - 1 : r); }
+
+    // Append, in scan order, the index of every entry of the cell rectangle
+    // within sqrt(r2) of (x0, y0). Each candidate's index is written and the
+    // cursor advances only on a hit: the same list as push_back-if-hit, with
+    // no branch on a test that passes about a third of the time at random
+    // (a mispredict on a large share of candidates).
+    void collect(float x0, float y0, float r2, int minCx, int maxCx, int minCy, int maxCy,
+                 std::vector<int>& results) const {
+        std::size_t candidates = 0;
+        for (int cy = minCy; cy <= maxCy; ++cy) {
+            const std::size_t rowBase = static_cast<std::size_t>(cy) * cols_;
+            candidates += static_cast<std::size_t>(start_[rowBase + maxCx + 1] - start_[rowBase + minCx]);
+        }
+        const std::size_t first = results.size();
+        results.resize(first + candidates);
+        int* out = results.data() + first;
+        std::size_t n = 0;
+        for (int cy = minCy; cy <= maxCy; ++cy) {
+            const std::size_t rowBase = static_cast<std::size_t>(cy) * cols_;
+            const Entry* e   = entries_.data() + start_[rowBase + minCx];
+            const Entry* end = entries_.data() + start_[rowBase + maxCx + 1];
+            for (; e != end; ++e) {
+                const float dx = e->pos.x - x0;
+                const float dy = e->pos.y - y0;
+                out[n] = e->index;
+                n += (dx * dx + dy * dy <= r2);
+            }
+        }
+        results.resize(first + n);
+    }
 };

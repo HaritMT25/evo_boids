@@ -745,8 +745,20 @@ EVO_EXPORT void evo_sync() {
     g_bodyParams.resize(n * 2);
     g_colors.resize(n * 3);
     g_ids.resize(n);
+    // The HUD's genome-length and generation figures ride along in the same
+    // pass, summed in the same order as the loops they replace
+    // (generationSpan's included), so the doubles come out identical.
+    double genomeSum = 0.0, genSum = 0.0;
+    std::uint32_t genMax = 0;
+    size_t genN = 0;
     for (size_t i = 0; i < n; ++i) {
         const Creature& c = w.creatures[i];
+        genomeSum += (double)c.genome.size();
+        if (c.alive) {
+            genSum += (double)c.generation;
+            if (c.generation > genMax) genMax = c.generation;
+            ++genN;
+        }
         for (int s = 0; s < Creature::BODY_LEN; ++s) {
             g_segments[i * 12 + s * 2 + 0] = c.body[s].x;
             g_segments[i * 12 + s * 2 + 1] = c.body[s].y;
@@ -797,9 +809,6 @@ EVO_EXPORT void evo_sync() {
         g_current.clear();
     }
 
-    double avgGenome = 0.0;
-    for (const auto& c : w.creatures) avgGenome += (double)c.genome.size();
-    if (n) avgGenome /= (double)n;
     g_stats[0] = (double)n;
     g_stats[1] = (double)w.food.size();
     g_stats[2] = (double)w.predators.size();
@@ -808,10 +817,9 @@ EVO_EXPORT void evo_sync() {
     g_stats[5] = (double)w.deaths;
     g_stats[6] = (double)w.totalBirths;
     g_stats[7] = (double)w.totalDeaths;
-    g_stats[8] = avgGenome;
-    const GenerationSpan gen = generationSpan(w);
-    g_stats[9] = gen.mean;
-    g_stats[10] = (double)gen.max;
+    g_stats[8] = n ? genomeSum / (double)n : 0.0;
+    g_stats[9] = genN ? genSum / (double)genN : 0.0;
+    g_stats[10] = (double)genMax;
 }
 
 EVO_EXPORT int evo_creature_count()             { return g_world ? (int)g_world->creatures.size() : 0; }

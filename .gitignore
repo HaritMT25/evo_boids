@@ -15,8 +15,9 @@ runs/
 *.swp
 .DS_Store
 
-# research log: kept local, never published
+# research log and performance log: kept local, never published
 docs/evo_boids_context.md
+docs/evo_boids_perf.md
 
 # deploy output (wasm/build_site.sh) and the Vercel CLI's project link
 dist/

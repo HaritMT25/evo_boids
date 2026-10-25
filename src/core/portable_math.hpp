@@ -459,6 +459,106 @@ inline float tanhf(float x)
     return sign ? -t : t;
 }
 
+// ---- tanhf over an array, without branches (same bits as tanhf above) ----
+// tanhf branches on the size of its argument, and so does expm1f inside it.
+// Across a creature's neurons those branches go any which way, and each wrong
+// guess costs a pipeline flush. The functions below do, for every input,
+// exactly the float operations tanhf and expm1f_impl would, but compute every
+// case and SELECT the result rather than branch to it. That makes one call
+// slower and an array faster, because the loop vectorises (SSE2 natively,
+// SIMD128 in the browser module): 1.7x natively and 2.1x in wasm per value,
+// while scalar code without SIMD would be slower than tanhf, so use these
+// only on arrays. Exhaustively checked against tanhf on all 2^32 inputs
+// (and on a sample by core_tests).
+namespace detail {
+
+inline float selectf(bool c, float a, float b) {   // c ? a : b, on the bits
+    const uint32_t m = 0u - static_cast<uint32_t>(c);
+    return bitsFloat((floatBits(a) & m) | (floatBits(b) & ~m));
+}
+inline int selecti(bool c, int a, int b) {
+    const int m = -static_cast<int>(c);
+    return (a & m) | (b & ~m);
+}
+
+// expm1f_impl for x in [-1.1, 20], the only range tanhfSelect passes it: no
+// early returns are reachable there, k is -1..29, and each case's value is
+// computed with expm1f_impl's own operations.
+inline float expm1fSelect(float x)
+{
+    const float ln2_hi = 6.9313812256e-01f, ln2_lo = 9.0580006145e-06f,
+                invln2 = 1.4426950216e+00f,
+                Q1 = -3.3333212137e-2f, Q2 = 1.5807170421e-3f;
+    const uint32_t ux = floatBits(x);
+    const uint32_t hx = ux & 0x7fffffffu;
+    const bool neg = (ux >> 31) != 0;
+
+    const bool reduce = hx > 0x3eb17218u;      // |x| > 0.5 ln2
+    const bool near1  = hx < 0x3F851592u;      // and |x| < 1.5 ln2: k = +-1
+    const bool tiny   = hx < 0x33000000u;      // |x| < 2^-25: expm1(x) = x
+
+    const int   kN  = static_cast<int>(invln2 * x + selectf(neg, -0.5f, 0.5f));
+    const float tN  = static_cast<float>(kN);
+    const float hi  = selectf(near1, selectf(neg, x + ln2_hi, x - ln2_hi), x - tN * ln2_hi);
+    const float lo  = selectf(near1, selectf(neg, -ln2_lo, ln2_lo), tN * ln2_lo);
+    const float xr  = hi - lo;
+    const float cr  = (hi - xr) - lo;
+    const float X   = selectf(reduce, xr, x);
+    const float c   = selectf(reduce, cr, 0.0f);
+    const int   k   = selecti(reduce, selecti(near1, selecti(neg, -1, 1), kN), 0);
+
+    const float hfx = 0.5f * X;
+    const float hxs = X * hfx;
+    const float r1  = 1.0f + hxs * (Q1 + hxs * Q2);
+    const float t   = 3.0f - r1 * hfx;
+    const float e   = hxs * ((r1 - t) / (6.0f - X * t));
+    const float k0  = X - (X * e - hxs);
+    float e2 = X * (e - c) - c;
+    e2 -= hxs;
+    const float kM1 = 0.5f * (X - e2) - 0.5f;
+    const float kP1 = selectf(X < -0.25f, -2.0f * (e2 - (X + 0.5f)), 1.0f + 2.0f * (X - e2));
+    const float twopk = bitsFloat(static_cast<uint32_t>(0x7f + k) << 23);
+    const float u     = bitsFloat(static_cast<uint32_t>(0x7f - k) << 23);
+    const float kBig  = selectf(k < 23, (X - e2 + (1 - u)) * twopk, (X - (e2 + u) + 1) * twopk);
+
+    float r = kBig;
+    r = selectf(k == 1, kP1, r);
+    r = selectf(k == -1, kM1, r);
+    r = selectf(k == 0, k0, r);
+    return selectf(!reduce && tiny, x, r);
+}
+
+inline float tanhfSelect(float x)
+{
+    const uint32_t ux = floatBits(x);
+    const uint32_t sign = ux & 0x80000000u;
+    const uint32_t w = ux & 0x7fffffffu;
+    const float ax = bitsFloat(w);
+
+    const bool mid = w > 0x3e82c578u;          // |x| > log(5/3)/2, and above
+    float arg = selectf(mid, 2 * ax, -2 * ax);
+    // |x| <= 10 keeps arg <= 20. Larger |x|, inf and NaN take the 1 + 0/x
+    // case, so their expm1 is never used: clamp it into range (NaN -> 20).
+    arg = selectf(arg <= 20.0f, arg, 20.0f);
+    const float e = expm1fSelect(arg);
+    const float tMid = e / (e + 2);
+
+    float t = ax;                              // |x| subnormal or zero
+    t = selectf(w >= 0x00800000u, -tMid, t);   // (-e)/(e+2): division is sign-symmetric
+    t = selectf(mid, tMid, t);
+    t = selectf(w > 0x3f0c9f54u, 1 - 2 / (e + 2), t);
+    t = selectf(w > 0x41200000u, 1 + 0 / ax, t);
+    return bitsFloat(floatBits(t) ^ sign);     // sign ? -t : t
+}
+
+} // namespace detail
+
+// out[i] = tanhf(x[i]) for i < n, bit for bit; x and out must not overlap.
+inline void tanhfArray(const float* __restrict x, float* __restrict out, int n)
+{
+    for (int i = 0; i < n; ++i) out[i] = detail::tanhfSelect(x[i]);
+}
+
 inline float expm1f(float x) { return detail::expm1f_impl(x); }
 
 // ---- sinf (origin: FreeBSD s_sinf.c, via musl) ----

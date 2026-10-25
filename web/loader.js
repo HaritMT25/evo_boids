@@ -19,6 +19,18 @@
 
   function abs(u) { return new URL(u, location.href).href; }
 
+  /* Both modules are built with WebAssembly SIMD (-msimd128, wasm/wasm.cmake),
+   * so a browser without it can't compile either. Check first, so the page
+   * can say what is missing instead of showing a compile error. This module,
+   * one function returning a v128 (i8x16.splat, i8x16.popcnt), validates only
+   * where SIMD is supported. */
+  var SIMD_PROBE = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0,
+                                   10, 10, 1, 8, 0, 65, 0, 253, 15, 253, 98, 11]);
+  function simdSupport() {
+    try { return typeof WebAssembly === "object" && WebAssembly.validate(SIMD_PROBE); }
+    catch (e) { return false; }
+  }
+
   function threadSupport() {
     var q = new URLSearchParams(location.search).get("threads");
     if (q === "0") return { ok: false, why: "forced single-threaded (?threads=0)" };
@@ -68,6 +80,9 @@
     },
     /* -> Promise<{Module, threaded, why, js, wasm}> */
     load: function () {
+      if (!simdSupport())
+        return Promise.reject(new Error("this browser has no WebAssembly SIMD, which the simulation " +
+                                        "needs (Chrome 91+, Firefox 89+ or Safari 16.4+)"));
       var t = threadSupport();
       var f = flavor(t.ok);
       return load(f).then(function (m) {

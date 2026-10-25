@@ -218,7 +218,7 @@ static std::uint32_t floatBits(float f) {
 }
 
 static void test_exact_shortcuts() {
-    std::printf("exact shortcuts (grid order, decay, count tanh, similarity, still water)...\n");
+    std::printf("exact shortcuts (grid order, decay, count tanh, similarity, still water, tanh array)...\n");
 
     // --- The cell-ordered grid lists hits in the order a vector per cell did:
     // cells row by row, each cell's entries in insertion order. ---
@@ -329,6 +329,37 @@ static void test_exact_shortcuts() {
                 const float now = (std::signbit(fx) && std::signbit(fy)) ? -0.0f : 0.0f;
                 if (floatBits(old) != floatBits(now)) ++differ;
             }
+        CHECK(differ == 0);
+    }
+
+    // --- tanhfArray (branch-free, vectorised) == tanhf. Every 509th bit
+    //     pattern covers every exponent and both signs, NaNs and infinities
+    //     included; the specials pin the case boundaries. (A sweep of all 2^32
+    //     inputs agreed too, when this was written.) ---
+    {
+        std::vector<float> in;
+        in.reserve((std::size_t{1} << 32) / 509 + 32);
+        for (std::uint64_t b = 0; b < (std::uint64_t{1} << 32); b += 509) {
+            const std::uint32_t u = static_cast<std::uint32_t>(b);
+            float f;
+            std::memcpy(&f, &u, sizeof f);
+            in.push_back(f);
+        }
+        const std::uint32_t edges[] = {0x3f0c9f54u, 0x3f0c9f55u, 0x41200000u, 0x41200001u,
+                                       0x3e82c578u, 0x3e82c579u, 0x00800000u, 0x007fffffu,
+                                       0x3eb17218u, 0x3F851592u, 0x33000000u, 0x7f800000u};
+        for (std::uint32_t e : edges)
+            for (std::uint32_t s : {0u, 0x80000000u}) {
+                float f;
+                const std::uint32_t u = e | s;
+                std::memcpy(&f, &u, sizeof f);
+                in.push_back(f);
+            }
+        std::vector<float> out(in.size());
+        evomath::tanhfArray(in.data(), out.data(), (int)in.size());
+        std::size_t differ = 0;
+        for (std::size_t i = 0; i < in.size(); ++i)
+            if (floatBits(out[i]) != floatBits(evomath::tanhf(in[i]))) ++differ;
         CHECK(differ == 0);
     }
 }

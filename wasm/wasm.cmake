@@ -13,6 +13,12 @@
 #   -ffp-contract=off   set for every target in CMakeLists.txt
 #   no -ffast-math      ever
 #
+# -msimd128 lets the compiler vectorise (feedForward's branch-free tanh,
+# portable_math.hpp tanhfArray, is what it is for). Vectorising changes no
+# result: each lane does the same IEEE operations, and wasm/parity.sh builds
+# its wasm side with the same flag. It needs WebAssembly SIMD in the browser
+# (Chrome 91+, Firefox 89+, Safari 16.4+); web/loader.js says so otherwise.
+#
 # Usage (after `source ~/emsdk/emsdk_env.sh`):
 #   cmake --preset wasm-st && cmake --build --preset wasm-st
 #   cmake --preset wasm-mt && cmake --build --preset wasm-mt
@@ -54,7 +60,9 @@ add_executable(evo_wasm wasm/evo_wasm.cpp)
 set_target_properties(evo_wasm PROPERTIES OUTPUT_NAME ${EVO_WASM_NAME} SUFFIX ".js")
 target_link_libraries(evo_wasm PRIVATE evo_core)
 target_compile_definitions(evo_wasm PRIVATE EVO_VERSION="${PROJECT_VERSION}")
+target_compile_options(evo_wasm PRIVATE -msimd128)
 target_link_options(evo_wasm PRIVATE
+    -msimd128
     --no-entry
     -sMODULARIZE=1
     -sEXPORT_NAME=createEvoBoids

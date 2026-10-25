@@ -15,7 +15,9 @@ mkdir -p "$OUT"
 
 echo "== building parity drivers"
 g++ -O3 -std=c++20 -ffp-contract=off -I src wasm/parity_driver.cpp -o "$OUT/parity_native"
-em++ -O3 -std=c++20 -ffp-contract=off -I src wasm/parity_driver.cpp -o "$OUT/parity_wasm.js"
+# -msimd128: the browser modules are built with it (wasm/wasm.cmake), so the
+# parity check runs the same vectorised code.
+em++ -O3 -std=c++20 -ffp-contract=off -msimd128 -I src wasm/parity_driver.cpp -o "$OUT/parity_wasm.js"
 
 run_case () {  # run_case NAME SEED STEPS [extra args...]
     local name=$1 seed=$2 steps=$3; shift 3

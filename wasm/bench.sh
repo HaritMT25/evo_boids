@@ -23,8 +23,8 @@ CXX="-O3 -std=c++20 -ffp-contract=off -I src wasm/bench_fixed.cpp"
 echo "== building"
 g++ $CXX -o "$OUT/native_serial"
 g++ $CXX -fopenmp -DUSE_OPENMP -o "$OUT/native_omp"
-em++ $CXX -sENVIRONMENT=node -sALLOW_MEMORY_GROWTH=1 -sEXIT_RUNTIME=1 -o "$OUT/wasm_st.js"
-em++ $CXX -pthread -DEVO_POOL_THREADS -sENVIRONMENT=node -sEXIT_RUNTIME=1 \
+em++ $CXX -msimd128 -sENVIRONMENT=node -sALLOW_MEMORY_GROWTH=1 -sEXIT_RUNTIME=1 -o "$OUT/wasm_st.js"
+em++ $CXX -msimd128 -pthread -DEVO_POOL_THREADS -sENVIRONMENT=node -sEXIT_RUNTIME=1 \
      -sPTHREAD_POOL_SIZE=7 -sINITIAL_MEMORY=134217728 -sALLOW_MEMORY_GROWTH=1 \
      -o "$OUT/wasm_mt.js" 2>/dev/null
 

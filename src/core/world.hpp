@@ -105,9 +105,13 @@ public:
         return read({pos.x + dir.x * dist, pos.y + dir.y * dist});
     }
 
+    // Each cell keeps 97% of its strength. In fixed point: (v * 63570) >> 16
+    // equals uint8_t(v * 0.97f) for every one of the 256 byte values (checked
+    // exhaustively, and pinned by core_tests), and with no branch and no
+    // float conversion the loop vectorises.
     void decay() {
         for (auto& v : grid_) {
-            if (v > 0) v = static_cast<uint8_t>(v * 0.97f);
+            v = static_cast<uint8_t>((static_cast<uint32_t>(v) * 63570u) >> 16);
         }
     }
 
@@ -127,9 +131,6 @@ public:
 };
 
 
-// Reusable scratch buffers for the per-creature spatial queries. Kept alive
-// across creatures (and one set per thread under OpenMP) so neighbour/food/
-// probe queries don't each heap-allocate a fresh std::vector every tick.
 // One attended neighbour, with the offset already computed so the second pass
 // never re-reads its position. Used only when SimConfig::maxNeighbors > 0.
 struct NeighborCandidate {
@@ -146,11 +147,42 @@ struct NeighborCandidate {
 // step costs more memory traffic than the per-neighbour work it skips.
 constexpr int MAX_TOPOLOGICAL_NEIGHBORS = 64;
 
+// What the neighbour scan reads of another creature, in a compact array: 16 B
+// a creature instead of a ~430 B Creature, so the scan's scattered reads stay
+// in cache once the population outgrows it. World::update refreshes entry i at
+// the start of a step and again the moment creature i has finished moving, so
+// at every point it holds creatures[i].pos / .vel - exactly what the scan read
+// before (in the serial loop, lower-index creatures have already moved).
+struct CreatureHot {
+    Vec2 pos;
+    Vec2 vel;
+};
+
+// Reusable scratch buffer for the per-creature neighbour query. Kept alive
+// across creatures (and one per thread under OpenMP) so the query doesn't
+// heap-allocate a fresh std::vector every tick. (The food and long-probe
+// senses scan the grid directly and need no list.)
 struct SensorScratch {
     std::vector<int> neighbors;
-    std::vector<int> nearbyFood;
-    std::vector<int> longProbe;
 };
+
+// tanh of a whole-number count over a fixed divisor, as a table: entry k holds
+// evomath::tanhf((float)k / D), the very expression the count sensors
+// evaluate, so a lookup returns the same bits as the call. Counts outside the
+// table fall back to the call.
+template <int D, int K>
+struct CountTanh {
+    float t[2 * K + 1];
+    CountTanh() {
+        for (int k = -K; k <= K; ++k) t[k + K] = evomath::tanhf((float)k / (float)D);
+    }
+    float operator()(int k) const {
+        return (k >= -K && k <= K) ? t[k + K] : evomath::tanhf((float)k / (float)D);
+    }
+};
+inline const CountTanh<5, 256>  tanhCountOver5;
+inline const CountTanh<10, 256> tanhCountOver10;
+inline const CountTanh<15, 256> tanhCountOver15;
 
 
 class World {
@@ -511,12 +543,16 @@ public:
         int numFood = (int)food.size();
 
         const auto tBuild0 = prof_ ? clk::now() : clk::time_point{};
+        hot_.resize(numCreatures);
         for (int i = 0; i < numCreatures; ++i) {
+            hot_[i] = {creatures[i].pos, creatures[i].vel};
             if (creatures[i].alive) creatureGrid_.insert(creatures[i].pos, i);
         }
         for (int i = 0; i < numFood; ++i) {
             if (food[i].alive) foodGrid_.insert(food[i].pos, i);
         }
+        creatureGrid_.build();
+        foodGrid_.build();
         if (prof_) prof.buildNs += std::chrono::duration<double, std::nano>(clk::now() - tBuild0).count();
 
         // Per-creature pending actions (for thread safety)
@@ -650,6 +686,7 @@ public:
             if (c.pos.x >= width) c.pos.x -= width;
             if (c.pos.y < 0) c.pos.y += height;
             if (c.pos.y >= height) c.pos.y -= height;
+            hot_[i] = {c.pos, c.vel};   // final for this step (see CreatureHot)
 
             c.updateBody();
 
@@ -854,6 +891,7 @@ private:
     // Spatial indices, reused across frames (see update()).
     SpatialGrid creatureGrid_;
     SpatialGrid foodGrid_;
+    std::vector<CreatureHot> hot_;  // pos/vel per creature index (see CreatureHot)
     CurrentField current_;          // ocean flow (off unless cfg.currentStrength>0)
     std::vector<Vec2> foodPatches_; // patch centres (empty => uniform food spawn)
 #ifdef EVO_POOL_THREADS
@@ -1105,11 +1143,13 @@ private:
         s1[NEAREST_NEIGHBOR_FOOD] = evomath::tanhf((c2.foodReserves - 25.0f) / 25.0f);
         s1[GENETIC_SIM_NEAREST] = genomeSimilarity(c1.genome, c2.genome);
 
-        s2[AGE] = evomath::tanhf((c2.age - 50.0f) / 50.0f);
-        s2[NEAREST_NEIGHBOR_AGE] = evomath::tanhf((c1.age - 50.0f) / 50.0f);
-        s2[FOOD_RESERVES] = evomath::tanhf((c2.foodReserves - 25.0f) / 25.0f);
-        s2[NEAREST_NEIGHBOR_FOOD] = evomath::tanhf((c1.foodReserves - 25.0f) / 25.0f);
-        s2[GENETIC_SIM_NEAREST] = genomeSimilarity(c2.genome, c1.genome);
+        // c2's view is c1's with the roles swapped: the same expressions, and
+        // genomeSimilarity is symmetric.
+        s2[AGE] = s1[NEAREST_NEIGHBOR_AGE];
+        s2[NEAREST_NEIGHBOR_AGE] = s1[AGE];
+        s2[FOOD_RESERVES] = s1[NEAREST_NEIGHBOR_FOOD];
+        s2[NEAREST_NEIGHBOR_FOOD] = s1[FOOD_RESERVES];
+        s2[GENETIC_SIM_NEAREST] = s1[GENETIC_SIM_NEAREST];
 
         float a1[NUM_ACTIONS], a2[NUM_ACTIONS];
         feedForward(c1.nnet, s1, a1);
@@ -1250,7 +1290,7 @@ private:
                         const SpatialGrid& creatureGrid, const SpatialGrid& foodGrid,
                         float sensors[], SensorScratch& scratch) {
         auto fwd = c.forward();
-        auto rht = c.right();
+        const Vec2 rht = {-fwd.y, fwd.x};   // c.right(), without a second forward()
 
         // Position & boundaries. LOC_X/LOC_Y stay absolute position in both
         // modes (on the torus they are a discontinuous-but-informative
@@ -1267,7 +1307,9 @@ private:
             float by = std::min(c.pos.y, (float)height - c.pos.y);
             sensors[BOUNDARY_DIST_X] = evomath::tanhf(bx / 100.0f);
             sensors[BOUNDARY_DIST_Y] = evomath::tanhf(by / 100.0f);
-            sensors[BOUNDARY_DIST] = evomath::tanhf(std::min(bx, by) / 100.0f);
+            // tanh is non-decreasing and min() returns one of its arguments,
+            // so this is tanh(min(bx, by) / 100), bit for bit.
+            sensors[BOUNDARY_DIST] = std::min(sensors[BOUNDARY_DIST_X], sensors[BOUNDARY_DIST_Y]);
         }
 
         // Own state
@@ -1291,19 +1333,22 @@ private:
         float nearestDist = cfg.perceptionRadius;
         int nearestIdx = -1;
         int neighborCount = 0;
-        float popFwd = 0, popLR = 0;
+        // Whole counts, as ints: a float sum of +-1 is exact anyway, and the
+        // ternaries below compile without the two branches per neighbour that
+        // `if (dot > 0) += 1 else -= 1` cost (taken half the time at random).
+        int popFwd = 0, popLR = 0;
 
         // One neighbour's contribution to the social percepts. Shared by both
         // paths below so the maths exists once; with cfg.maxNeighbors == 0 the
         // call order is exactly the old inline loop's, hence bit-identical.
-        auto attendTo = [&](int ni, const Creature& other, float dx, float dy, float dist) {
+        auto attendTo = [&](int ni, const CreatureHot& other, float dx, float dy, float dist) {
             avgDx += dx; avgDy += dy;
             avgHx += other.vel.x; avgHy += other.vel.y;
 
             float dotFwd = dx * fwd.x + dy * fwd.y;
             float dotLR = dx * rht.x + dy * rht.y;
-            if (dotFwd > 0) popFwd += 1.0f; else popFwd -= 1.0f;
-            if (dotLR > 0) popLR += 1.0f; else popLR -= 1.0f;
+            popFwd += (dotFwd > 0) ? 1 : -1;
+            popLR  += (dotLR > 0) ? 1 : -1;
 
             if (dist < nearestDist) { nearestDist = dist; nearestIdx = ni; }
             neighborCount++;
@@ -1315,10 +1360,11 @@ private:
 
         if (cfg.maxNeighbors <= 0) {
             // Metric interaction: attend to everything in range (historical).
+            // Every grid entry was alive when inserted and nothing in this phase
+            // kills, so no alive test is needed.
             for (int ni : neighbors) {
                 if (ni == selfIdx) continue;
-                const Creature& other = creatures[ni];
-                if (!other.alive) continue;
+                const CreatureHot& other = hot_[ni];
 
                 float dx = other.pos.x - c.pos.x;
                 float dy = other.pos.y - c.pos.y;
@@ -1348,8 +1394,7 @@ private:
 
             for (int ni : neighbors) {
                 if (ni == selfIdx) continue;
-                const Creature& other = creatures[ni];
-                if (!other.alive) continue;
+                const CreatureHot& other = hot_[ni];   // grid entries are all alive
                 ++inRadiusCount;
 
                 float rawDx = other.pos.x - c.pos.x;
@@ -1378,7 +1423,7 @@ private:
             }
 
             for (int j = 0; j < have; ++j) {
-                attendTo(best[j].index, creatures[best[j].index],
+                attendTo(best[j].index, hot_[best[j].index],
                          best[j].dx, best[j].dy, std::sqrt(best[j].distSq));
             }
         }
@@ -1388,28 +1433,28 @@ private:
             avgHx /= neighborCount; avgHy /= neighborCount;
         }
 
-        sensors[NEIGHBOR_COUNT] = evomath::tanhf(inRadiusCount / 10.0f);
+        sensors[NEIGHBOR_COUNT] = tanhCountOver10(inRadiusCount);
         sensors[AVG_NEIGHBOR_DX] = evomath::tanhf(avgDx / cfg.perceptionRadius);
         sensors[AVG_NEIGHBOR_DY] = evomath::tanhf(avgDy / cfg.perceptionRadius);
         sensors[AVG_NEIGHBOR_HEADING_X] = avgHx;
         sensors[AVG_NEIGHBOR_HEADING_Y] = avgHy;
         sensors[NEAREST_NEIGHBOR_DIST] = nearestDist / cfg.perceptionRadius;
-        sensors[POPULATION_DENSITY] = evomath::tanhf(inRadiusCount / 15.0f);
-        sensors[POPULATION_FWD] = evomath::tanhf(popFwd / 5.0f);
-        sensors[POPULATION_LR] = evomath::tanhf(popLR / 5.0f);
+        sensors[POPULATION_DENSITY] = tanhCountOver15(inRadiusCount);
+        sensors[POPULATION_FWD] = tanhCountOver5(popFwd);
+        sensors[POPULATION_LR] = tanhCountOver5(popLR);
 
         // Nearest neighbor attributes
         if (nearestIdx >= 0) {
             const Creature& nearest = creatures[nearestIdx];
             sensors[NEAREST_NEIGHBOR_AGE] = evomath::tanhf((nearest.age - 50.0f) / 50.0f);
             sensors[NEAREST_NEIGHBOR_FOOD] = evomath::tanhf((nearest.foodReserves - 25.0f) / 25.0f);
-            sensors[GENETIC_SIM_NEAREST] = genomeSimilarity(c.genome, nearest.genome);
+            const float sim = genomeSimilarity(c.genome, nearest.genome);
+            sensors[GENETIC_SIM_NEAREST] = sim;
             float dx = nearest.pos.x - c.pos.x;
             float dy = nearest.pos.y - c.pos.y;
             if (cfg.toroidal) { dx = wrapDx(dx); dy = wrapDy(dy); }
             float dotFwd = dx * fwd.x + dy * fwd.y;
-            sensors[GENETIC_SIM_FWD] = (dotFwd > 0)
-                ? genomeSimilarity(c.genome, nearest.genome) : 0.5f;
+            sensors[GENETIC_SIM_FWD] = (dotFwd > 0) ? sim : 0.5f;
         } else {
             sensors[NEAREST_NEIGHBOR_AGE] = 0.0f;
             sensors[NEAREST_NEIGHBOR_FOOD] = 0.0f;
@@ -1417,15 +1462,18 @@ private:
             sensors[GENETIC_SIM_FWD] = 0.5f;
         }
 
-        // Food sensors (reuse scratch buffer)
-        std::vector<int>& nearbyFood = scratch.nearbyFood;
-        nearbyFood.clear();
-        if (cfg.toroidal) foodGrid.queryRadiusWrapped(c.pos, cfg.perceptionRadius, nearbyFood);
-        else              foodGrid.queryRadius(c.pos, cfg.perceptionRadius, nearbyFood);
+        // Food sensors. Food neither moves nor dies in this phase, so a grid
+        // entry's stored position IS the food's position: visit the entries in
+        // the order queryRadius would list them, without the index list or a
+        // second read of food[]. (Wrapped offsets still go through wrapDx, as
+        // before — not through the image query's shifted centre, which rounds
+        // differently.)
         float foodDx = 0, foodDy = 0, foodDist = cfg.perceptionRadius;
-        for (int fi : nearbyFood) {
-            float dx = food[fi].pos.x - c.pos.x;
-            float dy = food[fi].pos.y - c.pos.y;
+        int foodCount = 0;
+        auto smell = [&](int, Vec2 fp) {
+            ++foodCount;
+            float dx = fp.x - c.pos.x;
+            float dy = fp.y - c.pos.y;
             if (cfg.toroidal) { dx = wrapDx(dx); dy = wrapDy(dy); }
             float dist = std::sqrt(dx * dx + dy * dy);
             if (dist < foodDist) {
@@ -1434,11 +1482,13 @@ private:
                 foodDx = dx * invD;
                 foodDy = dy * invD;
             }
-        }
+        };
+        if (cfg.toroidal) foodGrid.forEachInRadiusWrapped(c.pos, cfg.perceptionRadius, smell);
+        else              foodGrid.forEachInRadius(c.pos, cfg.perceptionRadius, smell);
         sensors[NEAREST_FOOD_DX] = foodDx;
         sensors[NEAREST_FOOD_DY] = foodDy;
         sensors[NEAREST_FOOD_DIST] = foodDist / cfg.perceptionRadius;
-        sensors[FOOD_DENSITY] = evomath::tanhf((float)nearbyFood.size() / 10.0f);
+        sensors[FOOD_DENSITY] = tanhCountOver10(foodCount);
 
         // Pheromone sensors
         sensors[SIGNAL0] = signals.read(c.pos);
@@ -1447,9 +1497,18 @@ private:
 
         // Current / flow sensors — local flow projected onto the creature's own
         // forward and right axes (0 everywhere when currents are disabled).
-        Vec2 cur = current_.velocityAt(c.pos);
-        sensors[CURRENT_FWD] = evomath::tanhf((cur.x * fwd.x + cur.y * fwd.y) / 100.0f);
-        sensors[CURRENT_LR]  = evomath::tanhf((cur.x * rht.x + cur.y * rht.y) / 100.0f);
+        if (current_.active()) {
+            Vec2 cur = current_.velocityAt(c.pos);
+            sensors[CURRENT_FWD] = evomath::tanhf((cur.x * fwd.x + cur.y * fwd.y) / 100.0f);
+            sensors[CURRENT_LR]  = evomath::tanhf((cur.x * rht.x + cur.y * rht.y) / 100.0f);
+        } else {
+            // Still water: the flow is {0, 0}, so each product above is a zero
+            // carrying the axis component's sign, their sum is -0 only when
+            // both are, and tanh keeps it. Same bits, without the two calls
+            // (the inspector shows the sign).
+            sensors[CURRENT_FWD] = (std::signbit(fwd.x) && std::signbit(fwd.y)) ? -0.0f : 0.0f;
+            sensors[CURRENT_LR]  = (std::signbit(rht.x) && std::signbit(rht.y)) ? -0.0f : 0.0f;
+        }
 
         // Predator threat sensors — nearest predator within the prey's OWN
         // perception radius (the predator's larger detection radius is the ambush
@@ -1480,20 +1539,19 @@ private:
             }
         }
 
-        // Long probe (reuse scratch buffer)
-        std::vector<int>& longProbe = scratch.longProbe;
-        longProbe.clear();
+        // Long probe: only the count is a percept, so count, don't collect.
+        int probeCount;
         Vec2 probePos = {c.pos.x + fwd.x * LONGPROBE_DIST, c.pos.y + fwd.y * LONGPROBE_DIST};
         if (cfg.toroidal) {
             // A probe cast past the seam looks into the far side of the world
             // instead of going blind off-plane.
             probePos = { wrapCoord(probePos.x, (float)width),
                          wrapCoord(probePos.y, (float)height) };
-            creatureGrid.queryRadiusWrapped(probePos, 30.0f, longProbe);
+            probeCount = creatureGrid.countRadiusWrapped(probePos, 30.0f);
         } else {
-            creatureGrid.queryRadius(probePos, 30.0f, longProbe);
+            probeCount = creatureGrid.countRadius(probePos, 30.0f);
         }
-        sensors[LONGPROBE_POP_FWD] = evomath::tanhf((float)longProbe.size() / 5.0f);
+        sensors[LONGPROBE_POP_FWD] = tanhCountOver5(probeCount);
 
         // Random
         sensors[RANDOM_SENSOR] = rng.range(-1.0f, 1.0f);

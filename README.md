@@ -29,7 +29,7 @@ web/           browser frontend: canvas renderer, module loader, Turbo worker
 tests/         core_tests, predator_smoke, core_bench (no SFML needed)
 ```
 
-- **Spatial index.** Creatures and food go into uniform grids (`spatial_grid.hpp`), with cell size equal to the perception radius. The grids are rebuilt every step without reallocating, and a neighbour query only scans the cells overlapping its radius.
+- **Spatial index.** Creatures and food go into uniform grids (`spatial_grid.hpp`), with cell size equal to the perception radius. Each grid is one array sorted by cell, rebuilt every step without reallocating, and a neighbour query scans each row of the cells overlapping its radius as one contiguous run.
 - **One step.**
   - The per-creature phase (sense, run the network, move) only writes to the creature being updated, so it runs in parallel.
   - Eating, interactions, births and deaths change shared state, so they run on one thread.
@@ -309,6 +309,22 @@ In the windowed Chrome runs (AC power, a display at about 56.6 Hz, so stable mea
 Headless Firefox adds a fixed ~16 ms to every flat-view frame, whatever the number of agents (16.2 ms at 250, 15.9 ms at 2,000; one more battery run stopped at 250 agents, at 35.9 ms). The cost is the per-frame copy of the offscreen WebGL2 canvas onto the visible 2D canvas (`ctx.drawImage`): in a test page, that copy took 16.4 ms of JavaScript per frame in headless Firefox, against 1.4 ms when the WebGL2 canvas is shown directly with a 2D overlay, and 0.5–0.8 ms in a windowed Firefox. Windowed, on the real page, the flat view drew in under 2.4 ms at every count up to 12,000. So the headless number is an artifact of headless Firefox, not what visitors see. Playwright's windowed Firefox paced every page here, a bare WebGL2 canvas included, at about 35 fps, so its frame rate says nothing about a regular Firefox; Chrome held about 57 fps (the display's rate on battery) in the same tests.
 
 The page starts the single-threaded module at 300 creatures and the threaded one at 600. Under the default settings, the population then settles between roughly 250 and 800.
+
+### Faster steps, same results (2026-10-24)
+
+A step got 1.3–2× faster without changing a single result: every checkpoint, every inspector value and the native/wasm parity come out bit for bit as before. Most of the gain came from removing branches the CPU could not predict (which side of a fish a neighbour is on, whether a grid candidate is inside the sensing radius, whether two genes' types match), from laying the spatial grid out as one array, and from keeping the positions the neighbour scan reads in a compact array of their own.
+
+Measured against the previous version in one process: both builds side by side on the same world, alternating short blocks of steps, the median of three seeds (three repeats for the thread pool), on AC power. The single-threaded runs compared the two worlds byte for byte at the end. Each cell is the old step time divided by the new one.
+
+| creatures | native, 1 thread | wasm, 1 thread (Node 22, Chrome's V8) | native thread pool, 4 threads | thread pool, 8 threads |
+|---:|---:|---:|---:|---:|
+| 300 | 1.53× | 1.31× | | |
+| 1,000 | 1.67× | 1.40× | | |
+| 3,000 | 1.81× | 1.51× | 1.58× | 1.47× |
+| 8,000 (an evolved world) | 2.02× | 1.68× | 1.78× | 1.67× |
+| 12,000 | | | 1.98× | 1.87× |
+
+The thread pool is the code the browser's threaded module runs, built natively. The wasm module gains less because its `tanhf` costs more than twice as much as native, so the neural network is a larger share of its step. The table below predates this change.
 
 ### Step time at a fixed creature count
 

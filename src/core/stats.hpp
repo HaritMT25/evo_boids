@@ -6,7 +6,7 @@
 #include <cmath>
 #include <algorithm>
 #include <random>
-#include <unordered_set>
+#include <bitset>
 #include <cstdint>
 #include <cstring>
 #include "world.hpp"
@@ -58,15 +58,15 @@ inline void computeGeneticSpread(const std::vector<Creature>& cs,
     // Fixed random hyperplanes for SimHash — FROZEN constants (plane_data.hpp)
     // so signatures are comparable across samples and runs, and identical
     // across native and wasm builds (runtime std::normal_distribution was not).
-    static const std::vector<std::vector<float>> H = [] {
-        std::vector<std::vector<float>> h(STATS_HASH_BITS,
-                                          std::vector<float>(STATS_DIM));
+    // Stored cell-major: one cell's STATS_HASH_BITS weights are one contiguous
+    // row, so a touched cell reads a single row rather than one value from
+    // each plane. Every plane still sums the same products in the same order.
+    static const std::vector<float> HT = [] {
+        std::vector<float> h(static_cast<std::size_t>(STATS_DIM) * STATS_HASH_BITS);
         for (int r = 0; r < STATS_HASH_BITS; ++r)
-            for (int i = 0; i < STATS_DIM; ++i) {
-                float v;
-                std::memcpy(&v, &kSimHashPlaneBits[r][i], 4);
-                h[r][i] = v;
-            }
+            for (int i = 0; i < STATS_DIM; ++i)
+                std::memcpy(&h[static_cast<std::size_t>(i) * STATS_HASH_BITS + r],
+                            &kSimHashPlaneBits[r][i], 4);
         return h;
     }();
 
@@ -82,8 +82,10 @@ inline void computeGeneticSpread(const std::vector<Creature>& cs,
     std::vector<int>   touched;
     touched.reserve(GENOME_MAX_LENGTH);
 
-    std::unordered_set<uint64_t> signatures;
-    signatures.reserve(static_cast<size_t>(n) * 2);
+    // A signature is a STATS_HASH_BITS-bit number, so one bit per possible
+    // value counts the distinct ones, with no hashing and no allocation.
+    static_assert(STATS_HASH_BITS <= 20, "the signature bitset holds 2^STATS_HASH_BITS bits");
+    std::bitset<(std::size_t{1} << STATS_HASH_BITS)> signatures;
 
     int epoch = 0;
     for (const Creature& c : cs) {
@@ -99,13 +101,14 @@ inline void computeGeneticSpread(const std::vector<Creature>& cs,
             const double v = cell[idx];
             gsum[idx]   += v;
             gsumsq[idx] += v * v;
-            for (int j = 0; j < STATS_HASH_BITS; ++j) proj[j] += v * H[j][idx];
+            const float* h = &HT[static_cast<std::size_t>(idx) * STATS_HASH_BITS];
+            for (int j = 0; j < STATS_HASH_BITS; ++j) proj[j] += v * h[j];
         }
 
         uint64_t sig = 0;
         for (int j = 0; j < STATS_HASH_BITS; ++j)
             if (proj[j] >= 0.0) sig |= (uint64_t{1} << j);
-        signatures.insert(sig);
+        signatures.set(sig);
 
         ++epoch;
     }
@@ -119,7 +122,7 @@ inline void computeGeneticSpread(const std::vector<Creature>& cs,
     }
 
     diversityOut = static_cast<float>(std::sqrt(totalVar));
-    speciesOut   = static_cast<int>(signatures.size());
+    speciesOut   = static_cast<int>(signatures.count());
 }
 
 // ----------------------------------------------------------------------------
@@ -406,20 +409,19 @@ inline WorldStats computeStats(const World& w) {
         SpatialGrid sgrid;
         sgrid.init(w.width, w.height, perc);
         for (int k = 0; k < n; ++k) sgrid.insert(cs[k].pos, k);
+        sgrid.build();
 
-        std::vector<int> near;
         double    alignSum   = 0.0;
         int       alignN     = 0;
         long long neighTotal = 0;
         for (int i = 0; i < n; ++i) {
-            near.clear();
-            sgrid.queryRadius(cs[i].pos, perc, near);   // exact disk: dist(i,j) <= perc
             Vec2 mh{0.0f, 0.0f};
             int  cnt = 0;
-            for (int j : near) {
-                if (j == i) continue;                   // queryRadius includes self
+            // exact disk: dist(i,j) <= perc, visited in queryRadius order
+            sgrid.forEachInRadius(cs[i].pos, perc, [&](int j, Vec2) {
+                if (j == i) return;                     // the disk includes self
                 mh.x += hdg[j].x; mh.y += hdg[j].y; ++cnt;
-            }
+            });
             neighTotal += cnt;
             if (cnt > 0 && (hdg[i].x != 0.0f || hdg[i].y != 0.0f)) {
                 const float ml = std::sqrt(mh.x * mh.x + mh.y * mh.y);

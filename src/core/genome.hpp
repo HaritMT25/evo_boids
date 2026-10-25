@@ -312,12 +312,14 @@ inline float genomeSimilarity(const Genome& g1, const Genome& g2) {
     size_t minLen = std::min(g1.size(), g2.size());
     if (minLen == 0) return 0.0f;
 
+    // & rather than &&: both fields are compared every time, so the count has
+    // no data-dependent branch. With &&, the branch on the first comparison was
+    // close to a coin flip per gene for the predictor, and this runs for every
+    // creature's nearest neighbour on every step.
     int matches = 0;
     for (size_t i = 0; i < minLen; ++i) {
-        if (g1[i].sourceType == g2[i].sourceType &&
-            g1[i].sinkType == g2[i].sinkType) {
-            matches++;
-        }
+        matches += (g1[i].sourceType == g2[i].sourceType) &
+                   (g1[i].sinkType == g2[i].sinkType);
     }
     return static_cast<float>(matches) / static_cast<float>(minLen);
 }

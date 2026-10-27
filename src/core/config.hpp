@@ -68,7 +68,7 @@ struct SimConfig {
     // reseed-floor injection and never of a child (it inherits the maternal
     // line), so this needs no new creature state: lineageId and age are both
     // serialized already. <= 0 = off, and <= 5 is inert as well because
-    // doInteraction requires age > 5 before the gate is reached at all.
+    // kernel::pairingAllowed requires age > 5 before the gate is reached at all.
     // Why it exists: under a tight gate the --min-pop reseed floor becomes a
     // diversity pump that cannot reproduce — random founders sit ~19.5 from
     // everyone, so they eat, never pair, and pin the population on the floor.

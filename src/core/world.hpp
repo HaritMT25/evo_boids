@@ -6,7 +6,6 @@
 #include <cstring>
 #include <cstdint>
 #include <chrono>
-#include <cstdio>
 #include <utility>
 #include "vec2.hpp"
 #include "portable_math.hpp"
@@ -17,9 +16,8 @@
 #include "spatial_grid.hpp"
 #include "config.hpp"
 #include "current.hpp"
-#include "cluster_projection.hpp"
-#include "isolation.hpp"
-#include "repro_graph.hpp"
+#include "kernel.hpp"
+#include "world_common.hpp"
 #ifdef EVO_POOL_THREADS
 #include "thread_pool.hpp"
 #endif
@@ -166,26 +164,8 @@ struct SensorScratch {
     std::vector<int> neighbors;
 };
 
-// tanh of a whole-number count over a fixed divisor, as a table: entry k holds
-// evomath::tanhf((float)k / D), the very expression the count sensors
-// evaluate, so a lookup returns the same bits as the call. Counts outside the
-// table fall back to the call.
-template <int D, int K>
-struct CountTanh {
-    float t[2 * K + 1];
-    CountTanh() {
-        for (int k = -K; k <= K; ++k) t[k + K] = evomath::tanhf((float)k / (float)D);
-    }
-    float operator()(int k) const {
-        return (k >= -K && k <= K) ? t[k + K] : evomath::tanhf((float)k / (float)D);
-    }
-};
-inline const CountTanh<5, 256>  tanhCountOver5;
-inline const CountTanh<10, 256> tanhCountOver10;
-inline const CountTanh<15, 256> tanhCountOver15;
 
-
-class World {
+class World : public WorldCommon {
 public:
     int width, height;
     std::vector<Creature> creatures;
@@ -194,216 +174,6 @@ public:
                                        // population with an energy economy in Stage B.
     std::vector<Food> food;
     SignalGrid signals;
-
-    unsigned long long frame = 0;
-    int births = 0;          // this-frame only; reset every update()
-    int deaths = 0;          // this-frame only; reset every update()
-    long long totalBirths = 0;  // cumulative over the whole run (never reset)
-    long long totalDeaths = 0;  // cumulative over the whole run (never reset)
-
-    // Attribution for the two match-distance mitigations (v0.24.0), cumulative
-    // and both <= totalBirths. Without them a rescued population cannot be
-    // attributed to grace vs the soft ramp, and that attribution is the whole
-    // point of running the mitigation sweep. Both stay 0 on every run with the
-    // knobs off, including a hard-gated one.
-    //   totalGraceBirths: the gate was bypassed because a partner was a young
-    //     founder (see reproGraced).
-    //   totalSoftBirths:  the soft draw admitted a pair the HARD gate at the
-    //     same threshold would have refused (dsq > T*T). A pair inside T that
-    //     the soft draw happened to accept is not counted — it needed no help.
-    long long totalGraceBirths = 0;
-    long long totalSoftBirths  = 0;
-
-    // Cumulative deaths split by cause (sum == totalDeaths). "prey deaths up" is
-    // meaningless until you know which kind, so the logger differences these into
-    // per-interval predation / starvation / age columns.
-    long long totalDeathsPredation  = 0;
-    long long totalDeathsStarvation = 0;
-    long long totalDeathsAge        = 0;
-
-    // Predator economy bookkeeping (Stage B). Cumulative over the run; the logger
-    // differences them into per-interval columns, exactly like the prey deaths.
-    // Births and the two death causes are tracked separately so a predator crash
-    // can be diagnosed (starved out vs aged out) and recovery (births) watched.
-    // All stay 0 in Stage A (cfg.predatorEconomy == false).
-    long long totalPredatorBirths           = 0;
-    long long totalPredatorDeathsStarvation = 0;
-    long long totalPredatorDeathsAge        = 0;
-    // Predators the floor added (cfg.predatorMinPopulation, v0.26.0). Not
-    // births: kept apart so a population the floor holds up can be told from
-    // one that breeds. 0 unless the floor is on.
-    long long totalPredatorReseeds          = 0;
-
-    // Death-cluster map (cfg.clusterMap). One point per creature death: the 2-D
-    // projection of its network plus the death ordinal (so colour can band by
-    // epoch) and a few attributes. Memory is bounded to cfg.clusterMax by uniform
-    // decimation (when full, drop every other kept point and double the stride),
-    // which keeps an evenly-spaced sample across the whole run. Empty / untouched
-    // unless cfg.clusterMap is on, so default runs are unaffected.
-    struct DeathRecord {
-        float x = 0.0f, y = 0.0f;   // fixed 2-D projection (the non-PCA map point)
-        float sketch[CLUSTER_SKETCH_DIM] = {};  // K-dim sketch, for end-of-run PCA
-        long long index = 0;        // death ordinal over the run (0-based)
-        std::uint64_t lineageId = 0;
-        float age = 0.0f;           // age at death
-        int genomeLen = 0;
-        char cause = '?';           // 'p' predation, 's' starvation, 'a' age
-    };
-    std::vector<DeathRecord> deathLog;
-    long long totalDeathsLogged_ = 0;   // every death seen (not just kept)
-    long long clusterStride_     = 1;   // keep a death iff (ordinal % stride == 0)
-
-    // ---- Pairing graph (see repro_graph.hpp for what it measures) ----
-    // Two structures, because the archive and the metric want opposite things.
-    //
-    // birthLog is the archival event log written to <stem>.births.csv: bounded
-    // and uniformly DECIMATED exactly like deathLog, so a million-step run stays
-    // in memory. Only populated when cfg.reproLog.
-    //
-    // reproWindow_ is the metric's data source: the last cfg.reproWindow pairs,
-    // UNDECIMATED, in a fixed-capacity ring. Decimation would be actively
-    // wrong here — dropping edges fragments a connected graph and would inflate
-    // the component count, which is the very thing being measured. Always
-    // maintained (two integer writes per event, no rng, no floats, not
-    // serialized), so the CSV column means the same thing in every run rather
-    // than being silently empty unless a flag was remembered.
-    struct BirthRecord {
-        long long index = 0;                     // event ordinal over the run (0-based)
-        std::uint64_t parent1 = 0, parent2 = 0;  // Creature::id of each of the pair
-        std::uint64_t lineage1 = 0, lineage2 = 0;
-        unsigned long long frame = 0;
-    };
-    std::vector<BirthRecord> birthLog;
-    long long totalBirthsLogged_ = 0;   // every event seen (not just kept)
-    long long reproStride_       = 1;   // keep an event iff (ordinal % stride == 0)
-
-    std::vector<repro::Edge> reproWindow_;
-    std::size_t reproWindowNext_ = 0;   // ring cursor
-
-    // Stable identity counter (see Creature::id). Assigned single-threaded at every
-    // creation site, so it never touches the parallel phase or the global rng — the
-    // simulation stays byte-for-byte and deterministic regardless of ids.
-    std::uint64_t nextId_ = 1;
-
-    // ---- Phase profiler (cfg.profile). Accumulates wall-time per phase plus a
-    // CPU-time split inside the parallel loop (gather vs feedForward vs apply,
-    // summed over threads). Zero cost when off (no clock calls). buildNs/parWallNs/
-    // serialNs are WALL time and sum to ~the step; gather/ff/apply are thread-summed
-    // CPU time, so on T threads they total ~T * parWallNs — read them as a ratio.
-    struct PhaseProfile {
-        double buildNs = 0, parWallNs = 0, serialNs = 0, totalNs = 0;
-        double gatherNs = 0, ffNs = 0, applyNs = 0;   // thread-summed, within parallel
-        long long steps = 0;
-    } prof;
-
-    void dumpProfile() const {
-        if (prof.steps == 0) { std::printf("(no profiled steps)\n"); return; }
-        const double s = (double)prof.steps, us = 1e-3;
-        const double step = prof.totalNs / s * us;
-        auto pct = [&](double ns){ return prof.totalNs > 0 ? 100.0 * ns / prof.totalNs : 0.0; };
-        const double parCpu = prof.gatherNs + prof.ffNs + prof.applyNs;
-        auto cpu = [&](double ns){ return parCpu > 0 ? 100.0 * ns / parCpu : 0.0; };
-        std::printf("=== phase profile over %lld steps (%.3f ms/step avg) ===\n", prof.steps, step);
-        std::printf("  build        %7.3f us/step  (%4.1f%% wall)\n", prof.buildNs / s * us, pct(prof.buildNs));
-        std::printf("  parallel     %7.3f us/step  (%4.1f%% wall)\n", prof.parWallNs / s * us, pct(prof.parWallNs));
-        std::printf("  serial       %7.3f us/step  (%4.1f%% wall)\n", prof.serialNs / s * us, pct(prof.serialNs));
-        std::printf("  -- inside parallel (thread-summed CPU, share of parallel work) --\n");
-        std::printf("     sensor-gather %5.1f%%   feedForward %5.1f%%   apply/metab %5.1f%%\n",
-                    cpu(prof.gatherNs), cpu(prof.ffNs), cpu(prof.applyNs));
-    }
-
-    // Is this creature inside its founder grace window (cfg.reproGracePeriod)?
-    // A founder is a creature whose lineage starts at itself, which is exactly
-    // lineageId == id: both spawn sites (init and the --min-pop reseed floor)
-    // set it that way, ids are unique, and a child always inherits the maternal
-    // lineageId — so no creature field and no checkpoint column has to be added
-    // to ask this question. gracePeriod <= 0 is off; anything <= 5 is off in
-    // practice too, since doInteraction requires age > 5 before the gate runs.
-    //
-    // Public and static so the predicate can be tested directly rather than
-    // only through whole-run behaviour.
-    static bool reproGraced(const Creature& c, float gracePeriod) {
-        return gracePeriod > 0.0f && c.lineageId == c.id && c.age < gracePeriod;
-    }
-
-    // Record one death into the cluster map (no-op unless cfg.clusterMap). Called
-    // from the single-threaded death paths, so it is deterministic and thread-safe.
-    void logDeath(const Creature& c, char cause) {
-        if (!cfg.clusterMap) return;
-        const long long ordinal = totalDeathsLogged_++;
-        if (ordinal % clusterStride_ != 0) return;          // decimated out
-        DeathRecord rec;
-        clusterSketch(c.genome, rec.sketch);                 // K-dim, for optional PCA
-        const Vec2 p = sketchTo2D(rec.sketch);               // fixed 2-D map point
-        rec.x = p.x; rec.y = p.y;
-        rec.index = ordinal; rec.lineageId = c.lineageId;
-        rec.age = c.age; rec.genomeLen = (int)c.genome.size(); rec.cause = cause;
-        deathLog.push_back(rec);
-        if (cfg.clusterMax > 0 && (int)deathLog.size() >= 2 * cfg.clusterMax) {
-            // Halve: keep every other kept point, then require twice the spacing.
-            const long long newStride = clusterStride_ * 2;
-            std::vector<DeathRecord> kept;
-            kept.reserve(deathLog.size() / 2 + 1);
-            for (const DeathRecord& d : deathLog)
-                if (d.index % newStride == 0) kept.push_back(d);
-            deathLog.swap(kept);
-            clusterStride_ = newStride;
-        }
-    }
-
-    // Record one pairing event into the pairing graph. Called from the success
-    // path of doInteraction case 2, which runs in the single-threaded phase — so
-    // this is deterministic and thread-safe for the same reason logDeath is.
-    // Draws no random numbers and touches no simulation state.
-    void logBirth(const Creature& c1, const Creature& c2) {
-        // The metric window is always maintained; only the archive is opt-in.
-        const int cap = cfg.reproWindow > 0 ? cfg.reproWindow : 0;
-        if (cap > 0) {
-            // Guard, unreachable today (cfg is fixed before init() and a load
-            // builds a fresh World): if reproWindow ever shrinks on a live
-            // World, over-cap edges must not sit in the ring forever.
-            if ((int)reproWindow_.size() > cap) {
-                reproWindow_.resize((std::size_t)cap);
-                reproWindowNext_ = 0;
-            }
-            const repro::Edge e{c1.id, c2.id};
-            if ((int)reproWindow_.size() < cap) {
-                reproWindow_.push_back(e);
-            } else {
-                reproWindow_[reproWindowNext_] = e;
-                reproWindowNext_ = (reproWindowNext_ + 1) % (std::size_t)cap;
-            }
-        }
-
-        if (!cfg.reproLog) return;
-        const long long ordinal = totalBirthsLogged_++;
-        if (ordinal % reproStride_ != 0) return;            // decimated out
-        BirthRecord rec;
-        rec.index = ordinal;
-        rec.parent1 = c1.id;       rec.parent2 = c2.id;
-        rec.lineage1 = c1.lineageId; rec.lineage2 = c2.lineageId;
-        rec.frame = frame;
-        birthLog.push_back(rec);
-        if (cfg.reproLogMax > 0 && (int)birthLog.size() >= 2 * cfg.reproLogMax) {
-            // Halve: keep every other kept record, then require twice the spacing.
-            const long long newStride = reproStride_ * 2;
-            std::vector<BirthRecord> kept;
-            kept.reserve(birthLog.size() / 2 + 1);
-            for (const BirthRecord& b : birthLog)
-                if (b.index % newStride == 0) kept.push_back(b);
-            birthLog.swap(kept);
-            reproStride_ = newStride;
-        }
-    }
-
-    // Connected components of the pairing graph over the trailing window,
-    // counting only components with at least cfg.reproMinCluster members.
-    int reproComponents() const {
-        return repro::componentCount(reproWindow_, cfg.reproMinCluster);
-    }
-
-    // Runtime-tunable parameters (see SimConfig). Set World::cfg before init().
-    SimConfig cfg;
 
     // Structural constant, kept compile-time (not a tuning knob).
     static constexpr float LONGPROBE_DIST = 200.0f;
@@ -451,11 +221,10 @@ public:
             Vec2 pos = {rng.range(10.0f, (float)w - 10.0f),
                         rng.range(10.0f, (float)h - 10.0f)};
             creatures.push_back(makeRandomCreature(pos, cfg.genomeInitMin, cfg.genomeInitMax));
-            creatures.back().id = nextId_++;
-            creatures.back().lineageId = creatures.back().id;   // a new founder line
+            markFounder(creatures.back());   // a new founder line
             // Body model: founders keep the default 1.0/1.0 and draw NOTHING,
             // even with cfg.bodyModel on. Body diversity is produced by the
-            // per-insertion mutation, not by the spawn (see doInteraction).
+            // per-insertion mutation, not by the spawn (see kernel::inheritFromPair).
         }
 
         // Predators: a fixed handful dropped at random positions with a random
@@ -690,30 +459,8 @@ public:
 
             c.updateBody();
 
-            // Internal state actions
-            c.oscPeriod = std::clamp(c.oscPeriod + actions[SET_OSCILLATOR_PERIOD] * 5.0f * dt,
-                                     4.0f, 200.0f);
-            c.responsiveness = std::clamp(
-                c.responsiveness + actions[SET_RESPONSIVENESS] * 0.5f * dt,
-                0.01f, 1.0f);
-
-            c.oscPhase += dt * (6.28f / c.oscPeriod);
-            if (c.oscPhase > 6.28f) c.oscPhase -= 6.28f;
-
-            // Age and metabolism
-            c.age += dt;
-            // Metabolism: a fixed burn, an optional per-gene surcharge (longer
-            // genomes must earn their length), plus an optional kinetic cost so
-            // thrust isn't free — moveCost*speed^2 makes fast movement (e.g.
-            // fighting a current) expensive and gives an interior optimal speed.
-            // Body model: the FIXED burn scales with mass, so a big body pays
-            // for its size every second. The gene-cost term is deliberately
-            // untouched — that one prices the genome, not the body.
-            c.foodReserves -= dt * (cfg.metabolicRate * massFactor(c)
-                                    + cfg.geneCost * (float)c.genome.size()
-                                    + cfg.moveCost * c.speed * c.speed);
-            c.reproTimer -= dt;
-            c.interactTimer -= dt;
+            kernel::stepInternalState(c, actions, dt);
+            kernel::stepMetabolism(c, cfg, dt);
 
             // Defer signal emission (shared grid, not thread-safe)
             if (actions[EMIT_SIGNAL0] > 0.0f) {
@@ -789,16 +536,8 @@ public:
             }
 
             // Death check (split by cause for the deaths decomposition).
-            if (c.foodReserves <= 0.0f) {
-                c.alive = false;
-                deaths++; totalDeaths++; totalDeathsStarvation++;
-                logDeath(c, 's');
-                continue;
-            }
-            if (c.age > cfg.maxAge) {
-                c.alive = false;
-                deaths++; totalDeaths++; totalDeathsAge++;
-                logDeath(c, 'a');
+            if (const char cause = kernel::deathCause(c, cfg)) {
+                recordDeath(c, cause);
                 continue;
             }
 
@@ -858,8 +597,7 @@ public:
                 Vec2 pos = {rng.range(10.0f, (float)width - 10.0f),
                             rng.range(10.0f, (float)height - 10.0f)};
                 creatures.push_back(makeRandomCreature(pos, cfg.genomeInitMin, cfg.genomeInitMax));
-                creatures.back().id = nextId_++;
-                creatures.back().lineageId = creatures.back().id;   // new founder line
+                markFounder(creatures.back());   // new founder line
                 // Body model: a reseeded founder is 1.0/1.0 and draws nothing.
                 // Deliberate — the reseed floor already acts as a pump for
                 // random founders when a population is collapsing (§7.1), and
@@ -993,9 +731,7 @@ private:
                                            : creatures[bestIdx].foodReserves;
                         p.energy += meal;
                     }
-                    creatures[bestIdx].alive = false;
-                    deaths++; totalDeaths++; totalDeathsPredation++;
-                    logDeath(creatures[bestIdx], 'p');
+                    recordDeath(creatures[bestIdx], 'p');
                     p.digestTimer = cfg.predatorCooldown;
                 }
             }
@@ -1086,110 +822,33 @@ private:
         }
     }
 
-    // The reproduction gate, as one predicate. Called as the LAST conjunct of
-    // the case-2 precondition (see the comment at the call site for why the
-    // gate lives there at all), so "returned true" == "an insertion happens"
-    // and the out-flags can drive the attribution counters directly.
-    //
-    // The precedence below is load-bearing, because it defines when a draw
-    // happens:
-    //   1. gate off (T < 0)      accept. No fold, no draw — the default corpus.
-    //   2. either partner graced accept. No fold, no draw: grace is a bypass,
-    //                            not a widening, so it costs nothing and can
-    //                            never be overruled by an unlucky draw.
-    //   3. fold the pair         dsq = genomeDistanceSq (the expensive part,
-    //                            reached only when the gate is armed).
-    //   4. hard gate (W <= 0)    the EXACT v0.21 comparison, and NO draw. Every
-    //                            archived --repro-max-distance run has to stay
-    //                            byte-identical, so this expression may not
-    //                            acquire a sqrt, a division or a draw.
-    //   5. soft gate (W > 0)     sqrt, then EXACTLY ONE rng.unit(), taken
-    //                            UNCONDITIONALLY before the comparison. The
-    //                            draw count per gate evaluation must not depend
-    //                            on d — the same rule the body model's two
-    //                            draws follow — or native and wasm desync on
-    //                            the first pair that lands on the other side of
-    //                            a branch.
-    bool reproGatePasses(const Creature& c1, const Creature& c2,
-                         bool& viaGrace, bool& viaSoft) {
-        viaGrace = false;
-        viaSoft  = false;
-        const float T = cfg.reproMaxDistance;
-        if (T < 0.0f) return true;
-        if (reproGraced(c1, cfg.reproGracePeriod) ||
-            reproGraced(c2, cfg.reproGracePeriod)) {
-            viaGrace = true;
-            return true;
-        }
-        const float dsq = genomeDistanceSq(c1.genome, c2.genome);
-        const float W = cfg.reproSoftWidth;
-        if (W <= 0.0f) return dsq <= T * T;
-        const float u = rng.unit();
-        if (!softGateAccepts(std::sqrt(dsq), T, W, u)) return false;
-        // Only a birth the hard gate would have REFUSED is a soft birth; a pair
-        // already inside T needed no help from the ramp.
-        viaSoft = (dsq > T * T);
-        return true;
-    }
-
+    // A pairwise interaction. The vote, the share and fight outcomes, the
+    // insertion preconditions and gate, and what a newborn inherits are the
+    // kernel's (kernel.hpp); what is left here is where the child goes.
     void doInteraction(Creature& c1, Creature& c2, std::vector<Creature>& newborns) {
-        float s1[NUM_SENSES], s2[NUM_SENSES];
-        std::memset(s1, 0, sizeof(s1));
-        std::memset(s2, 0, sizeof(s2));
-
-        s1[AGE] = evomath::tanhf((c1.age - 50.0f) / 50.0f);
-        s1[NEAREST_NEIGHBOR_AGE] = evomath::tanhf((c2.age - 50.0f) / 50.0f);
-        s1[FOOD_RESERVES] = evomath::tanhf((c1.foodReserves - 25.0f) / 25.0f);
-        s1[NEAREST_NEIGHBOR_FOOD] = evomath::tanhf((c2.foodReserves - 25.0f) / 25.0f);
-        s1[GENETIC_SIM_NEAREST] = genomeSimilarity(c1.genome, c2.genome);
-
-        // c2's view is c1's with the roles swapped: the same expressions, and
-        // genomeSimilarity is symmetric.
-        s2[AGE] = s1[NEAREST_NEIGHBOR_AGE];
-        s2[NEAREST_NEIGHBOR_AGE] = s1[AGE];
-        s2[FOOD_RESERVES] = s1[NEAREST_NEIGHBOR_FOOD];
-        s2[NEAREST_NEIGHBOR_FOOD] = s1[FOOD_RESERVES];
-        s2[GENETIC_SIM_NEAREST] = s1[GENETIC_SIM_NEAREST];
-
-        float a1[NUM_ACTIONS], a2[NUM_ACTIONS];
-        feedForward(c1.nnet, s1, a1);
-        feedForward(c2.nnet, s2, a2);
-
-        float sShare = a1[INTERACT_SHARE] + a2[INTERACT_SHARE];
-        float sRepro = a1[INTERACT_REPRODUCE] + a2[INTERACT_REPRODUCE];
-        float sFight = a1[INTERACT_FIGHT] + a2[INTERACT_FIGHT];
-        float sIgnore = a1[INTERACT_IGNORE] + a2[INTERACT_IGNORE];
-
-        float maxScore = sIgnore;
-        int choice = 0;
-        if (sShare > maxScore) { maxScore = sShare; choice = 1; }
-        if (sRepro > maxScore) { maxScore = sRepro; choice = 2; }
-        if (sFight > maxScore) { maxScore = sFight; choice = 3; }
-
-        switch (choice) {
-        case 1: {
-            float total = c1.foodReserves + c2.foodReserves;
-            c1.foodReserves = total * 0.5f;
-            c2.foodReserves = total * 0.5f;
+        switch (kernel::interactionVote(c1, c2)) {
+        case kernel::Interaction::Share:
+            kernel::shareReserves(c1, c2);
             break;
-        }
-        case 2: {
-            // The genetic gate (reproGatePasses, above) is the LAST conjunct on
+        case kernel::Interaction::Pair: {
+            // The genetic gate (kernel::reproGatePasses) is the LAST conjunct on
             // purpose: it is the only expensive one, and every cheap
-            // precondition short-circuits ahead of it. With the gate off it
-            // returns on one float compare, never folding a genome and —
-            // critically — never drawing, so the rng sequence is untouched.
+            // precondition (kernel::pairingAllowed) short-circuits ahead of it.
+            // With the gate off it returns on one float compare, never folding
+            // a genome and — critically — never drawing, so the rng sequence is
+            // untouched.
             //
             // THE RANDOM STREAM IS DEFINED HERE, alongside the body-model draws
-            // below. Only the soft ramp (cfg.reproSoftWidth > 0) draws, and
-            // then it draws exactly one uniform per evaluation of this conjunct
-            // whatever the pair's distance is; the hard gate, the grace bypass
-            // and the off-path draw nothing at all, which is what keeps the
-            // v0.21/0.22 gated runs and the whole default corpus byte-identical.
-            // Because the gate is the last conjunct, reaching it means every
-            // other precondition already held, so "gate passed" and "insertion
-            // happened" are the same event and viaGrace/viaSoft can be counted
-            // inside the branch without a second evaluation.
+            // in kernel::inheritFromPair. Only the soft ramp
+            // (cfg.reproSoftWidth > 0) draws, and then it draws exactly one
+            // uniform per evaluation of this conjunct whatever the pair's
+            // distance is; the hard gate, the grace bypass and the off-path draw
+            // nothing at all, which is what keeps the v0.21/0.22 gated runs and
+            // the whole default corpus byte-identical. Because the gate is the
+            // last conjunct, reaching it means every other precondition already
+            // held, so "gate passed" and "insertion happened" are the same event
+            // and viaGrace/viaSoft can be counted inside the branch without a
+            // second evaluation.
             //
             // Gating HERE rather than in the partner-selection loop is
             // deliberate: the caller consumes both creatures' interactTimer
@@ -1202,16 +861,10 @@ private:
             // wanted it goes in as a separate flag and gets measured against
             // this one, not swapped in silently.
             bool viaGrace = false, viaSoft = false;
-            if (c1.foodReserves > cfg.reproEnergy && c2.foodReserves > cfg.reproEnergy &&
-                c1.reproTimer <= 0.0f && c2.reproTimer <= 0.0f &&
-                c1.age > 5.0f && c2.age > 5.0f &&
-                (cfg.maxPopulation <= 0 ||
-                 (int)creatures.size() + (int)newborns.size() < cfg.maxPopulation) &&
-                reproGatePasses(c1, c2, viaGrace, viaSoft)) {
-                c1.foodReserves -= 12.0f;
-                c2.foodReserves -= 12.0f;
-                c1.reproTimer = cfg.reproCooldown;
-                c2.reproTimer = cfg.reproCooldown;
+            if (kernel::pairingAllowed(c1, c2, cfg,
+                                       (int)creatures.size() + (int)newborns.size()) &&
+                kernel::reproGatePasses(c1, c2, cfg, viaGrace, viaSoft)) {
+                kernel::payForPairing(c1, c2, cfg);
                 newborns.push_back(makeChild(c1, c2, cfg.genomeMinLength,
                                              cfg.genomeMaxLength,
                                              cfg.mutationMultiplier,
@@ -1229,59 +882,14 @@ private:
                         baby.body[bi] = { m.x - baby.vel.x * bi * 4.0f,
                                           m.y - baby.vel.y * bi * 4.0f };
                 }
-                newborns.back().lineageId = c1.lineageId;   // inherit maternal line
-                newborns.back().generation = std::max(c1.generation, c2.generation) + 1;
-
-                // --- Tier-1 body inheritance (v0.23.0) --------------------
-                // THE RANDOM STREAM IS DEFINED HERE. Read before editing:
-                //
-                //  * Draws happen ONLY under cfg.bodyModel. With the flag off
-                //    this block draws nothing, so the pre-0.23 rng sequence —
-                //    and therefore every archived run — is untouched.
-                //  * EXACTLY TWO rng.range draws per successful insertion, in
-                //    this order: bodySize first, then bodyElong. rng.range is a
-                //    single engine draw with no rejection, so the draw COUNT is
-                //    independent of the values; that is what lets native and
-                //    wasm stay bit-identical. Do not swap the order, do not add
-                //    a Gaussian, do not add a resample-until-in-range loop —
-                //    each of those breaks the parity contract.
-                //  * Position in the sequence: AFTER the lineageId assignment,
-                //    BEFORE logBirth. doInteraction runs in the single-threaded
-                //    phase, so this shares the one global rng safely.
-                //  * Blend is the plain parent mean plus a uniform jitter, then
-                //    clamped, so a child can never leave [0.5, 2.0] no matter
-                //    what the parents are.
-                if (cfg.bodyModel) {
-                    Creature& nb = newborns.back();
-                    nb.bodySize  = std::clamp(0.5f * (c1.bodySize + c2.bodySize)
-                                              + rng.range(-cfg.bodyMutation, cfg.bodyMutation),
-                                              BODY_PARAM_MIN, BODY_PARAM_MAX);
-                    nb.bodyElong = std::clamp(0.5f * (c1.bodyElong + c2.bodyElong)
-                                              + rng.range(-cfg.bodyMutation, cfg.bodyMutation),
-                                              BODY_PARAM_MIN, BODY_PARAM_MAX);
-                }
-                births++;
-                totalBirths++;
-                if (viaGrace) totalGraceBirths++;
-                if (viaSoft)  totalSoftBirths++;
-                logBirth(c1, c2);
+                kernel::inheritFromPair(newborns.back(), c1, c2, cfg);
+                recordPairing(c1, c2, viaGrace, viaSoft);
             }
             break;
         }
-        case 3: {
-            float str1 = (c1.age < 30.0f) ? c1.age / 30.0f : 1.0f - (c1.age - 30.0f) / 90.0f;
-            float str2 = (c2.age < 30.0f) ? c2.age / 30.0f : 1.0f - (c2.age - 30.0f) / 90.0f;
-            str1 *= rng.unit();
-            str2 *= rng.unit();
-            if (str1 > str2) {
-                c1.foodReserves += 15.0f;
-                c2.foodReserves -= 15.0f;
-            } else {
-                c2.foodReserves += 15.0f;
-                c1.foodReserves -= 15.0f;
-            }
+        case kernel::Interaction::Fight:
+            kernel::fightOutcome(c1, c2);
             break;
-        }
         default: break;
         }
     }
@@ -1312,16 +920,12 @@ private:
             sensors[BOUNDARY_DIST] = std::min(sensors[BOUNDARY_DIST_X], sensors[BOUNDARY_DIST_Y]);
         }
 
-        // Own state
+        // Own state (speed, age, reserves, oscillator, responsiveness: kernel)
         sensors[OWN_VEL_X] = c.vel.x;
         sensors[OWN_VEL_Y] = c.vel.y;
-        sensors[OWN_SPEED] = c.speed / cfg.maxSpeed;
         sensors[LAST_MOVE_DIR_X] = c.lastMoveDir.x;
         sensors[LAST_MOVE_DIR_Y] = c.lastMoveDir.y;
-        sensors[AGE] = evomath::tanhf(c.age / 60.0f);
-        sensors[FOOD_RESERVES] = evomath::tanhf((c.foodReserves - 25.0f) / 25.0f);
-        sensors[OSCILLATOR] = c.getOscillator();
-        sensors[RESPONSIVENESS] = c.responsiveness;
+        kernel::writeOwnStateSensors(c, cfg, sensors);
 
         // Neighbor queries (reuse scratch buffer instead of allocating)
         std::vector<int>& neighbors = scratch.neighbors;
@@ -1446,19 +1050,14 @@ private:
         // Nearest neighbor attributes
         if (nearestIdx >= 0) {
             const Creature& nearest = creatures[nearestIdx];
-            sensors[NEAREST_NEIGHBOR_AGE] = evomath::tanhf((nearest.age - 50.0f) / 50.0f);
-            sensors[NEAREST_NEIGHBOR_FOOD] = evomath::tanhf((nearest.foodReserves - 25.0f) / 25.0f);
-            const float sim = genomeSimilarity(c.genome, nearest.genome);
-            sensors[GENETIC_SIM_NEAREST] = sim;
+            const float sim = kernel::writeNearestSensors(c, nearest, sensors);
             float dx = nearest.pos.x - c.pos.x;
             float dy = nearest.pos.y - c.pos.y;
             if (cfg.toroidal) { dx = wrapDx(dx); dy = wrapDy(dy); }
             float dotFwd = dx * fwd.x + dy * fwd.y;
             sensors[GENETIC_SIM_FWD] = (dotFwd > 0) ? sim : 0.5f;
         } else {
-            sensors[NEAREST_NEIGHBOR_AGE] = 0.0f;
-            sensors[NEAREST_NEIGHBOR_FOOD] = 0.0f;
-            sensors[GENETIC_SIM_NEAREST] = 0.0f;
+            kernel::clearNearestSensors(sensors);
             sensors[GENETIC_SIM_FWD] = 0.5f;
         }
 

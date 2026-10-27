@@ -23,11 +23,11 @@
 // post-change binaries step for step and compares fingerprints.
 //
 // RNG: none of this draws. The ONLY draws the body model ever makes are the two
-// per insertion in World::doInteraction, and only when cfg.bodyModel is true —
+// per insertion in kernel::inheritFromPair, and only when cfg.bodyModel is true —
 // see the comment there. That is what keeps the off-path random stream, and
 // therefore every run in the existing corpus, untouched.
 // ----------------------------------------------------------------------------
-#include "creature.hpp"
+#include "agent_core.hpp"
 
 // Clamp range shared by the inheritance step and the tests. 1.0 (the default)
 // sits at the geometric middle: half-size to double-size, and the same for
@@ -49,12 +49,12 @@ inline constexpr float BODY_PARAM_MAX = 2.0f;
 // is deliberately NOT rescaled per body, can read above 1.0 for a small creature
 // and is capped well below 1.0 for a large one. That asymmetry is information
 // the brain can evolve to use, which is why the sensor is left alone.
-inline float speedFactor(const Creature& c) { return 2.0f / (1.0f + c.bodySize); }
+inline float speedFactor(const AgentCore& c) { return 2.0f / (1.0f + c.bodySize); }
 
 // Longer body => worse turning. Same shape, driven by elongation. Only bites
 // under --triangular-motion, which is the only mode that uses maxTurnRate.
-inline float turnFactor(const Creature& c) { return 2.0f / (1.0f + c.bodyElong); }
+inline float turnFactor(const AgentCore& c) { return 2.0f / (1.0f + c.bodyElong); }
 
 // Metabolism scales linearly with size: a body twice as large costs twice as
 // much to run. This is the term that pays for the speed the other two cost.
-inline float massFactor(const Creature& c) { return c.bodySize; }
+inline float massFactor(const AgentCore& c) { return c.bodySize; }

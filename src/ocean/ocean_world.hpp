@@ -232,11 +232,15 @@ public:
     //    B and B' vanish at surface and floor: no flow through either.
     // θ is formed and reduced to [0, 2π) in double (exact IEEE ops), then the
     // portable float sin / cos / expm1: the same bits native and wasm.
+    // The depth taper B(d), B'(d) depends on d alone, so it is formed once per
+    // call and shared by the three trains (the same expressions as
+    // waveTrainAt(i, p, d): the same bits).
     Flow flowAt(Vec2 p, float d) const {
         Flow U = currentFlowAt(p, d);
         if (wavesOn()) {
+            const Taper tp = taperAt(d);
             for (int i = 0; i < kWaveTrains; ++i) {
-                const Flow u = waveTrainAt(i, p, d);
+                const Flow u = waveTrainAt(i, p, d, tp);
                 U.x += u.x;
                 U.y += u.y;
                 U.d += u.d;
@@ -257,14 +261,22 @@ public:
         }
         return U;
     }
-    // Wave train i alone (whatever waveSpeed is; 0 gives zero flow).
-    Flow waveTrainAt(int i, Vec2 p, float d) const {
-        const WaveTrain& t = waves_[i];
+    // The trains' shared depth taper B = S(d/b)·S((D−d)/b) and its d-derivative.
+    struct Taper { float B, Bp; };
+    Taper taperAt(float d) const {
         const float b = std::min(ocfg.waveBand, 0.25f * D);
         const float r1 = d / b, r2 = (D - d) / b;
         const float s1 = smooth01(r1), s2 = smooth01(r2);
-        const float B = s1 * s2;
-        const float Bp = (smooth01d(r1) * s2 - s1 * smooth01d(r2)) / b;
+        Taper tp;
+        tp.B = s1 * s2;
+        tp.Bp = (smooth01d(r1) * s2 - s1 * smooth01d(r2)) / b;
+        return tp;
+    }
+    // Wave train i alone (whatever waveSpeed is; 0 gives zero flow).
+    Flow waveTrainAt(int i, Vec2 p, float d) const { return waveTrainAt(i, p, d, taperAt(d)); }
+    Flow waveTrainAt(int i, Vec2 p, float d, const Taper& tp) const {
+        const WaveTrain& t = waves_[i];
+        const float B = tp.B, Bp = tp.Bp;
         const float A = t.frac * ocfg.waveSpeed;
         // e^{−kd} as 1 / e^{kd}: full relative precision at depth, where
         // expm1f(−kd) + 1 would keep only ~1e-7 absolute (e^{kd} = inf -> 0).

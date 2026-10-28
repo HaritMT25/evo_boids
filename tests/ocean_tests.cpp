@@ -54,7 +54,9 @@
 //   divergence    central-difference div of each wave train, their sum, the
 //                 depth-weighted current and the whole flow: normalised
 //                 residual < 1e-3, shrinking with h (bulk and boundary bands);
-//                 exactly zero normal flow at surface and floor
+//                 exactly zero normal flow at surface and floor; flowAt (one
+//                 shared depth taper per call) == the current + each train's
+//                 own waveTrainAt, bit for bit
 //   e1_buoyancy   with the non-flow E1 knobs on and wallBand 0, an idle fish
 //                 still settles monotonically at bodyBuoy·D
 //   drift         sizeDrift: one step moves fish of size .5 / 1 / 2 by exactly
@@ -1359,6 +1361,24 @@ void testDivergence() {
     }
     t.expect(zeroN == 500, "normal flow at surface / floor not exactly 0 at %d of 500 points", 500 - zeroN);
     t.expect(stillSurface == 500, "deep current: f(0) = 0, f(>= D/2) = 1 failed at %d points", 500 - stillSurface);
+    // flowAt (one shared taper per call) == the current + each train on its
+    // own (waveTrainAt(i, p, d)), in flowAt's order, bit for bit: in the bulk,
+    // across both taper bands and their edges, at surface and floor.
+    int sameBits = 0, nPts = 0;
+    for (int k = 0; k < 2000; ++k) {
+        const Vec2 p = {1920.0f * g.unit(), 1080.0f * g.unit()};
+        const float edges[] = {0.0f, b, D - b, D, std::nextafter(b, 0.0f), std::nextafter(D - b, D)};
+        const float d = (k < 600) ? edges[k % 6] : D * g.unit();
+        const Fl f = w.flowAt(p, d);
+        Fl s = w.currentFlowAt(p, d);
+        for (int i = 0; i < OceanWorld::kWaveTrains; ++i) {
+            const Fl u = w.waveTrainAt(i, p, d);
+            s.x += u.x; s.y += u.y; s.d += u.d;
+        }
+        ++nPts;
+        sameBits += (std::memcmp(&f.x, &s.x, 4) == 0 && std::memcmp(&f.y, &s.y, 4) == 0 && std::memcmp(&f.d, &s.d, 4) == 0);
+    }
+    t.expect(sameBits == nPts, "flowAt != current + the trains one by one at %d of %d points", nPts - sameBits, nPts);
 }
 
 void testE1Buoyancy() {

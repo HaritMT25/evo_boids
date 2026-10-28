@@ -1,0 +1,429 @@
+"use strict";
+/* evo_boids 3-D Ocean: the settings the page offers (web/ocean.js builds the
+ * sheet from these), their explanations, and 🎲 Randomize's ranges.
+ *
+ * Every key is an oc_init cfg key (SimConfig's checkpoint names, or
+ * OceanConfig's: src/ocean/ocean_config.hpp) except seed / population / depth,
+ * which are oc_init's own arguments. Defaults are the Ocean's: SimConfig's,
+ * then applyOceanDefaults (perceptionRadius 100, interactRadius 36,
+ * pickupRadius 24, targetFood 2400), then OceanConfig's. The page sends only
+ * keys that differ from these, so an untouched sheet is the tuned world.
+ *
+ * LIVE is oc_set_param's whitelist (wasm/ocean_wasm.cpp kOcean + kLive):
+ * those apply to the running world at once, everything else on Restart.
+ * No page code here. */
+(function (root) {
+  /* key: [default, {step, min, max, int, options, bit}]
+   *   boolean default = a switch (JSON true / false); bit = a switch that is
+   *   an int key (JSON 0 / 1); options = a select (int value) */
+  var KEYS = {
+    seed: [42, { step: 1, min: 0, int: true }], population: [300, { step: 1, min: 0, int: true }],
+    depth: [240, { step: 10, min: 10 }],
+    toroidal: [false], bodyModel: [false],
+    maxPopulation: [0, { step: 1, min: 0, int: true }], minPopulation: [50, { step: 1, min: 0, int: true }],
+    minSpeed: [30], maxSpeed: [150], triangularMotion: [false], maxTurnRate: [4],
+    perceptionRadius: [100], interactRadius: [36], maxNeighbors: [0, { step: 1, min: 0, int: true }],
+    fastTanh: [false],
+    foodPatches: [0, { step: 1, min: 0, int: true }], foodPatchRadius: [120], targetFood: [2400, { step: 1, min: 0, int: true }],
+    foodSpawnBase: [3], foodSpawnAmp: [2], foodEnergy: [5], pickupRadius: [24], foodDrift: [false],
+    foodLife: [0, { step: 5, min: 0 }],
+    foodDepthMode: [0, { options: ["Anywhere in depth", "Each patch at its own depth"] }], foodDepthSpread: [30, { min: 0 }],
+    metabolicRate: [1.5], moveCost: [0, { step: 0.00001, min: 0 }], geneCost: [0, { step: 0.001, min: 0 }],
+    maxAge: [120], reproEnergy: [20], newbornEnergy: [25],
+    mutationMultiplier: [1, { step: 0.1, min: 0 }], genomeInitMin: [24, { int: true }], genomeInitMax: [48, { int: true }],
+    genomeMinLength: [16, { int: true }], genomeMaxLength: [80, { int: true }],
+    reproMaxDistance: [-1, { step: 0.5 }], reproSoftWidth: [0, { step: 0.5, min: 0 }],
+    reproGracePeriod: [0, { step: 10, min: 0 }],
+    bodyMutation: [0.1, { step: 0.01, min: 0 }], buoyMutation: [0.05, { step: 0.01, min: 0, max: 1 }],
+    predatorCount: [0, { step: 1, min: 0, int: true }], predatorEconomy: [false],
+    predatorSpeed: [110], predatorPerception: [150], predatorCaptureRadius: [14],
+    predatorCooldown: [3, { step: 0.5, min: 0 }],
+    predatorMeal: [-1, { step: 0.5 }], predatorMetabolism: [2], predatorReproEnergy: [60], predatorMaxAge: [0],
+    predatorMinPopulation: [0, { step: 1, min: 0, int: true }], predatorMaxPopulation: [0, { step: 1, min: 0, int: true }],
+    predatorInheritance: [false], predatorTraitMutation: [0.1, { step: 0.01, min: 0 }],
+    kBuoy: [1, { step: 0.1 }], pitchMax: [0.5, { step: 0.05, min: 0.001 }], vDrag: [2, { step: 0.1, min: 0 }],
+    wallBand: [12, { step: 1, min: 0 }],
+    cHold: [0, { step: 0.01, min: 0, max: 100 }], cPress: [0, { step: 0.01, min: 0, max: 100 }], depthCostScaled: [false],
+    currentStrength: [0, { step: 1, min: 0 }],
+    currentMode: [0, { options: ["Eddies", "Gyre"] }], currentEddies: [5, { int: true, min: 0 }], currentCore: [150], currentDrift: [1],
+    deepCurrent: [false],
+    waveSpeed: [0, { step: 0.5, min: 0, max: 100 }], waveBand: [32, { min: 1 }], waveGravity: [20, { min: 0.01 }],
+    lightEnabled: [false], L0: [1, { step: 0.1, min: 0, max: 100 }], kWater: [0.006, { step: 0.001, min: 0, max: 1 }],
+    sizeDrift: [false], sizeFight: [false], mouthGate: [false], kMouth: [2, { step: 0.1, min: 0.01 }],
+    steerFrame: [0, { options: ["World x / y (Classic's)", "The fish's own frame"] }],
+    eye: [0, { bit: true }], eyeOnly: [0, { bit: true }], eyeCode: [0, { step: 1, min: 0, max: 7, int: true }]
+  };
+
+  /* oc_set_param's whitelist: these apply at once */
+  var LIVE = {};
+  ["kBuoy", "pitchMax", "vDrag", "wallBand", "buoyMutation", "cHold", "cPress", "foodDepthSpread",
+   "waveSpeed", "waveBand", "waveGravity", "deepCurrent", "lightEnabled", "L0", "kWater",
+   "depthCostScaled", "sizeDrift", "sizeFight", "mouthGate", "kMouth", "eye", "eyeOnly", "eyeCode",
+   "steerFrame", "foodLife",
+   "maxPopulation", "minPopulation", "targetFood", "foodSpawnBase", "foodSpawnAmp", "foodEnergy",
+   "metabolicRate", "moveCost", "geneCost", "maxAge", "reproEnergy", "newbornEnergy",
+   "mutationMultiplier", "minSpeed", "maxSpeed", "predatorMinPopulation", "predatorMaxPopulation",
+   "predatorTraitMutation"].forEach(function (k) { LIVE[k] = 1; });
+
+  /* The sheet: tabs, then groups of keys. "run" is static HTML in ocean.html. */
+  var TABS = [
+    { id: "run", title: "Run" },
+    { id: "world", title: "World", groups: [
+      ["The world", ["seed", "population", "depth", "toroidal", "bodyModel"]],
+      ["Population limits", ["maxPopulation", "minPopulation"]],
+      ["Movement", ["minSpeed", "maxSpeed", "triangularMotion", "maxTurnRate"]],
+      ["Senses", ["perceptionRadius", "interactRadius", "maxNeighbors"]],
+      ["Numerics", ["fastTanh"]]] },
+    { id: "food", title: "Food", groups: [
+      ["Food", ["foodPatches", "foodPatchRadius", "targetFood", "foodSpawnBase", "foodSpawnAmp", "foodEnergy", "pickupRadius", "foodDrift", "foodLife"]],
+      ["Food in depth", ["foodDepthMode", "foodDepthSpread"]]] },
+    { id: "life", title: "Life", groups: [
+      ["Energy and age", ["metabolicRate", "moveCost", "geneCost", "maxAge", "reproEnergy", "newbornEnergy"]],
+      ["Genes", ["mutationMultiplier", "genomeInitMin", "genomeInitMax", "genomeMinLength", "genomeMaxLength"]],
+      ["Who can breed", ["reproMaxDistance", "reproSoftWidth", "reproGracePeriod"]],
+      ["Bodies", ["bodyMutation", "buoyMutation"]]] },
+    { id: "predators", title: "Predators", groups: [
+      ["Predators", ["predatorCount", "predatorEconomy"]],
+      ["Hunting", ["predatorSpeed", "predatorPerception", "predatorCaptureRadius", "predatorCooldown"]],
+      ["Their economy", ["predatorMeal", "predatorMetabolism", "predatorReproEnergy", "predatorMaxAge"]],
+      ["Limits and inheritance", ["predatorMinPopulation", "predatorMaxPopulation", "predatorInheritance", "predatorTraitMutation"]]] },
+    { id: "depth", title: "Depth", groups: [
+      ["Swimming in depth", ["kBuoy", "pitchMax", "vDrag", "wallBand"]],
+      ["What depth costs", ["cHold", "cPress", "depthCostScaled"]]] },
+    { id: "ocean", title: "Water", groups: [
+      ["Currents", ["currentStrength", "currentMode", "currentEddies", "currentCore", "currentDrift", "deepCurrent"]],
+      ["Waves", ["waveSpeed", "waveBand", "waveGravity"]],
+      ["Light", ["lightEnabled", "L0", "kWater"]],
+      ["Size laws", ["sizeDrift", "sizeFight", "mouthGate", "kMouth"]]] },
+    { id: "senses", title: "Steering", groups: [
+      ["Steering", ["steerFrame"]],
+      ["The compound eye", ["eye", "eyeOnly", "eyeCode"]]] }
+  ];
+
+  var LABELS = {
+    seed: "Seed", population: "Starting fish", depth: "Sea depth", toroidal: "Senses wrap around the edges",
+    bodyModel: "Evolving bodies",
+    maxPopulation: "Population cap", minPopulation: "Reseed floor",
+    minSpeed: "Slowest speed", maxSpeed: "Fastest speed", maxTurnRate: "Turn rate",
+    triangularMotion: "Fast swims straight, slow turns",
+    perceptionRadius: "Sight radius", interactRadius: "Touch radius", maxNeighbors: "Neighbours watched",
+    fastTanh: "Fast tanh",
+    foodPatches: "Food patches", foodPatchRadius: "Patch radius", targetFood: "Food target",
+    foodSpawnBase: "Food per step", foodSpawnAmp: "Food swing", foodEnergy: "Energy per food",
+    pickupRadius: "Eating distance", foodDrift: "Food drifts with the current", foodLife: "Food lifetime (s)",
+    foodDepthMode: "Where food appears", foodDepthSpread: "Depth spread per patch",
+    metabolicRate: "Energy burned per second", moveCost: "Swimming cost", geneCost: "Cost per gene",
+    maxAge: "Lifespan (s)", reproEnergy: "Energy needed to breed", newbornEnergy: "Newborn energy",
+    mutationMultiplier: "Mutation rate ×", genomeInitMin: "Starting genes, fewest",
+    genomeInitMax: "Starting genes, most", genomeMinLength: "Genes, minimum", genomeMaxLength: "Genes, maximum",
+    reproMaxDistance: "Breeding distance limit", reproSoftWidth: "Soft limit width",
+    reproGracePeriod: "Founder grace (s)", bodyMutation: "Body mutation", buoyMutation: "Buoyancy mutation",
+    predatorCount: "Predators", predatorEconomy: "Predators eat, breed and starve",
+    predatorSpeed: "Predator speed", predatorPerception: "Predator sight", predatorCaptureRadius: "Catch distance",
+    predatorCooldown: "Digesting time (s)", predatorMeal: "Energy per catch",
+    predatorMetabolism: "Predator energy burn", predatorReproEnergy: "Energy to bud a child",
+    predatorMaxAge: "Predator lifespan", predatorMinPopulation: "Predator floor",
+    predatorMaxPopulation: "Predator cap", predatorInheritance: "Hunters inherit traits",
+    predatorTraitMutation: "Trait mutation",
+    kBuoy: "Buoyancy pull", pitchMax: "Steepest dive", vDrag: "Vertical drag", wallBand: "Surface and floor cushion",
+    cHold: "Cost of leaving neutral depth", cPress: "Cost of pressure", depthCostScaled: "Depth costs scale with metabolism",
+    currentStrength: "Current strength", currentMode: "Current shape", currentEddies: "Eddies",
+    currentCore: "Eddy radius", currentDrift: "How fast the flow changes", deepCurrent: "A deep current",
+    waveSpeed: "Wave strength", waveBand: "Wave taper band", waveGravity: "Wave dispersion",
+    lightEnabled: "Light field", L0: "Surface light", kWater: "Light fall-off",
+    sizeDrift: "Small fish drift more", sizeFight: "Big fish fight harder", mouthGate: "Mouth size limits food",
+    kMouth: "Mouth size ×",
+    steerFrame: "Steering frame", eye: "Compound eye", eyeOnly: "See only through the eye", eyeCode: "Eye encoding"
+  };
+  var HINTS = {
+    maxPopulation: "0 = none", minPopulation: "founders added below this",
+    maxNeighbors: "0 = everyone in range", reproMaxDistance: "-1 = off",
+    reproSoftWidth: "0 = a hard limit", reproGracePeriod: "0 = off", predatorMeal: "-1 = the prey's whole store",
+    predatorMaxAge: "0 = until it starves", predatorMinPopulation: "0 = off; put back below this",
+    predatorMaxPopulation: "0 = none", currentDrift: "0 = a still pattern", fastTanh: "changes the numbers",
+    foodLife: "0 = until eaten", depth: "0 = surface", kBuoy: "per second", waveSpeed: "0 = still",
+    cHold: "× metabolism when scaled", cPress: "× metabolism when scaled", eyeCode: "bits 1, 2, 4"
+  };
+  /* what one press of − / + changes */
+  var BTN_STEP = {
+    seed: 1, population: 50, depth: 20, predatorCount: 1, foodPatches: 1, currentStrength: 5,
+    targetFood: 100, foodSpawnBase: 1, foodSpawnAmp: 0.5, foodEnergy: 0.5, foodPatchRadius: 10, pickupRadius: 2,
+    foodLife: 5, foodDepthSpread: 5,
+    metabolicRate: 0.1, moveCost: 0.00001, geneCost: 0.001, maxAge: 10, reproEnergy: 1, newbornEnergy: 1,
+    maxPopulation: 50, minPopulation: 10, minSpeed: 5, maxSpeed: 5, maxTurnRate: 0.5,
+    perceptionRadius: 5, interactRadius: 2, maxNeighbors: 1, mutationMultiplier: 0.1,
+    genomeInitMin: 1, genomeInitMax: 1, genomeMinLength: 1, genomeMaxLength: 1,
+    reproMaxDistance: 0.5, reproSoftWidth: 0.5, reproGracePeriod: 10, bodyMutation: 0.01, buoyMutation: 0.01,
+    predatorSpeed: 5, predatorPerception: 5, predatorCaptureRadius: 1, predatorCooldown: 0.5,
+    predatorMeal: 0.5, predatorMetabolism: 0.1, predatorReproEnergy: 5, predatorMaxAge: 10,
+    predatorMinPopulation: 1, predatorMaxPopulation: 5, predatorTraitMutation: 0.01,
+    kBuoy: 0.1, pitchMax: 0.05, vDrag: 0.1, wallBand: 2, cHold: 0.01, cPress: 0.01,
+    currentEddies: 1, currentCore: 10, currentDrift: 0.1,
+    waveSpeed: 0.5, waveBand: 4, waveGravity: 2, L0: 0.1, kWater: 0.001, kMouth: 0.1, eyeCode: 1
+  };
+
+  /* Hover (or tap) info: d = what it is, t = values to try. The keys Classic
+   * has too carry Classic's text (web/renderer.js TIPS), with the Ocean's
+   * defaults where they differ. */
+  var TIPS = {
+    seed: { d: "RNG seed — the same seed and the same settings replay the run step for step.", t: "try: any uint32; keep it to reproduce a run" },
+    population: { d: "Starting fish (the world reseeds below the reseed floor).", t: "try: 200-600; more than ~1500 gets slow in a browser" },
+    depth: { d: "How deep the sea is, in world units (the tank is 1920 x 1080 across, or the same area on its side on a portrait screen). Fish, food and predators live anywhere from the surface to the floor.", t: "try: 240 (the default); 120 is a shallow sea, 480 a deep one" },
+    toroidal: { d: "Senses wrap across the world's sides — no walls, no sensory dead zone at the edges. Depth never wraps: the surface and the floor are real.", t: "try: on; cures the wall-hugger phenotype" },
+    bodyModel: { d: "Heritable body size and elongation: bigger = slower and costlier, longer = turns worse. The size laws (Water tab) act on the size.", t: "try: on; founders start at 1.0 and bodies drift from births" },
+    maxPopulation: { d: "Birth cap: no births while the population is at or above it (0 = none). Applies live.", t: "try: 0, or 600 to keep a big run fast" },
+    minPopulation: { d: "Reseed floor: random founders are added when the population falls below it. Applies live.", t: "try: 50 (the default)" },
+    minSpeed: { d: "Minimum swim speed. Applies live.", t: "try: 0 when the swimming cost is above 0 (drifting allowed)" },
+    maxSpeed: { d: "Maximum swim speed — the sprint ceiling. Applies live.", t: "try: 150; sprinting escapes predators at 110" },
+    maxTurnRate: { d: "Turn ceiling (rad/s) at zero drive — triangular motion only.", t: "try: 2-6 around the default 4" },
+    triangularMotion: { d: "Couple drive and turn: fast = straight, slow = agile.", t: "try: on for strike-vs-reorient bouts" },
+    perceptionRadius: { d: "Sensing radius for neighbours, food and predators, in 3-D. The Ocean's default (100) is larger than Classic's 80: in a sea with depth, a fish meets others less often.", t: "try: 160 = the high-density schooling regime" },
+    interactRadius: { d: "Range for social interactions (share / fight / breed), in 3-D. The Ocean's default is 36 (Classic's 20).", t: "try: 24-48" },
+    maxNeighbors: { d: "Attend to only the N nearest neighbours; 0 = everyone in range.", t: "try: 7 — starlings track ~6-7" },
+    fastTanh: { d: "A ~1.25x faster tanh approximation — changes the numbers.", t: "try: off to reproduce runs" },
+    foodPatches: { d: "Cluster food into N patches (0 = scattered evenly).", t: "try: 5-6; patchy food makes currents matter" },
+    foodPatchRadius: { d: "Spread of food around each patch centre.", t: "try: 60 tight, 240 loose" },
+    targetFood: { d: "Food count the world regrows toward (hard cap 2x). The Ocean's default (2400) is four times Classic's: food is spread through the depth too. Applies live.", t: "try: 1200 scarcity, 4800 abundance" },
+    foodSpawnBase: { d: "Mean food items spawned per step. Applies live.", t: "try: 2-12; higher = a richer world" },
+    foodSpawnAmp: { d: "Sinusoidal swing of food abundance around the base rate. Applies live.", t: "try: 0 for a steady food supply" },
+    foodEnergy: { d: "Energy gained per food item eaten. Applies live.", t: "try: 3-8 around the default 5" },
+    pickupRadius: { d: "How close (in 3-D) a fish must come to eat a food item. The Ocean's default is 24 (Classic's 10).", t: "try: 16-32" },
+    foodDrift: { d: "Food is carried by the current into drifting filaments.", t: "try: on — pairs well with currents" },
+    foodLife: { d: "Every food item disappears this many seconds after it appeared, eaten or not (it sinks out or decays); 0 = it stays until eaten. With a fixed inflow, food nobody finds is lost, so how many fish a world feeds depends on how well they search. Applies live.", t: "try: 30-90" },
+    foodDepthMode: { d: "Anywhere: food appears at any depth. Each patch at its own depth: every food patch gets a depth at the start and its food lands near it (needs food patches).", t: "try: patches at their own depth, to make depth worth choosing" },
+    foodDepthSpread: { d: "How far above and below its patch's depth food lands. Applies live.", t: "try: 15 tight, 60 loose" },
+    metabolicRate: { d: "Fixed energy burned per second by every fish. Applies live.", t: "try: toward 3 for harsher starvation" },
+    moveCost: { d: "Kinetic cost: energy/sec = F x speed² — makes thrust expensive. Applies live.", t: "try: 0.00007 -> cruise ~82; 0 = free" },
+    geneCost: { d: "Extra energy/sec per gene — parsimony pressure against bloat. Applies live.", t: "try: 0.005 makes big genomes costly" },
+    maxAge: { d: "Age in seconds at which a fish dies of old age. Applies live.", t: "try: 60-240 around the default 120" },
+    reproEnergy: { d: "Energy a parent needs before it can reproduce. Applies live.", t: "try: 15-40; higher = slower breeding" },
+    newbornEnergy: { d: "Starting energy of a newborn. Applies live.", t: "try: 15-35 around the default 25" },
+    mutationMultiplier: { d: "Multiplier on the per-birth mutation rate. Applies live.", t: "try: 0.5 conservative, 2 fast drift" },
+    genomeInitMin: { d: "Low end of the starting gene-count range.", t: "try: 24-48 inside the bounds 16-80" },
+    genomeInitMax: { d: "High end of the starting gene-count range.", t: "try: 24-48 inside the bounds 16-80" },
+    genomeMinLength: { d: "Hard lower bound on gene count.", t: "try: 16 (the default)" },
+    genomeMaxLength: { d: "Hard upper bound on gene count.", t: "try: 80 (the default)" },
+    reproMaxDistance: { d: "Reproductive isolation: parents farther apart than this in wiring space cannot breed (-1 = off).", t: "try: 18 bites gently, 14 hard; below 12 breeding stops" },
+    reproSoftWidth: { d: "Softens the isolation gate into a ramp: past the gate breeding fades out over this width (0 = a hard cliff).", t: "try: 4-5 with the gate at 14-16" },
+    reproGracePeriod: { d: "Founders ignore the gate while younger than this, so a fresh genome can breed once (0 = off).", t: "try: 60" },
+    bodyMutation: { d: "Evolving bodies only: jitter added to each inherited body parameter.", t: "try: 0.1 default; 0 freezes drift, 0.3 explores fast" },
+    buoyMutation: { d: "Half-width of a newborn's neutral-depth draw around its parents' (as a fraction of the depth). Neutral depth is where a fish floats without effort; it is inherited, so a population can evolve to live high or low. Applies live.", t: "try: 0.05 (the default); 0 freezes it, 0.2 explores fast" },
+    predatorCount: { d: "Number of scripted hunters chasing fish in 3-D (0 = none).", t: "try: 3-4 with the predator economy on" },
+    predatorEconomy: { d: "Predators eat, breed and starve instead of being immortal.", t: "try: on with 4 predators, energy per catch 9 and a predator cap of 15" },
+    predatorSpeed: { d: "Predator cruise speed.", t: "try: 110 vs the fish's top speed 150 = escapable" },
+    predatorPerception: { d: "Predator's prey-detection radius.", t: "try: 150 (the default)" },
+    predatorCaptureRadius: { d: "Contact distance at which a fish is caught.", t: "try: 10-20 around the default 14" },
+    predatorCooldown: { d: "Seconds a predator digests after a catch before it can catch again — caps its kill rate.", t: "try: 3-5; 5 eases the chase" },
+    predatorMeal: { d: "Energy a predator gains per catch (economy on). -1 = it absorbs the prey's whole store, which lets predators explode.", t: "try: 1.2 × break-even = cooldown × (metabolism + swimming cost × 110²); 7 at the defaults" },
+    predatorMetabolism: { d: "Predator energy burn per second (economy on); fish burn 1.5.", t: "try: 2-3" },
+    predatorReproEnergy: { d: "Energy a predator needs to bud a child (economy on).", t: "try: 40-80" },
+    predatorMaxAge: { d: "Predator death age; 0 = immortal until starved.", t: "try: 0, or 120 to age them out" },
+    predatorMinPopulation: { d: "Predator floor: fresh hunters are put back whenever fewer than this are alive (economy on; 0 = off). Applies live.", t: "try: 2, with a cap" },
+    predatorMaxPopulation: { d: "Predator cap: a well-fed hunter doesn't bud while this many are alive (economy on; 0 = none). Applies live.", t: "try: 15 with the default 3 s digesting time" },
+    predatorInheritance: { d: "Each bud inherits its parent's speed and budding threshold (×0.5 to ×2) with a small mutation, so hunters evolve.", t: "try: on with a swimming cost, a predator lifespan and a cap" },
+    predatorTraitMutation: { d: "How far a bud's traits can stray from its parent's, per trait per bud. Applies live.", t: "try: 0.1 (the default)" },
+    kBuoy: { d: "How hard a fish is pulled back toward its neutral depth, per second. Leaving neutral depth costs steering effort. Applies live (0 or more).", t: "try: 1 (the default, tuned); 0.5 lets fish wander in depth, 3 pins them" },
+    pitchMax: { d: "The steepest a fish can climb or dive: its vertical speed is at most this × its speed. Applies live.", t: "try: 0.5 (about 27°); 1 = 45°" },
+    vDrag: { d: "Vertical drag, per second: how fast a fish's climb or dive dies away when it stops steering in depth. Applies live.", t: "try: 2 (the default); 0.5 glides, 6 stops short" },
+    wallBand: { d: "Within this distance of the surface or the floor, a soft push turns a fish back into the water. Applies live.", t: "try: 12 (the default); 0 = hard walls" },
+    cHold: { d: "Energy a fish pays for being away from its neutral depth, per unit of distance (as a share of the depth). With depth costs scaled: a multiple of its own metabolism. Applies live.", t: "try: 0.05 scaled (the E1 preset); 0 = free" },
+    cPress: { d: "Energy a fish pays for depth itself (pressure), growing toward the floor. With depth costs scaled: a multiple of its own metabolism. Applies live.", t: "try: 0.03 scaled (the E1 preset)" },
+    depthCostScaled: { d: "Off: the two depth costs are energy per second. On: they are multiples of each fish's own metabolism (bigger bodies pay more), the E1 physics' rule. Applies live.", t: "try: on with the E1 preset" },
+    currentStrength: { d: "Peak ocean-flow speed in world units per second (0 = still water).", t: "try: 5 with a deep current (the E1 preset); 80 for a strong 2-D-style flow" },
+    currentMode: { d: "Eddies = moving vortices; gyre = two counter-rotating basins.", t: "try: eddies" },
+    currentEddies: { d: "Number of vortices in eddies mode.", t: "try: 3-8 around the default 5" },
+    currentCore: { d: "Eddy radius — the distance of peak flow speed.", t: "try: 100-250 around the default 150" },
+    currentDrift: { d: "How fast the flow field evolves (0 = static).", t: "try: 0.5-2 around the default 1" },
+    deepCurrent: { d: "The current flows at depth only: still at the surface, full strength from mid-depth down, so where a fish swims decides whether it is carried. Applies live.", t: "try: on (the E1 preset)" },
+    waveSpeed: { d: "Surface waves: three fixed wave trains move the water in orbits, strongest near the surface, fading toward the floor; fish and food are carried. Their orbital speed in units per second (0 = still). Applies live.", t: "try: 6 (the E1 preset)" },
+    waveBand: { d: "How far from the surface and floor the waves taper to nothing. Applies live.", t: "try: 32 (the default)" },
+    waveGravity: { d: "The waves' dispersion constant (ω² = g·k): higher = faster orbits. Applies live.", t: "try: 20 (the default)" },
+    lightEnabled: { d: "Light that fades with depth, L(d) = L0·exp(−fall-off·d). The tank then shades depth by it. Display only in this version of the physics. Applies live.", t: "try: on (the E1 preset)" },
+    L0: { d: "Light at the surface. Applies live.", t: "try: 1 (the default)" },
+    kWater: { d: "How fast light fades with depth, per unit (0.006: about half at 115). Applies live.", t: "try: 0.006 (the default); 0.012 for murky water" },
+    sizeDrift: { d: "The flow moves a fish by min(1, 1 / size) of itself: small fish are carried more. Applies live.", t: "try: on with evolving bodies and a current or waves" },
+    sizeFight: { d: "A fish's fighting strength grows with its size squared. Applies live.", t: "try: on with evolving bodies" },
+    mouthGate: { d: "A fish can eat a food item only if the food is no bigger than mouth size × its own size. Applies live.", t: "try: on with evolving bodies" },
+    kMouth: { d: "Mouth size, as a multiple of body size (the mouth gate). Applies live.", t: "try: 2 (the default)" },
+    steerFrame: { d: "Which way STEER_X / STEER_Y push: in world x / y (Classic's, and the food senses' frame), or in the fish's own frame (STEER_X turns it right or left, STEER_Y along its heading), so a sense in its own frame can turn it toward what it senses. Fast-swims-straight already turns by STEER_X and ignores this. Applies live.", t: "try: the fish's own frame, for the 3-D senses" },
+    eye: { d: "The compound eye: six sectors around the fish (ahead, behind, left, right, up, down), each reporting the nearest thing in it by nearness, apparent size and contrast. Only in the eye build of the module. Applies live.", t: "try: on in the eye build" },
+    eyeOnly: { d: "Turn off the labelled senses the eye replaces (food direction, neighbours, the predator bearing, ...): the fish see only through the eye (or, with it off, nothing outside their own body). Eye build only. Applies live.", t: "try: on with the eye, to see what evolves from sight alone" },
+    eyeCode: { d: "The eye's encoding, a sum of bits: 1 faded contrast, 2 opponent pairs (left + right and right − left, ...), 4 every object in a sector instead of the nearest. Eye build only. Applies live.", t: "try: 0, then 2" },
+    governor: { d: "When frames take too long: first run fewer steps per frame, then draw the tank with less detail. Never changes the simulation itself.", t: "try: on; off to see the uncapped run (it may stutter)" },
+    colourBrain: { d: "Off: each family line (every fish descended from the same starting fish) has its own colour, the one it has in the dashboards. On: the colour comes from the genome's wiring, so similar brains look alike.", t: "try: off to follow families, on to see what their brains converged on" },
+    followLight: { d: "While you follow a fish (F), a flashlight shows it and its surroundings in clear light: true colours, no depth fade, no water tint. The dock's flashlight button (L) turns it on anywhere. Drawing only: the fish never see it.", t: "try: on (the default)" }
+  };
+
+  /* ---- 🎲 Randomize: a whole setup from ranges ----
+   * Classic's measured ideas (web/randomizer.js: currents with patchy,
+   * drifting food and a thrust cost; predators with a thrust cost, plenty of
+   * food and a cap; the economy with a fixed meal, a predator cap and floor;
+   * the match gate only with its soft ramp), with the Ocean's food stock (4 x
+   * Classic's: food fills the depth too) and sight, plus the Ocean's own: the
+   * tuned E1 physics preset, patches at their own depths, own-frame steering.
+   * key: [min, max, step, source] */
+  var RANGES = {
+    popFactor: [0.7, 1.4, 0.05, "around the default 300"],
+    targetFood: [2000, 4800, 100, "Classic's 500-1200, x4 (the Ocean's default is 4 x Classic's)"],
+    foodSpawnBase: [3, 8, 0.5, "Classic's: try 2-12"],
+    foodSpawnAmp: [0, 3, 0.5, "default 2; 0 = steady supply"],
+    foodEnergy: [4, 7, 0.5, "try: 3-8 around the default 5"],
+    maxAge: [90, 180, 10, "try: 60-240 around the default 120"],
+    maxAgeHunted: [120, 180, 10, "with predators, at least the default"],
+    reproEnergy: [18, 30, 1, "try: 15-40"],
+    newbornEnergy: [20, 30, 1, "try: 15-35"],
+    mutationMultiplier: [0.5, 2, 0.1, "try: 0.5 conservative, 2 fast drift"],
+    moveCost: [0.00003, 0.00007, 0.00001, "Classic measured: 3e-5 and 7e-5 both give a cruise ~82"],
+    geneCost: [0.005, 0.01, 0.001, "try: 0.005"],
+    maxNeighbors: [6, 8, 1, "starlings track ~6-7 nearest"],
+    perceptionRadius: [100, 180, 10, "the Ocean's 100 up to Classic's schooling regime"],
+    maxTurnRate: [3, 5, 0.5, "try: 2-6 around the default 4"],
+    hunters: [3, 5, 1, "Classic's arena: 3-5 healthy"],
+    economyHunters: [3, 4, 1, "try: 3-4 with the economy on"],
+    mealFactor: [1.2, 1.4, 0.05, "meal / break-even (Classic measured)"],
+    predatorCapPerCooldown: [8, 8, 1, "cap = this x cooldown (Classic measured)"],
+    predatorFloor: [2, 2, 1, "keeps a seed population"],
+    predatorMetabolism: [2, 3, 0.5, "try: 2-3"],
+    predatorReproEnergy: [50, 70, 5, "try: 40-80"],
+    predatorCooldown: [3, 5, 0.5, "default 3; 5 eases the chase"],
+    arenaFood: [4800, 8000, 200, "Classic's arena 1200-2000, x4"],
+    arenaFoodSpawn: [8, 12, 1, "the arena runs used 12"],
+    arenaCap: [300, 450, 50, "Classic's schooling arena capped at 350"],
+    economyCap: [400, 600, 50, "the economy runs capped at 600"],
+    foodPatches: [5, 6, 1, "try: 5-6"],
+    foodPatchRadius: [80, 200, 10, "try: 60 tight, 240 loose"],
+    foodDepthSpread: [20, 60, 5, "try: 15 tight, 60 loose"],
+    currentFight: [70, 90, 5, "Classic measured: 80 with a thrust cost = fish fight the flow"],
+    currentRide: [130, 160, 5, "Classic measured: 150 with a thrust cost = fish ride it"],
+    currentEddies: [3, 8, 1, "try: 3-8"],
+    currentCore: [100, 250, 10, "try: 100-250"],
+    currentDrift: [0.5, 2, 0.1, "try: 0.5-2"],
+    reproMaxDistance: [16, 18, 0.5, "16 with the soft ramp clears collapse"],
+    reproSoftWidth: [4, 5, 0.5, "width 4 clears collapse at 16"],
+    bodyMutation: [0.05, 0.2, 0.01, "try: 0.1 default"],
+    buoyMutation: [0.03, 0.12, 0.01, "around the default 0.05"]
+  };
+  var CHANCE = {
+    predatorsScripted: 0.25, predatorsEconomy: 0.3,
+    currents: 0.35, patchyFood: 0.25,
+    e1: 0.35,              /* the tuned E1 physics preset (waves, deep current, light, depth costs) */
+    patchDepths: 0.6,      /* with patches: each patch at its own depth */
+    thrustCost: 0.5, toroidal: 0.8, topological: 0.35, triangular: 0.2, widePerception: 0.2,
+    geneCost: 0.3, bodyModel: 0.3, matchGate: 0.15, grace: 0.5, ownFrame: 0.25,
+    tuneFood: 0.5, tuneLife: 0.4, tuneMutation: 0.4, tuneBuoy: 0.3
+  };
+  var PREDATOR_SPEED = 110;
+  function round(v, step) { return +(Math.round(v / step) * step).toFixed(6); }
+
+  /* rand: () => [0, 1); e1: the E1 preset as an object.
+   * -> { population, set: {key: value}, labels: [...] }; every key left out
+   * stays at its default. */
+  function draw(rand, basePop, e1) {
+    function chance(p) { return rand() < p; }
+    function pick(a) { return a[Math.floor(rand() * a.length)]; }
+    function range(key) { var r = RANGES[key]; return round(r[0] + (r[1] - r[0]) * rand(), r[2]); }
+    var set = {}, labels = [];
+    var population = Math.max(50, Math.round(basePop * range("popFactor")));
+    var thrust = false;
+    var u = rand();
+    if (u < CHANCE.predatorsEconomy + CHANCE.predatorsScripted) {
+      var economy = u < CHANCE.predatorsEconomy;
+      set.predatorCount = range(economy ? "economyHunters" : "hunters");
+      set.predatorCooldown = range("predatorCooldown");
+      set.targetFood = range("arenaFood");
+      set.foodSpawnBase = range("arenaFoodSpawn");
+      set.maxPopulation = range(economy ? "economyCap" : "arenaCap");
+      set.moveCost = range("moveCost");
+      thrust = true;
+      if (economy) {
+        set.predatorEconomy = true;
+        set.predatorMetabolism = range("predatorMetabolism");
+        var breakEven = set.predatorCooldown * (set.predatorMetabolism + set.moveCost * PREDATOR_SPEED * PREDATOR_SPEED);
+        var f = RANGES.mealFactor;
+        set.predatorMeal = Math.min(Math.floor(f[1] * breakEven * 2) / 2,
+                                    Math.max(Math.ceil(f[0] * breakEven * 2) / 2, round(range("mealFactor") * breakEven, 0.5)));
+        set.predatorReproEnergy = range("predatorReproEnergy");
+        set.minPopulation = 20;
+        set.predatorMaxPopulation = Math.round(range("predatorCapPerCooldown") * set.predatorCooldown);
+        set.predatorMinPopulation = range("predatorFloor");
+        labels.push(set.predatorCount + " predators that must eat to breed (meal " + set.predatorMeal + "), kept between " +
+                    set.predatorMinPopulation + " and " + set.predatorMaxPopulation);
+      } else {
+        labels.push(set.predatorCount + " hunting predators");
+      }
+      labels.push("plenty of food, at most " + set.maxPopulation + " fish");
+      population = Math.min(population, set.maxPopulation);
+    } else {
+      var e = rand();
+      if (e < CHANCE.currents) {
+        var ride = chance(0.5);
+        set.currentStrength = range(ride ? "currentRide" : "currentFight");
+        set.currentMode = pick([0, 1]);
+        if (set.currentMode === 0) { set.currentEddies = range("currentEddies"); set.currentCore = range("currentCore"); }
+        set.currentDrift = range("currentDrift");
+        set.foodPatches = range("foodPatches");
+        set.foodPatchRadius = range("foodPatchRadius");
+        set.foodDrift = true;
+        thrust = true;
+        labels.push("ocean current " + set.currentStrength + " (" + (set.currentMode ? "gyre" : "eddies") + ")");
+        labels.push(set.foodPatches + " drifting food patches");
+      } else if (e < CHANCE.currents + CHANCE.patchyFood) {
+        set.foodPatches = range("foodPatches");
+        set.foodPatchRadius = range("foodPatchRadius");
+        labels.push(set.foodPatches + " food patches");
+      }
+      if (set.foodPatches && chance(CHANCE.patchDepths)) {
+        set.foodDepthMode = 1;
+        set.foodDepthSpread = range("foodDepthSpread");
+        labels.push("each patch at its own depth");
+      }
+      if (chance(CHANCE.tuneFood)) {
+        set.targetFood = range("targetFood");
+        set.foodSpawnBase = range("foodSpawnBase");
+        set.foodSpawnAmp = range("foodSpawnAmp");
+        set.foodEnergy = range("foodEnergy");
+        labels.push("food " + set.targetFood + ", " + set.foodSpawnBase + "/step");
+      }
+    }
+    /* the E1 physics preset, unless a strong current was drawn (the preset's
+     * own current is a gentle deep one) */
+    if (e1 && !set.currentStrength && chance(CHANCE.e1)) {
+      Object.keys(e1).forEach(function (k) { if (!(k in set)) set[k] = e1[k]; });
+      labels.push("E1 physics: waves, a deep current, light, depth costs");
+    }
+    if (thrust || chance(CHANCE.thrustCost)) {
+      if (set.moveCost === undefined) set.moveCost = range("moveCost");
+      set.minSpeed = 0;
+      labels.push("swimming costs energy");
+    }
+    if (chance(CHANCE.toroidal)) { set.toroidal = true; labels.push("wrap-around senses"); }
+    if (chance(CHANCE.topological)) { set.maxNeighbors = range("maxNeighbors"); labels.push("each fish follows its " + set.maxNeighbors + " nearest"); }
+    if (chance(CHANCE.widePerception)) { set.perceptionRadius = range("perceptionRadius"); labels.push("sight " + set.perceptionRadius); }
+    if (chance(CHANCE.triangular)) {
+      set.triangularMotion = true; set.maxTurnRate = range("maxTurnRate");
+      labels.push("fast = straight, slow = agile");
+    } else if (chance(CHANCE.ownFrame)) {
+      set.steerFrame = 1; labels.push("steering in the fish's own frame");
+    }
+    if (chance(CHANCE.tuneLife)) {
+      set.maxAge = range(set.predatorCount ? "maxAgeHunted" : "maxAge");
+      set.reproEnergy = range("reproEnergy");
+      set.newbornEnergy = range("newbornEnergy");
+      labels.push("lifespan " + set.maxAge + " s");
+    }
+    if (chance(CHANCE.tuneMutation)) { set.mutationMultiplier = range("mutationMultiplier"); labels.push("mutation ×" + set.mutationMultiplier); }
+    if (chance(CHANCE.tuneBuoy)) { set.buoyMutation = range("buoyMutation"); labels.push("buoyancy mutation " + set.buoyMutation); }
+    if (chance(CHANCE.geneCost)) { set.geneCost = range("geneCost"); labels.push("big genomes cost energy"); }
+    if (chance(CHANCE.bodyModel)) { set.bodyModel = true; set.bodyMutation = range("bodyMutation"); labels.push("heritable body size"); }
+    if (chance(CHANCE.matchGate)) {
+      set.reproMaxDistance = range("reproMaxDistance");
+      set.reproSoftWidth = range("reproSoftWidth");
+      if (chance(CHANCE.grace)) set.reproGracePeriod = 60;
+      labels.push("picky partners (match gate " + set.reproMaxDistance + ")");
+    }
+    return { population: population, set: set, labels: labels };
+  }
+
+  root.EvoOceanConfig = { KEYS: KEYS, LIVE: LIVE, TABS: TABS, LABELS: LABELS, HINTS: HINTS, BTN_STEP: BTN_STEP,
+                          TIPS: TIPS, RANGES: RANGES, CHANCE: CHANCE, draw: draw };
+})(typeof window !== "undefined" ? window : globalThis);

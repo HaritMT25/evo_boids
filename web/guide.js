@@ -11,7 +11,11 @@
  * every control still works mid-tour (the keyboard step invites trying them).
  * Page hooks it uses: window.EvoApp (renderer.js). */
 (function () {
-  var KEY = "evo_boids.guideSeen.v2";
+  /* Another page can bring its own tour: window.EvoGuideConfig = {key,
+   * introKey, steps(h), intro(h)} set before this file runs (web/ocean.js,
+   * the 3-D Ocean), where h holds the helpers below. Classic sets none. */
+  var CFG = window.EvoGuideConfig || null;
+  var KEY = (CFG && CFG.key) || "evo_boids.guideSeen.v2";
   function app() { return window.EvoApp || {}; }
   function q(sel) { return document.querySelector(sel); }
   function rectOf(sel) { var e = q(sel); return e && !e.hidden ? e.getBoundingClientRect() : null; }
@@ -22,7 +26,7 @@
   function compact() { return !!(app().compact && app().compact()); }
   function seen() { try { return localStorage.getItem(KEY) === "1"; } catch (e) { return false; } }
   function markSeen() { try { localStorage.setItem(KEY, "1"); } catch (e) { /* private mode */ } }
-  var INTRO_KEY = "evo_boids.turboIntroSeen.v1";
+  var INTRO_KEY = (CFG && CFG.introKey) || "evo_boids.turboIntroSeen.v1";
   function introSeen() { try { return localStorage.getItem(INTRO_KEY) === "1"; } catch (e) { return false; } }
   function markIntroSeen() { try { localStorage.setItem(INTRO_KEY, "1"); } catch (e) { /* private mode */ } }
   function wide() { return window.matchMedia("(min-width: 960px)").matches; }
@@ -32,7 +36,8 @@
    * scroll (bring into view in the settings), place (card sides to try, in
    * order), enter() (side effects). */
   function drawerSides() { return wide() ? ["left", "below", "above"] : ["above", "below"]; }
-  var STEPS = [
+  var H = { app: app, q: q, rectOf: rectOf, touch: touch, tank: tank, compact: compact, wide: wide, drawerSides: drawerSides };
+  var STEPS = CFG && CFG.steps ? CFG.steps(H) : [
     { welcome: true, drawer: false, title: "Welcome to evo_boids",
       body: function () {
         return "Each fish has a tiny neural network wired by its genes. Fish that eat enough " +
@@ -133,7 +138,7 @@
   ];
 
   /* The first-visit Turbo card: one step, its own buttons (show()). */
-  var INTRO = { intro: true, drawer: false, title: "Turbo: evolution, fast-forwarded",
+  var INTRO = CFG && CFG.intro ? CFG.intro(H) : { intro: true, drawer: false, title: "Turbo: evolution, fast-forwarded",
     target: function () { return rectOf("#turbobtn"); },
     place: ["above", "below", "left", "right"],
     body: function () {

@@ -2,8 +2,10 @@
 # build_site.sh — assemble the static demo site in dist/ for Vercel.
 #
 #   dist/index.html            no-cache; references everything below by hash
-#   dist/ocean.html            the 3-D Ocean preview (web/ocean.html: its own
-#                              engine web/evo_ocean.{js,wasm}, single-threaded),
+#   dist/ocean.html            the 3-D Ocean (web/ocean.html: its own engine
+#                              web/evo_ocean.{js,wasm}, single-threaded, and
+#                              Turbo worker; it shares charts.js, guide.js and
+#                              the three.js bundle with the Classic page),
 #                              no-cache, the same hashed references
 #   dist/assets/NAME.HASH.EXT  every script, wasm and image, content-hashed,
 #                              served with a one-year immutable cache
@@ -23,7 +25,8 @@ SRC=(web/evo_boids.js web/evo_boids.wasm web/evo_boids_mt.js web/evo_boids_mt.wa
      web/loader.js web/gl_renderer.js web/randomizer.js web/renderer.js web/guide.js
      web/dash_data.js web/charts.js web/dashboard.js web/scene3d.js web/vendor/three.bundle.min.js
      web/worker.js img/rocks.jpg web/index.html web/vercel.json
-     web/evo_ocean.js web/evo_ocean.wasm web/ocean.js web/ocean_scene.js web/ocean.html)
+     web/evo_ocean.js web/evo_ocean.wasm web/ocean.js web/ocean_scene.js web/ocean.html
+     web/ocean_config.js web/ocean_dash.js web/ocean_worker.js)
 for f in "${SRC[@]}"; do
     [ -f "$f" ] || { echo "missing $f — build the modules first (wasm/build_wasm.sh, wasm/build_ocean.sh)" >&2; exit 1; }
 done
@@ -52,9 +55,11 @@ GUIDE=$(publish web/guide.js);        DDATA=$(publish web/dash_data.js)
 CHARTS=$(publish web/charts.js);      DASH=$(publish web/dashboard.js)
 WORKER=$(publish web/worker.js);      BG=$(publish img/rocks.jpg)
 SCENE=$(publish web/scene3d.js);      THREE=$(publish web/vendor/three.bundle.min.js)
-# the Ocean page (it shares the three.js bundle)
+# the Ocean page (it shares the three.js bundle, charts.js and guide.js)
 OC=$(publish web/evo_ocean.js);       OC_WASM=$(publish web/evo_ocean.wasm)
 OCJS=$(publish web/ocean.js);         OCSCENE=$(publish web/ocean_scene.js)
+OCCFG=$(publish web/ocean_config.js); OCDASH=$(publish web/ocean_dash.js)
+OCWORKER=$(publish web/ocean_worker.js)
 
 # Rewrite the EVO_ASSETS block and the <script src> tags. Fails loudly if
 # index.html no longer has the shape this expects.
@@ -83,22 +88,28 @@ assert counts == (1,) * 10, ("index.html changed shape", counts)
 open(sys.argv[1], "w").write(out)
 PY
 
-# The Ocean page: its EVO_ASSETS block and its two <script src> tags. ocean.js
-# loads the engine (ocean / oceanWasm) and ocean_scene.js the three bundle
-# from these. (mock: ?mock=1's stand-in, never published.)
+# The Ocean page: its EVO_ASSETS block and its six <script src> tags. ocean.js
+# loads the engine (ocean / oceanWasm) and starts the Turbo worker (worker)
+# from these, ocean_scene.js the three bundle. (mock: ?mock=1's stand-in,
+# never published.)
 python3 - "$OUT/ocean.html" <<PY
 import re, sys
 src = open("web/ocean.html").read()
 assets = '''window.EVO_ASSETS = {
       ocean: "$OC", oceanWasm: "$OC_WASM",
+      worker: "$OCWORKER",
       mock: "ocean_mock.js",
       three: "$THREE"
     };'''
 out, n1 = re.subn(r'window\.EVO_ASSETS = \{.*?\};', lambda m: assets, src, count=1, flags=re.S)
 out, n2 = re.subn(r'<script src="ocean_scene\.js"></script>', '<script src="$OCSCENE"></script>', out, count=1)
 out, n3 = re.subn(r'<script src="ocean\.js"></script>', '<script src="$OCJS"></script>', out, count=1)
-counts = (n1, n2, n3)
-assert counts == (1,) * 3, ("ocean.html changed shape", counts)
+out, n4 = re.subn(r'<script src="ocean_config\.js"></script>', '<script src="$OCCFG"></script>', out, count=1)
+out, n5 = re.subn(r'<script src="ocean_dash\.js"></script>', '<script src="$OCDASH"></script>', out, count=1)
+out, n6 = re.subn(r'<script src="charts\.js"></script>', '<script src="$CHARTS"></script>', out, count=1)
+out, n7 = re.subn(r'<script src="guide\.js"></script>', '<script src="$GUIDE"></script>', out, count=1)
+counts = (n1, n2, n3, n4, n5, n6, n7)
+assert counts == (1,) * 7, ("ocean.html changed shape", counts)
 open(sys.argv[1], "w").write(out)
 PY
 

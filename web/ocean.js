@@ -1,83 +1,101 @@
 "use strict";
-/* evo_boids Ocean preview: the page controller (web/ocean.html).
+/* evo_boids 3-D Ocean: the page controller (web/ocean.html).
  *
  * Runs the Ocean world (web/evo_ocean.{js,wasm}, factory createEvoOcean,
- * single-threaded; the C API is PLAN_ocean_preview.md §4) and draws it in the
- * deep tank (web/ocean_scene.js, window.EvoOceanScene). It builds the tank's
- * per-frame snapshot itself, the same object renderer.js hands scene3d.js,
- * plus the depths: s.depth (per fish), s.foodDepth, s.predDepth.
+ * single-threaded; the C API is wasm/ocean_wasm.cpp's header) and draws it in
+ * the deep tank (web/ocean_scene.js). Around it, the Classic page's controls
+ * (web/renderer.js), so the two pages are one product:
+ *   - the top bar (live readout -> the stat panel with the depth histogram;
+ *     📊 dashboards, web/ocean_dash.js; the settings) and the toasts
+ *   - the dock: pause, speed (steps per frame), Turbo, 🎲 Randomize, the
+ *     flashlight, fit the view
+ *   - the settings sheet, built from web/ocean_config.js: every key the
+ *     Ocean takes, "live" ones (oc_set_param) applying at once, the rest on
+ *     Restart ("Restart to apply"); settings that do nothing with the others as
+ *     they are are dimmed with the reason (NEEDS); the Run tab: Randomize, New
+ *     world / Replay, playback and view switches, save / load a setup
+ *   - the fish card (click or tap a fish): oc_inspect's numbers and its live
+ *     brain (oc_set_capture keeps its senses while a fish is selected)
+ *   - Turbo: web/ocean_worker.js steps a copy of the module's memory at full
+ *     speed; the copy comes back on Stop, so the run carries on exactly
+ *   - the tour and the first-visit Turbo card (web/guide.js, steps below)
+ * The flashlight (scene.setFlashlight) is drawing only: no engine call.
  *
- * Every pointer the module returns is valid until the next oc_sync/oc_init,
- * and memory can grow, so the typed-array views are cut fresh from the heap
- * after every sync and never cached.
+ * Every pointer the module returns is valid until the next oc_sync / oc_init
+ * (oc_inspect: until the next step or sync), and memory can grow, so typed
+ * arrays are cut fresh from the heap after every call and never cached.
  *
- * URL: ?seed=42 &pop=300 &w=1920 &h=1080 (1080 x 1920 on a portrait screen)
- *      &depth=240 &cfg={"key":value,...}
- *      (SimConfig + OceanConfig keys, as oc_init takes them) &speed=1
- *      &e1=1: the E1 physics preset (waves, deep currents, light, depth costs;
- *      the module's oc_e1_preset()), with any &cfg keys on top. Without it the
- *      page is the preview it always was (every E1 knob off).
- *      With the engine's light field on (oc_light_enabled), the tank shades
- *      depth by its L(d) = L0·exp(−kWater·d) (EvoOceanScene setLight).
- *      ?mock=1 loads ocean_mock.js from beside the page instead of the engine:
- *      a JS stand-in for page development, not part of web/.
- * Keys: space pause, + / - steps per frame, F follow a random fish (again:
- *       another one), Esc stop following, R a new world (new seed), shift+R
- *       replay this one, C back to the full view, E / Q or PageUp / PageDown
- *       (held) move the view up / down in depth, . one step while paused.
- *       Click a fish to mark it. The camera orbits freely, below the
- *       horizontal too (look up at the surface from the floor).
- * Pitch: s.vz from oc_creature_vz when the module has it, else estimated
- *       per fish id from depth change over distance swum (vzEstimate).
+ * URL: ?seed=42 &pop=300 &depth=240 &w=1920 &h=1080 (1080 x 1920 on a
+ *      portrait screen) &cfg={"key":value,...} (SimConfig + OceanConfig keys,
+ *      as oc_init takes them; the settings show them) &speed=1 (steps per
+ *      frame) &e1=1 (the E1 physics preset, oc_e1_preset, under &cfg)
+ *      &colour=brain|family &guide=0|1 &intro=1 (web/guide.js)
+ *      ?mock=1 loads ocean_mock.js from beside the page instead of the engine
+ *      (a JS stand-in for page development, not part of web/).
+ *      A Restart writes seed / pop / depth / cfg back, so a reload keeps it.
+ * Keys: space pause, + / - (or arrows) steps per frame, F follow (the selected
+ *       fish, else a random one; again: another), Esc close / stop following
+ *       / let go, R a new world (new seed), shift+R replay this one, C fit the
+ *       view, L the flashlight, E / Q or PageUp / PageDown (held) move the view
+ *       up / down in depth, . one step while paused.
  *
- * window.EvoOcean: a small handle for the console and the tests
- *   (state(), set(name, v) -> oc_set_param, module). */
+ * window.EvoOcean: a small handle for the console and the tests. */
 (function () {
-  var A = window.EVO_ASSETS;
+  var A = window.EVO_ASSETS, CFG = window.EvoOceanConfig;
   var P = new URLSearchParams(location.search);
   var MOCK = P.get("mock") === "1";
-  var E1 = P.get("e1") === "1";        /* the E1 physics preset under &cfg */
+  var E1 = P.get("e1") === "1";
   var DT = 0.016;                      /* oc_step's fixed step */
   var SPEEDS = [1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64];
-  var STEP_BUDGET_MS = 11;             /* of a 16.7 ms frame: what stepping may take */
+  var STEP_BUDGET_MS = 11;             /* of a 16.7 ms frame: what stepping may take (Hold 60 fps) */
   var STATS = { pop: 0, frame: 1, births: 2, deaths: 3, reseeds: 4, depthMean: 5, depthSd: 6, hist0: 7 };
   var REQUIRED = ["oc_init", "oc_reset", "oc_step", "oc_sync", "oc_creature_count", "oc_creature_segments",
                   "oc_creature_depth", "oc_body_params", "oc_creature_colors", "oc_creature_ids",
                   "oc_food_count", "oc_food_xy", "oc_food_depth", "oc_predator_count", "oc_predator_data",
                   "oc_predator_depth", "oc_stats", "oc_stats_len", "oc_width", "oc_height", "oc_depth_max"];
+  var KEYS = CFG.KEYS, LIVE = CFG.LIVE, LABELS = CFG.LABELS;
+  var ARGS = { seed: 1, population: 1, depth: 1 };   /* oc_init's own arguments, not cfg keys */
+  var ACTION_LABELS = ["steer x", "steer y", "swim forward", "wander", "speed", "signal",
+                       "oscillator period", "respond", "share food", "reproduce", "fight", "ignore", "steer z (depth)"];
+  var ACTION_SHORT = ["steer x", "steer y", "forward", "wander", "speed", "signal",
+                      "osc", "respond", "share", "breed", "fight", "ignore", "steer z"];
 
   /* the Classic tank's body-size curve (renderer.js bodyScale): the two must match */
   function bodyScale(b) { return b > 0 ? 1 + 0.4 * Math.tanh(5 * (b - 1)) : 1; }
-
   function el(id) { return document.getElementById(id); }
-  var canvas = el("tank"), msgEl = el("msg");
-  function say(text) { msgEl.hidden = false; msgEl.className = "chip"; msgEl.textContent = text; }
-  function fail(what, detail) {
-    msgEl.hidden = false; msgEl.className = "chip err";
-    msgEl.innerHTML = "";
-    var b = document.createElement("b"); b.textContent = what;
-    msgEl.appendChild(b);
-    if (detail) msgEl.appendChild(document.createTextNode("\n" + detail));
-    console.error("ocean: " + what + (detail ? " — " + detail : ""));
-  }
+  var canvas = el("tank");
+  var compactMQ = window.matchMedia("(max-width: 700px), (max-height: 560px), (pointer: coarse)");
+  var coarseMQ = window.matchMedia("(pointer: coarse)");
+  var wideMQ = window.matchMedia("(min-width: 960px)");
+  var reducedMQ = window.matchMedia("(prefers-reduced-motion: reduce)");
+  var lastPointer = "mouse";
+  ["pointerover", "pointerdown"].forEach(function (type) {
+    window.addEventListener(type, function (e) { lastPointer = e.pointerType || "mouse"; }, true);
+  });
+  function store(k, v) { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch (e) { /* private mode */ } return null; }
 
-  function num(key, def, lo, hi) {
-    var v = parseFloat(P.get(key));
-    if (!isFinite(v)) return def;
-    return Math.max(lo, Math.min(hi, v));
+  /* ---------------- messages: the settings footer line, plus a toast ---------------- */
+  var errEl = el("err"), toastsEl = el("toasts");
+  function toast(msg, kind) {
+    var t = document.createElement("div");
+    t.className = "toast" + (kind ? " " + kind : "");
+    t.textContent = msg;
+    toastsEl.appendChild(t);
+    while (toastsEl.children.length > 3) toastsEl.removeChild(toastsEl.firstChild);
+    setTimeout(function () {
+      t.classList.add("out");
+      setTimeout(function () { if (t.parentNode) t.parentNode.removeChild(t); }, 220);
+    }, kind === "error" ? 6000 : 3200);
   }
-  /* a portrait screen gets the same-area world turned on its side (1080 x
-   * 1920), as Classic shapes its world to a phone: the same food density and
-   * crowding, and a tank that fills the screen instead of a strip across it */
-  var portrait = innerHeight > innerWidth * 1.15;
-  var INIT = {
-    seed: num("seed", 42, 0, 4294967295) >>> 0,
-    pop: Math.round(num("pop", 300, 0, 20000)),
-    w: Math.round(num("w", portrait ? 1080 : 1920, 100, 20000)),
-    h: Math.round(num("h", portrait ? 1920 : 1080, 100, 20000)),
-    depth: num("depth", 240, 10, 5000),
-    cfg: P.get("cfg") || ""
-  };
+  function showError(msg) { errEl.textContent = msg; errEl.className = "error"; toast(msg, "error"); console.warn("ocean: " + msg); }
+  function showNote(msg) { errEl.textContent = msg; errEl.className = ""; toast(msg); }
+  function clearError() { errEl.textContent = ""; errEl.className = ""; }
+  function splashSay(msg, isError) {
+    var s = el("splashstate");
+    s.textContent = msg;
+    s.className = isError ? "error" : "";
+    if (isError) el("splash").classList.add("failed");
+  }
 
   /* ---------------- the module ---------------- */
   var SIMD_PROBE = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0,
@@ -92,6 +110,7 @@
     });
   }
   function abs(u) { return new URL(u, location.href).href; }
+  var moduleUrls = null;   /* {js, wasm}: the Turbo worker loads the same module */
   function loadModule() {
     if (!MOCK) {
       var simd = false;
@@ -99,6 +118,7 @@
       if (!simd) return Promise.reject(new Error("this browser has no WebAssembly SIMD, which the simulation needs (Chrome 91+, Firefox 89+ or Safari 16.4+)"));
     }
     var js = abs(MOCK ? A.mock : A.ocean), wasm = abs(A.oceanWasm);
+    moduleUrls = { js: js, wasm: wasm };
     return loadScript(js).then(function () {
       if (typeof createEvoOcean !== "function") throw new Error(js + " loaded but defines no createEvoOcean()");
       return createEvoOcean({ locateFile: function (path) { return path.slice(-5) === ".wasm" ? wasm : path; } });
@@ -108,6 +128,7 @@
   var M = null;
   function heap() { return M.wasmMemory ? M.wasmMemory.buffer : M.HEAPU8.buffer; }
   function u8() { return new Uint8Array(heap()); }
+  function has(fn) { return !!M && typeof M["_" + fn] === "function"; }
   function withCString(str, fn) {
     if (!str) return fn(0);
     var bytes = new TextEncoder().encode(str), ptr = M._malloc(bytes.length + 1);
@@ -122,11 +143,26 @@
     return new TextDecoder().decode(h.subarray(ptr, end));
   }
   function lastError() { return M._oc_last_error ? cString(M._oc_last_error()) : "(no oc_last_error)"; }
+  /* Take a whole memory image of this same module (the Turbo hand-off): grow
+   * to its size through the allocator, so the module's own views follow, copy
+   * it in, zero the rest (as fresh pages are). web/ocean_worker.js says why
+   * this carries the run on exactly. */
+  function takeMemory(src) {
+    var need = src.byteLength, have = heap().byteLength;
+    if (have < need) {
+      var p = M._malloc(need - have + 65536);
+      if (p) M._free(p);
+      if (heap().byteLength < need) throw new Error("could not grow the page's memory to " + need + " bytes");
+    }
+    var dst = u8();
+    dst.set(new Uint8Array(src));
+    if (dst.length > need) dst.fill(0, need);
+  }
 
-  var W = 0, H = 0, D = 0, statsLen = 0;
-  var LIGHT = { on: false, L0: 1, k: 0 };   /* the engine's light field (E1; optional exports) */
+  var W = 0, H = 0, D = 0, statsLen = 0, HAS_VZ = false, HAS_EYE = false;
+  var LIGHT = { on: false, L0: 1, k: 0 };
   function readLight() {
-    var on = typeof M._oc_light_enabled === "function" && !!M._oc_light_enabled();
+    var on = has("oc_light_enabled") && !!M._oc_light_enabled();
     LIGHT = { on: on, L0: on ? M._oc_light_l0() : 1, k: on ? M._oc_light_kwater() : 0 };
     if (scene) scene.setLight(LIGHT);
   }
@@ -135,20 +171,437 @@
     statsLen = M._oc_stats_len();
     readLight();
   }
-  /* ?e1=1: the module's preset JSON with the page's &cfg keys on top (both flat
-   * objects). A &cfg that is not JSON goes through as it is, so oc_init says why. */
-  function e1Config(userCfg) {
-    var preset = cString(M._oc_e1_preset());
-    if (!userCfg) return preset;
-    try { return JSON.stringify(Object.assign(JSON.parse(preset), JSON.parse(userCfg))); }
-    catch (e) { return userCfg; }
+  function e1Preset() {
+    if (!has("oc_e1_preset")) return null;
+    try { return JSON.parse(cString(M._oc_e1_preset())); } catch (e) { return null; }
   }
-  function initWorld() {
-    var ok = withCString(INIT.cfg, function (ptr) {
-      return M._oc_init(INIT.seed, INIT.w, INIT.h, INIT.depth, INIT.pop, ptr);
-    });
-    if (!ok) throw new Error("oc_init failed: " + lastError());
+
+  /* ---------------- the world's settings ---------------- */
+  var runCfg = {};           /* the running world's cfg (keys that differ from the default) */
+  var initArgs = null;       /* the last successful oc_init's {seed, population, depth, cfg} (Replay) */
+  var extraCfg = {};         /* cfg keys from ?cfg= or a setup file that the sheet has no field for */
+  function cfgVal(key) { return Object.prototype.hasOwnProperty.call(runCfg, key) ? runCfg[key] : KEYS[key][0]; }
+  /* World size for a (re)start: the native 1920 x 1080, or the same area on
+   * its side on a portrait screen (the same food density and crowding, and a
+   * tank that fills a phone), unless ?w= / ?h= fix it. */
+  var URL_W = parseFloat(P.get("w")), URL_H = parseFloat(P.get("h"));
+  function isPortrait() { return innerHeight > innerWidth * 1.15; }
+  function fittedWorld() {
+    var p = isPortrait(), w = p ? 1080 : 1920, h = p ? 1920 : 1080;
+    if (isFinite(URL_W)) w = Math.round(Math.max(100, Math.min(20000, URL_W)));
+    if (isFinite(URL_H)) h = Math.round(Math.max(100, Math.min(20000, URL_H)));
+    return [w, h];
+  }
+  function updateFitButton() {
+    var f = fittedWorld();
+    el("fitbtn").hidden = !M || (f[0] === W && f[1] === H) || (isFinite(URL_W) || isFinite(URL_H));
+  }
+  var worldReady = false;
+  function initWorld(seed, population, depth, cfg, rawCfg) {
+    var size = fittedWorld();
+    var json = rawCfg !== undefined ? rawCfg : (Object.keys(cfg).length ? JSON.stringify(cfg) : "");
+    var ok = withCString(json, function (ptr) { return M._oc_init(seed >>> 0, size[0], size[1], depth, population, ptr); });
+    if (!ok) return false;
+    initArgs = { seed: seed >>> 0, population: population, depth: depth, cfg: cfg };
+    runCfg = Object.assign({}, cfg);
+    afterNewWorld();
+    return true;
+  }
+  /* a new world (oc_init or oc_reset), or one handed back by Turbo */
+  function afterNewWorld(fromTurbo) {
+    var w0 = W, h0 = H, d0 = D;
     readWorld();
+    if (scene && (W !== w0 || H !== h0 || D !== d0)) { scene.setWorld(W, H, D); labelHist(); }
+    applyDisplaySwitches();
+    estPrev.n = 0;
+    stepMs = 0;
+    if (!fromTurbo) {
+      selectedId = null; wantFollow = false;
+      if (scene && scene.following()) scene.setFollow(false);
+      if (window.EvoOceanDash) EvoOceanDash.reset();
+      sampleBucket = -1;
+      rates.reset();
+    }
+    dirtyHud = true;
+    updateFitButton();
+  }
+  /* the shim's display switches: the colour mode is the shim's (memory), the
+   * capture flag the world's, so both are set again after every new world and
+   * every Turbo hand-off */
+  function applyDisplaySwitches() {
+    if (has("oc_set_colour_mode")) M._oc_set_colour_mode(colourBrain ? 0 : 1);
+    if (has("oc_set_capture")) M._oc_set_capture(selectedId !== null ? 1 : 0);
+  }
+
+  /* ---- the sheet (built from EvoOceanConfig.TABS) ---- */
+  function decimals(x) { var s = String(x); var i = s.indexOf("."); return i < 0 ? (s.indexOf("e-") > 0 ? +s.split("e-")[1] : 0) : s.length - i - 1; }
+  function makeStepper(input, key, min, max) {
+    var wrap = document.createElement("span");
+    wrap.className = "stepper";
+    function button(sign, icon, label) {
+      var b = document.createElement("button");
+      b.type = "button"; b.tabIndex = -1;
+      b.setAttribute("aria-label", label);
+      b.innerHTML = "<svg class='i'><use href='#i-" + icon + "'/></svg>";
+      b.addEventListener("click", function () {
+        var st = CFG.BTN_STEP[key] || 1, v = parseFloat(input.value);
+        if (!Number.isFinite(v)) v = 0;
+        v = +(v + sign * st).toFixed(Math.max(decimals(st), 0) + 2);
+        v = +v.toFixed(Math.max(decimals(st), decimals(v) > 6 ? 6 : decimals(v)));
+        if (min !== undefined && v < min) v = min;
+        if (max !== undefined && v > max) v = max;
+        input.value = String(v);
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+      return b;
+    }
+    wrap.appendChild(button(-1, "minus", "less"));
+    wrap.appendChild(input);
+    wrap.appendChild(button(1, "plus", "more"));
+    return wrap;
+  }
+  function makeField(key) {
+    var def = KEYS[key][0], opt = KEYS[key][1] || {}, id = "o_" + key;
+    var row = document.createElement("div");
+    row.className = "field";
+    row.id = "f_" + key;
+    var left = document.createElement("span");
+    var name = document.createElement("label");
+    name.className = "name";
+    name.htmlFor = id;
+    var lt = document.createElement("span");
+    lt.className = "lt";
+    lt.textContent = LABELS[key] || key;
+    name.appendChild(lt);
+    if (LIVE[key]) {
+      var tag = document.createElement("span");
+      tag.className = "livetag";
+      tag.textContent = "live";
+      tag.title = "applies to the running world at once";
+      name.appendChild(tag);
+    }
+    var keyEl = document.createElement("span");
+    keyEl.className = "key";
+    keyEl.textContent = key + (CFG.HINTS[key] ? " · " + CFG.HINTS[key] : "");
+    left.appendChild(name);
+    left.appendChild(keyEl);
+    var ctl = document.createElement("span");
+    ctl.className = "ctl";
+    var input;
+    if (typeof def === "boolean" || opt.bit) {
+      input = document.createElement("input");
+      input.type = "checkbox";
+      input.className = "switch";
+      input.setAttribute("role", "switch");
+      input.checked = !!def;
+      ctl.appendChild(input);
+    } else if (opt.options) {
+      input = document.createElement("select");
+      opt.options.forEach(function (label, i) {
+        var o = document.createElement("option");
+        o.value = String(i); o.textContent = label;
+        input.appendChild(o);
+      });
+      input.value = String(def);
+      ctl.appendChild(input);
+    } else {
+      input = document.createElement("input");
+      input.type = "number";
+      input.inputMode = "decimal";
+      input.step = opt.step !== undefined ? String(opt.step) : "any";
+      if (opt.min !== undefined) input.min = String(opt.min);
+      if (opt.max !== undefined) input.max = String(opt.max);
+      input.value = String(def);
+      ctl.appendChild(makeStepper(input, key, opt.min, opt.max));
+    }
+    input.id = id;
+    if (LIVE[key]) input.addEventListener("change", function () { applyLive(key); });
+    row.appendChild(left);
+    row.appendChild(ctl);
+    attachTip(row, key);
+    return row;
+  }
+  function getVal(key) {
+    var def = KEYS[key][0], opt = KEYS[key][1] || {}, input = el("o_" + key);
+    if (typeof def === "boolean") return input.checked;
+    if (opt.bit) return input.checked ? 1 : 0;
+    var v = opt.options ? parseInt(input.value, 10) : parseFloat(input.value);
+    if (!Number.isFinite(v)) return def;
+    if (opt.int) v = Math.round(v);
+    return v;
+  }
+  function setVal(key, v) {
+    var def = KEYS[key][0], opt = KEYS[key][1] || {}, input = el("o_" + key);
+    if (!input) return;
+    if (typeof def === "boolean" || opt.bit) input.checked = v === true || v === 1;
+    else input.value = String(v);
+  }
+  function resetForm() { Object.keys(KEYS).forEach(function (k) { setVal(k, KEYS[k][0]); }); extraCfg = {}; }
+  /* a flat cfg object into the sheet: known keys into their fields, the rest kept aside */
+  function cfgToForm(cfg) {
+    Object.keys(cfg || {}).forEach(function (k) {
+      if (KEYS[k] && !ARGS[k]) setVal(k, cfg[k]);
+      else if (!ARGS[k]) extraCfg[k] = cfg[k];
+    });
+  }
+  function readForm() {
+    var cfg = {};
+    Object.keys(KEYS).forEach(function (k) {
+      if (ARGS[k]) return;
+      var v = getVal(k), def = KEYS[k][0];
+      if (typeof def === "boolean" ? v !== def : v !== def) cfg[k] = v;
+    });
+    Object.keys(extraCfg).forEach(function (k) { if (!(k in cfg)) cfg[k] = extraCfg[k]; });
+    return { seed: getVal("seed") >>> 0, population: getVal("population"), depth: getVal("depth"), cfg: cfg };
+  }
+  /* push one live knob into the running world (or the Turbo worker's) */
+  function applyLive(key) {
+    if (!M) return;
+    var v = getVal(key), num = typeof v === "boolean" ? (v ? 1 : 0) : v;
+    if (turboState === "turbo") {   /* Turbo owns the world: the worker applies it */
+      turboWorker.postMessage({ cmd: "set", key: key, value: num });
+      return;
+    }
+    if (turboState !== "live") { showNote("Turbo is starting or stopping: try again in a moment."); return; }
+    if (turboState !== "live" || !has("oc_set_param")) return;
+    var ok = withCString(key, function (p) { return M._oc_set_param(p, num); });
+    if (ok) liveApplied(key, v);
+    else showError((LABELS[key] || key) + ": " + lastError());
+  }
+  function liveApplied(key, v) {
+    if (v === KEYS[key][0]) delete runCfg[key]; else runCfg[key] = v;
+    if (key === "lightEnabled" || key === "L0" || key === "kWater") readLight();
+    showNote((LABELS[key] || key) + " is now " + (typeof v === "boolean" ? (v ? "on" : "off") : v) + " (live)");
+  }
+
+  var tabsEl = el("tabs"), panelsEl = el("panels"), currentTab = "run";
+  function buildSettings() {
+    CFG.TABS.forEach(function (tab) {
+      var b = document.createElement("button");
+      b.type = "button";
+      b.id = "tab-" + tab.id;
+      b.setAttribute("role", "tab");
+      b.setAttribute("aria-controls", "panel-" + tab.id);
+      b.textContent = tab.title;
+      b.addEventListener("click", function () { setSheetTab(tab.id); });
+      tabsEl.appendChild(b);
+      if (!tab.groups) return;
+      var panel = document.createElement("section");
+      panel.className = "panel";
+      panel.id = "panel-" + tab.id;
+      panel.dataset.tab = tab.id;
+      panel.setAttribute("role", "tabpanel");
+      if (tab.id === "ocean") panel.appendChild(presetBox());
+      tab.groups.forEach(function (g) {
+        var h = document.createElement("h3");
+        h.textContent = g[0];
+        panel.appendChild(h);
+        g[1].forEach(function (k) { panel.appendChild(makeField(k)); });
+      });
+      panelsEl.appendChild(panel);
+    });
+    el("panel-run").setAttribute("role", "tabpanel");
+    attachTip(el("f_governor"), "governor");
+    attachTip(el("f_colourBrain"), "colourBrain");
+    attachTip(el("f_followLight"), "followLight");
+    var saved = store("evo_boids.ocean.tab");
+    setSheetTab(saved && el("panel-" + saved) ? saved : "run");
+  }
+  /* the Water tab's "Tuned E1 preset": its keys into the sheet */
+  function presetBox() {
+    var box = document.createElement("div");
+    box.className = "preset";
+    box.innerHTML = "<button type='button' class='btn' id='e1btn'><svg class='i'><use href='#i-restart'/></svg>Use the tuned E1 preset</button>" +
+      "<p>The E1 physics as tuned: surface waves, a gentle deep current with food drifting in it, light that fades with depth, and depth costs scaled to each fish's metabolism. Puts its settings in the tabs; Restart applies them.</p>";
+    box.querySelector("#e1btn").addEventListener("click", function () {
+      var p = e1Preset();
+      if (!p) { showError("this module has no E1 preset (oc_e1_preset)"); return; }
+      cfgToForm(p);
+      updateNeeds(); updateTabDots(); setPending(true);
+      showNote("The E1 preset is in the settings. Restart to apply.");
+      this.blur();
+    });
+    return box;
+  }
+  function setSheetTab(id) {
+    currentTab = id;
+    CFG.TABS.forEach(function (tab) {
+      var on = tab.id === id;
+      el("tab-" + tab.id).setAttribute("aria-selected", on ? "true" : "false");
+      el("tab-" + tab.id).tabIndex = on ? 0 : -1;
+      el("panel-" + tab.id).hidden = !on;
+    });
+    panelsEl.scrollTop = 0;
+    hideTip();
+    store("evo_boids.ocean.tab", id);
+  }
+  tabsEl.addEventListener("keydown", function (e) {
+    if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
+    var ids = CFG.TABS.map(function (t) { return t.id; });
+    var i = (ids.indexOf(currentTab) + (e.key === "ArrowRight" ? 1 : -1) + ids.length) % ids.length;
+    setSheetTab(ids[i]);
+    el("tab-" + ids[i]).focus();
+    e.preventDefault();
+  });
+  function updateTabDots() {
+    CFG.TABS.forEach(function (tab) {
+      if (!tab.groups) return;
+      var changed = tab.groups.some(function (g) {
+        return g[1].some(function (k) { return k !== "seed" && k !== "population" && getVal(k) !== KEYS[k][0]; });
+      });
+      var b = el("tab-" + tab.id), dot = b.querySelector(".dot");
+      if (changed && !dot) { dot = document.createElement("span"); dot.className = "dot"; dot.title = "changed from the default"; b.appendChild(dot); }
+      else if (!changed && dot) b.removeChild(dot);
+    });
+  }
+  /* Settings that do nothing with the others as they are: dimmed, with the
+   * reason under their name. Each rule: [keys, () => "" (fine) or the reason]. */
+  function hasCurrent() { return getVal("currentStrength") > 0; }
+  function hasPredators() { return getVal("predatorCount") > 0; }
+  var NEEDS = [
+    [["foodPatchRadius", "foodDepthMode"], function () { return getVal("foodPatches") > 0 ? "" : "needs food patches above 0"; }],
+    [["foodDepthSpread"], function () { return getVal("foodPatches") > 0 && getVal("foodDepthMode") === 1 ? "" : "needs food patches, each at its own depth"; }],
+    [["foodDrift", "currentMode", "currentDrift", "deepCurrent"], function () { return hasCurrent() ? "" : "needs a current (strength above 0)"; }],
+    [["currentEddies", "currentCore"], function () { return hasCurrent() && getVal("currentMode") === 0 ? "" : "needs a current in the eddies shape"; }],
+    [["predatorEconomy", "predatorSpeed", "predatorPerception", "predatorCaptureRadius", "predatorCooldown"],
+      function () { return hasPredators() ? "" : "needs predators above 0"; }],
+    [["predatorMeal", "predatorMetabolism", "predatorReproEnergy", "predatorMaxAge", "predatorMinPopulation",
+      "predatorMaxPopulation", "predatorInheritance"],
+      function () { return hasPredators() && getVal("predatorEconomy") ? "" : "needs predators, with their economy on"; }],
+    [["predatorTraitMutation"], function () {
+      return hasPredators() && getVal("predatorEconomy") && getVal("predatorInheritance") ? "" : "needs hunters inherit traits on"; }],
+    [["maxTurnRate"], function () { return getVal("triangularMotion") ? "" : "needs fast-swims-straight on"; }],
+    [["steerFrame"], function () { return getVal("triangularMotion") ? "no effect with fast-swims-straight on: it turns by steer x already" : ""; }],
+    [["reproSoftWidth", "reproGracePeriod"], function () { return getVal("reproMaxDistance") >= 0 ? "" : "needs a breeding distance limit of 0 or more"; }],
+    [["bodyMutation", "sizeFight"], function () { return getVal("bodyModel") ? "" : "needs evolving bodies on (without them every fish is size 1)"; }],
+    [["sizeDrift"], function () {
+      if (!getVal("bodyModel")) return "needs evolving bodies on (without them every fish is size 1)";
+      return hasCurrent() || getVal("waveSpeed") > 0 ? "" : "needs a current or waves to drift in";
+    }],
+    [["kMouth"], function () { return getVal("mouthGate") ? "" : "needs the mouth gate on"; }],
+    [["waveBand", "waveGravity"], function () { return getVal("waveSpeed") > 0 ? "" : "needs waves (strength above 0)"; }],
+    [["L0", "kWater"], function () { return getVal("lightEnabled") ? "" : "needs the light field on"; }],
+    [["depthCostScaled"], function () { return getVal("cHold") > 0 || getVal("cPress") > 0 ? "" : "needs a depth cost above 0"; }],
+    [["eye", "eyeOnly"], function () { return HAS_EYE ? "" : "needs the eye build of the module; this page runs the plain Ocean build"; }],
+    [["eyeCode"], function () {
+      if (!HAS_EYE) return "needs the eye build of the module; this page runs the plain Ocean build";
+      return getVal("eye") ? "" : "needs the compound eye on";
+    }]
+  ];
+  function updateNeeds() {
+    NEEDS.forEach(function (rule) {
+      var why = rule[1]();
+      rule[0].forEach(function (k) {
+        var row = el("f_" + k);
+        if (!row) return;
+        var hint = row.querySelector(".needs");
+        if (!hint) { hint = document.createElement("span"); hint.className = "needs"; row.appendChild(hint); }
+        row.classList.toggle("inert", !!why);
+        hint.textContent = why;
+      });
+    });
+  }
+  function setPending(on) {
+    var b = el("restart");
+    b.classList.toggle("pending", on);
+    b.querySelector("span").textContent = on ? "Restart to apply" : "Restart";
+  }
+  function onEdit(e) {
+    var t = e.target;
+    updateNeeds();
+    updateTabDots();
+    if (!t || !t.id || t.id.indexOf("o_") !== 0 || LIVE[t.id.slice(2)]) return;   /* live ones apply by themselves */
+    setPending(true);
+  }
+
+  /* ---- restart, new world, replay, randomize, setups ---- */
+  function guardTurbo() {
+    if (turboState === "live") return false;
+    showNote("Stop Turbo first.");
+    return true;
+  }
+  function restart() {
+    if (!M || guardTurbo()) return false;
+    clearError();
+    var f = readForm();
+    if (!initWorld(f.seed, f.population, f.depth, f.cfg)) {
+      showError("Couldn't start that world: " + lastError());
+      return false;
+    }
+    setPending(false);
+    el("randnote").textContent = "";
+    writeUrl();
+    return true;
+  }
+  function newWorld() {
+    if (!M || guardTurbo()) return;
+    setVal("seed", (Math.random() * 0x100000000) >>> 0);
+    if (restart()) toast("A new world, seed " + getVal("seed") + ".");
+  }
+  /* this world again from its start: oc_reset (the last init's seed and
+   * config; live changes since are dropped), and the sheet back to them */
+  function replay() {
+    if (!M || guardTurbo() || !initArgs) return;
+    if (!M._oc_reset()) { showError("oc_reset failed: " + lastError()); return; }
+    resetForm();
+    setVal("seed", initArgs.seed); setVal("population", initArgs.population); setVal("depth", initArgs.depth);
+    cfgToForm(initArgs.cfg);
+    runCfg = Object.assign({}, initArgs.cfg);
+    updateNeeds(); updateTabDots(); setPending(false);
+    afterNewWorld();
+    toast("Replaying seed " + initArgs.seed + " from its start.");
+  }
+  function randomize() {
+    if (!M || guardTurbo()) return;
+    var pick = CFG.draw(Math.random, KEYS.population[0], e1Preset());
+    resetForm();
+    Object.keys(pick.set).forEach(function (k) { setVal(k, pick.set[k]); });
+    setVal("population", pick.population);
+    setVal("seed", (Math.random() * 0x100000000) >>> 0);
+    updateNeeds(); updateTabDots();
+    if (restart()) {
+      var what = pick.population + " fish" + (pick.labels.length ? " · " + pick.labels.join(" · ") : " · the default world");
+      el("randnote").textContent = "Picked: " + what + ". Every setting is in the tabs above.";
+      toast("New world: " + what);
+    }
+  }
+  /* a Restart writes the setup into the address, so a reload or a shared
+   * link is this world */
+  function writeUrl() {
+    if (!initArgs) return;
+    try {
+      var u = new URL(location.href);
+      u.searchParams.set("seed", String(initArgs.seed));
+      if (initArgs.population !== KEYS.population[0]) u.searchParams.set("pop", String(initArgs.population)); else u.searchParams.delete("pop");
+      if (initArgs.depth !== KEYS.depth[0]) u.searchParams.set("depth", String(initArgs.depth)); else u.searchParams.delete("depth");
+      if (Object.keys(initArgs.cfg).length) u.searchParams.set("cfg", JSON.stringify(initArgs.cfg)); else u.searchParams.delete("cfg");
+      u.searchParams.delete("e1");   /* its keys are in cfg now */
+      history.replaceState(null, "", u);
+    } catch (e) { /* file:// or a sandboxed frame */ }
+  }
+  function saveSetup() {
+    if (!initArgs) return;
+    var setup = { format: "evo_ocean_setup", version: 1, seed: initArgs.seed, population: initArgs.population,
+                  depth: initArgs.depth, width: W, height: H, config: initArgs.cfg };
+    var url = URL.createObjectURL(new Blob([JSON.stringify(setup, null, 2)], { type: "application/json" }));
+    var a = document.createElement("a");
+    a.href = url; a.download = "evo_ocean_setup_seed" + initArgs.seed + ".json";
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+    toast("Saved this world's setup (seed " + initArgs.seed + ").");
+  }
+  function loadSetup(text) {
+    var s;
+    try { s = JSON.parse(text); } catch (e) { showError("That file is not JSON: " + e.message); return; }
+    if (!s || s.format !== "evo_ocean_setup" || typeof s.config !== "object") { showError("That file is not an Ocean setup (Save setup makes one)."); return; }
+    resetForm();
+    if (Number.isFinite(s.seed)) setVal("seed", s.seed >>> 0);
+    if (Number.isFinite(s.population)) setVal("population", s.population);
+    if (Number.isFinite(s.depth)) setVal("depth", s.depth);
+    cfgToForm(s.config);
+    updateNeeds(); updateTabDots();
+    if (restart()) showNote("Setup loaded: seed " + getVal("seed") + ", replaying from its start.");
   }
 
   /* ---------------- per-frame data ---------------- */
@@ -168,23 +621,17 @@
       preds: new Float32Array(buf, M._oc_predator_data(), pc * 3),
       predDepth: new Float32Array(buf, M._oc_predator_depth(), pc),
       stats: new Float64Array(buf, M._oc_stats(), statsLen),
-      /* the fish's pitch (s.vz, + = sinking, tan of the angle): the engine's
-       * oc_creature_vz when it has one, else estimated (vzEstimate) */
       vz: HAS_VZ ? new Float32Array(buf, M._oc_creature_vz(), n) : null,
-      curActive: false, curGrid: null, curCols: 0, curRows: 0   /* §4 exports no current grid */
+      curActive: false, curGrid: null, curCols: 0, curRows: 0
     };
   }
-
   /* Without oc_creature_vz: each fish's pitch from how its depth changed over
-   * the distance its head swam since the last frame (wrapping), smoothed, and
-   * keyed by id so births and deaths don't shuffle it. Same units as the
-   * engine's vz (depth per unit of horizontal travel). */
-  var HAS_VZ = false;
+   * the distance its head swam since the last frame, smoothed, keyed by id. */
   function vzBufs(cap) {
     return { n: 0, ids: new Float64Array(cap), x: new Float32Array(cap), y: new Float32Array(cap),
              d: new Float32Array(cap), vz: new Float32Array(cap) };
   }
-  var estPrev = vzBufs(0), estNext = vzBufs(0);   /* last frame's, and the set being written */
+  var estPrev = vzBufs(0), estNext = vzBufs(0);
   function vzEstimate(s, stepped) {
     var n = s.n, prev = estPrev, at = new Map();
     for (var j = 0; j < prev.n; j++) at.set(prev.ids[j], j);
@@ -206,29 +653,41 @@
       B.ids[c] = id; B.x[c] = x; B.y[c] = y; B.d[c] = d; B.vz[c] = v;
     }
     B.n = n;
-    estNext = estPrev; estPrev = B;   /* B stays intact until the frame after next */
+    estNext = estPrev; estPrev = B;
     return B.vz.subarray(0, n);
   }
 
   /* ---------------- state ---------------- */
   var scene = null, lastS = null;
   var paused = false, stepOnce = false;
-  var speedIdx = Math.max(0, SPEEDS.indexOf(Math.round(num("speed", 1, 1, 64))));
-  var stepMs = 0;                 /* ema of one oc_step, ms */
-  var lastSteps = 0;              /* steps actually run last frame (the budget may cut the ask) */
-  var selectedId = null, wantFollow = false;
+  var speedIdx = Math.max(0, SPEEDS.indexOf(Math.round(Math.max(1, Math.min(64, parseFloat(P.get("speed")) || 1)))));
+  var stepMs = 0, lastSteps = 0;
+  var selectedId = null, wantFollow = false, everSelected = false;
   var animT = 0, lastNow = 0;
   var fpsFrames = 0, fpsT = 0, fps = 0;
-
+  var governorOn = true, colourBrain = false;
+  var summary = null, summaryT = 0;   /* oc_summary, refreshed twice a second for the readout */
   function speed() { return SPEEDS[speedIdx]; }
   function stepsThisFrame() {
     var ask = speed();
-    if (ask <= 1 || !(stepMs > 0)) return ask;
+    if (!governorOn || ask <= 1 || !(stepMs > 0)) return ask;
     return Math.max(1, Math.min(ask, Math.floor(STEP_BUDGET_MS / stepMs)));
   }
-
+  function setPaused(on) {
+    paused = on;
+    var b = el("pausebtn");
+    b.querySelector("use").setAttribute("href", paused ? "#i-play" : "#i-pause");
+    b.setAttribute("aria-label", paused ? "play" : "pause");
+    b.title = (paused ? "Play" : "Pause") + " (Space)";
+    dirtyHud = true;
+  }
+  function changeSpeed(d) {
+    speedIdx = Math.max(0, Math.min(SPEEDS.length - 1, speedIdx + d));
+    el("speedlabel").textContent = speed() + "×";
+    dirtyHud = true;
+  }
   function indexOfId(s, id) {
-    if (id === null) return -1;
+    if (id === null || !s) return -1;
     for (var i = 0; i < s.n; i++) if (s.ids[i] === id) return i;
     return -1;
   }
@@ -238,66 +697,62 @@
     if (s.n > 1 && s.ids[i] === notId) i = (i + 1 + Math.floor(Math.random() * (s.n - 1))) % s.n;
     return i;
   }
-  /* F: follow a random fish (or, the first time, the one already marked) */
+  function select(id) {
+    var was = selectedId;
+    selectedId = id;
+    if (id !== null) everSelected = true;
+    if ((was === null) !== (id === null) && M && has("oc_set_capture")) M._oc_set_capture(id !== null ? 1 : 0);
+    dirtyHud = true;
+  }
+  /* F: follow the selected fish; again (or with none): a random one */
   function follow() {
     var s = lastS;
-    if (!s || !s.n) return;
+    if (!s || !s.n || turboState !== "live") return;
     var idx = !scene.following() ? indexOfId(s, selectedId) : -1;
     if (idx < 0) idx = randomFish(s, selectedId);
-    selectedId = s.ids[idx];
+    select(s.ids[idx]);
     wantFollow = true;
     if (!scene.following()) scene.setFollow(true);
-    dirtyHud = true;
   }
   function unfollow() {
     wantFollow = false;
     if (scene.following()) scene.setFollow(false);
-    selectedId = null;
-    dirtyHud = true;
   }
   function onFollowChange(on) {
-    el("b-follow").setAttribute("aria-pressed", on ? "true" : "false");
-    /* the user dragged/refit the camera away: stop wanting it */
+    el("followbtn").setAttribute("aria-pressed", on ? "true" : "false");
+    el("followbtn").title = on ? "Stop following (F or Esc)" : "Follow this fish (F)";
     if (!on) wantFollow = false;
-  }
-  /* R: a new world (new seed); Shift+R: replay this one from the start.
-   * Either way the camera stays where it is — C is the key that moves it. */
-  function reset(replay) {
-    if (scene.following()) scene.setFollow(false);
-    wantFollow = false; selectedId = null;
-    var w0 = W, h0 = H, d0 = D;
-    if (replay) {
-      if (!M._oc_reset()) { fail("oc_reset failed", lastError()); return; }
-      readWorld();
-    } else {
-      INIT.seed = (Math.random() * 4294967296) >>> 0;
-      try { initWorld(); } catch (err) { fail("oc_init failed", lastError()); return; }
-      try {
-        var u = new URL(location.href);
-        u.searchParams.set("seed", String(INIT.seed));
-        history.replaceState(null, "", u);   /* a reload keeps this world */
-      } catch (err) { /* file:// or a sandboxed frame: the seed is in the HUD */ }
-    }
-    if (W !== w0 || H !== h0 || D !== d0) scene.setWorld(W, H, D);
-    estPrev.n = 0;   /* ids start over: forget the old fish's pitch */
-    rates.reset();
-    stepMs = 0;
-    dirtyHud = true;
-  }
-  function setPaused(on) {
-    paused = on;
-    el("b-pause").setAttribute("aria-pressed", on ? "true" : "false");
-    el("b-pause").textContent = on ? "Run" : "Pause";
-    dirtyHud = true;
-  }
-  function changeSpeed(d) {
-    speedIdx = Math.max(0, Math.min(SPEEDS.length - 1, speedIdx + d));
-    dirtyHud = true;
+    if (on) toast(coarseMQ.matches ? "Following. Drag to circle around it." : "Following. Drag to circle around it; Esc stops.");
+    updateLight();
   }
 
-  /* ---------------- the HUD ---------------- */
-  var dirtyHud = true, hudT = 0;
-  var histRows = [];
+  /* ---- the flashlight (drawing only; scene.setFlashlight) ----
+   * While following: on unless "Flashlight while following" is off. Else:
+   * the dock button / L. The button shows the light as it is and toggles
+   * whichever of the two is in charge. */
+  var followLight = store("evo_boids.ocean.followLight") !== "0", lightAnywhere = false;
+  function lightOn() { return scene && scene.following() ? followLight : lightAnywhere; }
+  function updateLight() {
+    var on = !!lightOn();
+    if (scene) scene.setFlashlight(on);
+    var b = el("lightbtn");
+    b.setAttribute("aria-pressed", on ? "true" : "false");
+    b.title = (on ? "Flashlight on (L)" : "Flashlight (L)") + ": clear light where you look; on by itself while you follow a fish";
+  }
+  function toggleLight() {
+    if (scene && scene.following()) {
+      followLight = !followLight;
+      el("followLight").checked = followLight;
+      store("evo_boids.ocean.followLight", followLight ? "1" : "0");
+    } else {
+      lightAnywhere = !lightAnywhere;
+      if (lightAnywhere) toast("Flashlight on: true colours where you look, without the water's tint.");
+    }
+    updateLight();
+  }
+
+  /* ---------------- the readout and the stat panel ---------------- */
+  var dirtyHud = true, hudT = 0, histRows = [];
   function buildHist() {
     var box = el("hist");
     for (var i = 0; i < 8; i++) {
@@ -305,7 +760,6 @@
       var lab = document.createElement("span");
       var track = document.createElement("div"); track.className = "track";
       var bar = document.createElement("div"); bar.className = "bar";
-      /* light fades and cools with depth, like the tank */
       var t = i / 7;
       bar.style.background = "oklch(" + (0.84 - 0.30 * t).toFixed(3) + " " + (0.15 - 0.04 * t).toFixed(3) + " " + (150 + 90 * t).toFixed(0) + ")";
       var pct = document.createElement("b");
@@ -318,68 +772,436 @@
     for (var i = 0; i < 8; i++) histRows[i].lab.textContent = Math.round(D * i / 8);
     histRows[0].lab.title = "surface";
   }
-  /* births / reseeds per 1000 frames, from a sliding window of samples
-   * (the counters are cumulative; a drop means the world was reset) */
+  /* births / deaths per simulated second over a sliding window (the counters
+   * are cumulative; a drop means a new world) */
   var rates = {
     q: [],
     reset: function () { this.q.length = 0; },
-    push: function (frame, births, reseeds) {
+    push: function (frame, b, d) {
       var q = this.q, last = q[q.length - 1];
-      if (last && (frame < last.f || births < last.b || reseeds < last.r)) q.length = 0;
-      if (!last || frame !== last.f) q.push({ f: frame, b: births, r: reseeds });
+      if (last && (frame < last.f || b < last.b)) q.length = 0;
+      if (!last || frame !== last.f) q.push({ f: frame, b: b, d: d });
       while (q.length > 2 && q[q.length - 1].f - q[0].f > 6000) q.shift();
     },
-    per1k: function (key) {
+    perSec: function (key) {
       var q = this.q;
       if (q.length < 2) return null;
-      var a = q[0], b = q[q.length - 1], df = b.f - a.f;
-      return df > 0 ? (b[key] - a[key]) * 1000 / df : null;
+      var a = q[0], b = q[q.length - 1], df = (b.f - a.f) * DT;
+      return df > 0 ? (b[key] - a[key]) / df : null;
     }
   };
   function fmtInt(v) { return Math.round(v).toLocaleString("en-US"); }
-  function setText(id, html) { var e = el(id); if (e._v !== html) { e._v = html; e.innerHTML = html; } }
+  function fmtTime(s) { s = Math.max(0, Math.round(s)); var m = Math.floor(s / 60); return m ? m + " min " + (s % 60) + " s" : s + " s"; }
+  function setHtml(id, html) { var e = el(id); if (e && e._v !== html) { e._v = html; e.innerHTML = html; } }
+  function setTxt(id, t) { var e = el(id); if (e && e._v !== t) { e._v = t; e.textContent = t; } }
+  var statOpen = false;
+  function setStatPanel(open) {
+    statOpen = open;
+    el("statpanel").hidden = !open;
+    el("readout").setAttribute("aria-expanded", open ? "true" : "false");
+    dirtyHud = true;
+  }
   function updateHud(s, now) {
-    if (!dirtyHud && now - hudT < 250) return;
+    if (!dirtyHud && now - hudT < 500) return;
     dirtyHud = false; hudT = now;
+    if (has("oc_summary") && (!summary || now - summaryT > 450)) {
+      summary = Array.prototype.slice.call(new Float64Array(heap(), M._oc_summary(), M._oc_summary_len()));
+      summaryT = now;
+    }
     var st = s.stats, g = function (k) { return STATS[k] < st.length ? st[STATS[k]] : NaN; };
-    var frame = g("frame"), births = g("births"), reseeds = g("reseeds");
-    rates.push(frame, births, reseeds);
-    var rb = rates.per1k("b"), rr = rates.per1k("r");
-    /* <small class="x">: extras a narrow screen leaves out */
-    setText("h-pop", fmtInt(s.n) + ' <small class="x">· ' + fmtInt(s.fc) + " food · " + s.pc + " pred</small>");
-    setText("h-frame", fmtInt(frame) + ' <small class="x">· ' + (frame * DT / 60).toFixed(1) + " min</small>");
-    setText("h-seed", String(INIT.seed));
-    setText("h-births", fmtInt(births) + (rb !== null ? ' <small class="x">· ' + rb.toFixed(1) + "/1k fr</small>" : ""));
-    setText("h-reseeds", fmtInt(reseeds) + (rr !== null ? ' <small class="x">· ' + rr.toFixed(1) + "/1k fr</small>" : ""));
-    setText("h-deaths", fmtInt(g("deaths")));
-    setText("h-depth", g("depthMean").toFixed(0) + " ± " + g("depthSd").toFixed(0) + ' <small class="x">of ' + D.toFixed(0) + "</small>");
-    /* steps run per frame, and what was asked when the step budget cut it */
+    var frame = g("frame");
+    rates.push(frame, g("births"), g("deaths"));
+    setTxt("ro-fish", fmtInt(s.n));
+    setTxt("ro-gen", summary ? String(Math.round(summary[13])) : "–");
+    setTxt("ro-depth", g("depthMean").toFixed(0));
+    setTxt("ro-fps", String(fps));
+    el("ro-fps").className = "num" + (fps && fps < 45 ? " warn" : "");
+    if (!statOpen) return;
+    var rb = rates.perSec("b"), rd = rates.perSec("d");
+    var rows = [
+      ["fish", fmtInt(s.n)],
+      ["food", fmtInt(s.fc)],
+      ["predators", String(s.pc)],
+      ["time", fmtTime(frame * DT) + " <small>· frame " + fmtInt(frame) + "</small>"],
+      ["seed", initArgs ? String(initArgs.seed) : "–"],
+      ["births", fmtInt(g("births")) + (rb !== null ? " <small>· " + rb.toFixed(1) + "/s</small>" : "")],
+      ["deaths", fmtInt(g("deaths")) + (rd !== null ? " <small>· " + rd.toFixed(1) + "/s</small>" : "")],
+      ["founders added", fmtInt(g("reseeds"))]
+    ];
+    if (summary) {
+      rows.push(["died", "<small>starved </small>" + fmtInt(summary[3]) + "<small> · old </small>" + fmtInt(summary[4]) + "<small> · caught </small>" + fmtInt(summary[2])]);
+      rows.push(["generation", summary[12].toFixed(1) + " <small>avg · " + Math.round(summary[13]) + " max</small>"]);
+      rows.push(["family lines", fmtInt(summary[19])]);
+      rows.push(["neutral depth", (summary[14] * D).toFixed(0) + " <small>± " + (summary[15] * D).toFixed(0) + "</small>"]);
+    }
+    rows.push(["depth", g("depthMean").toFixed(0) + " ± " + g("depthSd").toFixed(0) + " <small>of " + D.toFixed(0) + "</small>"]);
     var ask = speed(), ran = paused ? ask : lastSteps;
-    setText("h-speed", ran + (ran !== ask ? "<small>/" + ask + "</small>" : "") +
-            ' <small><span class="x">steps/frame </span>· ' + fps + " fps</small>");
+    rows.push(["steps / frame", ran + (ran !== ask ? "<small>/" + ask + "</small>" : "") + " <small>· " + fps + " fps</small>"]);
+    setHtml("statlist", rows.map(function (r) { return "<dt>" + r[0] + "</dt><dd>" + r[1] + "</dd>"; }).join(""));
     for (var i = 0; i < 8; i++) {
       var k = STATS.hist0 + i, v = k < st.length ? st[k] : 0;
       v = isFinite(v) ? v : 0;
       histRows[i].bar.style.width = Math.min(100, v * 200).toFixed(1) + "%";   /* full track = 50 % */
       histRows[i].pct.textContent = Math.round(v * 100) + "%";
     }
-    var state = el("h-state");
-    state.className = "state" + (paused ? " paused" : "");
-    state.textContent = paused ? "paused" : (scene.following() ? "following a fish" : "");
-    var sel = el("h-sel"), idx = indexOfId(s, selectedId);
-    if (idx >= 0) {
-      var c = "rgb(" + s.colors[3 * idx] + "," + s.colors[3 * idx + 1] + "," + s.colors[3 * idx + 2] + ")";
-      setText("h-sel", '<i style="background:' + c + '"></i>fish #' + selectedId + " · depth " + s.depth[idx].toFixed(0));
-    } else if (sel._v !== "") { sel._v = ""; sel.innerHTML = ""; }
+    var notes = [];
+    if (paused) notes.push("Paused. Space or ▶ runs it; . steps once.");
+    if (turboState !== "live") notes.push("Turbo is running: this picture waits for it.");
+    if (scene && scene.following()) notes.push("Following a fish" + (lightOn() ? ", with the flashlight on." : "."));
+    setTxt("statnotes", notes.join(" "));
   }
 
+  /* ---------------- the fish card ---------------- */
+  var cardEl = el("fishcard"), inetCanvas = el("inetc"), inetCtx = inetCanvas.getContext("2d");
+  var portraitEl = el("iportrait"), portraitCtx = portraitEl.getContext("2d");
+  var cardExpanded = window.innerWidth >= 600, cardCache = {}, cardFor = null, cardFlip = false;
+  el("iexpand").setAttribute("aria-expanded", cardExpanded ? "true" : "false");
+  var sensorNames = null, actionNames = null, netNodes = [], netHover = -1, uiFont = "";
+  function prettyName(n) { return String(n).replace(/_/g, " ").toLowerCase(); }
+  function brainShape() {
+    if (!sensorNames) {
+      sensorNames = has("oc_sensor_names") ? cString(M._oc_sensor_names()).split(",").map(prettyName) : [];
+      actionNames = has("oc_action_names") ? cString(M._oc_action_names()).split(",").map(prettyName) : [];
+    }
+    return { nS: has("oc_num_senses") ? M._oc_num_senses() : sensorNames.length,
+             nH: has("oc_num_hidden") ? M._oc_num_hidden() : 12,
+             nA: has("oc_num_actions") ? M._oc_num_actions() : actionNames.length };
+  }
+  function cardText(id, v) { if (cardCache[id] !== v) { cardCache[id] = v; el(id).textContent = v; } }
+  function setBar(id, f, tick) {
+    f = Math.max(0, Math.min(1, f));
+    var key = f.toFixed(3) + "|" + (tick === undefined ? "" : tick.toFixed(3));
+    if (cardCache[id + "bar"] === key) return;
+    cardCache[id + "bar"] = key;
+    var bar = el(id);
+    bar.firstElementChild.style.transform = "scaleX(" + f.toFixed(3) + ")";
+    var t = bar.querySelector(".tick");
+    if (t) t.style.left = "calc(" + ((tick || 0) * 100).toFixed(1) + "% - 1px)";
+  }
+  function showCard() {
+    cardEl.hidden = false;
+    document.body.classList.add("card-open");
+    cardEl.classList.toggle("expanded", cardExpanded);
+    el("iexpand").setAttribute("aria-expanded", cardExpanded ? "true" : "false");
+    cardCache = {};
+  }
+  function hideCard() {
+    if (cardEl.hidden) return;
+    cardEl.hidden = true;
+    cardFor = null; netHover = -1; cardFlip = false;
+    cardEl.classList.remove("flip");
+    document.body.classList.remove("card-open");
+  }
+  function placeCard(fx, fy) {
+    var r = cardEl.getBoundingClientRect(), m = 24;
+    if (fx < r.left - m || fx > r.right + m || fy < r.top - m || fy > r.bottom + m) return;
+    var flip = window.innerWidth < 600 ? fy > window.innerHeight / 2 : fx > window.innerWidth / 2;
+    if (flip === cardFlip) return;
+    cardFlip = flip;
+    cardEl.classList.toggle("flip", flip);
+  }
+  function drawPortrait(rgb, size, elong) {
+    var dpr = window.devicePixelRatio || 1, w = 56, h = 40;
+    if (portraitEl.width !== w * dpr) { portraitEl.width = w * dpr; portraitEl.height = h * dpr; }
+    var g = portraitCtx;
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.clearRect(0, 0, w, h);
+    var k = 3.0 * bodyScale(size), len = 1 + 0.35 * Math.tanh(4 * (elong - 1));
+    g.translate(w / 2 + 4, h / 2);
+    g.scale(len, 1);
+    g.fillStyle = "rgb(" + rgb.join(",") + ")";
+    g.beginPath();
+    g.moveTo(-9 * k / 1.2, 0);
+    g.bezierCurveTo(-7 * k / 1.2, -4.2 * k / 1.2, 2, -4.4 * k / 1.2, 6, -1.4);
+    g.lineTo(11, -5.5); g.lineTo(9.5, 0); g.lineTo(11, 5.5); g.lineTo(6, 1.4);
+    g.bezierCurveTo(2, 4.4 * k / 1.2, -7 * k / 1.2, 4.2 * k / 1.2, -9 * k / 1.2, 0);
+    g.fill();
+    g.fillStyle = "rgba(4,14,15,0.9)";
+    g.beginPath(); g.arc(-6.2 * k / 1.2, -1.2, 1.1, 0, Math.PI * 2); g.fill();
+    g.setTransform(1, 0, 0, 1, 0, 0);
+  }
+  /* oc_inspect(idx) right after the sync: its numbers, then the card */
+  function inspect(idx) {
+    if (!has("oc_inspect") || !M._oc_inspect(idx)) return null;
+    var buf = heap(), sh = brainShape(), nc = M._oc_inspect_conn_count();
+    return {
+      info: new Float64Array(buf, M._oc_inspect_info(), M._oc_inspect_len()),
+      sensors: new Float32Array(buf, M._oc_inspect_sensors(), sh.nS),
+      hidden: new Float32Array(buf, M._oc_inspect_hidden(), sh.nH),
+      actions: new Float32Array(buf, M._oc_inspect_actions(), sh.nA),
+      connCount: nc, conns: new Float32Array(buf, M._oc_inspect_conns(), nc * 5), shape: sh
+    };
+  }
+  function updateCard(s) {
+    var idx = s.selIdx, f = idx >= 0 && turboState === "live" ? inspect(idx) : null;
+    if (!f) { hideCard(); return; }
+    if (cardEl.hidden) showCard();
+    var p = scene.project(s, idx);
+    if (p) placeCard(p.x, p.y);
+    var info = f.info, id = Math.round(info[0]);
+    var rgb = [s.colors[3 * idx], s.colors[3 * idx + 1], s.colors[3 * idx + 2]];
+    var pkey = id + "|" + rgb.join() + "|" + info[4].toFixed(2) + "|" + info[5].toFixed(2);
+    if (cardFor !== pkey) { cardFor = pkey; drawPortrait(rgb, info[4], info[5]); }
+    cardText("ititle", "Fish #" + id);
+    cardText("isub", "Generation " + Math.round(info[6]) + " · family #" + Math.round(info[7]) + " · " + Math.round(info[11]) + " genes" +
+             (cfgVal("bodyModel") ? " · body " + info[4].toFixed(2) + " × " + info[5].toFixed(2) : ""));
+    var reproE = cfgVal("reproEnergy"), maxAge = cfgVal("maxAge"), maxSpd = cfgVal("maxSpeed"), pitchMax = cfgVal("pitchMax");
+    cardText("ienergyv", info[2].toFixed(1));
+    setBar("ienergy", info[2] / (reproE * 2), 0.5);
+    el("ienergy").title = info[2] >= reproE ? "enough energy to breed" : "needs " + reproE + " to breed";
+    cardText("iagev", Math.round(info[3]) + " s");
+    setBar("iage", info[3] / maxAge);
+    cardText("ispeedv", String(Math.round(info[1])));
+    setBar("ispeed", info[1] / maxSpd);
+    cardText("idepthv", info[8].toFixed(0) + " of " + D.toFixed(0));
+    setBar("idepth", info[8] / D, info[9]);
+    el("idepth").title = "the tick: its neutral depth";
+    cardText("ibuoyv", (info[9] * D).toFixed(0));
+    setBar("ibuoy", info[9]);
+    var deg = Math.atan(info[10]) * 180 / Math.PI;
+    cardText("ipitchv", Math.abs(deg) < 0.5 ? "level" : Math.abs(deg).toFixed(0) + "° " + (deg > 0 ? "down" : "up"));
+    setBar("ipitch", 0.5 + 0.5 * Math.max(-1, Math.min(1, info[10] / (pitchMax || 0.5))), 0.5);
+    if (cardExpanded) drawBrain(f);
+  }
+  function brainColor(v, a) {
+    var m = Math.min(1, Math.abs(v));
+    return v >= 0 ? "rgba(" + Math.round(70 + 130 * m) + "," + Math.round(90 + 150 * m) + "," + Math.round(60 + 10 * m) + "," + a + ")"
+                  : "rgba(" + Math.round(80 + 175 * m) + "," + Math.round(90 + 20 * m) + "," + Math.round(70 + 10 * m) + "," + a + ")";
+  }
+  /* senses -> hidden -> actions (renderer.js drawBrain, the Ocean's shape) */
+  function drawBrain(f) {
+    var box = inetCanvas.parentNode, w = box.clientWidth, h = box.clientHeight;
+    if (w < 60 || h < 60) return;
+    var sh = f.shape, nS = sh.nS, nH = sh.nH, nA = sh.nA;
+    var dpr = window.devicePixelRatio || 1, bw = Math.round(w * dpr), bh = Math.round(h * dpr);
+    if (inetCanvas.width !== bw) inetCanvas.width = bw;
+    if (inetCanvas.height !== bh) inetCanvas.height = bh;
+    var g = inetCtx, i;
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.clearRect(0, 0, w, h);
+    var wide = w > h * 1.15, pos = { sen: [], hid: [], act: [] }, m = 14;
+    if (wide) {
+      var yIn = 26, yOut = h - 40, yHid = (yIn + yOut) / 2;
+      for (i = 0; i < nS; i++) pos.sen.push([m + (w - 2 * m) * i / (nS - 1), yIn]);
+      for (i = 0; i < nH; i++) pos.hid.push([m + 18 + (w - 2 * m - 36) * i / (nH - 1), yHid]);
+      for (i = 0; i < nA; i++) pos.act.push([m + 18 + (w - 2 * m - 36) * i / (nA - 1), yOut]);
+    } else {
+      var yTop = 26, yBot = h - 12, xS = 18, xA = w - 100, xH = (xS + xA) / 2;
+      for (i = 0; i < nS; i++) pos.sen.push([xS, yTop + (yBot - yTop) * i / (nS - 1)]);
+      for (i = 0; i < nH; i++) pos.hid.push([xH, yTop + (yBot - yTop) * i / (nH - 1)]);
+      for (i = 0; i < nA; i++) pos.act.push([xA, yTop + (yBot - yTop) * i / (nA - 1)]);
+    }
+    var hoverKey = netHover >= 0 && netNodes[netHover] ? netNodes[netHover].kind + netNodes[netHover].i : null;
+    for (var k = 0; k < f.connCount; k++) {
+      var o = k * 5;
+      var srcSen = f.conns[o] !== 0, srcNum = f.conns[o + 1] | 0, sinkAct = f.conns[o + 2] !== 0, sinkNum = f.conns[o + 3] | 0, wgt = f.conns[o + 4];
+      var a = srcSen ? pos.sen[srcNum] : pos.hid[srcNum], b = sinkAct ? pos.act[sinkNum] : pos.hid[sinkNum];
+      if (!a || !b) continue;
+      var srcAct = srcSen ? f.sensors[srcNum] : f.hidden[srcNum];
+      var mag = Math.min(1, Math.abs(wgt) * Math.abs(srcAct) * 1.5);
+      var hl = hoverKey !== null && ((srcSen ? "Sense" : "Hidden neuron") + srcNum === hoverKey ||
+                                     (sinkAct ? "Action" : "Hidden neuron") + sinkNum === hoverKey);
+      g.strokeStyle = (wgt >= 0 ? "rgba(180,235,80," : "rgba(255,120,80,") + (hl ? 0.9 : (0.10 + 0.7 * mag)).toFixed(3) + ")";
+      g.lineWidth = hl ? 2 : 0.8 + 1.6 * mag;
+      g.beginPath();
+      g.moveTo(a[0], a[1]);
+      if (wide) g.bezierCurveTo(a[0], (a[1] + b[1]) / 2, b[0], (a[1] + b[1]) / 2, b[0], b[1]);
+      else g.bezierCurveTo((a[0] + b[0]) / 2, a[1], (a[0] + b[0]) / 2, b[1], b[0], b[1]);
+      g.stroke();
+    }
+    netNodes = [];
+    function node(p, r, v, kind, idx) {
+      g.fillStyle = brainColor(v, 1);
+      g.beginPath(); g.arc(p[0], p[1], r, 0, Math.PI * 2); g.fill();
+      g.strokeStyle = "rgba(4,14,16,0.85)"; g.lineWidth = 1; g.stroke();
+      netNodes.push({ x: p[0], y: p[1], kind: kind, i: idx, v: v });
+    }
+    var rs = Math.max(2, Math.min(3.2, (wide ? w : h) / nS * 0.36));
+    for (i = 0; i < nS; i++) node(pos.sen[i], rs, f.sensors[i], "Sense", i);
+    for (i = 0; i < nH; i++) node(pos.hid[i], 5, f.hidden[i], "Hidden neuron", i);
+    for (i = 0; i < nA; i++) node(pos.act[i], 5.5, f.actions[i], "Action", i);
+    if (netHover >= 0 && netNodes[netHover]) {
+      var hn = netNodes[netHover];
+      g.strokeStyle = "rgba(230,255,160,0.95)"; g.lineWidth = 2;
+      g.beginPath(); g.arc(hn.x, hn.y, 8, 0, Math.PI * 2); g.stroke();
+    }
+    if (!uiFont) uiFont = getComputedStyle(document.body).fontFamily;
+    g.font = "11px " + uiFont;
+    function tag(text, x, y) {
+      var tw = g.measureText(text).width;
+      g.fillStyle = "rgba(15,39,39,0.92)"; g.fillRect(x - 3, y - 10, tw + 6, 14);
+      g.fillStyle = "rgba(190,210,205,0.95)"; g.fillText(text, x, y);
+    }
+    g.fillStyle = "rgba(190,210,205,0.9)";
+    if (wide) {
+      tag("senses", m, 13);
+      tag("hidden", m, (26 + h - 40) / 2 - 9);
+      g.fillStyle = "rgba(190,210,205,0.9)";
+      g.textAlign = "center";
+      for (i = 0; i < nA; i++) g.fillText(ACTION_SHORT[i] || "", pos.act[i][0], h - 40 + (i % 2 ? 30 : 18));
+      g.textAlign = "left";
+    } else {
+      g.fillText("senses", 6, 13);
+      g.fillText("hidden", (18 + w - 100) / 2 - 18, 13);
+      g.fillText("actions", w - 106, 13);
+      for (i = 0; i < nA; i++) g.fillText(ACTION_LABELS[i] || "", pos.act[i][0] + 10, pos.act[i][1] + 4);
+    }
+    updateSenseLine();
+  }
+  var DEFAULT_SENSE = "Senses on one side, actions on the other. Lime links excite, orange ones inhibit; brighter = stronger right now. Tap a dot to name it.";
+  function updateSenseLine() {
+    if (netHover >= 0 && netNodes[netHover]) {
+      var n = netNodes[netHover];
+      var label = n.kind === "Sense" ? (sensorNames[n.i] || "sense " + (n.i + 1)) : n.kind === "Action" ? (ACTION_LABELS[n.i] || actionNames[n.i]) : "neuron " + (n.i + 1);
+      var html = n.kind + ": <b></b> " + (n.v >= 0 ? "+" : "") + n.v.toFixed(2);
+      if (cardCache.sense !== html + label) {
+        cardCache.sense = html + label;
+        el("isense").innerHTML = html;
+        el("isense").querySelector("b").textContent = label;
+      }
+    } else if (cardCache.sense !== "default") {
+      cardCache.sense = "default";
+      el("isense").textContent = coarseMQ.matches ? DEFAULT_SENSE : DEFAULT_SENSE.replace("Tap", "Point at");
+    }
+  }
+  function nearestNode(e) {
+    var r = inetCanvas.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
+    var best = -1, bd = e.pointerType === "mouse" ? 100 : 400;
+    netNodes.forEach(function (n, i) { var d = (n.x - x) * (n.x - x) + (n.y - y) * (n.y - y); if (d < bd) { bd = d; best = i; } });
+    return best;
+  }
+  inetCanvas.addEventListener("pointermove", function (e) { if (e.pointerType === "mouse") netHover = nearestNode(e); });
+  inetCanvas.addEventListener("pointerdown", function (e) { if (e.pointerType !== "mouse") netHover = nearestNode(e); });
+  inetCanvas.addEventListener("pointerleave", function (e) { if (e.pointerType === "mouse") netHover = -1; });
+
+  /* ---------------- the dashboards' recorder ---------------- */
+  var sampleBucket = -1;
+  function dash() { return window.EvoOceanDash || null; }
+  function takeSample(st) {
+    if (!dash() || !has("oc_summary")) return;
+    var every = dash().every(), b = Math.floor(st[1] / every);
+    if (b === sampleBucket) return;
+    sampleBucket = b;
+    var su = Array.prototype.slice.call(new Float64Array(heap(), M._oc_summary(), M._oc_summary_len()));
+    var k = M._oc_families(dash().famK);
+    var fam = Array.prototype.slice.call(new Float64Array(heap(), M._oc_families_data(), 2 * k));
+    dash().push({ st: Array.prototype.slice.call(st), su: su, fam: fam });
+  }
+  function wiringNow() {
+    if (!M || turboState !== "live" || !has("oc_wiring")) return null;
+    var n = M._oc_wiring(), sh = brainShape();
+    var data = new Float32Array(heap(), M._oc_wiring_data(), 2 * sh.nS * sh.nA);
+    return { at: performance.now(), n: n, senses: sh.nS, actions: sh.nA,
+             path: Array.prototype.slice.call(data, 0, sh.nS * sh.nA), direct: Array.prototype.slice.call(data, sh.nS * sh.nA),
+             senseNames: cString(M._oc_sensor_names()).split(","), actionNames: cString(M._oc_action_names()).split(",") };
+  }
+
+  /* ---------------- TURBO (web/ocean_worker.js) ----------------
+   * live -> entering -> turbo -> exiting -> live. The worker gets a copy of
+   * this module's memory and hands its own back on Stop; meanwhile this page
+   * keeps drawing the frozen world under the Turbo card, and live settings
+   * go to the worker. */
+  var turboState = "live", turboWorker = null, turboStats = null;
+  function updateLocks() {
+    var tb = el("turbobtn"), on = turboState === "turbo" || turboState === "exiting";
+    tb.setAttribute("aria-pressed", on ? "true" : "false");
+    tb.disabled = turboState === "entering" || turboState === "exiting";
+    var locked = turboState !== "live";
+    ["restart", "savecp", "loadcp", "pausebtn", "slower", "faster", "randombtn", "randombig", "newworld", "replay"].forEach(function (id) {
+      el(id).classList.toggle("locked", locked);
+    });
+    el("turbo").hidden = turboState === "live";
+    el("turboexit").disabled = turboState !== "turbo";
+    el("turboexit").textContent = turboState === "exiting" ? "Syncing back…" : turboState === "entering" ? "Starting…" : "Stop Turbo and watch";
+    if (turboState !== "live") paintTurbo();
+    dirtyHud = true;
+  }
+  function paintTurbo() {
+    var t = turboStats;
+    el("ts-rate").textContent = t ? Math.round(t.stepsPerSec).toLocaleString() : "–";
+    el("ts-steps").textContent = t ? t.totalSteps.toLocaleString() : "–";
+    el("ts-pop").textContent = t ? Math.round(t.pop).toLocaleString() : "–";
+    el("ts-food").textContent = t ? Math.round(t.food).toLocaleString() : "–";
+  }
+  function onTurboMessage(e) {
+    var msg = e.data || {};
+    if (msg.type === "stats") {
+      turboStats = msg;
+      if (turboState === "entering") { turboState = "turbo"; updateLocks(); }
+      paintTurbo();
+    } else if (msg.type === "rec") {
+      if (dash()) dash().ingest(msg.rows);
+    } else if (msg.type === "set") {
+      if (msg.ok) liveApplied(msg.key, typeof KEYS[msg.key][0] === "boolean" ? msg.value === 1 : msg.value);
+      else showError((LABELS[msg.key] || msg.key) + ": " + msg.error);
+    } else if (msg.type === "memory") {
+      if (turboState !== "exiting") return;
+      try { takeMemory(msg.mem); }
+      catch (err) { showError("Turbo could not hand the world back: " + (err.message || err)); turboState = "live"; updateLocks(); return; }
+      turboState = "live";
+      afterNewWorld(true);
+      sampleBucket = Math.floor(M._oc_stats ? frameNow() / (dash() ? dash().every() : 60) : -1);
+      setPaused(false);
+      updateLocks();
+      showNote("Turbo ran " + (msg.totalSteps || 0).toLocaleString() + " steps.");
+    } else if (msg.type === "error") {
+      showError("Turbo stopped: " + (msg.message || "unknown error"));
+      turboState = "live";   /* this page still holds its last state: nothing lost */
+      updateLocks();
+    }
+  }
+  function frameNow() { M._oc_sync(); return new Float64Array(heap(), M._oc_stats(), statsLen)[1]; }
+  function enterTurbo() {
+    if (turboState !== "live" || !M || MOCK) { if (MOCK) showNote("Turbo needs the real engine."); return; }
+    turboState = "entering";
+    turboStats = null;
+    select(null);
+    unfollow();
+    updateLocks();
+    if (!turboWorker) {
+      turboWorker = new Worker(A.worker);
+      turboWorker.onmessage = onTurboMessage;
+      turboWorker.onerror = function (ev) {
+        showError("The Turbo worker failed: " + (ev.message || "could not load ocean_worker.js"));
+        turboState = "live";
+        updateLocks();
+      };
+    }
+    var mem = heap().slice(0);
+    turboWorker.postMessage({ cmd: "start", js: moduleUrls.js, wasm: moduleUrls.wasm, mem: mem,
+                              recEvery: dash() ? dash().every() : 60, famK: dash() ? dash().famK : 8 }, [mem]);
+  }
+  function exitTurbo() {
+    if (turboState !== "turbo") return;
+    turboState = "exiting";
+    updateLocks();
+    turboWorker.postMessage({ cmd: "stop" });
+  }
+
+  /* ---------------- Hold 60 fps ----------------
+   * The step budget (stepsThisFrame) first; then, frames still slow at one
+   * step, the tank's detail, a level at a time. Never the simulation. */
+  var slowSince = 0, detail0 = 0;
+  function govern(now) {
+    if (!governorOn || paused || turboState !== "live" || !scene) { slowSince = 0; return; }
+    if (fps && fps < 48 && lastSteps <= 1) {
+      if (!slowSince) slowSince = now;
+      else if (now - slowSince > 3000) {
+        slowSince = 0;
+        if (scene.degrade()) toast("Drawing the tank with less detail, to hold 60 fps.");
+      }
+    } else slowSince = 0;
+  }
+  function restoreDetail() { if (scene && detail0) scene.setQuality(detail0); }
+
   /* ---------------- the loop ---------------- */
+  var splashDone = false;
   function frame(now) {
     requestAnimationFrame(frame);
     var dt = lastNow ? Math.min(0.1, (now - lastNow) / 1000) : 0;
     lastNow = now;
     var steps = 0;
-    if (!paused || stepOnce) {
+    if (turboState === "live" && (!paused || stepOnce)) {
       steps = stepOnce ? 1 : stepsThisFrame();
       stepOnce = false;
       var t0 = performance.now();
@@ -391,55 +1213,68 @@
     lastSteps = steps;
     M._oc_sync();
     var s = snapshot();
+    if (turboState === "live") takeSample(s.stats);
     if (!HAS_VZ) s.vz = vzEstimate(s, steps > 0);
-    /* Q/E, PageDown/PageUp held: the view sinks or rises, the whole depth in ~2 s */
     var vdir = 0;
     for (var key in heldDepthKeys) vdir += heldDepthKeys[key];
     if (vdir) scene.moveView(Math.sign(vdir) * D * 0.55 * dt);
-    /* the marked fish, by id; a followed fish that died hands over to another */
-    var idx = indexOfId(s, selectedId);
-    if (idx < 0 && selectedId !== null) {
-      if (wantFollow && s.n) { idx = randomFish(s, null); selectedId = s.ids[idx]; }
-      else selectedId = null;
-      dirtyHud = true;
+    /* the selected fish, by id; a followed fish that died hands over to another */
+    var idx = turboState === "live" ? indexOfId(s, selectedId) : -1;
+    if (idx < 0 && selectedId !== null && turboState === "live") {
+      if (wantFollow && s.n) { idx = randomFish(s, null); select(s.ids[idx]); }
+      else select(null);
     }
     s.selIdx = idx;
     lastS = s;
-    scene.render(s, { animT: animT, dtSim: steps * DT, selIdx: idx });
+    if (!(dash() && dash().isOpen())) scene.render(s, { animT: animT, dtSim: steps * DT, selIdx: idx });
+    updateCard(s);
     fpsFrames++;
-    if (now - fpsT >= 1000) { fps = Math.round(fpsFrames * 1000 / (now - fpsT)); fpsFrames = 0; fpsT = now; }
+    if (now - fpsT >= 1000) { fps = Math.round(fpsFrames * 1000 / (now - fpsT)); fpsFrames = 0; fpsT = now; dirtyHud = true; govern(now); }
     updateHud(s, now);
+    if (!splashDone) { splashDone = true; el("splash").classList.add("done"); }
   }
 
   /* ---------------- input ---------------- */
-  /* the keys that move the view in depth, while held: +1 up, -1 down */
   var DEPTH_KEYS = { e: 1, pageup: 1, q: -1, pagedown: -1 };
   var heldDepthKeys = {};
+  var escHandledElsewhere = false;
+  window.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") escHandledElsewhere = !!(dash() && dash().isOpen()) || !!document.getElementById("guide");
+  }, true);
   function wireInput() {
     document.addEventListener("keyup", function (e) { delete heldDepthKeys[String(e.key).toLowerCase()]; });
     window.addEventListener("blur", function () { heldDepthKeys = {}; });
-    document.addEventListener("keydown", function (e) {
+    window.addEventListener("keydown", function (e) {
+      if (e.key === "Escape") {
+        if (drawerEl.classList.contains("open")) setDrawer(false);
+        else if (statOpen) setStatPanel(false);
+        else if (!escHandledElsewhere) { if (scene.following()) unfollow(); else select(null); }
+        if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+        return;
+      }
+      var t = e.target;
+      if (t && (t.tagName === "INPUT" || t.tagName === "BUTTON" || t.tagName === "SELECT" || t.tagName === "TEXTAREA")) return;
       if (e.ctrlKey || e.metaKey || e.altKey) return;
       var k = e.key, lk = String(k).toLowerCase();
       if (DEPTH_KEYS[lk]) { heldDepthKeys[lk] = DEPTH_KEYS[lk]; e.preventDefault(); return; }
+      /* the view: always */
+      if (lk === "c") { wantFollow = false; scene.resetView(true); return; }
+      if (lk === "l") { toggleLight(); return; }
+      if (lk === "f") { follow(); return; }
+      /* the world: not while Turbo owns it */
+      if (turboState !== "live") {
+        if (k === " " || k === "ArrowUp" || k === "ArrowDown" || k === "+" || k === "=" || k === "-" || lk === "r" || k === ".") {
+          showNote("Stop Turbo first."); e.preventDefault();
+        }
+        return;
+      }
       if (k === " " || k === "Spacebar") { setPaused(!paused); e.preventDefault(); }
-      else if (k === "+" || k === "=") changeSpeed(1);
-      else if (k === "-" || k === "_") changeSpeed(-1);
-      else if (k === "f" || k === "F") follow();
-      else if (k === "r" || k === "R") reset(e.shiftKey);
-      else if (k === "c" || k === "C") { wantFollow = false; scene.resetView(true); }
-      else if (k === "Escape") unfollow();
+      else if (k === "+" || k === "=" || k === "ArrowUp") { changeSpeed(1); e.preventDefault(); }
+      else if (k === "-" || k === "_" || k === "ArrowDown") { changeSpeed(-1); e.preventDefault(); }
+      else if (lk === "r") { if (e.shiftKey) replay(); else newWorld(); }
       else if (k === "." && paused) stepOnce = true;
-      else return;
-      dirtyHud = true;
     });
-    function btn(id, fn) { el(id).addEventListener("click", function () { fn(); this.blur(); }); }
-    btn("b-pause", function () { setPaused(!paused); });
-    btn("b-slower", function () { changeSpeed(-1); });
-    btn("b-faster", function () { changeSpeed(1); });
-    btn("b-follow", function () { if (scene.following()) unfollow(); else follow(); });
-    btn("b-reset", function () { reset(false); });
-    /* a short tap or click marks the fish nearest it on screen; empty water
+    /* a short tap or click selects the fish nearest it on screen; empty water
      * lets go. A drag, pinch or long press belongs to the camera. */
     var tap = null;
     canvas.addEventListener("pointerdown", function (e) {
@@ -450,93 +1285,429 @@
       if (!tap || e.pointerId !== tap.id) return;
       var moved = Math.hypot(e.clientX - tap.x, e.clientY - tap.y), held = performance.now() - tap.t;
       tap = null;
-      if (moved > 8 || held > 600 || !lastS) return;
+      if (moved > 8 || held > 600 || !lastS || turboState !== "live") return;
       var best = scene.pick(lastS, e.clientX, e.clientY, e.pointerType === "mouse" ? 18 : 30);
       if (best < 0 && scene.following()) return;   /* a stray tap doesn't drop a follow */
-      selectedId = best >= 0 ? lastS.ids[best] : null;
-      dirtyHud = true;
+      if (best >= 0 && scene.following() && lastS.ids[best] !== selectedId) unfollow();
+      select(best >= 0 ? lastS.ids[best] : null);
     });
-    window.addEventListener("resize", function () { scene.resize(); placeInsets(); });
+    var fitTimer = 0;
+    window.addEventListener("resize", function () {
+      scene.resize(); updateInsets();
+      clearTimeout(fitTimer);
+      fitTimer = setTimeout(function () { updateFitButton(); updateInsets(); }, 250);
+    });
+    if (reducedMQ.addEventListener) reducedMQ.addEventListener("change", function () { scene.setReducedMotion(reducedMQ.matches); });
   }
-  /* on a narrow screen the HUD and the buttons sit over the tank: frame it between them */
-  function placeInsets() {
-    var narrow = window.matchMedia("(max-width: 700px)").matches;
-    if (!narrow) { scene.setInsets({ top: 0, right: 0, bottom: 0, left: 0 }); return; }
-    var top = el("hud").getBoundingClientRect().bottom + 6;
-    var bottom = innerHeight - el("btns").getBoundingClientRect().top + 6;
-    scene.setInsets({ top: Math.round(top), right: 0, bottom: Math.round(bottom), left: 0 });
+  /* The part of the screen the tank is framed in (renderer.js updateInsets):
+   * below the top bar and above the dock on a desktop, the whole screen on
+   * compact ones, where the controls float over it; less the open settings. */
+  function updateInsets() {
+    if (!scene) return;
+    var vh = window.innerHeight, open = drawerEl.classList.contains("open");
+    var top = 0, bottom = 0, right = 0;
+    if (!compactMQ.matches) {
+      top = el("topbar").getBoundingClientRect().bottom + 6;
+      bottom = vh - el("dock").getBoundingClientRect().top + 6;
+    }
+    if (open && wideMQ.matches) right = drawerEl.getBoundingClientRect().width;
+    else if (open) {
+      var sheetTop = drawerEl.getBoundingClientRect().top;
+      bottom = sheetTop - top >= vh * 0.3 ? vh - sheetTop : bottom;
+    }
+    scene.setInsets({ top: Math.round(top), right: Math.round(right), bottom: Math.round(Math.max(0, bottom)), left: 0 });
   }
 
+  /* ---- settings: a bottom sheet on narrow screens, a side panel on wide ones ---- */
+  var drawerEl = el("drawer"), menuBtn = el("menubtn");
+  function setDrawer(open) {
+    if (open && dash()) dash().close();
+    drawerEl.classList.toggle("open", open);
+    document.body.classList.toggle("sheet-open", open);
+    menuBtn.setAttribute("aria-expanded", open ? "true" : "false");
+    if (!open) hideTip();
+    if (open) setStatPanel(false);
+    if (scene) { updateInsets(); setTimeout(updateInsets, 320); }
+  }
+  menuBtn.addEventListener("click", function () { setDrawer(!drawerEl.classList.contains("open")); this.blur(); });
+  el("drawerclose").addEventListener("click", function () { setDrawer(false); this.blur(); });
+  (function () {   /* drag the sheet's grip (or header) down to close it */
+    var start = null, grip = el("grip"), head = drawerEl.querySelector(".sheet-head");
+    function down(e) {
+      if (wideMQ.matches || e.target.closest("button")) return;
+      start = { y: e.clientY, id: e.pointerId, dy: 0 };
+      drawerEl.classList.add("dragging");
+      e.currentTarget.setPointerCapture(e.pointerId);
+    }
+    function move(e) {
+      if (!start || e.pointerId !== start.id) return;
+      start.dy = Math.max(0, e.clientY - start.y);
+      drawerEl.style.transform = "translateY(" + start.dy + "px)";
+    }
+    function up(e) {
+      if (!start || e.pointerId !== start.id) return;
+      drawerEl.classList.remove("dragging");
+      drawerEl.style.transform = "";
+      if (start.dy > Math.min(120, drawerEl.offsetHeight * 0.25)) setDrawer(false);
+      start = null;
+    }
+    [grip, head].forEach(function (n) {
+      n.addEventListener("pointerdown", down); n.addEventListener("pointermove", move);
+      n.addEventListener("pointerup", up); n.addEventListener("pointercancel", up);
+    });
+  })();
+  el("readout").addEventListener("click", function () { setStatPanel(!statOpen); this.blur(); });
+  document.addEventListener("pointerdown", function (e) {
+    if (statOpen && !e.target.closest("#statpanel, #readout")) setStatPanel(false);
+  });
+
+  /* ---- the shared hover tooltip (renderer.js's) ---- */
+  var tipEl = document.createElement("div");
+  tipEl.id = "tooltip";
+  var tipDesc = document.createElement("div"); tipDesc.className = "tipd";
+  var tipTry = document.createElement("div"); tipTry.className = "tipt";
+  tipEl.appendChild(tipDesc); tipEl.appendChild(tipTry);
+  document.body.appendChild(tipEl);
+  var tipTimer = 0, tipFor = null;
+  function hideTip() { clearTimeout(tipTimer); tipEl.style.display = "none"; tipFor = null; }
+  function showTip(rowEl, tip) {
+    tipDesc.textContent = tip.d; tipTry.textContent = tip.t;
+    tipEl.style.display = "block";
+    tipFor = rowEl;
+    var dr = drawerEl.getBoundingClientRect(), lr = rowEl.getBoundingClientRect(), left, top;
+    if (wideMQ.matches && dr.left >= tipEl.offsetWidth + 16) {
+      left = Math.max(6, dr.left - 10 - tipEl.offsetWidth);
+      top = lr.top + lr.height / 2 - tipEl.offsetHeight / 2;
+    } else {
+      left = Math.max(8, Math.min(lr.left, window.innerWidth - tipEl.offsetWidth - 8));
+      top = lr.bottom + 4;
+      if (top + tipEl.offsetHeight > window.innerHeight - 6) top = lr.top - 4 - tipEl.offsetHeight;
+    }
+    top = Math.max(6, Math.min(top, window.innerHeight - tipEl.offsetHeight - 6));
+    tipEl.style.left = left + "px"; tipEl.style.top = top + "px";
+  }
+  function attachTip(rowEl, key) {
+    var tip = CFG.TIPS[key];
+    if (!tip || !rowEl) return;
+    rowEl.addEventListener("mouseenter", function () {
+      if (lastPointer !== "mouse") return;
+      clearTimeout(tipTimer);
+      tipTimer = setTimeout(function () { showTip(rowEl, tip); }, 200);
+    });
+    rowEl.addEventListener("mouseleave", function () { if (lastPointer === "mouse") hideTip(); });
+    var name = rowEl.querySelector(".lt");
+    if (name) name.addEventListener("click", function (e) {
+      if (lastPointer === "mouse") return;
+      e.preventDefault();
+      if (tipFor === rowEl) hideTip(); else showTip(rowEl, tip);
+    });
+  }
+  panelsEl.addEventListener("scroll", hideTip);
+  document.addEventListener("pointerdown", function (e) {
+    if (tipFor && e.pointerType !== "mouse" && !(e.target.closest && e.target.closest(".lt"))) hideTip();
+  });
+
+  /* ---- buttons ---- */
+  function btn(id, fn) { el(id).addEventListener("click", function () { fn(); this.blur(); }); }
+  buildSettings();
+  panelsEl.addEventListener("input", onEdit);
+  panelsEl.addEventListener("change", onEdit);
+  btn("restart", restart);
+  btn("pausebtn", function () { if (guardTurbo()) return; setPaused(!paused); });
+  btn("slower", function () { if (guardTurbo()) return; changeSpeed(-1); });
+  btn("faster", function () { if (guardTurbo()) return; changeSpeed(1); });
+  btn("turbobtn", function () { if (turboState === "live") enterTurbo(); else if (turboState === "turbo") exitTurbo(); });
+  btn("turboexit", exitTurbo);
+  btn("randombtn", randomize);
+  btn("randombig", randomize);
+  btn("newworld", newWorld);
+  btn("replay", replay);
+  btn("lightbtn", toggleLight);
+  btn("viewbtn", function () { if (scene) { wantFollow = false; scene.resetView(true); } });
+  btn("fitbtn", restart);
+  btn("followbtn", function () {
+    if (!scene) return;
+    if (scene.following()) unfollow();
+    else if (selectedId !== null) { wantFollow = true; scene.setFollow(true); }
+  });
+  btn("iclose", function () { unfollow(); select(null); });
+  btn("iexpand", function () {
+    cardExpanded = !cardExpanded;
+    cardEl.classList.toggle("expanded", cardExpanded);
+    el("iexpand").setAttribute("aria-expanded", cardExpanded ? "true" : "false");
+    el("iexpand").title = cardExpanded ? "Hide its brain" : "Show its brain";
+    cardCache.sense = null;
+  });
+  btn("advreset", function () {
+    resetForm();
+    setPending(true); updateNeeds(); updateTabDots();
+    showNote("Every setting is back to its default. Restart to apply.");
+  });
+  btn("guidebtn", function () { if (window.EvoGuide) EvoGuide.start(); });
+  btn("savecp", function () { if (guardTurbo()) return; saveSetup(); });
+  btn("loadcp", function () { if (guardTurbo()) return; el("cpfile").click(); });
+  el("cpfile").addEventListener("change", function () {
+    var file = this.files && this.files[0];
+    this.value = "";
+    if (!file || !M || guardTurbo()) return;
+    file.text().then(loadSetup, function (err) { showError("Couldn't read that file: " + err); });
+  });
+  el("governor").addEventListener("change", function () {
+    governorOn = this.checked;
+    if (!governorOn) restoreDetail();
+    this.blur();
+  });
+  el("followLight").addEventListener("change", function () {
+    followLight = this.checked;
+    store("evo_boids.ocean.followLight", followLight ? "1" : "0");
+    updateLight();
+    this.blur();
+  });
+  el("followLight").checked = followLight;
+  /* Fish colour: by family line (the default) or by brain similarity. The
+   * choice is shared with Classic (the same key and ?colour=). Display only. */
+  (function () {
+    var want = P.get("colour"), saved = store("evo_boids.colourBy");
+    if (want !== "brain" && want !== "family") want = saved === "brain" ? "brain" : "family";
+    colourBrain = want === "brain";
+    el("colourBrain").checked = colourBrain;
+  })();
+  el("colourBrain").addEventListener("change", function () {
+    colourBrain = this.checked;
+    store("evo_boids.colourBy", colourBrain ? "brain" : "family");
+    if (M) applyDisplaySwitches();
+    updateModeline();
+    this.blur();
+  });
+  function updateModeline() {
+    el("modeline").textContent = "Running the single-threaded Ocean module, reproducible from the seed" +
+      (HAS_EYE ? " (the eye build)" : "") + ". Drawing: the 3D tank" + (scene ? ", detail " + scene.quality() + " of 3" : "") +
+      (colourBrain ? ", coloured by brain" : ", coloured by family") + ".";
+  }
+  setPaused(false);
+  changeSpeed(0);
+
+  /* ---------------- the tour (web/guide.js reads this) ---------------- */
+  var guideFish = null;
+  window.EvoGuideConfig = {
+    key: "evo_boids.ocean.guideSeen.v1", introKey: "evo_boids.ocean.turboIntroSeen.v1",
+    steps: function (h) {
+      var tap = function () { return h.touch() ? "Tap" : "Click"; };
+      return [
+        { welcome: true, drawer: false, title: "Welcome to the 3-D Ocean",
+          body: function () {
+            return "The same fish as Classic, with tiny neural networks wired by their genes, but in a sea with real " +
+                   "depth: they sense up and down and steer in it, and each inherits the depth it floats at. Nobody " +
+                   "programs what they do: their behaviour evolves.<br>Take the one-minute tour?";
+          } },
+        { drawer: false, title: "The tank",
+          target: function () { return h.rectOf("#tank"); },
+          body: function () {
+            return "Glowing specks are food, each family has its own colour, and the dark fish with glowing eyes are " +
+                   "predators. Light fades and turns blue with depth. " +
+                   (h.touch() ? "Drag to move, pinch to zoom, twist with two fingers to turn (below the horizon too)."
+                              : "Drag to move, scroll to zoom, right-drag to turn (below the horizon too); E and Q rise and sink.");
+          } },
+        { drawer: false, title: "A fish's brain", fish: true,
+          enter: function () {
+            if (h.app().inspectSomeFish) h.app().inspectSomeFish();
+            var b = h.q("#iexpand");
+            if (b && b.getAttribute("aria-expanded") === "false") b.click();
+          },
+          target: function () { return h.app().inspectorRect ? h.app().inspectorRect() : null; },
+          body: function () {
+            return tap() + " any fish to see its energy, age, speed, depth, the depth it floats at and its pitch, and " +
+                   "its brain, live: senses on one side, actions on the other (steer z is the depth one). " +
+                   "<b>Follow</b> (F) keeps the camera on it, with a flashlight that shows its true colours.";
+          } },
+        { drawer: false, title: "Live numbers",
+          target: function () { return h.rectOf("#readout"); },
+          body: function () {
+            return "Fish, generations, their average depth and the frame rate. " + tap() + " it for the rest: food, " +
+                   "births and deaths, family lines, and where in the depth the fish are.";
+          } },
+        { desktopOnly: true, drawer: false, title: "Keyboard",
+          body: function () {
+            return "<kbd>Space</kbd> pause · <kbd>↑</kbd> <kbd>↓</kbd> speed · <kbd>F</kbd> follow · <kbd>L</kbd> " +
+                   "flashlight · <kbd>C</kbd> fit the view · <kbd>E</kbd> <kbd>Q</kbd> rise and sink · <kbd>R</kbd> a " +
+                   "new world (<kbd>Shift</kbd> <kbd>R</kbd> replays this one). Try one now; the tour waits.";
+          } },
+        { drawer: false, title: "Playback",
+          target: function () { return h.rectOf("#dock"); },
+          body: function () {
+            return "Pause and change speed. <b>Turbo</b> runs the world headless in a background thread, many times " +
+                   "faster, and hands it back exactly. The dice draws a new world; the lamp is the flashlight; the " +
+                   "corners fit the whole tank back on screen.";
+          } },
+        { drawer: false, title: "Dashboards",
+          target: function () { return h.rectOf("#dashbtn"); },
+          body: function () {
+            return "Charts of this run as it happens: population, where in the depth the fish live and the depth they " +
+                   "float at, family lines, bodies, and which senses their brains use. Recorded on your device only.";
+          } },
+        { drawer: false, title: "Settings",
+          target: function () { return h.rectOf("#menubtn"); },
+          body: function () { return "Everything else lives behind this button."; } },
+        { drawer: true, tab: "run", scroll: ".run-hero", place: h.drawerSides, title: "Randomize",
+          target: function () { return h.rectOf(".run-hero"); },
+          body: function () {
+            return "The quickest way to explore. It draws a setup from ranges that worked in experiments (predators, " +
+                   "currents, the E1 physics), restarts, and lists what it picked.";
+          } },
+        { drawer: true, tab: "depth", scroll: "#f_kBuoy", place: h.drawerSides, title: "Your own settings",
+          target: function () { return h.rectOf("#f_kBuoy"); },
+          body: function () {
+            return "Change anything by hand: the depth physics here, waves, light and currents under Water. " +
+                   (h.touch() ? "Tap" : "Hover over") + " a setting's name to see what it does. Changes apply on " +
+                   "<b>Restart</b>; settings marked <i>live</i> apply at once.";
+          } },
+        { last: true, drawer: false, title: "You're set",
+          body: function () { return "Replay this tour any time with <b>Tour</b> in the settings. Classic, the flat world, is linked from the Run tab."; } }
+      ];
+    },
+    intro: function (h) {
+      return { intro: true, drawer: false, title: "Turbo: evolution, fast-forwarded",
+        target: function () { return h.rectOf("#turbobtn"); },
+        place: ["above", "below", "left", "right"],
+        body: function () {
+          return "Behaviour evolves over many generations, which is slow to watch. <b>Turbo</b> runs the world " +
+                 "headless, in a background thread, many times faster, and keeps going in a background tab. Stop it " +
+                 "whenever you like: the world comes back exactly where Turbo got it.";
+        } };
+    }
+  };
+  window.EvoApp = {
+    ready: false,
+    touch: function () { return coarseMQ.matches; },
+    compact: function () { return true; },
+    has3D: function () { return true; },
+    colourByBrain: function () { return colourBrain; },
+    startTurbo: function () { if (M && turboState === "live") enterTurbo(); },
+    setDrawer: setDrawer,
+    setSheetTab: setSheetTab,
+    inspectSomeFish: function () {
+      if (!M || turboState !== "live" || !lastS || !lastS.n) return false;
+      if (selectedId !== null) return true;
+      var best = scene.pick(lastS, innerWidth * 0.4, innerHeight * 0.45, 4000);
+      if (best < 0) best = 0;
+      select(guideFish = lastS.ids[best]);
+      return true;
+    },
+    releaseFish: function () {
+      if (guideFish !== null && selectedId === guideFish) select(null);
+      guideFish = null;
+    },
+    inspectorRect: function () { return selectedId === null || cardEl.hidden ? null : cardEl.getBoundingClientRect(); }
+  };
+
   /* ---------------- start ---------------- */
-  el("h-tag").textContent = MOCK ? "mock engine" : E1 ? "preview · E1" : "preview";
-  if (MOCK) el("h-tag").classList.add("mock");
   buildHist();
-  say(MOCK ? "Starting the ocean (mock engine)…" : "Starting the ocean…");
+  splashSay(MOCK ? "Starting the ocean (mock engine)…" : "Starting the ocean…");
   var sceneReady = window.EvoOceanScene ? EvoOceanScene.load() : Promise.reject(new Error("ocean_scene.js missing"));
   Promise.all([loadModule().catch(function (e) {
     var why = String(e && e.message || e);
-    if (/could not load/.test(why) && !MOCK)
-      why += "\nThe Ocean module is web/evo_ocean.js + .wasm, built by wasm/build_ocean.sh.";
+    if (/could not load/.test(why) && !MOCK) why += "\nThe Ocean module is web/evo_ocean.js + .wasm, built by wasm/build_ocean.sh.";
     throw new Error(why);
   }), sceneReady]).then(function (r) {
     M = r[0];
     var missing = REQUIRED.filter(function (f) { return typeof M["_" + f] !== "function"; });
     if (missing.length) throw new Error("the module lacks exports: " + missing.join(", "));
     if (!M.wasmMemory && !M.HEAPU8) throw new Error("the module exposes neither wasmMemory nor HEAPU8");
-    if (!M._malloc && INIT.cfg) throw new Error("?cfg= needs _malloc/_free exported");
-    HAS_VZ = typeof M._oc_creature_vz === "function";   /* optional: the pitch, else estimated */
-    if (E1) {
-      if (typeof M._oc_e1_preset !== "function") throw new Error("?e1=1 needs oc_e1_preset: rebuild web/evo_ocean (wasm/build_ocean.sh)");
-      INIT.cfg = e1Config(INIT.cfg);
-    }
-    initWorld();
+    if (!M._malloc) throw new Error("the module does not export _malloc/_free");
+    HAS_VZ = has("oc_creature_vz");
+    HAS_EYE = has("oc_has_eye") && !!M._oc_has_eye();
+    if (!HAS_EYE) ["eye", "eyeOnly", "eyeCode"].forEach(function (k) {
+      var i = el("o_" + k); if (i) i.disabled = true;
+      var row = el("f_" + k); if (row) row.querySelectorAll(".stepper button").forEach(function (b) { b.disabled = true; });
+    });
+    /* the URL's world into the sheet: ?seed / ?pop / ?depth, ?cfg (JSON; one
+     * that is not goes to oc_init as it is, so it says why), ?e1=1 under it */
+    var rawCfg = P.get("cfg") || "", userCfg = {}, badCfg = false;
+    if (rawCfg) { try { userCfg = JSON.parse(rawCfg); if (!userCfg || typeof userCfg !== "object" || Array.isArray(userCfg)) badCfg = true; } catch (e) { badCfg = true; } }
+    if (E1 && !has("oc_e1_preset")) throw new Error("?e1=1 needs oc_e1_preset: rebuild web/evo_ocean (wasm/build_ocean.sh)");
+    var cfg0 = badCfg ? {} : Object.assign({}, E1 ? e1Preset() : {}, userCfg);
+    var num = function (key, def, lo, hi) { var v = parseFloat(P.get(key)); return isFinite(v) ? Math.max(lo, Math.min(hi, v)) : def; };
+    setVal("seed", num("seed", KEYS.seed[0], 0, 4294967295) >>> 0);
+    setVal("population", Math.round(num("pop", KEYS.population[0], 0, 100000)));
+    setVal("depth", num("depth", KEYS.depth[0], 10, 100000));
+    cfgToForm(cfg0);
+    updateNeeds(); updateTabDots();
+    var f = readForm();
+    if (!initWorld(f.seed, f.population, f.depth, f.cfg, badCfg ? rawCfg : undefined))
+      throw new Error("oc_init failed: " + lastError());
     scene = EvoOceanScene.create(canvas, {
       tankDepth: D,
-      coarse: window.matchMedia("(pointer: coarse)").matches,
-      reducedMotion: window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+      coarse: coarseMQ.matches,
+      reducedMotion: reducedMQ.matches,
       bodyScale: bodyScale, onFollowChange: onFollowChange
     });
-    if (!scene) throw new Error("WebGL2 is unavailable, and the Ocean preview has only the 3D tank");
+    if (!scene) throw new Error("WebGL2 is unavailable, and the 3-D Ocean has only the 3D tank");
+    detail0 = scene.quality();
     scene.setWorld(W, H, D);
     scene.setLight(LIGHT);
     labelHist();
     wireInput();
-    placeInsets();
-    msgEl.hidden = true;
+    updateInsets();
+    updateLight();
+    updateModeline();
+    if (dash()) dash().attach({
+      depth: function () { return D; },
+      familyColor: function (id) { return has("oc_family_color") ? M._oc_family_color(id) : 0x3b5957; },
+      wiring: wiringNow,
+      setDrawer: setDrawer,
+      setRecEvery: function (every) {
+        if (turboWorker && (turboState === "entering" || turboState === "turbo")) turboWorker.postMessage({ cmd: "rec", every: every });
+      }
+    });
     window.EvoOcean = {
-      module: M,
-      scene: scene,
-      /* the steepest diver (largest |vz|) right now: {idx, id, vz, x, y, depth} */
+      module: M, scene: scene,
       steepest: function (sinking) {
         var s = lastS, best = -1, bv = 0;
         if (!s || !s.vz) return null;
-        for (var i = 0; i < s.n; i++) {
-          var v = sinking ? s.vz[i] : Math.abs(s.vz[i]);
-          if (v > bv) { bv = v; best = i; }
-        }
+        for (var i = 0; i < s.n; i++) { var v = sinking ? s.vz[i] : Math.abs(s.vz[i]); if (v > bv) { bv = v; best = i; } }
         return best < 0 ? null : { idx: best, id: s.ids[best], vz: s.vz[best], x: s.segs[12 * best], y: s.segs[12 * best + 1],
                                    x1: s.segs[12 * best + 2], y1: s.segs[12 * best + 3], depth: s.depth[best] };
       },
       set: function (name, v) {
-        if (!M._oc_set_param) return false;
+        if (!has("oc_set_param")) return false;
         var ok = withCString(String(name), function (p) { return M._oc_set_param(p, +v); });
         if (!ok) console.warn("oc_set_param(" + name + "): " + lastError());
-        readLight();   /* lightEnabled / L0 / kWater are live */
+        readLight();
         return !!ok;
       },
+      select: function (idx) { if (lastS && idx >= 0 && idx < lastS.n) select(lastS.ids[idx]); },
+      /* index of the deepest fish right now (-1 with none) */
+      deepest: function () {
+        var s = lastS, best = -1;
+        if (s) for (var i = 0; i < s.n; i++) if (best < 0 || s.depth[i] > s.depth[best]) best = i;
+        return best;
+      },
+      follow: follow,
+      turbo: function () { return turboState; },
       state: function () {
         var s = lastS;
         if (!s) return null;
         var lo = Infinity, hi = -Infinity;
         for (var i = 0; i < s.n; i++) { lo = Math.min(lo, s.depth[i]); hi = Math.max(hi, s.depth[i]); }
         return { n: s.n, fc: s.fc, pc: s.pc, W: W, H: H, D: D, paused: paused, speed: speed(), steps: lastSteps,
-                 hasVz: HAS_VZ, view: scene.view(), e1: E1, cfg: INIT.cfg, light: LIGHT,
+                 hasVz: HAS_VZ, view: scene.view(), e1: E1, cfg: initArgs ? initArgs.cfg : null, seed: initArgs ? initArgs.seed : null,
+                 runCfg: Object.assign({}, runCfg), light: LIGHT, flashlight: scene.flashlight(), flashlightLevel: scene.flashlightLevel(),
                  stepMs: stepMs, fps: fps, following: scene.following(), selectedId: selectedId, selIdx: s.selIdx,
-                 stats: Array.prototype.slice.call(s.stats), depthMin: s.n ? lo : 0, depthMax: s.n ? hi : 0 };
+                 turbo: turboState, colourBrain: colourBrain, frame: s.stats[1],
+                 stats: Array.prototype.slice.call(s.stats), depthMin: s.n ? lo : 0, depthMax: s.n ? hi : 0,
+                 dashRows: dash() ? dash()._rows().length : 0 };
       }
     };
     requestAnimationFrame(frame);
+    window.EvoApp.ready = true;
+    window.dispatchEvent(new Event("evo:ready"));
+    setTimeout(function () {
+      if (!everSelected && selectedId === null && turboState === "live" && !document.getElementById("guide"))
+        toast((coarseMQ.matches ? "Tap" : "Click") + " any fish to see its brain; F follows one with a flashlight.");
+    }, 9000);
   }).catch(function (e) {
-    fail("The Ocean preview could not start.", String(e && e.message || e));
+    var why = String(e && e.message || e);
+    splashSay("The 3-D Ocean could not start.\n" + why, true);
+    console.error("ocean: " + why);
   });
 })();

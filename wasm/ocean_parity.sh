@@ -50,8 +50,11 @@
 #       runs everything and REPORTS which baselines differ and where; writes nothing
 #   wasm/ocean_parity.sh --rebaseline --overwrite --reason "what changed, and why"
 #       writes them, only if every selected case passes oracles 1 and 3, the
-#       unit checks pass and no config guard failed; records the commit, date,
-#       compilers, reason and cases in tests/ocean_baseline/MANIFEST
+#       unit checks pass and no config guard failed (so not with NO_TESTS;
+#       with ONLY the refused-config guard still runs); records the commit,
+#       date, compilers, reason and cases in tests/ocean_baseline/MANIFEST.
+#       Every write is checked (staged in tests/ocean_baseline/.rebaseline.*,
+#       then moved into place): any failure exits 1 and says what was written
 # Rebaselining is legitimate ONLY when behaviour is MEANT to change: a
 # deliberate engine change (a new default path, a fix that moves a trajectory,
 # a draw added by design), a new or edited case, or a change to what the
@@ -75,6 +78,13 @@ done
 if [ "$OVERWRITE" = 1 ] && [ "$REBASE" = 0 ]; then echo "--overwrite goes only with --rebaseline" >&2; exit 2; fi
 if [ "$OVERWRITE" = 1 ] && [ -z "$REASON" ]; then
     echo "--overwrite needs --reason \"which behaviour changed, on purpose, and why\"" >&2; exit 2
+fi
+# A baseline is written only after every check: NO_TESTS skips the unit checks
+# and the shim validation (and, with them, the refused-config guard), so it
+# cannot go with --overwrite. (ONLY may: the guards below still run then.)
+if [ "$OVERWRITE" = 1 ] && [ -n "${NO_TESTS:-}" ]; then
+    echo "--overwrite cannot go with NO_TESTS: the unit checks and the shim / config guards must run before a baseline is written" >&2
+    exit 2
 fi
 cd "$(dirname "$0")/.."
 T0=$(date +%s)
@@ -248,8 +258,9 @@ if [ -z "${NO_TESTS:-}" ]; then
     echo "== shim validation (oc_init + oc_set_param): $(( ${#SEL[@]} - ${#REFUSED[@]} )) of ${#SEL[@]} case configs accepted"
 fi
 # The configs that must be refused, and the preset's copy above vs the source.
+# (ONLY skips the refused-config list to save time, except under --overwrite.)
 GUARD_FAILED=0
-if [ -z "${NO_TESTS:-}" ] && [ -z "${ONLY:-}" ]; then
+if [ -z "${NO_TESTS:-}" ] && { [ -z "${ONLY:-}" ] || [ "$OVERWRITE" = 1 ]; }; then
     nref=0; bad=""
     for i in "${!RNAMES[@]}"; do
         read -r -a A <<< "${RARGS[$i]}"
@@ -402,14 +413,24 @@ if [ "$REBASE" = 1 ]; then
         echo "   no guard may fail before a baseline is written (fix the failures above first)"
         exit 1
     else
-        mkdir -p "$BASE"
+        # Every write is checked. All new files (the baselines and the
+        # MANIFEST with its new entry) are first staged in $BASE/.rebaseline.*
+        # (same filesystem), so a full disk or a read-only directory fails
+        # there with nothing replaced; then each is moved into place, checked.
+        mkdir -p "$BASE" || { echo "   FAILED: cannot create $BASE; nothing written"; exit 1; }
+        STAGE=$(mktemp -d "$BASE/.rebaseline.XXXXXX") || { echo "   FAILED: cannot create a staging directory in $BASE; nothing written"; exit 1; }
+        stage_fail () { echo "   FAILED: $1; nothing written to $BASE"; rm -rf "$STAGE"; exit 1; }
         names=""
-        for i in "${CHANGED[@]}"; do cp "$OUT/${NAMES[$i]}.native.txt" "$BASE/${NAMES[$i]}.txt"; names="$names ${NAMES[$i]}"; done
-        for o in $ORPHANS; do rm -f "$BASE/$o.txt"; done
+        for i in "${CHANGED[@]}"; do
+            cp "$OUT/${NAMES[$i]}.native.txt" "$STAGE/${NAMES[$i]}.txt" || stage_fail "cannot stage ${NAMES[$i]}.txt"
+            names="$names ${NAMES[$i]}"
+        done
         fmt=$(sed -n '1s/.*format=\([0-9]*\).*/\1/p' "$OUT/${NAMES[${SEL[0]}]}.native.txt")
         dirty=$(git status --porcelain -- src wasm/ocean_wasm.cpp 2>/dev/null | wc -l)
-        if [ ! -f "$BASE/MANIFEST" ]; then
-            cat > "$BASE/MANIFEST" << 'EOF'
+        if [ -f "$BASE/MANIFEST" ]; then
+            cp "$BASE/MANIFEST" "$STAGE/MANIFEST" || stage_fail "cannot stage MANIFEST"
+        else
+            cat > "$STAGE/MANIFEST" << 'EOF' || stage_fail "cannot write a new MANIFEST"
 tests/ocean_baseline — the Ocean determinism harness's historical oracle.
 
 <case>.txt is ocean_parity_driver's native output for that case of
@@ -432,7 +453,24 @@ EOF
             echo "$(date -u +%Y-%m-%dT%H:%MZ)  engine $(git rev-parse --short HEAD 2>/dev/null)$( [ "$dirty" -gt 0 ] && echo " + $dirty uncommitted engine path(s)" )  format=$fmt  g++ $GPP_VER / $EM_VER"
             echo "  reason: $REASON"
             echo "  wrote:$names${ORPHANS:+; removed:$ORPHANS}"
-        } >> "$BASE/MANIFEST"
+        } >> "$STAGE/MANIFEST" || stage_fail "cannot append the entry to the staged MANIFEST"
+        # Staged: now replace. A failure from here on can leave the set partly
+        # rewritten; say so, and how to undo it.
+        moved=0
+        place_fail () {
+            echo "   FAILED: $1, after $moved of the baseline file(s) were replaced: $BASE may be PARTLY rewritten" \
+                 "and the MANIFEST may not record it. Restore it: git checkout -- $BASE (staging kept in $STAGE)"
+            exit 1
+        }
+        for i in "${CHANGED[@]}"; do
+            mv -f "$STAGE/${NAMES[$i]}.txt" "$BASE/${NAMES[$i]}.txt" || place_fail "cannot replace $BASE/${NAMES[$i]}.txt"
+            moved=$((moved + 1))
+        done
+        for o in $ORPHANS; do
+            rm -f "$BASE/$o.txt" && [ ! -e "$BASE/$o.txt" ] || place_fail "cannot remove the orphan $BASE/$o.txt"
+        done
+        mv -f "$STAGE/MANIFEST" "$BASE/MANIFEST" || place_fail "cannot replace $BASE/MANIFEST"
+        rmdir "$STAGE" || echo "   (could not remove the empty staging directory $STAGE)"
         echo "   WROTE ${#CHANGED[@]} baseline(s) to $BASE and logged them in $BASE/MANIFEST."
         echo "   Read the diff before committing: git diff --stat $BASE; git diff $BASE/MANIFEST"
     fi
@@ -444,6 +482,11 @@ if [ "$FAILED" = 1 ] || [ "$TESTS_OK" = 0 ] || [ "$GUARD_FAILED" = 1 ]; then
     [ "$TESTS_OK" = 0 ] && echo "== OCEAN UNIT CHECKS FAILED"
     [ "$GUARD_FAILED" = 1 ] && echo "== OCEAN CONFIG GUARDS FAILED (a bad config accepted, the E1 preset copy drifted, or an orphan baseline)"
     exit 1
+fi
+if [ -n "${NO_TESTS:-}" ]; then
+    echo "== ALL $NPASS OCEAN PARITY CASES PASS: native == wasm == baseline, bit for bit, every step; expectations met;" \
+         "unit checks, shim validation and config guards NOT run (NO_TESTS)"
+    exit 0
 fi
 echo "== ALL $NPASS OCEAN PARITY CASES PASS: native == wasm == baseline, bit for bit, every step; expectations met;" \
      "unit checks pass in both builds"

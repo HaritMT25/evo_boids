@@ -35,6 +35,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <string>
 #include <vector>
 #include "../core/world.hpp"   // SignalGrid, MAX_TOPOLOGICAL_NEIGHBORS, and through it the
                                // kernel, WorldCommon, SpatialGrid, CurrentField, Predator
@@ -123,6 +124,34 @@ public:
     long long totalReseeds = 0;             // founders the minPopulation floor added (not births)
 
     static constexpr float LONGPROBE_DIST = 200.0f;
+    static constexpr float LONGPROBE_RADIUS = 30.0f;   // the probe's horizontal reach
+
+    // Every radius this world queries or tests with must be finite and >= 0.
+    // In a toroidal world each one must also be < min(w, h) / 2: that is the
+    // bound SpatialGrid::queryRadiusWrapped / forEachInRadiusWrapped assume
+    // (spatial_grid.hpp) — a wider disk overlaps its own image across the seam
+    // and lists the same entity twice. Capture is a minimum-image distance
+    // test, not a grid query, and is held to the same bound. Returns "" when a
+    // w x h world fits them all, else why not.
+    static std::string radiusError(const SimConfig& c, int w, int h) {
+        const struct { const char* name; float r; } radii[] = {
+            {"perceptionRadius", c.perceptionRadius},
+            {"interactRadius", c.interactRadius},
+            {"pickupRadius", c.pickupRadius},
+            {"predatorPerception", c.predatorPerception},
+            {"predatorCaptureRadius", c.predatorCaptureRadius},
+            {"the long probe radius", LONGPROBE_RADIUS},
+        };
+        for (const auto& e : radii) {
+            if (!std::isfinite(e.r) || e.r < 0.0f)
+                return std::string(e.name) + " must be finite and >= 0";
+            if (c.toroidal && !(2.0f * e.r < (float)std::min(w, h)))
+                return std::string(e.name) + " " + std::to_string(e.r) +
+                       " needs a toroidal world wider and taller than twice it (got " +
+                       std::to_string(w) + " x " + std::to_string(h) + ")";
+        }
+        return "";
+    }
 
     static float wrapDelta(float d, float span) {
         const float half = 0.5f * span;
@@ -431,7 +460,11 @@ private:
         {
             float vz = c.vz + actions[STEER_Z] * resp * 3.0f * dt
                      + ocfg.kBuoy * (c.bodyBuoy * D - c.depth) / D * dt + rndZ;
-            const float wb = ocfg.wallBand;
+            // Each wall's band is capped at half the depth: in a sea shallower
+            // than 2·wallBand the two bands would overlap and the else-if
+            // below would apply only the surface push. min() returns wallBand
+            // itself whenever D >= 2·wallBand, so a normal sea is unchanged.
+            const float wb = std::min(ocfg.wallBand, 0.5f * D);
             if (wb > 0.0f) {
                 if (c.depth < wb)           vz += (1.0f - c.depth / wb) * 3.0f * dt;
                 else if (c.depth > D - wb)  vz -= (1.0f - (D - c.depth) / wb) * 3.0f * dt;
@@ -701,9 +734,9 @@ private:
         auto probe = [&](int ni, Vec2) { probeCount += (std::abs(hot_[ni].depth - c.depth) <= 30.0f); };
         if (cfg.toroidal) {
             probePos = {wrapCoord(probePos.x, (float)width), wrapCoord(probePos.y, (float)height)};
-            creatureGrid_.forEachInRadiusWrapped(probePos, 30.0f, probe);
+            creatureGrid_.forEachInRadiusWrapped(probePos, LONGPROBE_RADIUS, probe);
         } else {
-            creatureGrid_.forEachInRadius(probePos, 30.0f, probe);
+            creatureGrid_.forEachInRadius(probePos, LONGPROBE_RADIUS, probe);
         }
         sensors[LONGPROBE_POP_FWD] = tanhCountOver5(probeCount);
 

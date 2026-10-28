@@ -1,13 +1,23 @@
 // ocean_wasm.cpp — C ABI shim for the Ocean preview (PLAN_ocean_preview.md §4).
 //
-// CONTRACT DEVIATIONS: none. Choices the contract leaves open, fixed here:
+// CONTRACT DEVIATIONS: one. oc_init refuses a reversed minSpeed/maxSpeed or
+// genome-length pair, where evo_init swaps it (see the refusals below).
+// Choices the contract leaves open, fixed here:
 //   * oc_init: depth <= 0 means the default sea depth (OceanConfig{}.depth,
 //     240); a non-finite depth or one in (0, 10) is refused like a bad width.
 //   * oc_stats: births, deaths and reseeds are CUMULATIVE totals over the run
 //     (reseeds = founders the minPopulation floor added); stats_len = 15.
+//   * oc_init also refuses (configOk; the previous world is kept): genome
+//     lengths outside 16 <= genomeMinLength <= genomeInitMin <= genomeInitMax
+//     <= genomeMaxLength <= 80 (GENOME_*); speeds other than finite
+//     0 <= minSpeed <= maxSpeed with maxSpeed > 0; a reversed min/max pair is
+//     refused, not swapped as evo_init does; a radius that is not finite and
+//     >= 0, or, toroidal, not < min(width, height) / 2 (the wrapped grid
+//     query's bound; OceanWorld::radiusError).
 //   * oc_set_param: the Ocean keys kBuoy, pitchMax, vDrag, wallBand,
 //     buoyMutation, cHold, cPress, foodDepthSpread, plus every key
-//     evo_set_param accepts. pitchMax must be > 0.
+//     evo_set_param accepts. pitchMax must be > 0. The changed config must
+//     pass oc_init's checks as stored (after the float / int conversion).
 //   * With no cfgJson the world is the tuned preview (applyOceanDefaults +
 //     OceanConfig defaults, src/ocean/ocean_config.hpp).
 //
@@ -29,6 +39,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
@@ -95,11 +106,11 @@ void familyColor(std::uint64_t id, std::uint8_t* out) {
     out[0] = (std::uint8_t)r; out[1] = (std::uint8_t)g; out[2] = (std::uint8_t)b;
 }
 
-// Copied from wasm/evo_wasm.cpp: the defensive clamps main.cpp applies.
+// The defensive clamps main.cpp applies (copied from wasm/evo_wasm.cpp) minus
+// its min/max swaps: Ocean refuses a reversed speed or genome-length pair
+// (configOk) instead of reordering it, so a live change to one bound can never
+// silently move the other.
 void clampConfig(SimConfig& c) {
-    if (c.minSpeed > c.maxSpeed) std::swap(c.minSpeed, c.maxSpeed);
-    if (c.genomeMinLength > c.genomeMaxLength) std::swap(c.genomeMinLength, c.genomeMaxLength);
-    if (c.genomeInitMin > c.genomeInitMax) std::swap(c.genomeInitMin, c.genomeInitMax);
     if (c.perceptionRadius < 1.0f) c.perceptionRadius = 1.0f;
     if (c.maxNeighbors < 0) c.maxNeighbors = 0;
     if (c.maxNeighbors > MAX_TOPOLOGICAL_NEIGHBORS) c.maxNeighbors = MAX_TOPOLOGICAL_NEIGHBORS;
@@ -108,8 +119,13 @@ void clampConfig(SimConfig& c) {
     if (c.predatorMaxPopulation < 0) c.predatorMaxPopulation = 0;
 }
 
-// evo_init's refusals (same reasons; see wasm/evo_wasm.cpp), plus the Ocean knobs.
-bool configOk(const SimConfig& cfg, const OceanConfig& oc) {
+// Every refusal oc_init and oc_set_param share, on the config exactly as the
+// engine will hold it (after the JSON's double -> float / int conversion and
+// clampConfig): evo_init's (same reasons; see wasm/evo_wasm.cpp), then genome
+// lengths, speeds, the live floats, radii vs the world size, and the Ocean
+// knobs. Nothing here touches the world; callers replace or change it only
+// after this passes.
+bool configOk(const SimConfig& cfg, const OceanConfig& oc, int width, int height) {
     if (cfg.reproMaxDistance >= 0.0f && cfg.genomeMaxLength > isolation_detail::ISO_MAX_GENES) {
         g_error = "reproMaxDistance requires genomeMaxLength <= "
                 + std::to_string(isolation_detail::ISO_MAX_GENES);
@@ -128,6 +144,39 @@ bool configOk(const SimConfig& cfg, const OceanConfig& oc) {
         g_error = "reproMaxDistance, reproSoftWidth and reproGracePeriod must be finite (negative = off)";
         return false;
     }
+    // Genome lengths: makeRandomGenome reserves genomeInitMin..Max genes and
+    // children are held to genomeMinLength..MaxLength.
+    if (!(GENOME_MIN_LENGTH <= cfg.genomeMinLength && cfg.genomeMinLength <= cfg.genomeMaxLength &&
+          cfg.genomeMaxLength <= GENOME_MAX_LENGTH)) {
+        g_error = "genome lengths need " + std::to_string(GENOME_MIN_LENGTH) +
+                  " <= genomeMinLength <= genomeMaxLength <= " + std::to_string(GENOME_MAX_LENGTH);
+        return false;
+    }
+    if (!(cfg.genomeMinLength <= cfg.genomeInitMin && cfg.genomeInitMin <= cfg.genomeInitMax &&
+          cfg.genomeInitMax <= cfg.genomeMaxLength)) {
+        g_error = "genome lengths need genomeMinLength <= genomeInitMin <= genomeInitMax <= genomeMaxLength";
+        return false;
+    }
+    // Speeds: the OWN_SPEED sensor is speed / maxSpeed.
+    if (!std::isfinite(cfg.minSpeed) || !std::isfinite(cfg.maxSpeed) || !(cfg.minSpeed >= 0.0f) ||
+        !(cfg.maxSpeed > 0.0f) || !(cfg.minSpeed <= cfg.maxSpeed)) {
+        g_error = "speeds need finite 0 <= minSpeed <= maxSpeed and maxSpeed > 0";
+        return false;
+    }
+    // The other floats oc_set_param can change: a finite double can still
+    // overflow to an infinite float.
+    const struct { const char* name; float v; } liveFloats[] = {
+        {"foodSpawnBase", cfg.foodSpawnBase}, {"foodSpawnAmp", cfg.foodSpawnAmp},
+        {"foodEnergy", cfg.foodEnergy}, {"metabolicRate", cfg.metabolicRate},
+        {"moveCost", cfg.moveCost}, {"geneCost", cfg.geneCost}, {"maxAge", cfg.maxAge},
+        {"reproEnergy", cfg.reproEnergy}, {"newbornEnergy", cfg.newbornEnergy},
+        {"mutationMultiplier", cfg.mutationMultiplier},
+    };
+    for (const auto& f : liveFloats)
+        if (!std::isfinite(f.v)) { g_error = std::string(f.name) + " must be finite"; return false; }
+    // Radii: finite, >= 0, and in a toroidal world < min(width, height) / 2.
+    g_error = OceanWorld::radiusError(cfg, width, height);
+    if (!g_error.empty()) return false;
     if (!oceanConfigValid(oc)) {
         g_error = "ocean config: kBuoy, vDrag, wallBand, cHold, cPress must be finite; "
                   "buoyMutation, vDrag, wallBand, foodDepthSpread >= 0; pitchMax > 0";
@@ -156,8 +205,10 @@ EVO_EXPORT int oc_init(unsigned seed, int width, int height, double depth, int p
         return 0;
     }
     oc.depth = (float)depth;
-    if (!configOk(cfg, oc)) return 0;
+    if (!configOk(cfg, oc, width, height)) return 0;
 
+    // Every refusal is above this line: the old world goes only for a config
+    // that passed them all.
     rng.seed(seed);
     delete g_world;
     g_world = new OceanWorld();
@@ -267,8 +318,10 @@ EVO_EXPORT double oc_depth_max()               { return g_world ? (double)g_worl
 
 // Change one parameter of the running world: the Ocean knobs listed at the
 // top, or any key evo_set_param accepts (read fresh every step). Values must
-// be finite and >= 0 (pitchMax > 0). Returns 0 and sets oc_last_error() on
-// refusal, leaving the config unchanged.
+// be finite and >= 0, and the config they make must pass oc_init's checks AS
+// STORED (pitchMax and maxSpeed > 0 after the float conversion, every float
+// finite, minSpeed <= maxSpeed; an integer knob must fit an int). Returns 0
+// and sets oc_last_error() on refusal, leaving the config unchanged.
 EVO_EXPORT int oc_set_param(const char* name, double value) {
     g_error.clear();
     if (!g_world) { g_error = "no world (call oc_init first)"; return 0; }
@@ -282,15 +335,24 @@ EVO_EXPORT int oc_set_param(const char* name, double value) {
         "newbornEnergy", "mutationMultiplier", "minSpeed", "maxSpeed",
         "predatorMinPopulation", "predatorMaxPopulation", "predatorTraitMutation",
     };
-    bool live = false;
+    static const char* const kLiveInt[] = {   // the int-typed keys of kLive
+        "maxPopulation", "minPopulation", "targetFood", "predatorMinPopulation",
+        "predatorMaxPopulation",
+    };
+    bool live = false, isInt = false;
     for (const char* k : kOcean) if (name && std::strcmp(name, k) == 0) { live = true; break; }
     for (const char* k : kLive)  if (name && std::strcmp(name, k) == 0) { live = true; break; }
+    for (const char* k : kLiveInt) if (name && std::strcmp(name, k) == 0) { isInt = true; break; }
     if (!live) {
         g_error = std::string("not a live parameter (change it and restart): ") + (name ? name : "(null)");
         return 0;
     }
     if (!std::isfinite(value) || value < 0.0) {
         g_error = std::string(name) + " must be finite and >= 0";
+        return 0;
+    }
+    if (isInt && !(value <= (double)std::numeric_limits<int>::max())) {
+        g_error = std::string(name) + " must fit an int";   // the JSON reader's (int) cast
         return 0;
     }
     if (std::strcmp(name, "pitchMax") == 0 && !(value > 0.0)) {
@@ -305,6 +367,12 @@ EVO_EXPORT int oc_set_param(const char* name, double value) {
     std::string err;
     if (!readOceanJson(json.c_str(), cfg, oc, err)) { g_error = "internal: " + err; return 0; }
     clampConfig(cfg);
+    // Check what was stored, not the double: 1e-100 is a 0 float, 1e300 an
+    // infinite one.
+    if (!configOk(cfg, oc, g_world->width, g_world->height)) {
+        g_error = std::string(name) + " = " + num + " refused (as stored): " + g_error;
+        return 0;
+    }
     g_world->cfg = cfg;
     g_world->ocfg = oc;
     return 1;

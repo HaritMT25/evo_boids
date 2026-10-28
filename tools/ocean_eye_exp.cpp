@@ -34,6 +34,16 @@
 // for every live fish a random genome of the SAME length (its own rng stream,
 // the world's rng is saved and restored, so the run is unchanged).
 //
+// Clustering (the CSV's last four columns, at each interval's end; read-only):
+//   nn_mean    mean 3-D distance from each live fish to its nearest other fish
+//   nn_null    the same with every fish moved to a uniformly random x, y (its
+//              depth kept, so depth layering alone is not counted as grouping;
+//              a private rng stream)
+//   near_frac  fraction of fish with another fish within interactRadius (the
+//              pairing range); near_null the same for the null positions
+// nn_mean / nn_null < 1 and near_frac / near_null > 1: the fish are closer to
+// each other than chance places them.
+//
 // Behavioural test (--behav, at the end): every live fish's genome, frozen
 // (fresh network state), alone in a quiet eye-only world (no labels: the fish
 // can only SEE), level at mid-depth, for 8 headings x {nothing, one food item
@@ -54,6 +64,18 @@
 //            step): toward it right minus left, below minus above, ahead
 //            minus nothing (appended columns; the food / predator indices are
 //            unchanged by them: every scene starts from the same state and rng)
+//   base_abs  |lateral steer with nothing in view| (per fish, mean over the 8
+//            headings): a turning bias in empty space; base_x the signed mean
+//   food_r / food_l  each side alone vs nothing: lateral steer with food on the
+//            right minus nothing / nothing minus with food on the left (+ =
+//            toward it; food_h = food_r + food_l); fish_r / fish_l likewise for
+//            the conspecific
+//   frac_food_both  fraction of fish with food_r > 0.05 AND food_l > 0.05 (turn
+//            toward food on either side); frac_food_one exactly one side;
+//            frac_one_bias one side, the other side served by a turning bias
+//            (base_x < -0.05 for a right-side responder, > 0.05 for a left-side
+//            one); frac_fish_both as frac_food_both for the conspecific
+//   (appended after frac_fish_h; the earlier columns are unchanged)
 // The scenes use the full eye: the cloak bits (eyeCode 8 / 16) are cleared for
 // the test, so a food-cloaked population's genomes are shown food they never
 // saw (does the steering they evolved on what they did see carry over?).
@@ -179,6 +201,53 @@ void scoreWiring(const OceanWorld& w, RandomGen& baseRng, Wiring& evo, Wiring& r
     }
 }
 
+// ---- clustering (read-only; the CSV's last columns, see the header) ---------------
+// Mean nearest-other distance and the fraction with another point within r, over
+// the points (x, y, z) (toroidal: x / y wrap). O(n^2), once per interval.
+void nnStats(const std::vector<float>& x, const std::vector<float>& y, const std::vector<float>& z, double W, double H,
+             bool toroidal, double r, double& nnMean, double& nearFrac) {
+    const std::size_t n = x.size();
+    nnMean = nearFrac = 0.0;
+    if (n < 2) return;
+    double sum = 0.0;
+    long near = 0;
+    for (std::size_t i = 0; i < n; ++i) {
+        double best = 1e300;
+        for (std::size_t j = 0; j < n; ++j) {
+            if (j == i) continue;
+            double dx = (double)x[j] - x[i], dy = (double)y[j] - y[i];
+            if (toroidal) {
+                if (dx > 0.5 * W) dx -= W; else if (dx < -0.5 * W) dx += W;
+                if (dy > 0.5 * H) dy -= H; else if (dy < -0.5 * H) dy += H;
+            }
+            const double dz = (double)z[j] - z[i];
+            best = std::min(best, dx * dx + dy * dy + dz * dz);
+        }
+        sum += std::sqrt(best);
+        near += best <= r * r;
+    }
+    nnMean = sum / (double)n;
+    nearFrac = (double)near / (double)n;
+}
+
+struct Clustering { double nnMean = 0, nnNull = 0, nearFrac = 0, nearNull = 0; };
+
+// The live fish, and the null: the same fish at uniformly random x, y (depths
+// kept), from the private stream r.
+Clustering clusteringOf(const OceanWorld& w, RandomGen& r) {
+    std::vector<float> x, y, z, xr, yr;
+    for (const Fish& f : w.creatures) {
+        if (!f.alive) continue;
+        x.push_back(f.pos.x); y.push_back(f.pos.y); z.push_back(f.depth);
+        xr.push_back(r.unit() * (float)w.width); yr.push_back(r.unit() * (float)w.height);
+    }
+    Clustering c;
+    const double W = (double)w.width, H = (double)w.height, ir = (double)w.cfg.interactRadius;
+    nnStats(x, y, z, W, H, w.cfg.toroidal, ir, c.nnMean, c.nearFrac);
+    nnStats(xr, yr, z, W, H, w.cfg.toroidal, ir, c.nnNull, c.nearNull);
+    return c;
+}
+
 // ---- the behavioural test ------------------------------------------------------
 struct Behav {
     double n = 0;
@@ -186,8 +255,14 @@ struct Behav {
     double react_food = 0, react_pred = 0;
     double pos_food_h = 0, pos_food_v = 0, pos_pred_spd = 0, pos_pred_v = 0;   // fraction of fish with index > 0.05
     double fish_h = 0, fish_v = 0, fish_spd = 0, react_fish = 0, pos_fish_h = 0;
+    // each side alone, and the empty-space turning bias (see the header)
+    double base_abs = 0, base_x = 0, food_r = 0, food_l = 0, fish_r = 0, fish_l = 0;
+    double pos_food_both = 0, pos_food_one = 0, pos_one_bias = 0, pos_fish_both = 0;
 };
-constexpr int kBehavIdx = 12;   // behaveOne's indices: 8 food / predator, 4 conspecific
+// behaveOne's indices: 8 food / predator, 4 conspecific, then 12 the lateral
+// steer with nothing in view, 13 / 14 food right / left vs nothing, 15 / 16 the
+// conspecific right / left vs nothing (+ = toward it)
+constexpr int kBehavIdx = 17;
 
 // What one fish does (its 3rd-step actions) in a held scene. kind: 0 nothing,
 // 1 food, 2 predator, 3 a conspecific; sector 0..5 = ahead, behind, left,
@@ -289,6 +364,11 @@ void behaveOne(Probe& pr, const Fish& base, bool bodyFrame, double idx[kBehavIdx
         idx[8] += lat(cd[3]) - lat(cd[2]);
         idx[9] += cd[5][STEER_Z] - cd[4][STEER_Z];
         idx[10] += cd[0][SPEED_ADJUST] - none[SPEED_ADJUST];
+        idx[12] += lat(none);
+        idx[13] += lat(fd[3]) - lat(none);
+        idx[14] += lat(none) - lat(fd[2]);
+        idx[15] += lat(cd[3]) - lat(none);
+        idx[16] += lat(none) - lat(cd[2]);
         double ps = 0, rf = 0, rp = 0, rc = 0;
         for (int s = 0; s < 6; ++s) {
             ps += pd[s][SPEED_ADJUST] - none[SPEED_ADJUST];
@@ -310,15 +390,25 @@ void addBehav(Behav& b, const double idx[kBehavIdx]) {
     b.pos_pred_spd += idx[5] > 0.05; b.pos_pred_v += idx[4] > 0.05;
     b.fish_h += idx[8]; b.fish_v += idx[9]; b.fish_spd += idx[10]; b.react_fish += idx[11];
     b.pos_fish_h += idx[8] > 0.05;
+    b.base_abs += std::abs(idx[12]); b.base_x += idx[12];
+    b.food_r += idx[13]; b.food_l += idx[14]; b.fish_r += idx[15]; b.fish_l += idx[16];
+    const bool r = idx[13] > 0.05, l = idx[14] > 0.05;
+    b.pos_food_both += r && l;
+    b.pos_food_one += r != l;
+    b.pos_one_bias += (r && !l && idx[12] < -0.05) || (l && !r && idx[12] > 0.05);
+    b.pos_fish_both += idx[15] > 0.05 && idx[16] > 0.05;
 }
 
 void writeBehavRow(std::FILE* f, const char* arm, unsigned seed, const char* who, const Behav& b) {
     const double n = b.n > 0 ? b.n : 1;
-    std::fprintf(f, "%s,%u,%s,%.0f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.4f,%.4f,%.4f,%.4f,%.5f,%.5f,%.5f,%.5f,%.4f\n",
+    std::fprintf(f, "%s,%u,%s,%.0f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.4f,%.4f,%.4f,%.4f,%.5f,%.5f,%.5f,%.5f,%.4f",
                  arm, seed, who, b.n,
                  b.food_h / n, b.food_v / n, b.food_spd / n, b.pred_h / n, b.pred_v / n, b.pred_spd / n,
                  b.react_food / n, b.react_pred / n, b.pos_food_h / n, b.pos_food_v / n, b.pos_pred_v / n,
                  b.pos_pred_spd / n, b.fish_h / n, b.fish_v / n, b.fish_spd / n, b.react_fish / n, b.pos_fish_h / n);
+    std::fprintf(f, ",%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.4f,%.4f,%.4f,%.4f\n", b.base_abs / n, b.base_x / n,
+                 b.food_r / n, b.food_l / n, b.fish_r / n, b.fish_l / n, b.pos_food_both / n, b.pos_food_one / n,
+                 b.pos_one_bias / n, b.pos_fish_both / n);
 }
 
 void behaviouralTest(const OceanWorld& w, const char* arm, unsigned seed, const std::string& path) {
@@ -359,7 +449,9 @@ void behaviouralTest(const OceanWorld& w, const char* arm, unsigned seed, const 
     std::FILE* out = std::fopen(path.c_str(), "w");
     if (!out) { std::fprintf(stderr, "cannot write %s\n", path.c_str()); return; }
     std::fprintf(out, "arm,seed,genomes,n,food_h,food_v,food_spd,pred_h,pred_v,pred_spd,react_food,react_pred,"
-                      "frac_food_h,frac_food_v,frac_pred_v,frac_pred_spd,fish_h,fish_v,fish_spd,react_fish,frac_fish_h\n");
+                      "frac_food_h,frac_food_v,frac_pred_v,frac_pred_spd,fish_h,fish_v,fish_spd,react_fish,frac_fish_h,"
+                      "base_abs,base_x,food_r,food_l,fish_r,fish_l,frac_food_both,frac_food_one,frac_one_bias,"
+                      "frac_fish_both\n");
     writeBehavRow(out, arm, seed, "evolved", evo);
     writeBehavRow(out, arm, seed, "random", rnd);
     std::fclose(out);
@@ -716,12 +808,15 @@ int main(int argc, char** argv) {
                  "clearance,clearance_norm,speed_mean,reserves_mean,depth_mean,depth_sd,genome_len,ms_per_step,"
                  "us_per_fish_step,eye_any,eye_direct,eye_conns,eye_absw,eye_share,eye_vert,food_matched,pred_move,"
                  "lab_move,rnd_eye_any,rnd_eye_direct,rnd_eye_conns,rnd_eye_absw,rnd_eye_share,rnd_eye_vert,"
-                 "rnd_food_matched,rnd_pred_move,rnd_lab_move,eye_lr,rnd_eye_lr,steer_frame\n");
+                 "rnd_food_matched,rnd_pred_move,rnd_lab_move,eye_lr,rnd_eye_lr,steer_frame,"
+                 "nn_mean,nn_null,near_frac,near_null\n");
     std::printf("arm %s (eye %d, eyeOnly %d, steerFrame %d, eyeCode %d) seed %u steps %ld cfg %s\n", armName,
                 arm->eye, arm->eyeOnly, w.ocfg.steerFrame, w.ocfg.eyeCode, seed, steps, cfgJson ? cfgJson : "{}");
 
     RandomGen wiringRng;
     wiringRng.seed(seed * 2654435761u + 11u);
+    RandomGen clusterRng;   // the clustering null's positions (private)
+    clusterRng.seed(seed * 2246822519u + 5u);
     const double volume = (double)W * H * depth;
     const double pickup = w.cfg.pickupRadius;
     long long lastBirths = 0, lastReseeds = 0, lastPred = 0, lastStarve = 0, lastAge = 0, lastEaten = 0,
@@ -763,12 +858,13 @@ int main(int argc, char** argv) {
         const double sweep = 3.14159265 * pickup * pickup * (spd / np);            // a straight swimmer's
         Wiring we, wr;
         scoreWiring(w, wiringRng, we, wr);
+        const Clustering cl = clusteringOf(w, clusterRng);
         const double fe = we.fish > 0 ? we.fish : 1, fr = wr.fish > 0 ? wr.fish : 1;
         std::fprintf(csv,
                      "%s,%u,%ld,%zu,%.2f,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%zu,%.1f,%zu,%.3f,%lld,%lld,%lld,%lld,"
                      "%.6f,%.6f,%.4f,%.4f,%.5f,%.1f,%.4f,%.2f,%.3f,%.2f,%.2f,%.2f,%.4f,%.4f,"
                      "%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,"
-                     "%.4f,%.4f,%d\n",
+                     "%.4f,%.4f,%d,%.3f,%.3f,%.4f,%.4f\n",
                      armName, seed, s, w.creatures.size(), popMean, w.totalBirths, births, w.totalReseeds, reseeds,
                      dPred, dStarve, dAge, eaten, w.food.size(), foodMean, w.predators.size(), predMean,
                      w.totalPredatorBirths, pBirths, w.totalPredatorReseeds, w.totalPredatorDeathsStarvation,
@@ -782,7 +878,7 @@ int main(int argc, char** argv) {
                      wr.eyeAny / fr, wr.eyeDirect / fr, wr.eyeConns / fr, wr.eyeAbsW / fr,
                      wr.sensorConns > 0 ? wr.eyeShareNum / wr.sensorConns : 0.0, wr.eyeVertDirect / fr,
                      wr.foodMatched / fr, wr.predMove / fr, wr.labMove / fr, we.eyeLRDirect / fe,
-                     wr.eyeLRDirect / fr, w.ocfg.steerFrame);
+                     wr.eyeLRDirect / fr, w.ocfg.steerFrame, cl.nnMean, cl.nnNull, cl.nearFrac, cl.nearNull);
         std::fflush(csv);
         std::printf("arm %s seed %u step %ld pop %zu births %lld reseeds %lld pred %zu eat/fish/s %.3f pred/fish/s %.4f"
                     " clr_norm %.2f %.3f ms/step\n",

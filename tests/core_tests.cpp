@@ -365,11 +365,16 @@ static void test_exact_shortcuts() {
 
     // --- vendored expf / logf / tanh == musl. The fingerprints were taken
     //     from musl's own expf/logf/tanh (std:: under emsdk 6.0.4), so this
-    //     pins the vendored copies (code and tables) to musl on every build:
+    //     pins the vendored copies (code and tables) to musl in the native
+    //     build — core_tests is native-only (CMakeLists.txt returns before it
+    //     under Emscripten); wasm == musl is covered by the exhaustive 2^32
+    //     run and the harnesses' native == wasm checks:
     //     FNV-1a 64 over expf and logf of every 509th float bit pattern (NaN
     //     canonical) and over tanh of 65536 doubles spread over [2^-32, 64).
     //     The two named inputs are where glibc's FMA expf (its default on
     //     FMA/AVX2 CPUs) is 1 ulp off musl — the whole reason for vendoring.
+    //     Every input is read through volatile storage, so -O3 cannot fold a
+    //     call into a compile-time constant: the runtime code path is tested.
     //     (All 2^32 floats agreed too, when this was written.) ---
     {
         auto mix = [](std::uint64_t& h, std::uint64_t v, int n) {
@@ -384,8 +389,9 @@ static void test_exact_shortcuts() {
             const std::uint32_t u = static_cast<std::uint32_t>(b);
             float f;
             std::memcpy(&f, &u, sizeof f);
-            mix(he, canon(evomath::expf(f)), 4);
-            mix(hl, canon(evomath::logf(f)), 4);
+            volatile float vf = f;
+            mix(he, canon(evomath::expf(vf)), 4);
+            mix(hl, canon(evomath::logf(vf)), 4);
         }
         const std::uint64_t lo = 0x3df0000000000000ull, hi = 0x4050000000000000ull,
                             step = ((hi - lo) / 65536) | 1;
@@ -393,7 +399,8 @@ static void test_exact_shortcuts() {
             const std::uint64_t u = (lo + i * step) | ((i & 1) << 63);
             double d, t;
             std::memcpy(&d, &u, sizeof d);
-            t = evomath::tanh(d);
+            volatile double vd = d;
+            t = evomath::tanh(vd);
             std::uint64_t ut;
             std::memcpy(&ut, &t, sizeof ut);
             mix(ht, ut, 8);
@@ -402,8 +409,9 @@ static void test_exact_shortcuts() {
         CHECK(hl == 0xb7e03d5adf9e01cdull);
         CHECK(ht == 0xf143dc73794db1f7ull);
         auto bitsF = [](std::uint32_t u) { float f; std::memcpy(&f, &u, sizeof f); return f; };
-        CHECK(floatBits(evomath::expf(bitsF(0xc27c65d9u))) == 0x11fa2992u);  // -0x1.f8cbb2p+5
-        CHECK(floatBits(evomath::expf(bitsF(0x4202422fu))) == 0x56fc9f1bu);  //  0x1.04845ep+5
+        volatile std::uint32_t fma0 = 0xc27c65d9u, fma1 = 0x4202422fu;
+        CHECK(floatBits(evomath::expf(bitsF(fma0))) == 0x11fa2992u);  // -0x1.f8cbb2p+5
+        CHECK(floatBits(evomath::expf(bitsF(fma1))) == 0x56fc9f1bu);  //  0x1.04845ep+5
     }
 }
 

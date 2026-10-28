@@ -42,6 +42,16 @@
 // musl == glibc generic) and on 2.4e8 stratified doubles plus every
 // branch threshold and real colour inputs (tanh: native == wasm == musl).
 //
+// Dropped from musl: errno and the fp_barrier / FORCE_EVAL calls, which only
+// keep the compiler from evaluating an operation at compile time (or not at
+// all) so that its FP exception flag is raised at run time. Without them the
+// compiler may fold, e.g., the overflow / underflow products (0x1p97f *
+// 0x1p97f) into constants, and a folded constant is the round-to-nearest
+// result. So this copy assumes the IEEE defaults the simulation always runs
+// with: round-to-nearest-even and gradual underflow (no flush-to-zero /
+// denormals-are-zero). The simulation never changes the rounding mode and
+// never reads the FP flags.
+//
 // Licences: musl MIT, Arm optimized-routines MIT, fdlibm (Sun) as noted.
 // Original notices preserved below; see THIRD_PARTY_NOTICES.md.
 // ============================================================

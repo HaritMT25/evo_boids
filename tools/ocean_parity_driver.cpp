@@ -88,7 +88,7 @@ bool applySet(OceanWorld& w, const LiveSet& s) {
     std::string err;
     if (!readOceanJson(json.c_str(), sc, oc, err)) return false;
     ofp::clampConfigLikeShim(sc);
-    if (!oceanConfigValid(oc)) return false;
+    if (!oceanConfigValid(oc) || !oceanSimConfigError(sc).empty()) return false;
     w.cfg = sc;
     w.ocfg = oc;
     return true;

@@ -26,8 +26,9 @@
 #
 # E1 physics: the cases before the e1_* block run with every E1 knob at its
 # default (OFF); the e1_* cases turn the features on. The r_* list holds
-# configs outside the Ocean knobs' ranges: each must be REFUSED by oc_init /
-# oc_set_param. The harness's copy of the E1 preset is checked against
+# configs outside the Ocean knobs' ranges (oceanConfigError) and the Ocean's
+# ranges for SimConfig keys (oceanSimConfigError): each must be REFUSED by
+# oc_init / oc_set_param. The harness's copy of the E1 preset is checked against
 # kE1PresetJson (src/ocean/ocean_config.hpp).
 #
 # Direct compiler calls only: CMakeLists.txt / CMakePresets.json (Classic's
@@ -211,6 +212,16 @@ radd r_live_kbuoy   '1 10 --set kBuoy=1e37@5'
 radd r_live_wave    '1 10 --set waveSpeed=500@5'
 radd r_live_bool    '1 10 --set mouthGate=0.5@5'
 radd r_live_band    '1 10 --set waveBand=0.5@5'
+# The Ocean's ranges for SimConfig keys (ocean_config.hpp oceanSimConfigError).
+radd r_cur_hang     '1 10 --pop 0 --cfg {"currentMode":1,"currentStrength":1e20,"deepCurrent":true,"foodDrift":true,"targetFood":1}'
+radd r_cur_strength '1 10 --cfg {"currentStrength":1001}'
+radd r_cur_neg      '1 10 --cfg {"currentStrength":-1}'
+radd r_cur_eddies   '1 10 --cfg {"currentStrength":50,"currentEddies":101}'
+radd r_cur_core     '1 10 --cfg {"currentStrength":50,"currentCore":1e9}'
+radd r_cur_drift    '1 10 --cfg {"currentStrength":50,"currentDrift":1e30}'
+radd r_cur_eps      '1 10 --cfg {"currentStrength":50,"currentMode":1,"currentGyreEps":2}'
+radd r_cur_mode     '1 10 --cfg {"currentStrength":50,"currentMode":2}'
+radd r_patch_radius '1 10 --cfg {"toroidal":true,"foodPatches":3,"foodPatchRadius":1e30}'
 
 run_one () {  # run_one INDEX: native and wasm side by side
     local i=$1 name=${NAMES[$1]}

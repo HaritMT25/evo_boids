@@ -211,3 +211,41 @@ inline std::string oceanConfigError(const OceanConfig& c) {
 
 // True when every knob is usable (oceanConfigError is empty).
 inline bool oceanConfigValid(const OceanConfig& c) { return oceanConfigError(c).empty(); }
+
+// The Ocean's own ranges for SimConfig keys whose extreme FINITE values break
+// the Ocean step (SimConfig itself is Classic's and stays as it is). "" when
+// every one is inside, else which one is not and why. Checked wherever an
+// Ocean config is accepted: oc_init / oc_set_param (wasm/ocean_wasm.cpp
+// configOk), the harness's world builder (tools/ocean_fingerprint.hpp
+// buildConfigs) and its live --set, the probe.
+//   * The current: currentStrength in [0, 1000] u/s (cases use <= 120; 0 =
+//     off), currentEddies in [0, 100], currentCore in [0, 1e5] (the field uses
+//     max(core, 1)), currentDrift in [-100, 100], currentGyreEps in [-1, 1],
+//     currentMode 0 (eddies) or 1 (gyre). The flow is then at most
+//     currentEddies·currentStrength (eddies; each vortex peaks at strength) or,
+//     per component, currentStrength·max(1, 2(H/W)(1 + 6|eps|)) (gyre, in a
+//     W x H world), and the field's clock
+//     (0.0003·drift·frame) stays finite. currentStrength 1e20 used to be
+//     accepted: food moved ~1e17 per step and OceanWorld::wrapCoord's loops
+//     never ended (wrapCoord is constant-time now too).
+//   * foodPatchRadius in [0, 1e5]: a toroidal patch's food is placed at
+//     wrapCoord(centre ± R); 1e30 sent that to the same endless loop.
+inline std::string oceanSimConfigError(const SimConfig& c) {
+    const struct { const char* name; float v, lo, hi; } r[] = {
+        {"currentStrength", c.currentStrength, 0.0f, 1000.0f},
+        {"currentCore", c.currentCore, 0.0f, 100000.0f},
+        {"currentDrift", c.currentDrift, -100.0f, 100.0f},
+        {"currentGyreEps", c.currentGyreEps, -1.0f, 1.0f},
+        {"foodPatchRadius", c.foodPatchRadius, 0.0f, 100000.0f},
+    };
+    for (const auto& e : r)
+        if (!(e.v >= e.lo && e.v <= e.hi)) {   // NaN fails both
+            char buf[160];
+            std::snprintf(buf, sizeof buf, "%s must be in [%g, %g] (got %g)", e.name, (double)e.lo,
+                          (double)e.hi, (double)e.v);
+            return buf;
+        }
+    if (c.currentMode != 0 && c.currentMode != 1) return "currentMode must be 0 (eddies) or 1 (gyre)";
+    if (c.currentEddies < 0 || c.currentEddies > 100) return "currentEddies must be in [0, 100]";
+    return "";
+}

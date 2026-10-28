@@ -178,10 +178,29 @@ public:
     }
     float wrapDx(float d) const { return wrapDelta(d, (float)width); }
     float wrapDy(float d) const { return wrapDelta(d, (float)height); }
+    // v wrapped into [0, span), span > 0, in constant time. It replaces the
+    // loops `while (v < 0) v += span; while (v >= span) v -= span;`, which
+    // never ended once v + span == v (currentStrength 1e20 moved food by ~1e17
+    // per step), and gives their bits wherever they ended:
+    //   * v in [-span, 2·span): the loops' one add / subtract, as they did it
+    //     (an add that rounds up to span still ends at 0);
+    //   * further out: std::fmod, which is exact (any correct libm, native or
+    //     wasm, returns the same bits), then the loops' last add. With span a
+    //     whole number <= 2^24 (a world size) and |v| < 2^24, every step of the
+    //     loops was exact too, so this equals them there as well (pinned by
+    //     tests/ocean_tests.cpp testWrap); a non-finite v gives NaN, not a hang.
+    // The bounded configs (ocean_config.hpp) keep every caller in the first case.
     static float wrapCoord(float v, float span) {
-        while (v < 0.0f) v += span;
-        while (v >= span) v -= span;
-        return v;
+        if (v >= -span && v < 2.0f * span) {
+            if (v < 0.0f) v += span;
+            if (v >= span) v -= span;
+            return v;
+        }
+        float r = std::fmod(v, span);   // exact; the sign of v, |r| < span
+        if (r < 0.0f) r += span;        // the loops' last add
+        else if (r == 0.0f) r = 0.0f;   // -0 -> +0, as that add gives
+        if (r >= span) r -= span;
+        return r;
     }
     float clampDepth(float z) const { return std::clamp(z, 0.0f, D); }
 

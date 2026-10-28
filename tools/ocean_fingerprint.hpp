@@ -670,7 +670,8 @@ inline void dumpState(const OceanWorld& w, std::FILE* out) {
 // ---- the world as the page builds it (wasm/ocean_wasm.cpp, oc_init) --------
 // Mirrors oc_init's config path: applyOceanDefaults, then the cfg JSON
 // (SimConfig + OceanConfig keys), then clampConfig (a copy of the shim's),
-// then rng.seed and init. Only oceanConfigValid is checked here; the shim's
+// then rng.seed and init. Only oceanConfigError and oceanSimConfigError (the
+// Ocean's ranges, src/ocean/ocean_config.hpp) are checked here; the shim's
 // full refusal list stays the shim's: wasm/ocean_parity.sh runs every case
 // through the real oc_init / oc_set_param first (ocean_tests --accepts), and
 // tests/ocean_tests.cpp checks that this path and the shim's give the same
@@ -696,6 +697,8 @@ inline bool buildConfigs(const char* cfgJson, float depth, SimConfig& sc, OceanC
     oc.depth = depth;
     err = oceanConfigError(oc);
     if (!err.empty()) { err = "invalid ocean config: " + err; return false; }
+    err = oceanSimConfigError(sc);
+    if (!err.empty()) { err = "invalid config for the Ocean: " + err; return false; }
     return true;
 }
 

@@ -70,6 +70,7 @@ int main(int argc, char** argv) {
     if (!readOceanJson(cfgJson, sc, oc, err)) { std::fprintf(stderr, "%s\n", err.c_str()); return 2; }
     oc.depth = (float)depth;
     if (!oceanConfigValid(oc)) { std::fprintf(stderr, "bad ocean config: %s\n", oceanConfigError(oc).c_str()); return 2; }
+    if (const std::string se = oceanSimConfigError(sc); !se.empty()) { std::fprintf(stderr, "bad config for the Ocean: %s\n", se.c_str()); return 2; }
 
     rng.seed(seed);
     OceanWorld w;

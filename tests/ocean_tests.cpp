@@ -74,11 +74,19 @@
 //   draws_e1      no E1 feature draws: per-step draws == N + 3·MOVE_RANDOM +
 //                 2·predators with everything on; a birth draws as without
 //   light         lightAt(0) == L0, falls as L0·exp(−kWater·d); the exports
-//   ranges        every Ocean knob: its range's ends accepted, just outside,
-//                 inf and the -1e37 hole refused (oc_init, oc_set_param); a
-//                 run at each end stays finite; bool / mode keys strict
+//   ranges        every Ocean knob, and the SimConfig keys the Ocean bounds
+//                 (oceanSimConfigError: the current, foodPatchRadius): its
+//                 range's ends accepted, just outside, inf and the -1e37 hole
+//                 refused (oc_init, oc_set_param); a run at each end stays
+//                 finite; bool / mode keys strict
 //   e1_hash       a wave-phase or E1-knob ulp changes only its own section
 //   preset        kE1PresetJson is accepted and is what it says
+//   wrap          OceanWorld::wrapCoord (constant time) == the loops it
+//                 replaced, bit for bit, at every edge of [-span, 2·span) and
+//                 [0, span) and on sweeps (multi-pass ones too, whole-number
+//                 spans); far values land in [0, span) as the exact remainder;
+//                 inf / NaN end; the config that hung (currentStrength 1e20,
+//                 validation bypassed) steps with every position in the world
 //
 // `ocean_tests --accepts SEED STEPS [driver args]` instead asks the shim
 // whether it would accept one ocean_parity_driver case (see acceptsMain).
@@ -91,6 +99,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <limits>
 #include <set>
 #include <utility>
 #include <string>
@@ -1852,6 +1861,12 @@ void testRanges() {
         {"waveBand", 1, 100000, R"("waveSpeed":100,)"}, {"waveGravity", 0.01, 10000, R"("waveSpeed":100,)"},
         {"L0", 0, 100, R"("lightEnabled":true,)"}, {"kWater", 0, 1, R"("lightEnabled":true,)"},
         {"kMouth", 0.01, 100, R"("mouthGate":true,"bodyModel":true,)"},
+        // The Ocean's ranges for SimConfig keys (oceanSimConfigError).
+        {"currentStrength", 0, 1000, R"("deepCurrent":true,"waveSpeed":6,"currentMode":1,"foodDrift":true,)"},
+        {"currentCore", 0, 100000, R"("currentStrength":80,"foodDrift":true,)"},
+        {"currentDrift", -100, 100, R"("currentStrength":80,"foodDrift":true,"deepCurrent":true,)"},
+        {"currentGyreEps", -1, 1, R"("currentStrength":80,"currentMode":1,"deepCurrent":true,"foodDrift":true,)"},
+        {"foodPatchRadius", 0, 100000, R"("toroidal":true,"foodPatches":3,)"},
     };
     auto cfgOf = [](const K& k, double v) {
         char num[40];
@@ -1879,10 +1894,22 @@ void testRanges() {
     // The hole the harness found, and the bool / mode keys.
     for (const char* c : {R"({"kBuoy":-1e37})", R"({"kBuoy":1e37})", R"({"vDrag":1e30})", R"({"pitchMax":1e-9})",
                           R"({"deepCurrent":2})", R"({"sizeDrift":"yes"})", R"({"mouthGate":0.5})", R"({"foodDepthMode":2})",
-                          R"({"foodDepthMode":0.5})", R"({"foodDepthMode":1e300})", R"({"waveBand":0})"})
+                          R"({"foodDepthMode":0.5})", R"({"foodDepthMode":1e300})", R"({"waveBand":0})",
+                          // the current's int keys, and the config that hung wrapCoord
+                          R"({"currentMode":2})", R"({"currentMode":-1})", R"({"currentEddies":101})", R"({"currentEddies":-1})",
+                          R"({"currentMode":1,"currentStrength":1e20,"deepCurrent":true,"foodDrift":true,"targetFood":1})"})
         refused += t.expect(oc_init(1002, 1920, 1080, 240.0, 100, c) == 0, "%s accepted", c);
     for (const char* c : {R"({"deepCurrent":1,"sizeDrift":true,"mouthGate":0,"foodDepthMode":1})"})
         accepted += t.expect(oc_init(1002, 1920, 1080, 240.0, 100, c) == 1, "%s refused: %s", c, oc_last_error());
+    // The current's int keys at their ends, run.
+    for (const char* c : {R"({"currentEddies":100,"currentStrength":1000,"foodDrift":true,"targetFood":300,"deepCurrent":true})",
+                          R"({"currentEddies":0,"currentStrength":1000,"foodDrift":true,"currentMode":0})"}) {
+        if (!t.expect(oc_init(1006, 1920, 1080, 240.0, 100, c) == 1, "%s refused: %s", c, oc_last_error())) continue;
+        ++accepted;
+        oc_step(300);
+        ++runs;
+        t.expect(ofp::countNonFinite(*g_world) == 0, "%s: non-finite state after 300 steps", c);
+    }
     // The sea's depth (oc_init's argument): [10, 100000].
     refused += t.expect(oc_init(1003, 1920, 1080, 100001.0, 50, nullptr) == 0, "depth 100001 accepted");
     accepted += t.expect(oc_init(1003, 1920, 1080, 100000.0, 50, nullptr) == 1, "depth 100000 refused: %s", oc_last_error());
@@ -1945,6 +1972,78 @@ void testE1Hash() {
     ofp::initWorld(w3, 1102, 1920, 1080, 240.0f, 100, nullptr, err);
     for (int s = 0; s < 30; ++s) w3.update(0.016f);
     t.expect(!w3.waveClockStarted() && !w3.flowE1() && oceanE1AtDefaults(w3.ocfg), "a preview world has E1 state");
+}
+
+// The loops OceanWorld::wrapCoord replaced (capped: n counts the passes).
+float wrapLoops(float v, float span, long& n) {
+    n = 0;
+    while (v < 0.0f && n < 100000000) { v += span; ++n; }
+    while (v >= span && n < 100000000) { v -= span; ++n; }
+    return v;
+}
+
+void testWrap() {
+    Test t("wrap");
+    long compared = 0, multi = 0;
+    auto check = [&](float v, float span) {
+        long n = 0;
+        const float want = wrapLoops(v, span, n);
+        const float got = OceanWorld::wrapCoord(v, span);
+        ++compared;
+        multi += (n > 1);
+        t.expect(std::memcmp(&got, &want, sizeof got) == 0, "wrapCoord(%a, %g) = %a, the loops gave %a (%ld passes)", (double)v,
+                 (double)span, (double)got, (double)want, n);
+    };
+    std::uint32_t s = 12345u;
+    auto u01 = [&] { s = s * 1664525u + 1013904223u; return (float)(s >> 8) * (1.0f / 16777216.0f); };
+    for (float span : {100.0f, 333.25f, 1080.0f, 1440.0f, 1920.0f, 2560.0f, 20000.0f, 100000.0f}) {
+        // The edges of the one-pass range [-span, 2·span) and of [0, span), each ± 1 ulp.
+        for (float x : {-span, 0.0f, -0.0f, span, 2.0f * span})
+            for (float v : {x, std::nextafter(x, -INFINITY), std::nextafter(x, INFINITY)}) check(v, span);
+        // Tiny negatives (the add rounds up to span: the loops end at 0).
+        for (float v : {-1e-30f, -std::numeric_limits<float>::denorm_min(), -1e-8f, -1e-6f, -0.5f * span}) check(v, span);
+        // A sweep of the one-pass range, any span ...
+        for (int k = 0; k < 20000; ++k) check(-span + 3.0f * span * u01(), span);
+        // ... and, for a whole-number span, |v| < 2^23 (many passes, each exact).
+        if (span == std::floor(span))
+            for (int k = 0; k < 300; ++k) check((u01() - 0.5f) * 16777216.0f, span);
+    }
+    // Far out (the loops never ended there): in [0, span), the exact remainder.
+    for (float v : {7.9e17f, 1e18f, 1.5e19f, -7.9e17f, -1e18f}) {
+        const std::uint64_t m = (std::uint64_t)std::abs(v) % 1920u;   // v is a whole number here
+        const float want = (v >= 0.0f) ? (float)m : (m ? 1920.0f - (float)m : 0.0f);
+        const float got = OceanWorld::wrapCoord(v, 1920.0f);
+        t.expect(got == want && !std::signbit(got), "wrapCoord(%.9g, 1920) = %.9g, want %.9g", (double)v, (double)got, (double)want);
+    }
+    for (float v : {1e20f, -1e20f, 3.4e38f, -3.4e38f}) {
+        const float got = OceanWorld::wrapCoord(v, 1080.0f);
+        t.expect(got >= 0.0f && got < 1080.0f, "wrapCoord(%.9g, 1080) = %.9g", (double)v, (double)got);
+    }
+    for (float v : {INFINITY, -INFINITY, NAN}) t.expect(std::isnan(OceanWorld::wrapCoord(v, 1920.0f)), "wrapCoord(%g) not NaN", (double)v);
+    // The config that hung (validation bypassed): it now steps, and the flow
+    // keeps every position in the world.
+    {
+        OceanWorld w;
+        SimConfig sc;
+        applyOceanDefaults(sc);
+        sc.currentMode = 1;
+        sc.currentStrength = 1e20f;
+        sc.foodDrift = true;
+        sc.targetFood = 1;
+        OceanConfig oc;
+        oc.deepCurrent = true;
+        rng.seed(1401);
+        w.cfg = sc;
+        w.ocfg = oc;
+        w.init(1920, 1080, 240.0f, 0);
+        for (int k = 0; k < 20; ++k) w.update(0.016f);
+        bool inside = !w.creatures.empty();
+        for (const Fish& f : w.creatures) inside &= f.pos.x >= 0.0f && f.pos.x < 1920.0f && f.pos.y >= 0.0f && f.pos.y < 1080.0f;
+        for (const OceanFood& f : w.food) inside &= f.pos.x >= 0.0f && f.pos.x < 1920.0f && f.pos.y >= 0.0f && f.pos.y < 1080.0f;
+        t.expect(inside, "currentStrength 1e20 (unvalidated): a position left the world (%zu fish, %zu food)", w.creatures.size(),
+                 w.food.size());
+    }
+    t.note("%ld values == the loops bit for bit (%ld of them more than one pass); far / non-finite values end", compared, multi);
 }
 
 #ifndef OCEAN_TESTS_NO_SHIM
@@ -2052,6 +2151,7 @@ int main(int argc, char** argv) {
 #ifndef OCEAN_TESTS_NO_SHIM
     ot::testPreset();
 #endif
+    ot::testWrap();
     std::printf("OCEAN TESTS: %d passed, %d failed\n", ot::g_passed, ot::g_failed);
     return ot::g_failed ? 1 : 0;
 }

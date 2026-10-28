@@ -13,7 +13,12 @@
 //     0 <= minSpeed <= maxSpeed with maxSpeed > 0; a reversed min/max pair is
 //     refused, not swapped as evo_init does; a radius that is not finite and
 //     >= 0, or, toroidal, not < min(width, height) / 2 (the wrapped grid
-//     query's bound; OceanWorld::radiusError).
+//     query's bound; OceanWorld::radiusError); a current knob or
+//     foodPatchRadius outside the Ocean's ranges (ocean_config.hpp
+//     oceanSimConfigError: currentStrength in [0, 1000], currentEddies in
+//     [0, 100], currentCore in [0, 1e5], currentDrift in [-100, 100],
+//     currentGyreEps in [-1, 1], currentMode 0 / 1, foodPatchRadius in
+//     [0, 1e5]).
 //   * oc_set_param: the Ocean keys kBuoy, pitchMax, vDrag, wallBand,
 //     buoyMutation, cHold, cPress, foodDepthSpread, the E1 keys (waveSpeed,
 //     waveBand, waveGravity, L0, kWater, kMouth, and the on/off keys
@@ -184,6 +189,10 @@ bool configOk(const SimConfig& cfg, const OceanConfig& oc, int width, int height
         if (!std::isfinite(f.v)) { g_error = std::string(f.name) + " must be finite"; return false; }
     // Radii: finite, >= 0, and in a toroidal world < min(width, height) / 2.
     g_error = OceanWorld::radiusError(cfg, width, height);
+    if (!g_error.empty()) return false;
+    // The Ocean's ranges for SimConfig keys (ocean_config.hpp
+    // oceanSimConfigError): the current's knobs, the food-patch radius.
+    g_error = oceanSimConfigError(cfg);
     if (!g_error.empty()) return false;
     // Every Ocean knob has a finite range (ocean_config.hpp oceanConfigError):
     // no accepted config can make the state non-finite.

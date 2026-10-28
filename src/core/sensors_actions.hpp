@@ -73,6 +73,15 @@ enum Sensor : uint8_t {
     // --- Noise ---
     RANDOM_SENSOR,          // random noise input
 
+#ifdef EVO_WORLD_OCEAN
+    // --- Depth (the Ocean build only, src/ocean/; Classic never sees these) ---
+    LOC_Z,                  // normalized depth, 0 = surface, 1 = floor
+    OWN_VEL_Z,              // own vertical velocity (+ = sinking)
+    NEAREST_FOOD_DZ,        // depth component of the unit vector to the nearest food
+    AVG_NEIGHBOR_DZ,        // depth offset toward avg neighbor (cohesion)
+    BOUNDARY_DIST_Z,        // distance to the nearer of surface and floor
+#endif
+
     NUM_SENSES              // <<--- marker
 };
 
@@ -99,6 +108,10 @@ enum Action : uint8_t {
     INTERACT_REPRODUCE,     // willingness to reproduce
     INTERACT_FIGHT,         // willingness to fight
     INTERACT_IGNORE,        // willingness to ignore
+
+#ifdef EVO_WORLD_OCEAN
+    STEER_Z,                // vertical steering force (Ocean build only; + = dive)
+#endif
 
     NUM_ACTIONS             // <<--- marker
 };

@@ -5,7 +5,11 @@
 #include <vector>
 #include "connectivity.hpp"
 #include "color.hpp"
+#ifdef EVO_WORLD_OCEAN
+#include "../ocean/plane_data_ocean.hpp"   // Ocean's sensor list => its own STATS_DIM
+#else
 #include "plane_data.hpp"
+#endif
 
 // Project the (source,sink) connectivity vector onto 3 fixed random directions
 // (a 3-component cousin of the 16-bit species SimHash) -> RGB. Projection is

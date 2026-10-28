@@ -1,0 +1,301 @@
+// ocean_wasm.cpp — C ABI shim for the Ocean preview (PLAN_ocean_preview.md §4).
+//
+// CONTRACT DEVIATIONS: none. Choices the contract leaves open, fixed here:
+//   * oc_init: depth <= 0 means the default sea depth (OceanConfig{}.depth,
+//     240); a non-finite depth or one in (0, 10) is refused like a bad width.
+//   * oc_stats: births, deaths and reseeds are CUMULATIVE totals over the run
+//     (reseeds = founders the minPopulation floor added); stats_len = 15.
+//   * oc_set_param: the Ocean keys kBuoy, pitchMax, vDrag, wallBand,
+//     buoyMutation, cHold, cPress, foodDepthSpread, plus every key
+//     evo_set_param accepts. pitchMax must be > 0.
+//   * With no cfgJson the world is the tuned preview (applyOceanDefaults +
+//     OceanConfig defaults, src/ocean/ocean_config.hpp).
+//
+// Compiled with Emscripten into web/evo_ocean.{js,wasm} by wasm/build_ocean.sh
+// (-DEVO_WORLD_OCEAN, single-threaded). The page (web/ocean.js) drives it:
+// oc_init once, then per frame oc_step(n) -> oc_sync() -> read the buffers.
+// Every pointer is valid until the next oc_sync / oc_init; memory can grow, so
+// the page re-creates its typed-array views after every sync.
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <string>
+#include <utility>
+#include <vector>
+
+#include "ocean/ocean_config.hpp"
+#include "ocean/ocean_world.hpp"
+
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#define EVO_EXPORT extern "C" EMSCRIPTEN_KEEPALIVE
+#else
+#define EVO_EXPORT extern "C"  // native build of the shim, for smoke tests
+#endif
+
+namespace {
+
+OceanWorld* g_world = nullptr;
+std::string g_error;
+
+std::vector<float>   g_segments;   // N*12: 6 spine points x, y  (= evo_creature_segments)
+std::vector<float>   g_depth;      // N
+std::vector<float>   g_bodyParams; // N*2: bodySize, bodyElong  (= evo_body_params)
+std::vector<uint8_t> g_colors;     // N*3: family colour         (= evo_creature_colors)
+std::vector<double>  g_ids;        // N                           (= evo_creature_ids)
+std::vector<float>   g_food;       // F*2: x, y                   (= evo_food_xy)
+std::vector<float>   g_foodDepth;  // F
+std::vector<float>   g_predators;  // P*3: x, y, digestTimer      (= evo_predator_data)
+std::vector<float>   g_predDepth;  // P
+// [pop, frame, births, deaths, reseeds, depthMean, depthSd, hist0 … hist7]
+constexpr int kStatsLen = 7 + ocean::kDepthBins;
+double g_stats[kStatsLen] = {};
+
+struct InitArgs {
+    unsigned seed = 0;
+    int width = 0, height = 0, population = 0;
+    double depth = 0.0;
+    std::string cfgJson;
+    bool valid = false;
+} g_lastInit;
+
+// Copied from wasm/evo_wasm.cpp (display only): a family line's colour from
+// its id alone, the same bytes in every build.
+void familyColor(std::uint64_t id, std::uint8_t* out) {
+    std::uint32_t h = (std::uint32_t)(id ^ (id >> 32));
+    h ^= h >> 16; h *= 0x7feb352dU; h ^= h >> 15; h *= 0x846ca68bU; h ^= h >> 16;
+    static const int kSat[4] = {200, 165, 225, 185}, kVal[4] = {240, 215, 195, 255};
+    const int tone = (int)((h >> 12) & 3u);
+    const int s = kSat[tone], v = kVal[tone];
+    constexpr int kRedGap = 85;
+    const int hue = kRedGap + (int)(h % (1536u - 2 * kRedGap)), sector = hue >> 8, f = hue & 255;
+    const int p = v * (255 - s) / 255;
+    const int q = v * (65025 - s * f) / 65025;
+    const int t = v * (65025 - s * (255 - f)) / 65025;
+    int r, g, b;
+    switch (sector) {
+        case 0: r = v; g = t; b = p; break;
+        case 1: r = q; g = v; b = p; break;
+        case 2: r = p; g = v; b = t; break;
+        case 3: r = p; g = q; b = v; break;
+        case 4: r = t; g = p; b = v; break;
+        default: r = v; g = p; b = q; break;
+    }
+    out[0] = (std::uint8_t)r; out[1] = (std::uint8_t)g; out[2] = (std::uint8_t)b;
+}
+
+// Copied from wasm/evo_wasm.cpp: the defensive clamps main.cpp applies.
+void clampConfig(SimConfig& c) {
+    if (c.minSpeed > c.maxSpeed) std::swap(c.minSpeed, c.maxSpeed);
+    if (c.genomeMinLength > c.genomeMaxLength) std::swap(c.genomeMinLength, c.genomeMaxLength);
+    if (c.genomeInitMin > c.genomeInitMax) std::swap(c.genomeInitMin, c.genomeInitMax);
+    if (c.perceptionRadius < 1.0f) c.perceptionRadius = 1.0f;
+    if (c.maxNeighbors < 0) c.maxNeighbors = 0;
+    if (c.maxNeighbors > MAX_TOPOLOGICAL_NEIGHBORS) c.maxNeighbors = MAX_TOPOLOGICAL_NEIGHBORS;
+    if (c.predatorMinPopulation < 0) c.predatorMinPopulation = 0;
+    if (c.predatorMinPopulation > 2000) c.predatorMinPopulation = 2000;
+    if (c.predatorMaxPopulation < 0) c.predatorMaxPopulation = 0;
+}
+
+// evo_init's refusals (same reasons; see wasm/evo_wasm.cpp), plus the Ocean knobs.
+bool configOk(const SimConfig& cfg, const OceanConfig& oc) {
+    if (cfg.reproMaxDistance >= 0.0f && cfg.genomeMaxLength > isolation_detail::ISO_MAX_GENES) {
+        g_error = "reproMaxDistance requires genomeMaxLength <= "
+                + std::to_string(isolation_detail::ISO_MAX_GENES);
+        return false;
+    }
+    if (!(cfg.bodyMutation >= 0.0f) || !std::isfinite(cfg.bodyMutation)) {
+        g_error = "bodyMutation must be finite and >= 0";
+        return false;
+    }
+    if (!(cfg.predatorTraitMutation >= 0.0f) || !std::isfinite(cfg.predatorTraitMutation)) {
+        g_error = "predatorTraitMutation must be finite and >= 0";
+        return false;
+    }
+    if (!std::isfinite(cfg.reproSoftWidth) || !std::isfinite(cfg.reproGracePeriod) ||
+        !std::isfinite(cfg.reproMaxDistance)) {
+        g_error = "reproMaxDistance, reproSoftWidth and reproGracePeriod must be finite (negative = off)";
+        return false;
+    }
+    if (!oceanConfigValid(oc)) {
+        g_error = "ocean config: kBuoy, vDrag, wallBand, cHold, cPress must be finite; "
+                  "buoyMutation, vDrag, wallBand, foodDepthSpread >= 0; pitchMax > 0";
+        return false;
+    }
+    return true;
+}
+
+}  // namespace
+
+// Initialise (or re-initialise) the world. cfgJson may be null/empty for the
+// preview defaults, or a flat JSON object of SimConfig keys (the checkpoint
+// "config" names) and OceanConfig keys; any subset is accepted. Returns 1, or
+// 0 with oc_last_error() set (the previous world, if any, is kept).
+EVO_EXPORT int oc_init(unsigned seed, int width, int height, double depth, int population,
+                       const char* cfgJson) {
+    g_error.clear();
+    SimConfig cfg;
+    applyOceanDefaults(cfg);
+    OceanConfig oc;
+    if (!readOceanJson(cfgJson, cfg, oc, g_error)) return 0;
+    clampConfig(cfg);
+    if (std::isfinite(depth) && depth <= 0.0) depth = OceanConfig{}.depth;
+    if (width < 100 || height < 100 || population < 0 || !std::isfinite(depth) || depth < 10.0) {
+        g_error = "bad world dimensions or population";
+        return 0;
+    }
+    oc.depth = (float)depth;
+    if (!configOk(cfg, oc)) return 0;
+
+    rng.seed(seed);
+    delete g_world;
+    g_world = new OceanWorld();
+    g_world->cfg = cfg;
+    g_world->ocfg = oc;
+    g_world->init(width, height, (float)depth, population);
+
+    g_lastInit.seed = seed;
+    g_lastInit.width = width;
+    g_lastInit.height = height;
+    g_lastInit.depth = depth;
+    g_lastInit.population = population;
+    g_lastInit.cfgJson = (cfgJson && cfgJson[0]) ? cfgJson : "";
+    g_lastInit.valid = true;
+    return 1;
+}
+
+// Re-run the last successful oc_init (same seed and config: the run replays
+// exactly). Live changes made since with oc_set_param are dropped.
+EVO_EXPORT int oc_reset() {
+    if (!g_lastInit.valid) { g_error = "oc_reset before any successful oc_init"; return 0; }
+    const InitArgs a = g_lastInit;
+    return oc_init(a.seed, a.width, a.height, a.depth, a.population,
+                   a.cfgJson.empty() ? nullptr : a.cfgJson.c_str());
+}
+
+// Advance n fixed steps of dt 0.016 (a step count, never wall-clock time).
+EVO_EXPORT void oc_step(int n) {
+    if (!g_world) return;
+    for (int i = 0; i < n; ++i) g_world->update(0.016f);
+}
+
+// Repack every export buffer from the current world state.
+EVO_EXPORT void oc_sync() {
+    if (!g_world) return;
+    const OceanWorld& w = *g_world;
+    const size_t n = w.creatures.size();
+    g_segments.resize(n * 12);
+    g_depth.resize(n);
+    g_bodyParams.resize(n * 2);
+    g_colors.resize(n * 3);
+    g_ids.resize(n);
+    for (size_t i = 0; i < n; ++i) {
+        const Fish& c = w.creatures[i];
+        for (int s = 0; s < Fish::BODY_LEN; ++s) {
+            g_segments[i * 12 + s * 2 + 0] = c.body[s].x;
+            g_segments[i * 12 + s * 2 + 1] = c.body[s].y;
+        }
+        g_depth[i] = c.depth;
+        g_bodyParams[i * 2 + 0] = c.bodySize;
+        g_bodyParams[i * 2 + 1] = c.bodyElong;
+        familyColor(c.lineageId, &g_colors[i * 3]);
+        g_ids[i] = (double)c.id;
+    }
+
+    const size_t nf = w.food.size();
+    g_food.resize(nf * 2);
+    g_foodDepth.resize(nf);
+    for (size_t i = 0; i < nf; ++i) {
+        g_food[i * 2 + 0] = w.food[i].pos.x;
+        g_food[i * 2 + 1] = w.food[i].pos.y;
+        g_foodDepth[i] = w.food[i].depth;
+    }
+
+    const size_t np = w.predators.size();
+    g_predators.resize(np * 3);
+    g_predDepth.resize(np);
+    for (size_t i = 0; i < np; ++i) {
+        g_predators[i * 3 + 0] = w.predators[i].pos.x;
+        g_predators[i * 3 + 1] = w.predators[i].pos.y;
+        g_predators[i * 3 + 2] = w.predators[i].digestTimer;
+        g_predDepth[i] = w.predators[i].depth;
+    }
+
+    double mean, sd, hist[ocean::kDepthBins];
+    w.depthStats(mean, sd, hist);
+    g_stats[0] = (double)n;
+    g_stats[1] = (double)w.frame;
+    g_stats[2] = (double)w.totalBirths;
+    g_stats[3] = (double)w.totalDeaths;
+    g_stats[4] = (double)w.totalReseeds;
+    g_stats[5] = mean;
+    g_stats[6] = sd;
+    for (int b = 0; b < ocean::kDepthBins; ++b) g_stats[7 + b] = hist[b];
+}
+
+EVO_EXPORT int oc_creature_count()             { return g_world ? (int)g_world->creatures.size() : 0; }
+EVO_EXPORT const float* oc_creature_segments() { return g_segments.data(); }
+EVO_EXPORT const float* oc_creature_depth()    { return g_depth.data(); }
+EVO_EXPORT const float* oc_body_params()       { return g_bodyParams.data(); }
+EVO_EXPORT const uint8_t* oc_creature_colors() { return g_colors.data(); }
+EVO_EXPORT const double* oc_creature_ids()     { return g_ids.data(); }
+EVO_EXPORT int oc_food_count()                 { return g_world ? (int)g_world->food.size() : 0; }
+EVO_EXPORT const float* oc_food_xy()           { return g_food.data(); }
+EVO_EXPORT const float* oc_food_depth()        { return g_foodDepth.data(); }
+EVO_EXPORT int oc_predator_count()             { return g_world ? (int)g_world->predators.size() : 0; }
+EVO_EXPORT const float* oc_predator_data()     { return g_predators.data(); }
+EVO_EXPORT const float* oc_predator_depth()    { return g_predDepth.data(); }
+EVO_EXPORT const double* oc_stats()            { return g_stats; }
+EVO_EXPORT int oc_stats_len()                  { return kStatsLen; }
+EVO_EXPORT int oc_width()                      { return g_world ? g_world->width : 0; }
+EVO_EXPORT int oc_height()                     { return g_world ? g_world->height : 0; }
+EVO_EXPORT double oc_depth_max()               { return g_world ? (double)g_world->D : 0.0; }
+
+// Change one parameter of the running world: the Ocean knobs listed at the
+// top, or any key evo_set_param accepts (read fresh every step). Values must
+// be finite and >= 0 (pitchMax > 0). Returns 0 and sets oc_last_error() on
+// refusal, leaving the config unchanged.
+EVO_EXPORT int oc_set_param(const char* name, double value) {
+    g_error.clear();
+    if (!g_world) { g_error = "no world (call oc_init first)"; return 0; }
+    static const char* const kOcean[] = {
+        "kBuoy", "pitchMax", "vDrag", "wallBand", "buoyMutation", "cHold", "cPress",
+        "foodDepthSpread",
+    };
+    static const char* const kLive[] = {
+        "maxPopulation", "minPopulation", "targetFood", "foodSpawnBase", "foodSpawnAmp",
+        "foodEnergy", "metabolicRate", "moveCost", "geneCost", "maxAge", "reproEnergy",
+        "newbornEnergy", "mutationMultiplier", "minSpeed", "maxSpeed",
+        "predatorMinPopulation", "predatorMaxPopulation", "predatorTraitMutation",
+    };
+    bool live = false;
+    for (const char* k : kOcean) if (name && std::strcmp(name, k) == 0) { live = true; break; }
+    for (const char* k : kLive)  if (name && std::strcmp(name, k) == 0) { live = true; break; }
+    if (!live) {
+        g_error = std::string("not a live parameter (change it and restart): ") + (name ? name : "(null)");
+        return 0;
+    }
+    if (!std::isfinite(value) || value < 0.0) {
+        g_error = std::string(name) + " must be finite and >= 0";
+        return 0;
+    }
+    if (std::strcmp(name, "pitchMax") == 0 && !(value > 0.0)) {
+        g_error = "pitchMax must be > 0";
+        return 0;
+    }
+    char num[40];
+    std::snprintf(num, sizeof num, "%.9g", value);
+    const std::string json = std::string("{\"") + name + "\":" + num + "}";
+    SimConfig cfg = g_world->cfg;
+    OceanConfig oc = g_world->ocfg;
+    std::string err;
+    if (!readOceanJson(json.c_str(), cfg, oc, err)) { g_error = "internal: " + err; return 0; }
+    clampConfig(cfg);
+    g_world->cfg = cfg;
+    g_world->ocfg = oc;
+    return 1;
+}
+
+EVO_EXPORT const char* oc_last_error() { return g_error.c_str(); }

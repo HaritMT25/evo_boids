@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#071f20">
+<meta name="description" content="evo_boids Ocean preview: the same evolving fish, steering in real depth in a deep tank.">
+<title>evo_boids Ocean preview</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230b1d1f'/%3E%3Cpath d='M6 16c4-6 11-7 16-3l4-4v14l-4-4c-5 4-12 3-16-3z' fill='%2364b5e8'/%3E%3Ccircle cx='11' cy='15' r='1.4' fill='%230b1d1f'/%3E%3C/svg%3E">
+<!-- The Ocean preview (PLAN_ocean_preview.md): its own page, because
+     renderer.js calls the Classic exports unconditionally. web/ocean.js runs
+     the world (web/evo_ocean.{js,wasm}, factory createEvoOcean) and builds the
+     tank's snapshot itself; web/ocean_scene.js is the deep tank. Not deployed. -->
+<style>
+  :root {
+    color-scheme: dark;
+    --abyss: oklch(0.22 0.03 200);
+    --surface: oklch(0.255 0.03 196);
+    --surface-2: oklch(0.295 0.032 194);
+    --surface-3: oklch(0.34 0.035 192);
+    --line: oklch(0.44 0.036 190);
+    --line-soft: oklch(0.35 0.032 192);
+    --ink: oklch(0.96 0.012 180);
+    --ink-2: oklch(0.86 0.02 185);
+    --ink-3: oklch(0.74 0.025 188);
+    --plankton: oklch(0.86 0.19 125);
+    --plankton-soft: oklch(0.86 0.19 125 / 0.16);
+    --ember: oklch(0.72 0.18 38);
+    --deep: oklch(0.70 0.11 235);
+    --r-md: 12px;
+    --shadow: 0 12px 32px oklch(0.08 0.03 210 / 0.6);
+    --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+    --ease: cubic-bezier(0.22, 1, 0.36, 1);
+    --safe-t: env(safe-area-inset-top, 0px);
+    --safe-b: env(safe-area-inset-bottom, 0px);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background: var(--abyss); color: var(--ink);
+    font: 14px/1.4 var(--font);
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased; -webkit-text-size-adjust: 100%;
+  }
+  button { font: inherit; color: inherit; cursor: pointer; -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
+  :focus-visible { outline: 2px solid var(--plankton); outline-offset: 2px; }
+  .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+  #tank { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; background: var(--abyss); }
+  body::after {   /* the tank's edges fall into deep water, as in the Classic tank view */
+    content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 1;
+    background: radial-gradient(ellipse 85% 80% at 50% 48%, transparent 58%, oklch(0.10 0.03 210 / 0.55));
+  }
+  .chip {
+    background: oklch(0.255 0.03 196 / 0.86);
+    border: 1px solid var(--line-soft);
+    box-shadow: var(--shadow);
+    border-radius: var(--r-md);
+  }
+
+  /* ---------- HUD ---------- */
+  #hud {
+    position: fixed; z-index: 10;
+    top: calc(10px + var(--safe-t)); left: 10px;
+    width: 272px; padding: 10px 12px 11px;
+    font-size: 12.5px; color: var(--ink-2);
+    pointer-events: none;
+  }
+  #hud h1 { font-size: 13px; font-weight: 650; color: var(--ink); letter-spacing: 0.01em; display: flex; align-items: center; gap: 8px; }
+  #hud h1 .tag { font-size: 10.5px; font-weight: 600; color: var(--deep); border: 1px solid currentColor; border-radius: 999px; padding: 0 6px; }
+  #hud h1 .tag.mock { color: var(--ember); }
+  #hud dl { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; margin-top: 7px; }
+  #hud dt { color: var(--ink-3); }
+  #hud dd { text-align: right; color: var(--ink); font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  #hud dd small { color: var(--ink-3); font-size: 11px; }
+  #hud .state { margin-top: 6px; min-height: 17px; color: var(--plankton); font-weight: 600; }
+  #hud .state.paused { color: var(--ember); }
+  #hud .sel { display: flex; align-items: center; gap: 6px; min-height: 17px; color: var(--ink-2); }
+  #hud .sel i { width: 10px; height: 10px; border-radius: 3px; flex: none; }
+
+  /* depth histogram: surface on top, one bar per eighth of the depth */
+  #hist { margin-top: 8px; }
+  #hist .cap { display: flex; justify-content: space-between; color: var(--ink-3); font-size: 11px; margin-bottom: 3px; }
+  #hist .row { display: grid; grid-template-columns: 30px 1fr 34px; align-items: center; gap: 6px; height: 12px; font-size: 10.5px; }
+  #hist .row span { color: var(--ink-3); font-family: var(--mono); text-align: right; }
+  #hist .row b { font-weight: 500; color: var(--ink-2); font-family: var(--mono); text-align: right; }
+  #hist .track { position: relative; height: 8px; border-radius: 2px; background: oklch(0.32 0.03 200 / 0.6); overflow: hidden; }
+  #hist .bar { position: absolute; left: 0; top: 0; bottom: 0; width: 0; border-radius: 2px; transition: width 240ms var(--ease); }
+  /* the 35 % line (PLAN §6: no bin above it) */
+  #hist .track::after { content: ""; position: absolute; top: 0; bottom: 0; left: 70%; width: 1px; background: oklch(0.72 0.18 38 / 0.55); }
+
+  /* ---------- keys / buttons ---------- */
+  #keys {
+    position: fixed; z-index: 10;
+    left: 10px; bottom: calc(10px + var(--safe-b));
+    padding: 6px 12px; font-size: 12px; color: var(--ink-3);
+    pointer-events: none;
+  }
+  #keys kbd { font-family: var(--mono); font-size: 11px; color: var(--ink); background: var(--surface-3); border-radius: 4px; padding: 0 5px; margin-right: 3px; }
+  #keys span { white-space: nowrap; margin-right: 10px; }
+  #btns {
+    position: fixed; z-index: 10;
+    right: 10px; bottom: calc(10px + var(--safe-b));
+    display: flex; gap: 4px; padding: 4px;
+  }
+  #btns button {
+    min-width: 44px; height: 44px; padding: 0 10px;
+    border: 0; border-radius: 9px; background: transparent; color: var(--ink-2);
+    font-size: 13px; font-weight: 600;
+  }
+  #btns button:hover { background: var(--surface-3); color: var(--ink); }
+  #btns button[aria-pressed="true"] { background: var(--plankton-soft); color: var(--plankton); }
+
+  #msg {
+    position: fixed; z-index: 20; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    width: min(520px, calc(100vw - 32px)); padding: 18px 20px;
+    font-size: 14px; color: var(--ink-2); text-align: center;
+  }
+  #msg[hidden] { display: none; }
+  #msg.err { color: var(--ink); border-color: var(--ember); text-align: left; white-space: pre-wrap; }
+  #msg.err b { color: var(--ember); }
+
+  /* narrow screens: the numbers and the histogram side by side, extras off */
+  @media (max-width: 700px), (max-height: 560px) {
+    #hud { width: auto; left: 8px; right: 8px; top: calc(8px + var(--safe-t)); padding: 8px 10px 6px; font-size: 11.5px; }
+    #hud .cols { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; align-items: start; }
+    #hud dl { margin-top: 5px; gap: 1px 8px; }
+    #hud .wide, #hud .x { display: none; }
+    #hud .state, #hud .sel { min-height: 0; margin-top: 3px; }
+    #hist { margin-top: 7px; }
+    #hist .cap { display: none; }
+    #hist .row { grid-template-columns: 22px minmax(0, 1fr) 26px; gap: 5px; height: 11px; }
+    #keys { display: none; }
+  }
+  @media (max-width: 340px) { #hud .cols { grid-template-columns: 1fr; gap: 0; } }
+  @media (pointer: coarse) { #keys { display: none; } }
+</style>
+</head>
+<body>
+  <canvas id="tank" aria-label="the ocean as a deep 3D tank: drag to move, right-drag or two fingers to turn, scroll or pinch to zoom, click a fish to mark it"></canvas>
+
+  <div id="hud" class="chip" aria-live="off">
+    <h1>evo_boids Ocean <span class="tag" id="h-tag">preview</span></h1>
+    <div class="cols">
+      <dl>
+        <dt>fish</dt><dd id="h-pop">–</dd>
+        <dt>frame</dt><dd id="h-frame">–</dd>
+        <dt>births</dt><dd id="h-births">–</dd>
+        <dt>reseeds</dt><dd id="h-reseeds">–</dd>
+        <dt class="wide">deaths</dt><dd class="wide" id="h-deaths">–</dd>
+        <dt>depth</dt><dd id="h-depth">–</dd>
+        <dt>speed</dt><dd id="h-speed">–</dd>
+      </dl>
+      <div id="hist" aria-label="share of fish per depth eighth, surface first">
+        <div class="cap"><span>depth</span><span>share of fish</span></div>
+      </div>
+    </div>
+    <div class="state" id="h-state"></div>
+    <div class="sel" id="h-sel"></div>
+  </div>
+
+  <div id="keys" class="chip">
+    <span><kbd>space</kbd>pause</span><span><kbd>+</kbd><kbd>-</kbd>speed</span><span><kbd>F</kbd>follow a fish</span><span><kbd>R</kbd>reset</span><span><kbd>C</kbd>fit view</span><span>drag / scroll: camera</span>
+  </div>
+  <div id="btns" class="chip" role="toolbar" aria-label="ocean controls">
+    <button id="b-pause" aria-pressed="false" title="Pause (space)">Pause</button>
+    <button id="b-slower" title="Fewer steps per frame (-)">&minus;</button>
+    <button id="b-faster" title="More steps per frame (+)">+</button>
+    <button id="b-follow" aria-pressed="false" title="Follow a random fish (F)">Follow</button>
+    <button id="b-reset" title="Reset the world (R)">Reset</button>
+  </div>
+
+  <div id="msg" class="chip">Starting the ocean…</div>
+
+  <script>
+    /* Asset URLs, relative to this page. mock: a JS stand-in for the engine,
+     * used only with ?mock=1 and never shipped in web/. */
+    window.EVO_ASSETS = {
+      ocean: "evo_ocean.js", oceanWasm: "evo_ocean.wasm",
+      mock: "ocean_mock.js",
+      three: "vendor/three.bundle.min.js"
+    };
+  </script>
+  <script src="ocean_scene.js"></script>
+  <script src="ocean.js"></script>
+</body>
+</html>

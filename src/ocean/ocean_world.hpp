@@ -50,6 +50,40 @@
 // queries — and draws no random numbers. Off (or in the plain Ocean build)
 // the 18 inputs read 0, the same as six empty sectors.
 //
+// Why LEVEL (the fish's pitch is ignored, deliberately): a fish has no pitched
+// body to look out of. It swims along a horizontal unit heading (Fish::vel) at
+// `speed` and changes depth through a separate rate (vz; depth += vz·speed·dt;
+// its drawn pitch is atan(vz)), and its motor commands act in that same level
+// frame: STEER_X / STEER_Y (steerFrame 1: right / ahead of the horizontal
+// heading) and STEER_Z (down). A level eye reports every offset in exactly the
+// frame the fish can act in — ahead / behind / left / right against the
+// heading and STEER_X, up / down against STEER_Z — whatever vz is at the
+// moment. A pitched eye would tilt "ahead" into depth by atan(vz) (27° at the
+// default pitchMax 0.5, 76° at pitchMax 4) and give "up" a different motor
+// meaning at every pitch.
+//
+// What the eye sees within one step (the rule every labeled sense follows too,
+// and Classic's World): fish are stepped in index order, each sensing and then
+// moving, while the spatial grid holds every fish's START-of-step (x, y).
+// Candidates are the grid's: the stored positions within R in (x, y) of the
+// viewer's own start-of-step position (it senses before it moves). The eye
+// then takes each candidate's offset from hot_, which a fish rewrites as soon
+// as it has moved (with its new depth's contrast). So for viewer j:
+//   * a fish i > j (not stepped yet) is seen exactly where it starts the step;
+//   * a fish i < j (already stepped) is seen at its MOVED position, but only if
+//     its start-of-step (x, y) was within R too: one that swam into range this
+//     step is first seen next step (it is within one step's travel, maxSpeed·dt
+//     plus the current, of the edge of R), and one that swam out is dropped by
+//     the 3-D test on the moved offset (d² <= R²);
+//   * food (drifted before the grid is built, eaten only after the per-fish
+//     phase) and predators (a linear scan; they move after the per-fish phase)
+//     are seen exactly where they are, with this step's contrast.
+// Every binned object is within R of the viewer in 3-D (the test is on the
+// offset actually used), so PROX is in [0, 1] and SIZE in (0, 1]; the stale grid
+// can only delay a fish entering the edge of R by one step, never bin an object
+// outside R or index past an array (no fish is born, dies or is reordered, and
+// no predator is added or removed, during the per-fish phase).
+//
 // Eye-only mode (OceanConfig::eyeOnly, the eye build only): the 23 LABELED
 // exteroceptive senses the eye replaces (ocean::kLabeledSenses) read 0 and are
 // not computed:
@@ -561,8 +595,9 @@ private:
 
     // One object at offset (dx, dy, dz), d2 = its squared distance (<= R²): its
     // sector is the dominant axis of the offset in the level frame (fwd, rht,
-    // depth), and it replaces the sector's object if strictly nearer (ties: the
-    // first seen, so the result follows the deterministic visit order).
+    // depth; pitch ignored, see the header comment), and it replaces the
+    // sector's object if strictly nearer (ties: the first seen, so the result
+    // follows the deterministic visit order).
     static void eyeSee(EyeBin* eye, Vec2 fwd, Vec2 rht, float dx, float dy, float dz, float d2,
                        float size, float con) {
         const float a = dx * fwd.x + dy * fwd.y;   // + ahead

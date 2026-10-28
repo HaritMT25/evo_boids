@@ -6,7 +6,11 @@
 #include "connectivity.hpp"
 #include "color.hpp"
 #ifdef EVO_WORLD_OCEAN
+#ifdef EVO_OCEAN_EYE
+#include "../ocean/plane_data_ocean_eye.hpp"   // + the 18 eye sensors => STATS_DIM 1900
+#else
 #include "../ocean/plane_data_ocean.hpp"   // Ocean's sensor list => its own STATS_DIM
+#endif
 #else
 #include "plane_data.hpp"
 #endif

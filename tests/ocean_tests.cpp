@@ -361,6 +361,184 @@ void testCaptureNeutral() {
              (unsigned long long)fp[0].fish, (unsigned long long)fp[1].fish);
 }
 
+// ---- the compound eye -------------------------------------------------------
+#ifdef EVO_OCEAN_EYE
+// One sector's three inputs, as eyeWrite computes them, for an object at
+// squared distance d2 with world size s and contrast con.
+void eyeExpect(float d2, float s, float con, float R, float out[3]) {
+    const float d = std::sqrt(d2);
+    out[0] = 1.0f - d / R;
+    out[1] = s / (s + d);
+    out[2] = con;
+}
+
+void testEye() {
+    Test t("eye");
+    // (1) A hand-built scene, checked bit for bit: a viewer heading +x at depth
+    // 120, and around it food ahead (30) with a fish further ahead (60), a fish
+    // behind (50), food to the left (-y, 20), a predator to the right (+y, 70),
+    // a fish above (25 shallower) and a predator below (40 deeper), plus a food
+    // item beyond R that must not count. Nothing is wired, so nothing moves the
+    // viewer's state before it senses (it steps first).
+    {
+        OceanConfig oc;
+        oc.eye = 1;
+        OceanWorld w;
+        initQuiet(w, 61, 240.0f, oc, /*capture*/ true);
+        const Vec2 P = {600.0f, 500.0f};
+        const float z = 120.0f;
+        const int v = addFish(w, P, z, {}, 0.5f);
+        w.creatures[v].vel = {1.0f, 0.0f};
+        const int fAhead = addFish(w, {P.x + 60.0f, P.y}, z, {}, 0.5f);
+        const int fBehind = addFish(w, {P.x - 50.0f, P.y}, z, {}, 0.5f);
+        const int fUp = addFish(w, P, z - 25.0f, {}, 0.5f);
+        w.creatures[fBehind].bodySize = 1.5f;   // a bigger fish looks bigger
+        auto food = [&](float x, float y, float fz) {
+            OceanFood f;
+            f.pos = {x, y};
+            f.depth = fz;
+            f.eyeCon = ocean::eyeContrast(ocean::kEyeFoodBright, fz);
+            w.food.push_back(f);
+        };
+        food(P.x + 30.0f, P.y, z);
+        food(P.x, P.y - 20.0f, z);
+        food(P.x + 101.0f, P.y, z);   // beyond R = 100
+        auto pred = [&](float x, float y, float pz) {
+            OceanPredator p;
+            p.pos = {x, y};
+            p.vel = {1.0f, 0.0f};
+            p.depth = pz;
+            p.digestTimer = 1e9f;   // never eats in this test
+            w.predators.push_back(p);
+        };
+        pred(P.x, P.y + 70.0f, z);
+        pred(P.x, P.y, z + 40.0f);
+        (void)fAhead; (void)fUp;
+        const float R = w.cfg.perceptionRadius;
+        w.update(0.016f);
+        const float* S = w.creatures[v].lastSensors;
+        float want[ocean::kEyeSectors][3];
+        eyeExpect(900.0f, ocean::kEyeFoodSize, ocean::eyeContrast(ocean::kEyeFoodBright, z), R, want[0]);
+        eyeExpect(2500.0f, ocean::kEyeFishLen * 1.5f, ocean::eyeContrast(ocean::kEyeFishBright, z), R, want[1]);
+        eyeExpect(400.0f, ocean::kEyeFoodSize, ocean::eyeContrast(ocean::kEyeFoodBright, z), R, want[2]);
+        eyeExpect(4900.0f, ocean::kEyePredSize, ocean::eyeContrast(ocean::kEyePredBright, z), R, want[3]);
+        eyeExpect(625.0f, ocean::kEyeFishLen * 1.0f, ocean::eyeContrast(ocean::kEyeFishBright, z - 25.0f), R, want[4]);
+        eyeExpect(1600.0f, ocean::kEyePredSize, ocean::eyeContrast(ocean::kEyePredBright, z + 40.0f), R, want[5]);
+        static const char* kSec[] = {"ahead", "behind", "left", "right", "up", "down"};
+        for (int k = 0; k < ocean::kEyeSectors; ++k)
+            for (int f = 0; f < 3; ++f) {
+                const float got = S[ocean::kEyeFirst + 3 * k + f];
+                t.expect(got == want[k][f], "scene: %s feature %d = %.9g, expected %.9g", kSec[k], f,
+                         got, want[k][f]);
+            }
+        t.note("scene: ahead food %.3f/%.3f/%.3f, behind fish %.3f/%.3f/%.3f, down predator %.3f/%.3f/%.3f",
+               S[EYE_AHEAD_PROX], S[EYE_AHEAD_SIZE], S[EYE_AHEAD_CON], S[EYE_BEHIND_PROX],
+               S[EYE_BEHIND_SIZE], S[EYE_BEHIND_CON], S[EYE_DOWN_PROX], S[EYE_DOWN_SIZE], S[EYE_DOWN_CON]);
+    }
+    // (2) Populated worlds, every fish-step: off -> the 18 inputs are exactly 0;
+    // on -> each sector is empty (0, 0, 0) or holds an object (PROX in [0, 1],
+    // SIZE in (0, 1], CON in [-1, 1]); every input finite.
+    {
+        long onSteps = 0, offSteps = 0, seen = 0, slots = 0;
+        for (int eyeOn = 0; eyeOn < 2; ++eyeOn) {
+            const char* cfgs[] = {
+                R"({"predatorCount":4,"foodPatches":3,"foodDepthMode":1})",
+                R"({"maxNeighbors":7,"toroidal":true,"predatorCount":6,"predatorEconomy":true,"currentStrength":60})",
+            };
+            for (const char* base : cfgs) {
+                std::string cfg = std::string(base);
+                cfg.back() = ',';
+                cfg += eyeOn ? "\"eye\":1}" : "\"eye\":0}";
+                OceanWorld w;
+                std::string err;
+                if (!t.expect(ofp::initWorld(w, 62 + eyeOn, 1920, 1080, 240.0f, 500, cfg.c_str(), err),
+                              "init: %s", err.c_str()))
+                    continue;
+                w.cfg.captureActivations = true;
+                for (int s = 0; s < 300; ++s) {
+                    w.update(0.016f);
+                    for (const Fish& c : w.creatures) {
+                        if (c.age <= 0.0f) continue;   // reseeded / born after sensing
+                        const float* E = c.lastSensors + ocean::kEyeFirst;
+                        if (!eyeOn) {
+                            ++offSteps;
+                            bool zero = true;
+                            for (int k = 0; k < ocean::kEyeInputs; ++k) zero &= (E[k] == 0.0f);
+                            t.expect(zero, "eye off but an eye input is not 0");
+                            continue;
+                        }
+                        ++onSteps;
+                        for (int k = 0; k < ocean::kEyeSectors; ++k) {
+                            const float p = E[3 * k], sz = E[3 * k + 1], cn = E[3 * k + 2];
+                            ++slots;
+                            t.expect(finite(p) && finite(sz) && finite(cn), "non-finite eye input");
+                            if (p == 0.0f && sz == 0.0f && cn == 0.0f) continue;
+                            ++seen;
+                            t.expect(p >= 0.0f && p <= 1.0f && sz > 0.0f && sz <= 1.0f && cn >= -1.0f &&
+                                         cn <= 1.0f,
+                                     "eye sector %d out of range: %.9g %.9g %.9g", k, p, sz, cn);
+                        }
+                    }
+                }
+            }
+        }
+        t.expect(onSteps > 10000 && offSteps > 10000 && seen > slots / 10,
+                 "too little to test: on %ld off %ld, %ld of %ld sectors saw something", onSteps,
+                 offSteps, seen, slots);
+        t.note("populated: %ld fish-steps on, %ld off; %.1f%% of sectors held an object", onSteps,
+               offSteps, slots ? 100.0 * seen / slots : 0.0);
+    }
+    // (3) The eye has no side effects: fish with no wiring act the same whatever
+    // they see, so a world of them (with food and wandering predators that draw
+    // and capture) must run identically with the eye on and off — same state,
+    // same draws — and differ only in lastSensors.
+    {
+        ofp::Fingerprint fp[2];
+        long nonzero = 0;
+        for (int k = 0; k < 2; ++k) {
+            OceanConfig oc;
+            oc.eye = k;
+            OceanWorld w;
+            initQuiet(w, 64, 240.0f, oc, /*capture*/ true);
+            w.cfg.predatorCount = 3;
+            for (int j = 0; j < 400; ++j) {
+                const Vec2 p = {rng.range(10.0f, 1910.0f), rng.range(10.0f, 1070.0f)};
+                addFish(w, p, rng.range(0.0f, 240.0f), {}, 0.5f);
+            }
+            for (int j = 0; j < 600; ++j) w.spawnFood();
+            for (int j = 0; j < 3; ++j) {
+                OceanPredator p;
+                p.pos = {rng.range(10.0f, 1910.0f), rng.range(10.0f, 1070.0f)};
+                p.vel = {1.0f, 0.0f};
+                p.depth = rng.range(0.0f, 240.0f);
+                w.predators.push_back(p);
+            }
+            for (int s = 0; s < 400; ++s) w.update(0.016f);
+            fp[k] = ofp::fingerprint(w, /*withActivations*/ false);
+            if (k == 1)
+                for (const Fish& c : w.creatures)
+                    for (int e = 0; e < ocean::kEyeInputs; ++e) nonzero += (c.lastSensors[ocean::kEyeFirst + e] != 0.0f);
+        }
+        t.expect(fp[0].ctr == fp[1].ctr && fp[0].fish == fp[1].fish && fp[0].food == fp[1].food &&
+                     fp[0].pred == fp[1].pred && fp[0].rng == fp[1].rng,
+                 "the eye changed an unwired world (fish %016llx vs %016llx, rng %016llx vs %016llx)",
+                 (unsigned long long)fp[0].fish, (unsigned long long)fp[1].fish,
+                 (unsigned long long)fp[0].rng, (unsigned long long)fp[1].rng);
+        t.expect(nonzero > 0, "the eye saw nothing in the side-effect world");
+    }
+}
+#else
+// The plain Ocean build has no eye: the key is accepted only as 0.
+void testEye() {
+    Test t("eye(absent)");
+    OceanConfig oc;
+    t.expect(oceanConfigValid(oc), "default config refused");
+    oc.eye = 1;
+    t.expect(!oceanConfigValid(oc), "eye = 1 accepted by a build without the eye");
+    t.expect(NUM_SENSES == 46, "NUM_SENSES %d, expected 46", (int)NUM_SENSES);
+}
+#endif
+
 std::vector<ofp::Fingerprint> runPrints(unsigned seed, const char* cfg, int pop, int steps, int every) {
     std::vector<ofp::Fingerprint> out;
     OceanWorld w;
@@ -792,6 +970,7 @@ int main(int argc, char** argv) {
     ot::testSteerZ();
     ot::testSensors();
     ot::testCaptureNeutral();
+    ot::testEye();
     ot::testReproducible();
 #ifndef OCEAN_TESTS_NO_SHIM
     ot::testReset();

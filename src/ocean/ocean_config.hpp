@@ -36,7 +36,19 @@ struct OceanConfig {
     //       there are no patches)
     int   foodDepthMode   = 0;
     float foodDepthSpread = 30.0f;
+    // The compound eye (the EYE_* sensors; ocean_world.hpp "compound eye"):
+    // 0 = off, 1 = on. Only the eye build (-DEVO_OCEAN_EYE) has the sensors,
+    // so anywhere else it must stay 0 (oceanConfigValid). Off, the eye inputs
+    // read 0 — the same as six empty sectors — and cost nothing per object.
+    int   eye             = 0;
 };
+
+// Does this build have the compound eye's sensors?
+#ifdef EVO_OCEAN_EYE
+inline constexpr bool kOceanHasEye = true;
+#else
+inline constexpr bool kOceanHasEye = false;
+#endif
 
 // Every key defaults to the value already in `c` (the checkpoint reader's rule).
 // `o` is the flat config object itself, not a {"config": ...} wrapper. "depth"
@@ -52,6 +64,7 @@ inline void readOceanConfig(const jsonm::Value& o, OceanConfig& c) {
     c.cPress          = o.floatOr("cPress", c.cPress);
     c.foodDepthMode   = o.intOr("foodDepthMode", c.foodDepthMode);
     c.foodDepthSpread = o.floatOr("foodDepthSpread", c.foodDepthSpread);
+    c.eye             = o.intOr("eye", c.eye);
 }
 
 // The preview's SimConfig starting point (tuned with tools/ocean_probe.cpp).
@@ -81,5 +94,6 @@ inline bool oceanConfigValid(const OceanConfig& c) {
     return fin(c.depth) && c.depth > 0.0f && fin(c.kBuoy) && fin(c.buoyMutation) &&
            c.buoyMutation >= 0.0f && fin(c.pitchMax) && c.pitchMax > 0.0f &&
            fin(c.vDrag) && c.vDrag >= 0.0f && fin(c.wallBand) && c.wallBand >= 0.0f &&
-           fin(c.cHold) && fin(c.cPress) && fin(c.foodDepthSpread) && c.foodDepthSpread >= 0.0f;
+           fin(c.cHold) && fin(c.cPress) && fin(c.foodDepthSpread) && c.foodDepthSpread >= 0.0f &&
+           (c.eye == 0 || (kOceanHasEye && c.eye == 1));
 }

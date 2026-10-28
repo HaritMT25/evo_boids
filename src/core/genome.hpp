@@ -92,7 +92,14 @@ struct NeuralNet {
         uint16_t srcSink;   // src in bits 0-5, sink in bits 6-10
         int16_t  weight;    // same fixed-point encoding as Gene::weight
 
+#ifdef EVO_OCEAN_EYE
+        // The Ocean eye build: 64 sensors + 12 hidden = 76 sources need 7
+        // bits (sink keeps 9: 13 + 12 = 25 sinks). Packing only — genes still
+        // decode with % NUM_SENSES, and FlatConn stays 4 bytes.
+        static constexpr int SRC_BITS = 7;
+#else
         static constexpr int SRC_BITS = 6;
+#endif
         static constexpr uint16_t SRC_MASK = (1u << SRC_BITS) - 1u;
 
         int   src()  const { return srcSink & SRC_MASK; }

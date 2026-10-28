@@ -83,6 +83,10 @@ inline void hashConfig(Fnv& h, const SimConfig& c, const OceanConfig& o) {
     h.f32(o.depth); h.f32(o.kBuoy); h.f32(o.buoyMutation); h.f32(o.pitchMax); h.f32(o.vDrag);
     h.f32(o.wallBand); h.f32(o.cHold); h.f32(o.cPress); h.i32(o.foodDepthMode);
     h.f32(o.foodDepthSpread);
+#ifdef EVO_OCEAN_EYE
+    h.i32(o.eye);   // the eye build only: the plain build's eye is always 0 and its
+                    // fingerprints stay those of the build before the eye existed
+#endif
 }
 
 inline void hashCounters(Fnv& h, const OceanWorld& w) {
@@ -244,6 +248,9 @@ inline void dumpState(const OceanWorld& w, std::FILE* out) {
     d.fl("pitchMax", w.ocfg.pitchMax); d.fl("vDrag", w.ocfg.vDrag); d.fl("wallBand", w.ocfg.wallBand);
     d.fl("cHold", w.ocfg.cHold); d.fl("cPress", w.ocfg.cPress); d.ll("foodDepthMode", w.ocfg.foodDepthMode);
     d.fl("foodDepthSpread", w.ocfg.foodDepthSpread);
+#ifdef EVO_OCEAN_EYE
+    d.ll("eye", w.ocfg.eye);
+#endif
     std::fprintf(out, "\ncounters");
     d.ll("births", w.births); d.ll("deaths", w.deaths); d.ll("totalBirths", w.totalBirths);
     d.ll("totalDeaths", w.totalDeaths); d.ll("grace", w.totalGraceBirths); d.ll("soft", w.totalSoftBirths);

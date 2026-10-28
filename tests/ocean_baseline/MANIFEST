@@ -1,0 +1,19 @@
+tests/ocean_baseline — the Ocean determinism harness's historical oracle.
+
+<case>.txt is ocean_parity_driver's native output for that case of
+wasm/ocean_parity.sh (whose wasm output must equal it too): the fingerprint of
+the whole world every 100 / 250 steps, the rolling chain over every step, the
+coverage counters, the expectations, the final line. wasm/ocean_parity.sh fails
+any case whose output differs from its file here, so a change to shared
+behaviour that native and wasm make identically (they are built from the same
+source) still fails.
+
+Rewrite these files ONLY with `wasm/ocean_parity.sh --rebaseline --overwrite
+--reason "..."`, ONLY when behaviour is MEANT to change (a deliberate engine
+change, a new or edited case, a change to what the harness hashes — then bump
+ofp::kFormatVersion), and NEVER to make a failure go away. Commit them with
+the change that moved them. Each rewrite is logged below (newest last).
+
+2026-10-28T02:41Z  engine 3ef944c  format=2  g++ 13 / 6.0.4 (fe5be6afdff43ad58860d821fcc8572a23f92d19)
+  reason: initial baseline: engine at 3ef944c (unchanged), harness format 2 (full state every step, coverage expectations)
+  wrote: def_s1 def_s42 def_s999 def_s31415 pred_s7 econ_s42 rich_s5 eddies_s11 gyre_toro_s13 rich_toro_s7 x_steep_s3 x_deep_s8 x_shallow_s4 x_osc_s6 x_tri_body_s9 live_s21 capture_s17 big_s42 big_toro_s9 long_s42 pred_age_s23 gate_s29 cap_s31 fast_logs_s41 toro_bud_s43 e1_waves_s3 e1_deep_s5 e1_gyre_s13 e1_costs_s8 e1_size_s9 e1_preset_s42 e1_preset_long e1_live_s21 e1_capture_s17 e1_x_shallow_s4 e1_x_big_s9

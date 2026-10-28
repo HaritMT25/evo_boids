@@ -1,13 +1,19 @@
-// ocean_parity_driver.cpp — the Ocean world's native-vs-wasm determinism oracle
-// (PLAN_ecosystem.md §12, E0 exit test "native == wasm fingerprints").
+// ocean_parity_driver.cpp — the Ocean world's determinism oracle
+// (PLAN_ecosystem.md §12, E0 exit test "native == wasm fingerprints"; and the
+// historical oracle: wasm/ocean_parity.sh also compares the native output with
+// the committed baseline in tests/ocean_baseline/).
 //
-// Runs OceanWorld headless and prints, every K steps, an exact fingerprint of
+// Runs OceanWorld headless. After EVERY step it takes the full fingerprint of
 // the whole state (tools/ocean_fingerprint.hpp: every fish's AgentCore fields,
-// genome, net, pos/vel/depth/vz/bodyBuoy/body trail, food incl. depth,
-// predators incl. depth/pitch, the pheromone grid, the current, all counters
-// and nextId_, the config, and the rng engine's state; floats by bit pattern).
-// Build the SAME file natively and with Emscripten, run both with the same
-// arguments and byte-compare stdout: equal output == bit-identical runs.
+// genome, net, pos/vel/depth/vz/bodyBuoy/body trail, food incl. depth and size,
+// predators incl. depth/pitch, the pheromone grid, the current field's whole
+// state, the persistent geometry, all counters and nextId_, both configs, and
+// the rng engine; floats by bit pattern), folds it into a rolling `chain`
+// hash and scans the state for non-finite values; every K steps it prints the
+// sections and the chain. A divergence that heals before the next print still
+// changes the chain, and a transient NaN still fails the run. Build the SAME
+// file natively and with Emscripten, run both with the same arguments and
+// byte-compare stdout: equal output == bit-identical runs.
 //
 //   g++ -O3 -std=c++20 -ffp-contract=off -DEVO_WORLD_OCEAN -I src tools/ocean_parity_driver.cpp -o opd
 //   em++ -O3 -std=c++20 -ffp-contract=off -msimd128 -DEVO_WORLD_OCEAN -I src
@@ -21,25 +27,38 @@
 // cfg JSON means here what it means to oc_init.
 //
 // Usage: ocean_parity_driver SEED STEPS [options]
-//   --every K          fingerprint every K steps (default 100; step 0 and the
-//                      last step are always printed)
+//   --every K          print the fingerprint every K steps (default 100; step 0
+//                      and the last step are always printed). The chain covers
+//                      every step whatever K is.
 //   --w W --h H        world size (default 1920 x 1080)
 //   --depth D          sea depth (default 240)
 //   --pop N            founders (default 300)
 //   --cfg JSON         flat SimConfig + OceanConfig keys, as oc_init takes them
 //   --set NAME=V@S     before step S+1 (after S steps), change one live knob the
 //                      way oc_set_param does (repeatable)
+//   --expect NAMEopV   after the run, a coverage counter (the `cover` line) must
+//                      satisfy op V (op: > >= = <= <); repeatable; exit 5 if not.
+//                      This is how a case proves it reached the branch it is for.
 //   --dump PATH        write the full state as text (tools/ocean_fingerprint.hpp
 //                      dumpState) at --dump-step (default: the last step)
 //   --dump-step S      which step to dump (0 = right after init)
 //   --capture          captureActivations on: every fish's 46 sensors and 13
 //                      actions of its last step are hashed too (not a cfg JSON key)
-//   --trace            fingerprint EVERY step (divergence bisection)
+//   --logs C,R         the death-cluster map and the birth log on, kept to C and
+//                      R records (clusterMap / clusterMax, reproLog / reproLogMax:
+//                      not cfg JSON keys either — the checkpoint reader, and so
+//                      oc_init, does not carry them); small values force their
+//                      decimation
+//   --trace            print EVERY step (divergence bisection)
+//   --sparse           fingerprint only at the printed steps, no chain, no
+//                      per-step scan (the pre-v2 behaviour; for timing the
+//                      per-step overhead only — its output has no chain=)
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <string>
 #include <vector>
 #include "ocean_fingerprint.hpp"
@@ -75,16 +94,90 @@ bool applySet(OceanWorld& w, const LiveSet& s) {
     return true;
 }
 
+// What the run reached, observed from outside the engine every step (no hooks:
+// the engine is unchanged). `before` sees the state a step starts from — what
+// the step's branches read — and `after` the state it leaves.
+struct Coverage {
+    long long bandTop = 0;       // fish-steps that started inside the surface band (the wall push ran)
+    long long bandFloor = 0;     // ... inside the floor band
+    long long capSteps = 0;      // steps that started at maxPopulation (> 0): every pairing in them is capped
+    long long fastTanhSteps = 0; // fish-steps whose net ran with cfg.fastTanh
+    long long popMax = 0, predMax = 0, predGenMax = 0;
+    long long predTraitVaried = 0;   // predator-steps with an inherited (non-1) trait
+    void before(const OceanWorld& w) {
+        const float wb = std::min(w.ocfg.wallBand, 0.5f * w.D);   // the step's own band (stepFish)
+        for (const Fish& c : w.creatures) {
+            if (!c.alive || !(wb > 0.0f)) continue;
+            if (c.depth < wb) ++bandTop;
+            else if (c.depth > w.D - wb) ++bandFloor;
+        }
+        if (w.cfg.maxPopulation > 0 && (long long)w.creatures.size() >= w.cfg.maxPopulation) ++capSteps;
+        if (w.cfg.fastTanh) fastTanhSteps += (long long)w.creatures.size();
+    }
+    void after(const OceanWorld& w) {
+        popMax = std::max(popMax, (long long)w.creatures.size());
+        predMax = std::max(predMax, (long long)w.predators.size());
+        for (const OceanPredator& p : w.predators) {
+            predGenMax = std::max(predGenMax, (long long)p.generation);
+            predTraitVaried += (p.speedFactor != 1.0f || p.buddingFactor != 1.0f);
+        }
+    }
+    // Every counter, by name, with the engine's own totals.
+    std::map<std::string, long long> values(const OceanWorld& w) const {
+        const bool gateArmed = w.cfg.reproMaxDistance >= 0.0f;
+        return {
+            {"births", w.totalBirths}, {"deaths", w.totalDeaths}, {"reseeds", w.totalReseeds},
+            {"grace", w.totalGraceBirths}, {"soft", w.totalSoftBirths},
+            // births that passed the armed gate's distance test itself (not grace)
+            {"gateBirths", gateArmed ? w.totalBirths - w.totalGraceBirths : 0},
+            {"dPred", w.totalDeathsPredation}, {"dStarve", w.totalDeathsStarvation}, {"dAge", w.totalDeathsAge},
+            {"pBirths", w.totalPredatorBirths}, {"pStarve", w.totalPredatorDeathsStarvation},
+            {"pAge", w.totalPredatorDeathsAge}, {"pReseeds", w.totalPredatorReseeds},
+            {"deathLog", (long long)w.deathLog.size()}, {"clusterStride", w.clusterStride_},
+            {"birthLog", (long long)w.birthLog.size()}, {"reproStride", w.reproStride_},
+            {"bandTop", bandTop}, {"bandFloor", bandFloor}, {"capSteps", capSteps},
+            {"fastTanhSteps", fastTanhSteps}, {"popMax", popMax}, {"predMax", predMax},
+            {"predGenMax", predGenMax}, {"predTraitVaried", predTraitVaried},
+        };
+    }
+};
+
+struct Expect { std::string text, name, op; long long value; };
+
+bool parseExpect(const char* s, Expect& e) {
+    e.text = s;
+    const char* p = s;
+    while (*p && *p != '<' && *p != '>' && *p != '=') ++p;
+    if (p == s || !*p) return false;
+    e.name.assign(s, p - s);
+    const char* v = p + 1;
+    if (*v == '=') ++v;
+    e.op.assign(p, v - p);
+    if (e.op != ">" && e.op != ">=" && e.op != "=" && e.op != "<=" && e.op != "<") return false;
+    char* end = nullptr;
+    e.value = std::strtoll(v, &end, 10);
+    return end && end != v && !*end;
+}
+
+bool holds(const Expect& e, long long got) {
+    if (e.op == ">") return got > e.value;
+    if (e.op == ">=") return got >= e.value;
+    if (e.op == "=") return got == e.value;
+    if (e.op == "<=") return got <= e.value;
+    return got < e.value;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
     if (argc < 3) {
         std::fprintf(stderr, "usage: %s SEED STEPS [--every K] [--w W --h H --depth D --pop N]"
-                             " [--cfg JSON] [--set NAME=V@STEP] [--dump PATH --dump-step S] [--trace]\n",
+                             " [--cfg JSON] [--set NAME=V@STEP] [--expect NAMEopV] [--dump PATH --dump-step S]"
+                             " [--capture] [--logs C,R] [--trace] [--sparse]\n",
                      argv[0]);
         return 2;
     }
-    {   // Locale guard: the config text in the fingerprint assumes C-locale %.9g.
+    {   // Locale guard: --set and the header print with C-locale %.9g.
         char buf[16];
         std::snprintf(buf, sizeof buf, "%.9g", 0.5);
         if (std::strcmp(buf, "0.5") != 0) { std::fprintf(stderr, "FATAL: non-C locale (%s)\n", buf); return 3; }
@@ -97,8 +190,10 @@ int main(int argc, char** argv) {
     double depth = 240.0;
     const char* cfgJson = nullptr;
     const char* dumpPath = nullptr;
-    bool capture = false;
+    bool capture = false, sparse = false;
+    int clusterMax = -1, reproLogMax = -1;
     std::vector<LiveSet> sets;
+    std::vector<Expect> expects;
     for (int i = 3; i < argc; ++i) {
         auto is = [&](const char* k) { return std::strcmp(argv[i], k) == 0 && i + 1 < argc; };
         if (is("--every")) every = std::strtol(argv[++i], nullptr, 10);
@@ -114,8 +209,20 @@ int main(int argc, char** argv) {
             if (!parseSet(argv[++i], s)) { std::fprintf(stderr, "bad --set %s (NAME=VALUE@STEP)\n", argv[i]); return 2; }
             sets.push_back(s);
         }
+        else if (is("--expect")) {
+            Expect e;
+            if (!parseExpect(argv[++i], e)) { std::fprintf(stderr, "bad --expect %s (NAMEopVALUE)\n", argv[i]); return 2; }
+            expects.push_back(e);
+        }
+        else if (is("--logs")) {
+            if (std::sscanf(argv[++i], "%d,%d", &clusterMax, &reproLogMax) != 2 || clusterMax < 1 || reproLogMax < 1) {
+                std::fprintf(stderr, "bad --logs %s (CLUSTERMAX,REPROLOGMAX, both >= 1)\n", argv[i]);
+                return 2;
+            }
+        }
         else if (!std::strcmp(argv[i], "--trace")) every = 1;
         else if (!std::strcmp(argv[i], "--capture")) capture = true;
+        else if (!std::strcmp(argv[i], "--sparse")) sparse = true;
         else { std::fprintf(stderr, "unknown or incomplete argument: %s\n", argv[i]); return 2; }
     }
     if (every <= 0) every = steps > 0 ? steps : 1;
@@ -128,9 +235,20 @@ int main(int argc, char** argv) {
         return 4;
     }
     w.cfg.captureActivations = capture;
-    std::printf("ocean_parity seed=%u steps=%ld every=%ld world=%dx%dx%.9g pop=%d capture=%d cfg=%s\n",
-                seed, steps, every, W, H, depth, pop, (int)capture, cfgJson ? cfgJson : "{}");
+    if (clusterMax > 0) {
+        w.cfg.clusterMap = true;
+        w.cfg.clusterMax = clusterMax;
+        w.cfg.reproLog = true;
+        w.cfg.reproLogMax = reproLogMax;
+    }
+    std::printf("ocean_parity format=%d seed=%u steps=%ld every=%ld world=%dx%dx%.9g pop=%d capture=%d logs=%d,%d cfg=%s\n",
+                ofp::kFormatVersion, seed, steps, every, W, H, depth, pop, (int)capture, clusterMax, reproLogMax,
+                cfgJson ? cfgJson : "{}");
     for (const LiveSet& s : sets) std::printf("set %s=%.9g @%ld\n", s.name.c_str(), s.value, s.step);
+    for (const Expect& e : expects) {
+        // An unknown counter name is a harness error, not a pass.
+        if (!Coverage{}.values(w).count(e.name)) { std::fprintf(stderr, "--expect: no counter %s\n", e.name.c_str()); return 2; }
+    }
 
     auto dumpNow = [&] {
         std::FILE* f = std::fopen(dumpPath, "w");
@@ -141,14 +259,24 @@ int main(int argc, char** argv) {
 
     // Non-finite state is a failure even when both builds agree (see ofp::countNonFinite).
     long nonFiniteMax = 0, nonFiniteFirst = -1;
-    auto print = [&](long step) {
-        std::fputs(ofp::fingerprintLine("fp", step, w, ofp::fingerprint(w)).c_str(), stdout);
+    ofp::Hasher chain;   // every step's full fingerprint, in order
+    Coverage cover;
+    auto observe = [&](long step, bool printIt) {
+        if (sparse && !printIt) return;
+        const ofp::Fingerprint fp = ofp::fingerprint(w);
+        chain.u64(fp.all);
         const long nf = ofp::countNonFinite(w);
         if (nf > 0 && nonFiniteFirst < 0) nonFiniteFirst = step;
         nonFiniteMax = std::max(nonFiniteMax, nf);
+        if (printIt) {
+            std::fputs(ofp::fingerprintLine("fp", step, w, fp).c_str(), stdout);
+            if (!sparse) std::printf(" chain=%016llx", (unsigned long long)chain.value());
+            std::fputc('\n', stdout);
+        }
     };
 
-    print(0);
+    observe(0, true);
+    cover.after(w);
     if (dumpPath && dumpStep == 0) dumpNow();
 
     const auto t0 = std::chrono::steady_clock::now();
@@ -158,13 +286,30 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "--set %s refused\n", ls.name.c_str());
                 return 4;
             }
+        cover.before(w);
         w.update(0.016f);
+        cover.after(w);
         const long done = s + 1;
-        if (done % every == 0 || done == steps)
-            print(done);
+        observe(done, done % every == 0 || done == steps);
         if (dumpPath && done == dumpStep) dumpNow();
     }
     const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+
+    const auto values = cover.values(w);
+    std::printf("cover");
+    for (const auto& kv : values) std::printf(" %s=%lld", kv.first.c_str(), kv.second);
+    std::printf("\n");
+    int unmet = 0;
+    for (const Expect& e : expects) {
+        const long long got = values.at(e.name);
+        const bool ok = holds(e, got);
+        std::printf("expect %s %s (got %lld)\n", e.text.c_str(), ok ? "ok" : "FAILED", got);
+        if (!ok) {
+            ++unmet;
+            std::fprintf(stderr, "expectation %s not met (got %lld): the case did not reach what it is for\n",
+                         e.text.c_str(), got);
+        }
+    }
 
     double mean, sd, hist[ocean::kDepthBins];
     w.depthStats(mean, sd, hist);
@@ -177,5 +322,5 @@ int main(int argc, char** argv) {
     std::fflush(stdout);
     std::fprintf(stderr, "# %ld steps, %.2f s, %.0f steps/s, pop %zu\n", steps, secs,
                  steps / (secs > 0 ? secs : 1e-9), w.creatures.size());
-    return 0;
+    return unmet ? 5 : 0;
 }

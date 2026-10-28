@@ -14,12 +14,33 @@
 //   sensors       LOC_Z, OWN_VEL_Z, BOUNDARY_DIST_Z equal their defining
 //                 expressions; NEAREST_FOOD_DZ / AVG_NEIGHBOR_DZ in range; the
 //                 food direction is a unit vector; every sensor finite
+//   sensor_signs  hand-placed fixtures: the SIGN and value of LOC_Z,
+//                 OWN_VEL_Z, NEAREST_FOOD_DZ (+ = food deeper), AVG_NEIGHBOR_DZ
+//                 (+ = neighbours deeper), BOUNDARY_DIST_Z; a NEAREST_FOOD_DZ ->
+//                 STEER_Z (+) wire takes a fish toward its food in depth
+//   current_sens  3-D flow on: CURRENT_FWD / LR are + along / to the right of
+//                 the heading, 0 at the surface (deep current), f(d)-weighted,
+//                 and read flowAt at the fish (waves too)
+//   walls         the depth wall bands push away from surface / floor by
+//                 exactly (1 − z/wb)·3·dt, capped at D/2 in a shallow sea
 //   capture       captureActivations changes no dynamics
 //   reproducible  same seed twice -> identical fingerprints; another seed and a
-//                 1-ulp change in any section change the hash
+//                 1-ulp change in any section change the hash — incl. a
+//                 vortex frequency, a food-patch depth, a grid's cell size, the
+//                 signal grid's wrap flag, a wave phase (each its own section)
 //   reset         oc_init / oc_reset (the shim, wasm/ocean_wasm.cpp) replay
 //                 exactly, live oc_set_param changes are dropped, and the shim's
-//                 world == the harness's ofp::initWorld world
+//                 world == the harness's ofp::initWorld world (the harness's
+//                 prints, rng included, taken BEFORE the shim runs: an extra
+//                 draw in oc_step fails); a fresh world re-inited replays, a
+//                 reused one keeps exactly frame / ids / totals (asserted)
+//   pred_econ     fixtures: burn = metabolism + predatorMoveCost·speed² (or
+//                 moveCost when < 0), a fixed predatorMeal vs the prey's
+//                 reserves, death at predatorMaxAge — bit for bit
+//   pair_gates    fixtures: the maxPopulation cap, the hard distance gate
+//                 (reproSoftWidth 0: refuses far pairs, no draw) and the grace
+//                 bypass (young founders only), with their counters
+//   fast_tanh     cfg.fastTanh reaches the Ocean net: actions == fastTanhApprox
 //   child         child depth == the parents' midpoint, bodyBuoy within
 //                 ±buoyMutation of their mean (clamped to [0, 1]), on and
 //                 across the toroidal seam
@@ -373,7 +394,396 @@ void testSensors() {
 
 bool sameDynamics(const ofp::Fingerprint& a, const ofp::Fingerprint& b) {
     return a.ctr == b.ctr && a.fish == b.fish && a.food == b.food && a.pred == b.pred && a.sig == b.sig &&
-           a.cur == b.cur && a.rng == b.rng;
+           a.cur == b.cur && a.geo == b.geo && a.rng == b.rng;
+}
+
+// One step of hand-placed fish; sensors are read before anything moves (a fish
+// senses at the start of its own stepFish, and these fixtures do not move
+// vertically: kBuoy 0, no walls, no wiring unless a test adds it).
+void testSensorSigns() {
+    Test t("sensor_signs");
+    OceanConfig oc;
+    oc.kBuoy = 0.0f;
+    oc.wallBand = 0.0f;
+    OceanWorld w;
+    initQuiet(w, 1301, 240.0f, oc, /*capture*/ true);
+    const float D = w.D, R = w.cfg.perceptionRadius, pm = w.ocfg.pitchMax;
+    // Fixtures >= 400 apart (> R): each sees only its own food / neighbour.
+    struct FoodFix { Vec2 at; float z; Vec2 off; float dz; };
+    const FoodFix ff[] = {
+        {{200, 200}, 60.0f, {0, 0}, 50.0f},      // food straight below: DZ = +1
+        {{600, 200}, 180.0f, {0, 0}, -50.0f},    // straight above: DZ = -1
+        {{1000, 200}, 100.0f, {30, 0}, 40.0f},   // (30, 0, 40): DX .6, DZ .8
+        {{1400, 200}, 200.0f, {0, -30}, -40.0f}, // (0, -30, -40): DY -.6, DZ -.8
+    };
+    int foodIdx[4];
+    for (int k = 0; k < 4; ++k) {
+        foodIdx[k] = addFish(w, ff[k].at, ff[k].z, {}, ff[k].z / D);
+        OceanFood f;
+        f.pos = {ff[k].at.x + ff[k].off.x, ff[k].at.y + ff[k].off.y};
+        f.depth = ff[k].z + ff[k].dz;
+        w.food.push_back(f);
+    }
+    // A pair 40 apart in depth (5 apart horizontally): the upper one's neighbours are deeper.
+    const int up = addFish(w, {200, 700}, 100.0f, {}, 100.0f / D);
+    const int dn = addFish(w, {205, 700}, 140.0f, {}, 140.0f / D);
+    // vz preset: diving (+) and rising (-).
+    const int dive = addFish(w, {600, 700}, 120.0f, {}, 0.5f);
+    const int rise = addFish(w, {1000, 700}, 120.0f, {}, 0.5f);
+    w.creatures[dive].vz = 0.25f;
+    w.creatures[rise].vz = -0.25f;
+    // BOUNDARY_DIST_Z along the column: surface, quarter, middle, three quarters, floor.
+    const float bzDepth[5] = {0.0f, 60.0f, 120.0f, 180.0f, 240.0f};
+    int bz[5];
+    for (int k = 0; k < 5; ++k) bz[k] = addFish(w, {1400.0f + 100.0f * (k % 2), 600.0f + 110.0f * k}, bzDepth[k], {}, bzDepth[k] / D);
+    // Sensor -> action: a NEAREST_FOOD_DZ -> STEER_Z (+) fish with food below, one with food above.
+    const int seekDn = addFish(w, {1800, 200}, 100.0f, {mkGene(true, NEAREST_FOOD_DZ, STEER_Z, kStrong)}, 100.0f / D);
+    const int seekUp = addFish(w, {1800, 900}, 140.0f, {mkGene(true, NEAREST_FOOD_DZ, STEER_Z, kStrong)}, 140.0f / D);
+    for (const auto& fz : {std::pair<Vec2, float>{{1800, 200}, 150.0f}, std::pair<Vec2, float>{{1800, 900}, 90.0f}}) {
+        OceanFood f;
+        f.pos = fz.first;
+        f.depth = fz.second;
+        w.food.push_back(f);
+    }
+    std::vector<Fish> before = w.creatures;
+    w.update(0.016f);
+    auto S = [&](int i) { return w.creatures[i].lastSensors; };
+
+    for (int k = 0; k < 4; ++k) {
+        const Fish& c = before[foodIdx[k]];
+        const float dx = ff[k].off.x, dy = ff[k].off.y, dz = ff[k].dz;
+        const float dist = std::sqrt(dx * dx + dy * dy + dz * dz), inv = 1.0f / dist;
+        const float* s = S(foodIdx[k]);
+        t.expect(s[NEAREST_FOOD_DX] == dx * inv && s[NEAREST_FOOD_DY] == dy * inv && s[NEAREST_FOOD_DZ] == dz * inv,
+                 "food fixture %d: (%.9g, %.9g, %.9g), expected (%.9g, %.9g, %.9g)", k, s[NEAREST_FOOD_DX],
+                 s[NEAREST_FOOD_DY], s[NEAREST_FOOD_DZ], dx * inv, dy * inv, dz * inv);
+        t.expect((s[NEAREST_FOOD_DZ] > 0.0f) == (dz > 0.0f) && s[NEAREST_FOOD_DZ] != 0.0f,
+                 "food fixture %d: NEAREST_FOOD_DZ %.9g has the wrong sign (food is %s)", k, s[NEAREST_FOOD_DZ],
+                 dz > 0.0f ? "deeper" : "shallower");
+        t.expect(s[NEAREST_FOOD_DIST] == dist / R, "food fixture %d: NEAREST_FOOD_DIST %.9g != %.9g", k,
+                 s[NEAREST_FOOD_DIST], dist / R);
+        t.expect(s[LOC_Z] == c.depth / D, "food fixture %d: LOC_Z %.9g != depth/D %.9g", k, s[LOC_Z], c.depth / D);
+    }
+    t.expect(S(foodIdx[0])[NEAREST_FOOD_DZ] == 1.0f && S(foodIdx[1])[NEAREST_FOOD_DZ] == -1.0f,
+             "straight below / above: DZ %.9g / %.9g, expected +1 / -1", S(foodIdx[0])[NEAREST_FOOD_DZ],
+             S(foodIdx[1])[NEAREST_FOOD_DZ]);
+    t.expect(S(foodIdx[0])[LOC_Z] == 0.25f && S(foodIdx[1])[LOC_Z] == 0.75f, "LOC_Z at 60 / 180 of 240: %.9g / %.9g",
+             S(foodIdx[0])[LOC_Z], S(foodIdx[1])[LOC_Z]);
+
+    // AVG_NEIGHBOR_DZ: tanh(mean dz / R), + when the neighbours are deeper.
+    t.expect(S(up)[AVG_NEIGHBOR_DZ] == evomath::tanhf(40.0f / R) && S(up)[AVG_NEIGHBOR_DZ] > 0.0f,
+             "upper fish: AVG_NEIGHBOR_DZ %.9g, expected +tanh(0.4) = %.9g", S(up)[AVG_NEIGHBOR_DZ], evomath::tanhf(40.0f / R));
+    t.expect(S(dn)[AVG_NEIGHBOR_DZ] == evomath::tanhf(-40.0f / R) && S(dn)[AVG_NEIGHBOR_DZ] < 0.0f,
+             "lower fish: AVG_NEIGHBOR_DZ %.9g, expected -tanh(0.4)", S(dn)[AVG_NEIGHBOR_DZ]);
+    t.expect(S(dive)[AVG_NEIGHBOR_DZ] == 0.0f && S(dive)[NEAREST_FOOD_DZ] == 0.0f,
+             "a lone fish: AVG_NEIGHBOR_DZ %.9g NEAREST_FOOD_DZ %.9g (expected 0)", S(dive)[AVG_NEIGHBOR_DZ],
+             S(dive)[NEAREST_FOOD_DZ]);
+
+    // OWN_VEL_Z: vz / pitchMax, + = diving; a diving fish gets deeper (LOC_Z up).
+    t.expect(S(dive)[OWN_VEL_Z] == 0.25f / pm && S(dive)[OWN_VEL_Z] > 0.0f, "diving: OWN_VEL_Z %.9g, expected +%.9g",
+             S(dive)[OWN_VEL_Z], 0.25f / pm);
+    t.expect(S(rise)[OWN_VEL_Z] == -0.25f / pm, "rising: OWN_VEL_Z %.9g, expected %.9g", S(rise)[OWN_VEL_Z], -0.25f / pm);
+    t.expect(w.creatures[dive].depth > 120.0f && w.creatures[rise].depth < 120.0f,
+             "+vz must dive (depth 120 -> %.6f) and -vz rise (-> %.6f)", w.creatures[dive].depth, w.creatures[rise].depth);
+
+    // BOUNDARY_DIST_Z = tanh(min(z, D - z) / (D/4)): 0 at both walls, largest mid-column, symmetric.
+    for (int k = 0; k < 5; ++k) {
+        const float z = bzDepth[k];
+        const float e = evomath::tanhf(std::min(z, D - z) / (0.25f * D));
+        t.expect(S(bz[k])[BOUNDARY_DIST_Z] == e, "BOUNDARY_DIST_Z at %g: %.9g, expected %.9g", z, S(bz[k])[BOUNDARY_DIST_Z], e);
+    }
+    t.expect(S(bz[0])[BOUNDARY_DIST_Z] == 0.0f && S(bz[4])[BOUNDARY_DIST_Z] == 0.0f &&
+                 S(bz[1])[BOUNDARY_DIST_Z] == S(bz[3])[BOUNDARY_DIST_Z] &&
+                 S(bz[2])[BOUNDARY_DIST_Z] > S(bz[1])[BOUNDARY_DIST_Z] && S(bz[1])[BOUNDARY_DIST_Z] > 0.0f,
+             "BOUNDARY_DIST_Z along the column: %.6f %.6f %.6f %.6f %.6f", S(bz[0])[BOUNDARY_DIST_Z],
+             S(bz[1])[BOUNDARY_DIST_Z], S(bz[2])[BOUNDARY_DIST_Z], S(bz[3])[BOUNDARY_DIST_Z], S(bz[4])[BOUNDARY_DIST_Z]);
+
+    // The sensor's meaning end to end: wired (+) to STEER_Z it steers toward the food.
+    t.expect(S(seekDn)[NEAREST_FOOD_DZ] > 0.0f && S(seekUp)[NEAREST_FOOD_DZ] < 0.0f,
+             "seekers: DZ %.6f (food below) / %.6f (food above)", S(seekDn)[NEAREST_FOOD_DZ], S(seekUp)[NEAREST_FOOD_DZ]);
+    for (int s = 0; s < 9; ++s) w.update(0.016f);
+    t.expect(w.creatures[seekDn].depth > 100.0f && w.creatures[seekUp].depth < 140.0f,
+             "NEAREST_FOOD_DZ -> STEER_Z (+) did not move toward the food: %.4f (from 100, food at 150), %.4f (from 140, food at 90)",
+             w.creatures[seekDn].depth, w.creatures[seekUp].depth);
+    t.note("DZ +1 / -1 / .8 / -.8 as placed; AVG_NEIGHBOR_DZ ±tanh(.4); seekers after 10 steps at %.2f / %.2f",
+           w.creatures[seekDn].depth, w.creatures[seekUp].depth);
+}
+
+// CURRENT_FWD / CURRENT_LR with the 3-D flow on.
+void testCurrentSensors() {
+    Test t("current_sens");
+    for (int waves = 0; waves < 2; ++waves) {
+        SimConfig sc;
+        applyOceanDefaults(sc);
+        sc.minPopulation = 0; sc.targetFood = 0; sc.foodSpawnBase = 0.0f; sc.foodSpawnAmp = 0.0f;
+        sc.metabolicRate = 0.0f; sc.maxAge = 1e9f; sc.predatorCount = 0;
+        sc.captureActivations = true;
+        sc.currentStrength = 60.0f;
+        sc.currentDrift = 0.0f;   // a static field: the current a fish senses is currentAt() before and after
+        OceanConfig oc;
+        oc.deepCurrent = true;    // flowE1(): the sensors read flowAt
+        oc.waveSpeed = waves ? 6.0f : 0.0f;
+        oc.kBuoy = 0.0f;
+        oc.wallBand = 0.0f;
+        OceanWorld w;
+        rng.seed(1311);
+        w.cfg = sc;
+        w.ocfg = oc;
+        w.init(1920, 1080, 240.0f, 0);
+        w.update(0.016f);   // the first advance() places the eddy centres
+        // The strongest current on a coarse lattice: a clear direction to align with.
+        Vec2 at{0, 0}, cur{0, 0};
+        float best = -1.0f;
+        for (int j = 1; j < 10; ++j)
+            for (int i = 1; i < 18; ++i) {
+                const Vec2 p{(float)i * 100.0f, (float)j * 100.0f};
+                const Vec2 c = w.currentAt(p);
+                const float m = c.x * c.x + c.y * c.y;
+                if (m > best) { best = m; at = p; cur = c; }
+            }
+        const float len = std::sqrt(best);
+        const Vec2 u{cur.x / len, cur.y / len};
+        // Fixtures at that spot, 60+ apart in depth (> interactRadius): along the
+        // current, against it, and rotated so the current is on their right.
+        struct Fx { const char* what; float z; Vec2 head; };
+        const Fx fx[] = {
+            {"along, mid-column", 120.0f, u}, {"against, mid-column", 180.0f, {-u.x, -u.y}},
+            {"current on the right", 60.0f, {u.y, -u.x}}, {"along, at the surface", 0.0f, u},
+            {"along, deep", 240.0f, u},
+        };
+        constexpr int NF = 5;
+        int idx[NF];
+        Vec2 fwd[NF];
+        for (int k = 0; k < NF; ++k) {
+            idx[k] = addFish(w, at, fx[k].z, {}, fx[k].z / 240.0f);
+            w.creatures[idx[k]].vel = fx[k].head;
+            fwd[k] = w.creatures[idx[k]].forward();
+        }
+        w.update(0.016f);
+        for (int k = 0; k < NF; ++k) {
+            const float* s = w.creatures[idx[k]].lastSensors;
+            const float z = fx[k].z;
+            OceanWorld::Flow U;
+            if (waves) {
+                U = w.flowAt(at, z);
+            } else {   // independent of flowAt: f(d) = smoothstep(2d/D) on the 2-D current
+                const float f = (z <= 0.0f) ? 0.0f : (z >= 120.0f) ? 1.0f : (z == 60.0f ? 0.5f : -1.0f);
+                U.x = f * cur.x;
+                U.y = f * cur.y;
+            }
+            const Vec2 r{-fwd[k].y, fwd[k].x};
+            const float eF = evomath::tanhf((U.x * fwd[k].x + U.y * fwd[k].y) / 100.0f);
+            const float eL = evomath::tanhf((U.x * r.x + U.y * r.y) / 100.0f);
+            t.expect(s[CURRENT_FWD] == eF && s[CURRENT_LR] == eL, "%s, %s: FWD %.9g LR %.9g, expected %.9g %.9g",
+                     waves ? "waves" : "deep current", fx[k].what, s[CURRENT_FWD], s[CURRENT_LR], eF, eL);
+        }
+        const float* along = w.creatures[idx[0]].lastSensors;
+        const float* against = w.creatures[idx[1]].lastSensors;
+        const float* right = w.creatures[idx[2]].lastSensors;
+        const float* surf = w.creatures[idx[3]].lastSensors;
+        t.expect(along[CURRENT_FWD] > 0.1f && against[CURRENT_FWD] < -0.1f && right[CURRENT_LR] > 0.05f,
+                 "%s: signs: along FWD %.6f, against FWD %.6f, on the right LR %.6f", waves ? "waves" : "deep current",
+                 along[CURRENT_FWD], against[CURRENT_FWD], right[CURRENT_LR]);
+        if (!waves) {
+            t.expect(surf[CURRENT_FWD] == 0.0f && surf[CURRENT_LR] == 0.0f, "deep current at the surface: FWD %.9g LR %.9g",
+                     surf[CURRENT_FWD], surf[CURRENT_LR]);
+            t.expect(along[CURRENT_FWD] == evomath::tanhf(len / 100.0f) || std::abs(along[CURRENT_FWD] - evomath::tanhf(len / 100.0f)) < 1e-6f,
+                     "along the current: FWD %.9g, expected tanh(|U|/100) %.9g", along[CURRENT_FWD], evomath::tanhf(len / 100.0f));
+            t.note("strongest current %.2f at (%g, %g): FWD along %.4f, against %.4f; LR on the right %.4f; surface 0",
+                   len, at.x, at.y, along[CURRENT_FWD], against[CURRENT_FWD], right[CURRENT_LR]);
+        }
+    }
+}
+
+// The depth wall bands, one step, exactly as specified.
+void testWalls() {
+    Test t("walls");
+    struct V { float D, wallBand, z; int sign; };
+    const V vs[] = {
+        {240.0f, 12.0f, 2.0f, +1}, {240.0f, 12.0f, 238.0f, -1}, {240.0f, 12.0f, 120.0f, 0},
+        {240.0f, 12.0f, 0.0f, +1}, {240.0f, 12.0f, 240.0f, -1},
+        // A shallow sea: each band is capped at D/2, so depth 9 of 10 is in the FLOOR band.
+        {10.0f, 12.0f, 9.0f, -1}, {10.0f, 12.0f, 1.0f, +1},
+    };
+    long pushes = 0;
+    for (const V& v : vs) {
+        OceanConfig oc;
+        oc.kBuoy = 0.0f;
+        oc.vDrag = 0.0f;
+        oc.wallBand = v.wallBand;
+        OceanWorld w;
+        initQuiet(w, 1321, v.D, oc);
+        const int i = addFish(w, {500, 500}, v.z, {}, 0.5f);
+        const float speed = w.creatures[i].speed, dt = 0.016f;
+        w.update(dt);
+        const Fish& c = w.creatures[i];
+        const float wb = std::min(v.wallBand, 0.5f * v.D);
+        float vz = 0.0f;
+        if (v.z < wb) vz += (1.0f - v.z / wb) * 3.0f * dt;
+        else if (v.z > v.D - wb) vz -= (1.0f - (v.D - v.z) / wb) * 3.0f * dt;
+        vz = std::clamp(vz, -oc.pitchMax, oc.pitchMax);
+        const float z = std::clamp(v.z + vz * speed * dt, 0.0f, v.D);
+        t.expect(c.vz == vz && c.depth == z, "D %g band %g depth %g: vz %.9g depth %.9g, expected %.9g %.9g", v.D, v.wallBand,
+                 v.z, c.vz, c.depth, vz, z);
+        t.expect((c.vz > 0.0f) - (c.vz < 0.0f) == v.sign, "D %g depth %g: the wall pushed the wrong way (vz %.9g)", v.D, v.z, c.vz);
+        pushes += (c.vz != 0.0f);
+    }
+    t.expect(pushes == 6, "%ld of 6 band fixtures were pushed", pushes);
+}
+
+// Stage B predator economy, one step each, bit for bit.
+void testPredatorEconomy() {
+    Test t("pred_econ");
+    const float dt = 0.016f;
+    auto world = [&](OceanWorld& w, unsigned seed) {
+        initQuiet(w, seed, 240.0f, OceanConfig{});
+        w.cfg.predatorEconomy = true;
+        w.cfg.moveCost = 7e-5f;
+        w.cfg.predatorMetabolism = 2.0f;
+        w.cfg.predatorReproEnergy = 1e6f;   // no budding: one predator, its energy as computed
+    };
+    // Burn: metabolism + coefficient·speed², the coefficient predatorMoveCost (>= 0) or moveCost.
+    float energyAfter[2];
+    for (int k = 0; k < 2; ++k) {
+        const float pmc = k ? 3e-4f : -1.0f;
+        OceanWorld w;
+        world(w, 1401);
+        w.cfg.predatorMoveCost = pmc;
+        OceanPredator p;
+        p.pos = {500, 500};
+        p.depth = 100.0f;
+        p.energy = 40.0f;
+        p.speedFactor = 1.25f;
+        w.predators.push_back(p);
+        w.update(dt);
+        const float coef = (pmc >= 0.0f) ? pmc : 7e-5f;
+        const float speed = w.cfg.predatorSpeed * 1.25f;
+        const float burn = w.cfg.predatorMetabolism + coef * speed * speed;
+        const float e = 40.0f - burn * dt;
+        energyAfter[k] = w.predators[0].energy;
+        t.expect(w.predators[0].energy == e && w.predators[0].age == dt, "predatorMoveCost %g: energy %.9g age %.9g, expected %.9g %.9g",
+                 pmc, w.predators[0].energy, w.predators[0].age, e, dt);
+    }
+    t.expect(energyAfter[0] != energyAfter[1], "an explicit predatorMoveCost changed nothing");
+    // A capture: + predatorMeal when >= 0, else + the prey's reserves.
+    for (float meal : {9.0f, -1.0f}) {
+        OceanWorld w;
+        world(w, 1402);
+        w.cfg.moveCost = 0.0f;   // the prey's reserves stay what they were placed with
+        w.cfg.predatorMeal = meal;
+        const int prey = addFish(w, {500, 500}, 100.0f, {}, 100.0f / 240.0f);
+        w.creatures[prey].foodReserves = 33.0f;
+        OceanPredator p;
+        p.pos = {505, 500};
+        p.depth = 100.0f;
+        p.energy = 40.0f;
+        w.predators.push_back(p);
+        w.update(dt);
+        const float burn = w.cfg.predatorMetabolism + 0.0f * w.cfg.predatorSpeed * w.cfg.predatorSpeed;
+        const float e = (40.0f - burn * dt) + (meal >= 0.0f ? meal : 33.0f);
+        t.expect(w.totalDeathsPredation == 1 && w.creatures.empty() && w.predators.size() == 1,
+                 "meal %g: no capture (%lld), %zu predators", meal, w.totalDeathsPredation, w.predators.size());
+        t.expect(w.predators[0].energy == e && w.predators[0].digestTimer == w.cfg.predatorCooldown,
+                 "meal %g: energy %.9g, expected %.9g", meal, w.predators[0].energy, e);
+    }
+    // Old age: dead the step its age reaches predatorMaxAge, not before.
+    for (float age0 : {0.98f, 0.995f}) {
+        OceanWorld w;
+        world(w, 1403);
+        w.cfg.predatorMaxAge = 1.0f;
+        OceanPredator p;
+        p.pos = {500, 500};
+        p.depth = 100.0f;
+        p.energy = 40.0f;
+        p.age = age0;
+        w.predators.push_back(p);
+        w.update(dt);
+        const bool dies = age0 + dt >= 1.0f;
+        t.expect(w.predators.size() == (dies ? 0u : 1u) && w.totalPredatorDeathsAge == (dies ? 1 : 0) &&
+                     w.totalPredatorDeathsStarvation == 0,
+                 "age %g + dt vs max 1: %zu predators, %lld age deaths", age0, w.predators.size(), w.totalPredatorDeathsAge);
+    }
+}
+
+// Two adult, well-fed fish wired to pair, one step, under the pairing gates.
+struct GateRun { bool born = false; long draws = -1; long long grace = 0, soft = 0; };
+GateRun pairStep(unsigned seed, int maxPop, float T, float W, float grace, bool farGenomes, bool founders, float age) {
+    OceanWorld w;
+    initQuiet(w, seed, 240.0f, OceanConfig{});
+    w.cfg.maxPopulation = maxPop;
+    w.cfg.reproMaxDistance = T;
+    w.cfg.reproSoftWidth = W;
+    w.cfg.reproGracePeriod = grace;
+    std::vector<Gene> g1 = {mkGene(false, 0, INTERACT_REPRODUCE, kStrong)}, g2 = g1;
+    // An extra wire (its sensor is 0 in the vote) puts (32767/8192)^2 ~ 16 between the genomes.
+    if (farGenomes) g2.push_back(mkGene(true, LOC_X, STEER_X, kStrong));
+    const int a = addFish(w, {960, 540}, 100.0f, g1, 0.4f), b = addFish(w, {961, 541}, 101.0f, g2, 0.4f);
+    for (int i : {a, b}) {
+        Fish& f = w.creatures[i];
+        f.age = age;
+        f.foodReserves = 100.0f;
+        f.reproTimer = 0.0f;
+        f.interactTimer = 0.0f;
+        if (!founders) f.lineageId = f.id + 1000;   // not its own line: no grace
+    }
+    GateRun r;
+    const RandomGen before = rng;
+    w.update(0.016f);
+    r.draws = drawsBetween(before, rng);
+    r.born = w.creatures.size() == 3;
+    r.grace = w.totalGraceBirths;
+    r.soft = w.totalSoftBirths;
+    return r;
+}
+
+void testPairingGates() {
+    Test t("pair_gates");
+    for (unsigned seed : {1501u, 1502u, 1503u}) {
+        // The maxPopulation cap: 2 fish + 0 newborns must be < the cap.
+        const GateRun capped = pairStep(seed, 2, -1.0f, 0.0f, 0.0f, false, false, 10.0f);
+        const GateRun under = pairStep(seed, 3, -1.0f, 0.0f, 0.0f, false, false, 10.0f);
+        t.expect(!capped.born && under.born, "seed %u: maxPopulation 2 born %d, 3 born %d", seed, capped.born, under.born);
+        // The hard gate (soft width 0): identical genomes pass, far ones do not, and the gate draws nothing.
+        const GateRun near = pairStep(seed, 0, 1.0f, 0.0f, 0.0f, false, false, 10.0f);
+        const GateRun far = pairStep(seed, 0, 1.0f, 0.0f, 0.0f, true, false, 10.0f);
+        const GateRun farCapped = pairStep(seed, 2, 1.0f, 0.0f, 0.0f, true, false, 10.0f);   // refused before the gate
+        const GateRun farOff = pairStep(seed, 0, -1.0f, 0.0f, 0.0f, true, false, 10.0f);
+        t.expect(near.born && !far.born && farOff.born, "seed %u: hard gate T 1: near born %d, far born %d (gate off: %d)",
+                 seed, near.born, far.born, farOff.born);
+        t.expect(far.draws == farCapped.draws && near.soft == 0 && near.grace == 0,
+                 "seed %u: the hard gate drew (%ld vs %ld draws) or counted soft/grace", seed, far.draws, farCapped.draws);
+        // Grace: a young founder bypasses the gate (counted); an older one, or a non-founder, does not.
+        const GateRun young = pairStep(seed, 0, 1.0f, 0.0f, 20.0f, true, true, 10.0f);
+        const GateRun old = pairStep(seed, 0, 1.0f, 0.0f, 20.0f, true, true, 25.0f);
+        const GateRun notFounder = pairStep(seed, 0, 1.0f, 0.0f, 20.0f, true, false, 10.0f);
+        t.expect(young.born && young.grace == 1 && !old.born && !notFounder.born,
+                 "seed %u: grace 20: young founders born %d (grace %lld), age 25 born %d, non-founders born %d", seed,
+                 young.born, young.grace, old.born, notFounder.born);
+    }
+}
+
+// cfg.fastTanh reaches the Ocean world's net (stepFish -> feedForward).
+void testFastTanh() {
+    Test t("fast_tanh");
+    int differ = 0;
+    for (int wgt : {4096, 9000, 16384, 30000}) {
+        float act[2];
+        for (int fast = 0; fast < 2; ++fast) {
+            OceanConfig oc;
+            oc.kBuoy = 0.0f;
+            OceanWorld w;
+            initQuiet(w, 1601, 240.0f, oc, /*capture*/ true);
+            w.cfg.fastTanh = (fast == 1);
+            const int i = addFish(w, {500, 500}, 120.0f, {mkGene(false, 0, STEER_Z, wgt)}, 0.5f);
+            w.update(0.016f);
+            act[fast] = w.creatures[i].lastActions[STEER_Z];
+        }
+        const float x = 0.5f * (float)wgt / 8192.0f;   // undriven neuron 0 (0.5) x weight
+        t.expect(act[0] == evomath::tanhf(x) && act[1] == fastTanhApprox(x), "weight %d: actions %.9g / %.9g, expected %.9g / %.9g",
+                 wgt, act[0], act[1], evomath::tanhf(x), fastTanhApprox(x));
+        differ += (act[0] != act[1]);
+    }
+    t.expect(differ > 0, "fastTanh on and off gave identical actions: the flag does not reach the net");
 }
 
 void testCaptureNeutral() {
@@ -418,31 +828,62 @@ void testReproducible() {
         const auto c = runPrints(52, cfg, 300, 0, 1);
         t.expect(!c.empty() && c[0].fish != a[0].fish && c[0].rng != a[0].rng, "another seed gave the same world");
     }
-    // The hash sees a 1-ulp change in each section (and only that section).
+    // The hash sees a 1-ulp change in each section (and only that section),
+    // including the private state the harness reads through ofp::peek.
     OceanWorld w;
     std::string err;
-    ofp::initWorld(w, 53, 1920, 1080, 240.0f, 200, R"({"predatorCount":2})", err);
+    ofp::initWorld(w, 53, 1920, 1080, 240.0f, 200,
+                   R"({"predatorCount":2,"currentStrength":40,"foodPatches":3,"foodDepthMode":1})", err);
     for (int s = 0; s < 50; ++s) w.update(0.016f);
     const ofp::Fingerprint base = ofp::fingerprint(w);
     auto bump = [](float& f) { f = std::nextafter(f, 1e30f); };
+    int bumps = 0;
     auto only = [&](const char* what, std::uint64_t ofp::Fingerprint::*field) {
+        ++bumps;
         const ofp::Fingerprint p = ofp::fingerprint(w);
         bool othersSame = true;
-        for (auto f : {&ofp::Fingerprint::cfg, &ofp::Fingerprint::ctr, &ofp::Fingerprint::fish, &ofp::Fingerprint::food,
-                       &ofp::Fingerprint::pred, &ofp::Fingerprint::sig, &ofp::Fingerprint::cur, &ofp::Fingerprint::rng})
+        for (auto f : ofp::kSections)
             if (f != field) othersSame &= (p.*f == base.*f);
         t.expect(p.*field != base.*field && p.all != base.all && othersSame, "a 1-ulp change in %s: hash %s", what,
                  p.*field == base.*field ? "unchanged" : "changed other sections too");
     };
-    { const float keep = w.creatures[7].depth; bump(w.creatures[7].depth); only("fish depth", &ofp::Fingerprint::fish); w.creatures[7].depth = keep; }
-    { const float keep = w.creatures[3].bodyBuoy; bump(w.creatures[3].bodyBuoy); only("fish bodyBuoy", &ofp::Fingerprint::fish); w.creatures[3].bodyBuoy = keep; }
-    { const float keep = w.creatures[5].body[4].y; bump(w.creatures[5].body[4].y); only("fish body trail", &ofp::Fingerprint::fish); w.creatures[5].body[4].y = keep; }
-    { const float keep = w.food[11].depth; bump(w.food[11].depth); only("food depth", &ofp::Fingerprint::food); w.food[11].depth = keep; }
-    { const float keep = w.predators[1].pitch; bump(w.predators[1].pitch); only("predator pitch", &ofp::Fingerprint::pred); w.predators[1].pitch = keep; }
-    { const float keep = w.ocfg.vDrag; bump(w.ocfg.vDrag); only("ocean config", &ofp::Fingerprint::cfg); w.ocfg.vDrag = keep; }
-    { const auto keep = w.nextId_; w.nextId_++; only("nextId_", &ofp::Fingerprint::ctr); w.nextId_ = keep; }
-    { const RandomGen keep = rng; rng.uint(); only("rng (one draw)", &ofp::Fingerprint::rng); rng = keep; }
+    using FP = ofp::Fingerprint;
+    namespace pk = ofp::peek;
+    { const float keep = w.creatures[7].depth; bump(w.creatures[7].depth); only("fish depth", &FP::fish); w.creatures[7].depth = keep; }
+    { const float keep = w.creatures[3].bodyBuoy; bump(w.creatures[3].bodyBuoy); only("fish bodyBuoy", &FP::fish); w.creatures[3].bodyBuoy = keep; }
+    { const float keep = w.creatures[5].body[4].y; bump(w.creatures[5].body[4].y); only("fish body trail", &FP::fish); w.creatures[5].body[4].y = keep; }
+    { const float keep = w.food[11].depth; bump(w.food[11].depth); only("food depth", &FP::food); w.food[11].depth = keep; }
+    { const float keep = w.predators[1].pitch; bump(w.predators[1].pitch); only("predator pitch", &FP::pred); w.predators[1].pitch = keep; }
+    { const float keep = w.ocfg.vDrag; bump(w.ocfg.vDrag); only("ocean config", &FP::cfg); w.ocfg.vDrag = keep; }
+    { const float keep = w.cfg.moveCost; bump(w.cfg.moveCost); only("SimConfig moveCost (0 -> denormal)", &FP::cfg); w.cfg.moveCost = keep; }
+    { const int keep = w.cfg.clusterEpoch; w.cfg.clusterEpoch++; only("clusterEpoch (no checkpoint key)", &FP::cfg); w.cfg.clusterEpoch = keep; }
+    { const auto keep = w.nextId_; w.nextId_++; only("nextId_", &FP::ctr); w.nextId_ = keep; }
+    { auto& t1 = ofp::field<pk::OwWaves>(w)[1]; const double keep = t1.phase; t1.phase = std::nextafter(keep, 10.0);
+      only("a wave phase", &FP::ctr); t1.phase = keep; }
+    { std::vector<std::uint8_t> g = w.signals.data(); const std::vector<std::uint8_t> keep = g; g[100] ^= 1;
+      w.signals.restore(g); only("a pheromone byte", &FP::sig); w.signals.restore(keep); }
+    {   // a vortex frequency (vortexState() index 5 = vortex 0's fx), centres kept
+        CurrentField& cf = ofp::field<pk::OwCurrent>(w);
+        const std::vector<float> keepV = cf.vortexState();
+        const std::vector<Vec2> keepC = ofp::field<pk::CfCenters>(cf);
+        std::vector<float> v = keepV;
+        bump(v[5]);
+        cf.restoreVortexState(v);
+        ofp::field<pk::CfCenters>(cf) = keepC;
+        only("a vortex frequency", &FP::cur);
+        cf.restoreVortexState(keepV);
+        ofp::field<pk::CfCenters>(cf) = keepC;
+    }
+    { float& c = ofp::field<pk::CfCore>(ofp::field<pk::OwCurrent>(w)); const float keep = c; bump(c); only("the eddy core", &FP::cur); c = keep; }
+    { float& d = ofp::field<pk::OwPatchDepth>(w)[1]; const float keep = d; bump(d); only("a food-patch depth", &FP::geo); d = keep; }
+    { float& x = ofp::field<pk::OwPatches>(w)[2].x; const float keep = x; bump(x); only("a food-patch centre", &FP::geo); x = keep; }
+    { float& ic = ofp::field<pk::SgInvCell>(ofp::field<pk::OwFoodGrid>(w)); const float keep = ic; bump(ic);
+      only("the food grid's cell size", &FP::geo); ic = keep; }
+    { bool& tor = ofp::field<pk::SigToroidal>(w.signals); tor = !tor; only("the signal grid's wrap flag", &FP::geo); tor = !tor; }
+    { int& wc = ofp::field<pk::SigWrapCols>(w.signals); ++wc; only("the signal grid's seam period", &FP::geo); --wc; }
+    { const RandomGen keep = rng; rng.uint(); only("rng (one draw)", &FP::rng); rng = keep; }
     t.expect(ofp::fingerprint(w) == base, "restoring every bump did not restore the hash");
+    t.note("%d single-value changes, each seen by its own section only", bumps);
 }
 
 #ifndef OCEAN_TESTS_NO_SHIM
@@ -467,37 +908,75 @@ void testReset() {
     oc_step(400);
     t.expect(ofp::fingerprint(*g_world) == f400, "a repeated oc_init differs");
 
-    // The harness's world (ofp::initWorld, what ocean_parity_driver runs) is the shim's.
+    // The harness's world (ofp::initWorld, what ocean_parity_driver runs) is the
+    // shim's. fingerprint() hashes the GLOBAL rng, so the harness's prints (rng
+    // included) are taken while the rng is the harness's — before the shim
+    // touches it — and the shim's are compared against those snapshots: one
+    // extra draw anywhere in oc_init / oc_step, even after its last step, fails.
     for (const char* c : {(const char*)nullptr, cfg,
                           R"({"pitchMax":3,"vDrag":0,"wallBand":80,"buoyMutation":0.4,"toroidal":true,"bodyModel":true,"triangularMotion":true})"}) {
-        if (!t.expect(oc_init(78, 1600, 900, 300.0, 250, c) == 1, "oc_init: %s", oc_last_error())) continue;
         OceanWorld w;
         std::string err;
-        ofp::initWorld(w, 78, 1600, 900, 300.0f, 250, c, err);
-        t.expect(ofp::fingerprint(w) == ofp::fingerprint(*g_world), "shim vs harness differ after init (cfg %s)", c ? c : "{}");
+        if (!t.expect(ofp::initWorld(w, 78, 1600, 900, 300.0f, 250, c, err), "initWorld: %s", err.c_str())) continue;
+        const ofp::Fingerprint h0 = ofp::fingerprint(w);
+        const std::string r0 = rng.state();
         for (int s = 0; s < 300; ++s) w.update(0.016f);
-        // fingerprint() hashes the global rng: re-run the shim from its seed so both end at the same rng state.
-        oc_reset();
+        const ofp::Fingerprint h300 = ofp::fingerprint(w);
+        const std::string r300 = rng.state();
+        rng.seed(999);   // the shim must not depend on what the rng held before oc_init
+        if (!t.expect(oc_init(78, 1600, 900, 300.0, 250, c) == 1, "oc_init: %s", oc_last_error())) continue;
+        t.expect(ofp::fingerprint(*g_world) == h0 && rng.state() == r0, "shim vs harness differ after init (cfg %s)",
+                 c ? c : "{}");
         oc_step(300);
-        t.expect(ofp::fingerprint(w) == ofp::fingerprint(*g_world), "shim vs harness differ after 300 steps (cfg %s)", c ? c : "{}");
+        const ofp::Fingerprint s300 = ofp::fingerprint(*g_world);
+        t.expect(s300 == h300 && rng.state() == r300, "shim vs harness differ after 300 steps (cfg %s; rng %s)",
+                 c ? c : "{}", s300.rng == h300.rng ? "same" : "differs");
     }
 
-    // A fresh OceanWorld re-inited from the same seed replays; reusing ONE
-    // object does not (init() leaves WorldCommon's frame / nextId_ / totals),
-    // which oc_reset avoids by always allocating a new world.
+    // Re-init. A fresh OceanWorld re-inited from the same seed replays. Reusing
+    // ONE object keeps WorldCommon's run state — frame, nextId_ (so the ids),
+    // the totals and the pairing window — as Classic's World::init does; the
+    // shim never reuses a world (oc_init / oc_reset allocate a new one). Asserted
+    // exactly: the reused world differs from a fresh one in that state and in
+    // nothing else.
     {
         OceanWorld a;
         std::string err;
         ofp::initWorld(a, 79, 1920, 1080, 240.0f, 200, nullptr, err);
         const ofp::Fingerprint a0 = ofp::fingerprint(a);
         for (int s = 0; s < 200; ++s) a.update(0.016f);
+        const unsigned long long frameBefore = a.frame;
+        const std::uint64_t idBefore = a.nextId_;
+        const long long birthsBefore = a.totalBirths, deathsBefore = a.totalDeaths;
+        const std::size_t windowBefore = a.reproWindow_.size();
         ofp::initWorld(a, 79, 1920, 1080, 240.0f, 200, nullptr, err);
         const ofp::Fingerprint a1 = ofp::fingerprint(a);
-        if (a1 == a0) t.note("re-init of a used OceanWorld object == fresh");
-        else t.note("re-init of a USED OceanWorld object != fresh (frame %llu, nextId %llu carried over; fish %s, "
-                    "food %s) - as Classic's World::init; the shim never reuses a world",
-                    a.frame, (unsigned long long)a.nextId_, a1.fish == a0.fish ? "same" : "differ",
-                    a1.food == a0.food ? "same" : "differ");
+        OceanWorld b;
+        ofp::initWorld(b, 79, 1920, 1080, 240.0f, 200, nullptr, err);
+        const ofp::Fingerprint b0 = ofp::fingerprint(b);
+        t.expect(b0 == a0, "a fresh OceanWorld re-inited from the same seed does not replay");
+        t.expect(a.frame == frameBefore && a.nextId_ == idBefore + 200 && a.totalBirths == birthsBefore &&
+                     a.totalDeaths == deathsBefore && a.reproWindow_.size() == windowBefore && a.totalReseeds == 0,
+                 "reused world: frame %llu (was %llu), nextId %llu (was %llu + 200 founders), births %lld (was %lld)",
+                 a.frame, frameBefore, (unsigned long long)a.nextId_, (unsigned long long)idBefore, a.totalBirths, birthsBefore);
+        t.expect(frameBefore == 200 && idBefore >= 201, "the first run did not get anywhere to carry over");
+        t.expect(a1.cfg == a0.cfg && a1.food == a0.food && a1.pred == a0.pred && a1.sig == a0.sig && a1.cur == a0.cur &&
+                     a1.geo == a0.geo && a1.rng == a0.rng && a1.ctr != a0.ctr && a1.fish != a0.fish,
+                 "reused world: only ctr and fish may differ from a fresh one");
+        // The fish are the fresh world's, but for ids shifted by the ids already used.
+        bool sameFish = a.creatures.size() == b.creatures.size();
+        for (std::size_t i = 0; sameFish && i < a.creatures.size(); ++i) {
+            Fish x = a.creatures[i];
+            const Fish& y = b.creatures[i];
+            sameFish &= (x.id == y.id + (idBefore - 1) && x.lineageId == y.lineageId + (idBefore - 1));
+            x.id = y.id;
+            x.lineageId = y.lineageId;
+            ofp::Hasher hx, hy;
+            ofp::hashFish(hx, x);
+            ofp::hashFish(hy, y);
+            sameFish &= (hx.value() == hy.value());
+        }
+        t.expect(sameFish, "reused world: the fish differ from a fresh world's by more than their ids");
     }
 }
 #endif
@@ -1446,9 +1925,8 @@ void testE1Hash() {
     auto only = [&](const char* what, std::uint64_t ofp::Fingerprint::*field) {
         const ofp::Fingerprint p = ofp::fingerprint(w);
         bool othersSame = true;
-        for (auto f : {&ofp::Fingerprint::cfg, &ofp::Fingerprint::ctr, &ofp::Fingerprint::fish, &ofp::Fingerprint::food,
-                       &ofp::Fingerprint::pred, &ofp::Fingerprint::sig, &ofp::Fingerprint::rng})
-            if (f != field) othersSame &= (p.*f == base.*f);
+        for (auto f : ofp::kSections)   // all but cur (a wave knob also moves the sampled flow)
+            if (f != field && f != &ofp::Fingerprint::cur) othersSame &= (p.*f == base.*f);
         t.expect(p.*field != base.*field && othersSame, "a 1-ulp change in %s: hash %s", what,
                  p.*field == base.*field ? "unchanged" : "changed other sections too");
     };
@@ -1512,8 +1990,8 @@ int acceptsMain(int argc, char** argv) {
             if (!eq) { std::printf("bad --set %s\n", s); return 2; }
             sets.emplace_back(std::string(s, eq - s), std::strtod(eq + 1, nullptr));
         }
-        else if (is("--every") || is("--dump") || is("--dump-step")) ++i;
-        else if (!std::strcmp(argv[i], "--capture") || !std::strcmp(argv[i], "--trace")) {}
+        else if (is("--every") || is("--dump") || is("--dump-step") || is("--expect") || is("--logs")) ++i;
+        else if (!std::strcmp(argv[i], "--capture") || !std::strcmp(argv[i], "--trace") || !std::strcmp(argv[i], "--sparse")) {}
         else { std::printf("unknown driver argument %s\n", argv[i]); return 2; }
     }
     if (!oc_init(seed, W, H, depth, pop, cfg)) { std::printf("refused by oc_init: %s\n", oc_last_error()); return 1; }
@@ -1540,11 +2018,17 @@ int main(int argc, char** argv) {
     ot::testBuoyancy();
     ot::testSteerZ();
     ot::testSensors();
+    ot::testSensorSigns();
+    ot::testCurrentSensors();
+    ot::testWalls();
     ot::testCaptureNeutral();
     ot::testReproducible();
 #ifndef OCEAN_TESTS_NO_SHIM
     ot::testReset();
 #endif
+    ot::testPredatorEconomy();
+    ot::testPairingGates();
+    ot::testFastTanh();
     ot::testChild();
     ot::testDrawsMotion();
     ot::testDrawsBirth();

@@ -1,104 +1,298 @@
 #pragma once
 // ----------------------------------------------------------------------------
 // ocean_fingerprint — an exact, platform-independent hash of an OceanWorld's
-// whole state, for the native-vs-wasm determinism harness
-// (tools/ocean_parity_driver.cpp, wasm/ocean_parity.sh) and tests/ocean_tests.cpp.
+// whole state, for the determinism harness (tools/ocean_parity_driver.cpp,
+// wasm/ocean_parity.sh: native == wasm == the committed baseline) and
+// tests/ocean_tests.cpp.
 //
-// Every value is fed to FNV-1a 64 through an explicit little-endian encoding
-// (floats by their bit pattern, bools as one byte, sizes as u64), never as raw
-// struct memory, so padding and bit-field layout cannot leak in and the same
-// state hashes the same on x86-64 and wasm32. Sections are hashed separately so
-// a mismatch says WHAT diverged first:
+// Encoding: every value goes through an explicit encoding (floats and doubles
+// by bit pattern, bools as 0 / 1, integers widened to 64 bits, byte arrays
+// packed little-endian eight to a word), never as raw struct memory, so
+// padding and layout cannot leak in and the same state hashes the same on
+// x86-64 and wasm32. Words are absorbed by a mix that is a bijection in both
+// the running hash and the word, so ONE changed value always changes its
+// section's hash. Sections are hashed separately so a mismatch says WHAT
+// diverged first:
 //
-//   cfg   SimConfig (the checkpoint writer's canonical text + the keys it does
-//         not carry) and every OceanConfig field
+//   cfg   every SimConfig and every OceanConfig field, by bit pattern
 //   ctr   frame, world size, D, every WorldCommon counter, nextId_, the
-//         pairing-graph window and the death / birth logs, totalReseeds
+//         pairing-graph window, the death / birth logs, totalReseeds and the
+//         wave trains' travelled phases
 //   fish  every Fish: all AgentCore fields (ids, energy, timers, internal
 //         state, body params, genome gene by gene, the built net's neurons and
 //         flat connections, lastSensors / lastActions, colour) + pos, vel,
 //         lastMoveDir, depth, vz, bodyBuoy and the 6-point body trail
-//   food  every OceanFood: pos, depth, alive
-//   pred  every OceanPredator: Predator fields + depth, pitch
+//   food  every OceanFood: pos, depth, alive, size
+//   pred  every OceanPredator: every Predator field + depth, pitch
 //   sig   the pheromone grid bytes
-//   cur   the current field sampled on a fixed 8 x 5 lattice (its vortices
-//         are private; the samples pin them and the frame's centres)
-//   rng   the global engine's full state text (624 words + position)
+//   cur   the CurrentField's WHOLE state: mode, strength, core, the size it
+//         was built for, the gyre's eps / omega / amplitude / clock, every
+//         vortex (base, sign, amplitudes, frequencies, phases: vortexState())
+//         and every current centre; then the velocity it gives on a fixed
+//         8 x 5 lattice and, while the 3-D flow is on (flowE1), flowAt on
+//         that lattice at three depths
+//   geo   persistent geometry: both SpatialGrids (width, height, cols, rows,
+//         1 / cell size), the SignalGrid (world size, cell size, cols, rows,
+//         seam period, toroidal flag, byte count), the food-patch centres and
+//         per-patch depths, the wave trains' fixed modes
+//   rng   the global engine: its 624 words and its position
 //
-// E1 additions are hashed only when they are off their defaults (the E1 knobs
-// in cfg, the wave clock in ctr, a food size != 1 in food, the 3-D flow
-// sampled at three depths in cur while flowE1()), so every preview world
-// hashes exactly as it did before E1.
+// Not hashed, by design: scratch the step rebuilds from hashed state before
+// reading it (the grids' entries, hot_, pending_, the neighbour vectors) and
+// WorldCommon::prof (the wall-clock profiler; cfg.profile itself is hashed).
 //
-// Not hashed: the world's private scratch (spatial grids, hot_ / pending_
-// arrays — rebuilt from the hashed state every step) and the food-patch
-// centres (private, fixed after init; every food spawn depends on them, so a
-// difference shows up in `food` on the first spawn).
+// Private state is read WITHOUT engine accessors (namespace peek below: a
+// pointer to member taken in an explicit template instantiation, where C++
+// waives access checking, [temp.spec.general]). Each one names its member, so
+// a renamed or retyped member stops this header compiling.
+//
+// Tripwires (compile errors, not silent gaps): every hashed aggregate's field
+// count is static_asserted (a new SimConfig / OceanConfig / AgentCore / Fish /
+// Predator / food / log field must be hashed here before the harness builds),
+// and the classes with private members (OceanWorld, CurrentField, SpatialGrid,
+// SignalGrid, the rng engine) are size-checked against mirrors of their member
+// lists (a new member must be hashed, or listed above as scratch).
+//
+// The format is versioned (kFormatVersion, printed in every driver header and
+// so in every baseline file): bump it whenever this file changes what or how
+// it hashes, so a baseline diff that comes from the harness reads as such.
 // ----------------------------------------------------------------------------
+#include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <initializer_list>
 #include <string>
 #include <utility>
+#include <vector>
 #include "ocean/ocean_config.hpp"
 #include "ocean/ocean_world.hpp"
 
 namespace ofp {
 
-struct Fnv {
-    std::uint64_t h = 1469598103934665603ull;
-    void byte(std::uint8_t b) { h ^= b; h *= 1099511628211ull; }
-    void u32(std::uint32_t v) { for (int i = 0; i < 4; ++i) byte((std::uint8_t)(v >> (8 * i))); }
-    void u64(std::uint64_t v) { for (int i = 0; i < 8; ++i) byte((std::uint8_t)(v >> (8 * i))); }
+inline constexpr int kFormatVersion = 2;
+
+// ---- private engine state, read without an accessor -------------------------
+namespace peek {
+template <class Tag, auto M>
+struct Expose { friend constexpr auto member(Tag) noexcept { return M; } };
+}  // namespace peek
+}  // namespace ofp
+
+#define OFP_PEEK(NAME, CLASS, FIELD)                                     \
+    namespace ofp::peek {                                                \
+    struct NAME { friend constexpr auto member(NAME) noexcept; };        \
+    template struct Expose<NAME, &CLASS::FIELD>;                         \
+    }
+OFP_PEEK(OwCurrent, OceanWorld, current_)
+OFP_PEEK(OwPatches, OceanWorld, foodPatches_)
+OFP_PEEK(OwPatchDepth, OceanWorld, foodPatchDepth_)
+OFP_PEEK(OwCreatureGrid, OceanWorld, creatureGrid_)
+OFP_PEEK(OwFoodGrid, OceanWorld, foodGrid_)
+OFP_PEEK(OwWaves, OceanWorld, waves_)
+OFP_PEEK(CfMode, CurrentField, mode_)
+OFP_PEEK(CfCenters, CurrentField, centers_)
+OFP_PEEK(CfStrength, CurrentField, strength_)
+OFP_PEEK(CfCore, CurrentField, core_)
+OFP_PEEK(CfW, CurrentField, w_)
+OFP_PEEK(CfH, CurrentField, h_)
+OFP_PEEK(CfGyreEps, CurrentField, gyreEps_)
+OFP_PEEK(CfGyreOmega, CurrentField, gyreOmega_)
+OFP_PEEK(CfGyreA, CurrentField, gyreA_)
+OFP_PEEK(CfGyreT, CurrentField, gyreT_)
+OFP_PEEK(SgWidth, SpatialGrid, width_)
+OFP_PEEK(SgHeight, SpatialGrid, height_)
+OFP_PEEK(SgCols, SpatialGrid, cols_)
+OFP_PEEK(SgRows, SpatialGrid, rows_)
+OFP_PEEK(SgInvCell, SpatialGrid, invCell_)
+OFP_PEEK(SigW, SignalGrid, w_)
+OFP_PEEK(SigH, SignalGrid, h_)
+OFP_PEEK(SigWrapCols, SignalGrid, wrapCols_)
+OFP_PEEK(SigWrapRows, SignalGrid, wrapRows_)
+OFP_PEEK(SigToroidal, SignalGrid, toroidal_)
+OFP_PEEK(RgEngine, RandomGen, engine_)
+OFP_PEEK(MtWords, PortableMT19937, x_)
+OFP_PEEK(MtPos, PortableMT19937, p_)
+#undef OFP_PEEK
+
+namespace ofp {
+
+// The private member `Tag` names, of obj (const in, const out; tests that bump
+// private state pass a non-const object).
+template <class Tag, class T>
+constexpr decltype(auto) field(T& obj) { return (obj.*member(Tag{})); }
+
+// ---- tripwires ----------------------------------------------------------------
+namespace detail {
+struct AnyField { template <class T> constexpr operator T() const noexcept; };
+// The number of initializers an aggregate takes (arrays count element by element).
+template <class T, class... A>
+constexpr std::size_t fieldCount() {
+    if constexpr (requires { T{A{}..., AnyField{}}; }) return fieldCount<T, A..., AnyField>();
+    else return sizeof...(A);
+}
+}  // namespace detail
+
+#define OFP_FIELDS(T, N) \
+    static_assert(detail::fieldCount<T>() == (N), #T " gained or lost a field: hash it in tools/ocean_fingerprint.hpp, then update this count")
+OFP_FIELDS(SimConfig, 71);
+OFP_FIELDS(OceanConfig, 22);
+OFP_FIELDS(AgentCore, 16 + NUM_SENSES + NUM_ACTIONS + 1);   // 14 scalars + genome + nnet, the two arrays, colour
+OFP_FIELDS(Fish, 1 + 6 + Fish::BODY_LEN);                   // base, pos .. bodyBuoy, body[]
+OFP_FIELDS(Predator, 9);
+OFP_FIELDS(OceanPredator, 3);                               // base, depth, pitch
+OFP_FIELDS(OceanFood, 4);
+OFP_FIELDS(Gene, 5);
+OFP_FIELDS(NeuralNet, 2);
+OFP_FIELDS(NeuralNet::Neuron, 2);
+OFP_FIELDS(NeuralNet::FlatConn, 2);
+OFP_FIELDS(WorldCommon, 25);
+OFP_FIELDS(WorldCommon::DeathRecord, 7 + CLUSTER_SKETCH_DIM);
+OFP_FIELDS(WorldCommon::BirthRecord, 6);
+OFP_FIELDS(repro::Edge, 2);
+#undef OFP_FIELDS
+
+// Mirrors of the member lists of the classes with private state (same types,
+// same order, so the same size on every ABI).
+namespace mirror {
+struct SignalGrid_ { int w, h, cell, cols, rows, wrapCols, wrapRows; bool tor; std::vector<std::uint8_t> g; };
+struct SpatialGrid_ { int w, h, cols, rows; float inv; std::vector<int> start, cursor, staged, entries; };
+struct CurrentField_ { CurrentField::Mode m; std::vector<int> vort, centers; float s, core; int w, h; float eps, om, a, t; };
+struct Mt_ { std::uint32_t x[624]; int p; };
+struct WaveTrain_ { double kx, ky, phase, phi; float k, qx, qy, frac; };
+struct FishHot_ { Vec2 pos, vel; float depth; };
+struct Pending_ { bool wants; Vec2 pos; };
+struct OceanWorld_ : WorldCommon {
+    int width, height; float D; OceanConfig ocfg;
+    std::vector<Fish> creatures; std::vector<OceanPredator> predators; std::vector<OceanFood> food;
+    SignalGrid signals; long long totalReseeds;
+    SpatialGrid creatureGrid, foodGrid; std::vector<FishHot_> hot; std::vector<Pending_> pending;
+    std::vector<int> neighbors, nearbyFood, nearby, near;
+    CurrentField current; std::vector<Vec2> patches; std::vector<float> patchDepth;
+    WaveTrain_ waves[OceanWorld::kWaveTrains];
+};
+}  // namespace mirror
+static_assert(sizeof(SignalGrid) == sizeof(mirror::SignalGrid_), "SignalGrid's members changed: update hashGeometry and mirror::SignalGrid_");
+static_assert(sizeof(SpatialGrid) == sizeof(mirror::SpatialGrid_), "SpatialGrid's members changed: update hashGrid and mirror::SpatialGrid_");
+static_assert(sizeof(CurrentField) == sizeof(mirror::CurrentField_), "CurrentField's members changed: update hashCurrent and mirror::CurrentField_");
+static_assert(sizeof(PortableMT19937) == sizeof(mirror::Mt_) && sizeof(RandomGen) == sizeof(mirror::Mt_),
+              "the rng engine's members changed: update hashRng and mirror::Mt_");
+static_assert(sizeof(OceanWorld) == sizeof(mirror::OceanWorld_),
+              "OceanWorld's members changed: hash the new state (or list it as scratch) and update mirror::OceanWorld_");
+
+// ---- the hash -----------------------------------------------------------------
+inline std::uint32_t bits(float f) { std::uint32_t x; std::memcpy(&x, &f, 4); return x; }
+inline std::uint64_t bits64(double d) { std::uint64_t x; std::memcpy(&x, &d, 8); return x; }
+
+// Two lanes take alternate words (two independent multiply chains: about twice
+// the throughput of one); each lane's step (xor, odd multiply, xorshift) is a
+// bijection in the lane and in the word, and value() is a bijection in each
+// lane, so changing any one word always changes value().
+struct Hasher {
+    std::uint64_t la = 0x243F6A8885A308D3ull, lb = 0x13198A2E03707344ull;
+    bool odd = false;
+    static std::uint64_t mix(std::uint64_t h, std::uint64_t v) {
+        h ^= v;
+        h *= 0x9E3779B97F4A7C15ull;
+        return h ^ (h >> 29);
+    }
+    void u64(std::uint64_t v) {
+        if (odd) lb = mix(lb, v);
+        else     la = mix(la, v);
+        odd = !odd;
+    }
+    void u32(std::uint32_t v) { u64(v); }
+    void i32(int v) { u64((std::uint32_t)v); }
     void i64(long long v) { u64((std::uint64_t)v); }
-    void i32(int v) { u32((std::uint32_t)v); }
-    void b(bool v) { byte(v ? 1 : 0); }
-    void f32(float f) { std::uint32_t x; std::memcpy(&x, &f, 4); u32(x); }
-    void f64(double d) { std::uint64_t x; std::memcpy(&x, &d, 8); u64(x); }
-    void v2(Vec2 v) { f32(v.x); f32(v.y); }
-    void str(const std::string& s) { u64(s.size()); for (char c : s) byte((std::uint8_t)c); }
+    void b(bool v) { u64(v ? 1u : 0u); }
+    void f32(float f) { u64(bits(f)); }
+    void f64(double d) { u64(bits64(d)); }
+    void f32x2(float a, float b) { u64((std::uint64_t)bits(a) | ((std::uint64_t)bits(b) << 32)); }
+    void v2(Vec2 v) { f32x2(v.x, v.y); }
+    void bytes(const std::uint8_t* p, std::size_t n) {
+        u64(n);
+        for (std::size_t i = 0; i < n; i += 8) {
+            std::uint64_t w = 0;
+            for (std::size_t k = 0; k < 8 && i + k < n; ++k) w |= (std::uint64_t)p[i + k] << (8 * k);
+            u64(w);
+        }
+    }
+    // Named-field visitor interface (visitSimConfig / visitOceanConfig).
+    void f32(const char*, float v) { f32(v); }
+    void i32(const char*, int v) { i32(v); }
+    void b(const char*, bool v) { b(v); }
+    std::uint64_t value() const {   // both lanes, then murmur3's fmix64
+        std::uint64_t x = mix(mix(0xA4093822299F31D0ull, la), lb);
+        x ^= x >> 33; x *= 0xff51afd7ed558ccdull;
+        x ^= x >> 33; x *= 0xc4ceb9fe1a85ec53ull;
+        x ^= x >> 33;
+        return x;
+    }
 };
 
-inline std::uint32_t bits(float f) { std::uint32_t x; std::memcpy(&x, &f, 4); return x; }
-
 struct Fingerprint {
-    std::uint64_t all = 0, cfg = 0, ctr = 0, fish = 0, food = 0, pred = 0, sig = 0, cur = 0, rng = 0;
+    std::uint64_t all = 0, cfg = 0, ctr = 0, fish = 0, food = 0, pred = 0, sig = 0, cur = 0, geo = 0, rng = 0;
     bool operator==(const Fingerprint& o) const {
-        return all == o.all && cfg == o.cfg && ctr == o.ctr && fish == o.fish && food == o.food &&
-               pred == o.pred && sig == o.sig && cur == o.cur && rng == o.rng;
+        return all == o.all && cfg == o.cfg && ctr == o.ctr && fish == o.fish && food == o.food && pred == o.pred &&
+               sig == o.sig && cur == o.cur && geo == o.geo && rng == o.rng;
     }
     bool operator!=(const Fingerprint& o) const { return !(*this == o); }
 };
 
-inline std::string configText(const SimConfig& c) {
-    std::string out;
-    jsonm::Writer w(out);
-    w.beginObject();
-    checkpoint::writeConfig(w, c);
-    w.endObject();
-    return out;
+// Every section, for loops over them (tests).
+inline constexpr std::uint64_t Fingerprint::* kSections[] = {
+    &Fingerprint::cfg, &Fingerprint::ctr, &Fingerprint::fish, &Fingerprint::food, &Fingerprint::pred,
+    &Fingerprint::sig, &Fingerprint::cur, &Fingerprint::geo, &Fingerprint::rng};
+
+// ---- configs: every field, by name, in declaration order --------------------
+// V needs f32(name, float), i32(name, int), b(name, bool). The field counts
+// above are what keep these lists complete.
+#define OFP_F(n) v.f32(#n, c.n)
+#define OFP_I(n) v.i32(#n, c.n)
+#define OFP_B(n) v.b(#n, c.n)
+template <class V>
+void visitSimConfig(const SimConfig& c, V& v) {
+    OFP_B(toroidal); OFP_F(reproMaxDistance); OFP_F(reproSoftWidth); OFP_F(reproGracePeriod);
+    OFP_B(bodyModel); OFP_F(bodyMutation);
+    OFP_I(minPopulation); OFP_I(maxPopulation); OFP_I(targetFood);
+    OFP_F(foodSpawnBase); OFP_F(foodSpawnAmp); OFP_F(foodEnergy); OFP_F(pickupRadius);
+    OFP_F(metabolicRate); OFP_F(geneCost); OFP_F(moveCost); OFP_F(maxAge); OFP_F(reproEnergy); OFP_F(newbornEnergy);
+    OFP_F(perceptionRadius); OFP_F(interactRadius); OFP_I(maxNeighbors);
+    OFP_F(reproCooldown); OFP_F(interactCooldown); OFP_F(minSpeed); OFP_F(maxSpeed);
+    OFP_B(triangularMotion); OFP_F(maxTurnRate);
+    OFP_I(genomeMinLength); OFP_I(genomeMaxLength); OFP_I(genomeInitMin); OFP_I(genomeInitMax);
+    OFP_F(mutationMultiplier);
+    OFP_F(currentStrength); OFP_I(currentMode); OFP_I(currentEddies); OFP_F(currentCore); OFP_F(currentDrift);
+    OFP_F(currentGyreEps);
+    OFP_I(foodPatches); OFP_F(foodPatchRadius); OFP_B(foodDrift);
+    OFP_I(predatorCount); OFP_F(predatorPerception); OFP_F(predatorSpeed); OFP_F(predatorCaptureRadius);
+    OFP_F(predatorCooldown); OFP_B(predatorEconomy); OFP_F(predatorMetabolism); OFP_F(predatorMoveCost);
+    OFP_F(predatorReproEnergy); OFP_F(predatorNewbornEnergy); OFP_F(predatorMeal); OFP_F(predatorMaxAge);
+    OFP_I(predatorMinPopulation); OFP_I(predatorMaxPopulation); OFP_B(predatorInheritance);
+    OFP_F(predatorTraitMutation);
+    OFP_B(captureActivations); OFP_I(reproWindow); OFP_I(reproMinCluster); OFP_B(reproLog); OFP_I(reproLogMax);
+    OFP_B(clusterMap); OFP_I(clusterMax); OFP_I(clusterEpoch); OFP_B(clusterPca); OFP_I(clusterColor);
+    OFP_B(wiringLog); OFP_B(profile); OFP_B(fastTanh);
+}
+template <class V>
+void visitOceanConfig(const OceanConfig& c, V& v) {
+    OFP_F(depth); OFP_F(kBuoy); OFP_F(buoyMutation); OFP_F(pitchMax); OFP_F(vDrag); OFP_F(wallBand);
+    OFP_F(cHold); OFP_F(cPress); OFP_I(foodDepthMode); OFP_F(foodDepthSpread);
+    OFP_F(waveSpeed); OFP_F(waveBand); OFP_F(waveGravity); OFP_B(deepCurrent); OFP_B(lightEnabled);
+    OFP_F(L0); OFP_F(kWater); OFP_B(depthCostScaled); OFP_B(sizeDrift); OFP_B(sizeFight); OFP_B(mouthGate);
+    OFP_F(kMouth);
+}
+#undef OFP_F
+#undef OFP_I
+#undef OFP_B
+
+inline void hashConfig(Hasher& h, const SimConfig& c, const OceanConfig& o) {
+    visitSimConfig(c, h);
+    visitOceanConfig(o, h);
 }
 
-inline void hashConfig(Fnv& h, const SimConfig& c, const OceanConfig& o) {
-    h.str(configText(c));
-    // SimConfig keys the checkpoint does not carry but that change a run's state.
-    h.b(c.captureActivations); h.b(c.reproLog); h.i32(c.reproLogMax);
-    h.b(c.clusterMap); h.i32(c.clusterMax);
-    h.f32(o.depth); h.f32(o.kBuoy); h.f32(o.buoyMutation); h.f32(o.pitchMax); h.f32(o.vDrag);
-    h.f32(o.wallBand); h.f32(o.cHold); h.f32(o.cPress); h.i32(o.foodDepthMode);
-    h.f32(o.foodDepthSpread);
-    // E1 knobs: only when one is off its default, so a preview config hashes
-    // exactly as before E1 (the OFF-identity cases compare against those prints).
-    if (!oceanE1AtDefaults(o)) {
-        h.byte(0xE1);
-        h.f32(o.waveSpeed); h.f32(o.waveBand); h.f32(o.waveGravity); h.b(o.deepCurrent);
-        h.b(o.lightEnabled); h.f32(o.L0); h.f32(o.kWater); h.b(o.depthCostScaled);
-        h.b(o.sizeDrift); h.b(o.sizeFight); h.b(o.mouthGate); h.f32(o.kMouth);
-    }
-}
-
-inline void hashCounters(Fnv& h, const OceanWorld& w) {
+inline void hashCounters(Hasher& h, const OceanWorld& w) {
     h.u64(w.frame); h.i32(w.width); h.i32(w.height); h.f32(w.D);
     h.i32(w.births); h.i32(w.deaths); h.i64(w.totalBirths); h.i64(w.totalDeaths);
     h.i64(w.totalGraceBirths); h.i64(w.totalSoftBirths);
@@ -112,154 +306,240 @@ inline void hashCounters(Fnv& h, const OceanWorld& w) {
     for (const auto& e : w.reproWindow_) { h.u64(e.a); h.u64(e.b); }
     h.u64(w.deathLog.size());
     for (const auto& d : w.deathLog) {
-        h.f32(d.x); h.f32(d.y);
+        h.f32x2(d.x, d.y);
         for (float s : d.sketch) h.f32(s);
-        h.i64(d.index); h.u64(d.lineageId); h.f32(d.age); h.i32(d.genomeLen); h.byte((std::uint8_t)d.cause);
+        h.i64(d.index); h.u64(d.lineageId); h.f32(d.age); h.i32(d.genomeLen); h.i32(d.cause);
     }
     h.u64(w.birthLog.size());
     for (const auto& r : w.birthLog) {
         h.i64(r.index); h.u64(r.parent1); h.u64(r.parent2); h.u64(r.lineage1); h.u64(r.lineage2);
         h.u64(r.frame);
     }
-    // E1 wave clock (each train's travelled phase): only once it has run.
-    if (w.waveClockStarted()) {
-        h.byte(0xE1);
-        for (int i = 0; i < OceanWorld::kWaveTrains; ++i) h.f64(w.wavePhase(i));
-    }
+    for (int i = 0; i < OceanWorld::kWaveTrains; ++i) h.f64(w.wavePhase(i));
 }
 
-// E1: food size enters the hash only when it is not the default 1.
-inline void hashFood(Fnv& h, const OceanFood& f) {
-    h.v2(f.pos); h.f32(f.depth); h.b(f.alive);
-    if (bits(f.size) != bits(1.0f)) { h.byte(0x5A); h.f32(f.size); }
+inline void hashFood(Hasher& h, const OceanFood& f) {
+    h.v2(f.pos);
+    h.u64((std::uint64_t)bits(f.depth) | ((std::uint64_t)f.alive << 32));
+    h.f32(f.size);
 }
 
-// The E1 flow sampled on the current's lattice at three depths (only while
-// flowE1(): its trains are fixed by the world size, its clock is in ctr).
-template <class F>
-inline void forFlowSamples(const OceanWorld& w, F&& f) {
-    for (float frac : {0.1f, 0.5f, 0.9f})
-        for (int j = 0; j < 5; ++j)
-            for (int i = 0; i < 8; ++i)
-                f(Vec2{((float)i + 0.5f) * (float)w.width / 8.0f, ((float)j + 0.5f) * (float)w.height / 5.0f},
-                  frac * w.D);
+// A gene in 32 bits: its four bit-fields (1 + 7 + 1 + 7, a uint16_t's worth:
+// the size check below fails if they outgrow it) and the weight.
+static_assert(sizeof(Gene) == 4, "Gene's bit-fields outgrew 16 bits: widen geneWord");
+inline std::uint32_t geneWord(const Gene& g) {
+    return (std::uint32_t)g.sourceType | ((std::uint32_t)g.sourceNum << 1) | ((std::uint32_t)g.sinkType << 8) |
+           ((std::uint32_t)g.sinkNum << 9) | ((std::uint32_t)(std::uint16_t)g.weight << 16);
 }
+static_assert(MAX_INTERNAL_NEURONS <= 64, "the neurons' driven flags no longer fit one word");
 
-// withActivations = false leaves lastSensors / lastActions out (the dynamics
-// alone), for checking that captureActivations does not change a run.
-inline void hashFish(Fnv& h, const Fish& c, bool withActivations = true) {
-    h.b(c.alive); h.u64(c.id); h.u64(c.lineageId); h.u32(c.generation);
-    h.f32(c.speed); h.f32(c.age); h.f32(c.foodReserves); h.f32(c.reproTimer); h.f32(c.interactTimer);
-    h.f32(c.responsiveness); h.f32(c.oscPeriod); h.f32(c.oscPhase);
-    h.f32(c.bodySize); h.f32(c.bodyElong);
-    h.u64(c.genome.size());
-    for (const Gene& g : c.genome) {
-        h.byte((std::uint8_t)g.sourceType); h.byte((std::uint8_t)g.sourceNum);
-        h.byte((std::uint8_t)g.sinkType);   h.byte((std::uint8_t)g.sinkNum);
-        h.u32((std::uint32_t)(std::uint16_t)g.weight);
-    }
-    h.u64(c.nnet.neurons.size());
-    for (const auto& n : c.nnet.neurons) { h.f32(n.output); h.b(n.driven); }
-    h.u64(c.nnet.flat.size());
-    for (const auto& fc : c.nnet.flat) { h.u32(fc.srcSink); h.u32((std::uint32_t)(std::uint16_t)fc.weight); }
+// Two 32-bit values per word wherever they pair up (the fish section is most of
+// the cost of a per-step fingerprint). withActivations = false leaves
+// lastSensors / lastActions out (the dynamics alone), for checking that
+// captureActivations does not change a run.
+inline void hashFish(Hasher& h, const Fish& c, bool withActivations = true) {
+    h.u64((std::uint64_t)c.alive | ((std::uint64_t)c.generation << 1));
+    h.u64(c.id); h.u64(c.lineageId);
+    h.f32x2(c.speed, c.age); h.f32x2(c.foodReserves, c.reproTimer); h.f32x2(c.interactTimer, c.responsiveness);
+    h.f32x2(c.oscPeriod, c.oscPhase); h.f32x2(c.bodySize, c.bodyElong);
+    const std::size_t ng = c.genome.size();
+    h.u64(ng);
+    for (std::size_t i = 0; i < ng; i += 2)
+        h.u64((std::uint64_t)geneWord(c.genome[i]) | (i + 1 < ng ? (std::uint64_t)geneWord(c.genome[i + 1]) << 32 : 0));
+    const auto& nr = c.nnet.neurons;
+    std::uint64_t driven = 0;
+    for (std::size_t i = 0; i < nr.size(); ++i) driven |= (std::uint64_t)nr[i].driven << i;
+    h.u64(nr.size()); h.u64(driven);
+    for (std::size_t i = 0; i < nr.size(); i += 2)
+        h.u64((std::uint64_t)bits(nr[i].output) | (i + 1 < nr.size() ? (std::uint64_t)bits(nr[i + 1].output) << 32 : 0));
+    const auto& fl = c.nnet.flat;
+    auto flatWord = [](const NeuralNet::FlatConn& f) {
+        return (std::uint64_t)f.srcSink | ((std::uint64_t)(std::uint16_t)f.weight << 16);
+    };
+    h.u64(fl.size());
+    for (std::size_t i = 0; i < fl.size(); i += 2) h.u64(flatWord(fl[i]) | (i + 1 < fl.size() ? flatWord(fl[i + 1]) << 32 : 0));
     if (withActivations) {
-        for (int s = 0; s < NUM_SENSES; ++s) h.f32(c.lastSensors[s]);
-        for (int a = 0; a < NUM_ACTIONS; ++a) h.f32(c.lastActions[a]);
+        float io[(int)NUM_SENSES + (int)NUM_ACTIONS + 1] = {};
+        std::memcpy(io, c.lastSensors, sizeof c.lastSensors);
+        std::memcpy(io + NUM_SENSES, c.lastActions, sizeof c.lastActions);
+        for (int i = 0; i < (int)NUM_SENSES + (int)NUM_ACTIONS; i += 2) h.f32x2(io[i], io[i + 1]);
     }
-    h.byte(c.color.r); h.byte(c.color.g); h.byte(c.color.b); h.byte(c.color.a);
+    h.u64((std::uint64_t)c.color.r | ((std::uint64_t)c.color.g << 8) | ((std::uint64_t)c.color.b << 16) |
+          ((std::uint64_t)c.color.a << 24) | ((std::uint64_t)bits(c.bodyBuoy) << 32));
     h.v2(c.pos); h.v2(c.vel); h.v2(c.lastMoveDir);
-    h.f32(c.depth); h.f32(c.vz); h.f32(c.bodyBuoy);
+    h.f32x2(c.depth, c.vz);
     for (int i = 0; i < Fish::BODY_LEN; ++i) h.v2(c.body[i]);
 }
 
-inline void hashPredator(Fnv& h, const OceanPredator& p) {
-    h.v2(p.pos); h.v2(p.vel); h.f32(p.digestTimer); h.f32(p.energy); h.f32(p.age); h.b(p.alive);
-    h.f32(p.speedFactor); h.f32(p.buddingFactor); h.u32(p.generation);
-    h.f32(p.depth); h.f32(p.pitch);
+inline void hashPredator(Hasher& h, const OceanPredator& p) {
+    h.v2(p.pos); h.v2(p.vel); h.f32x2(p.digestTimer, p.energy); h.f32(p.age); h.b(p.alive);
+    h.f32x2(p.speedFactor, p.buddingFactor); h.u32(p.generation);
+    h.f32x2(p.depth, p.pitch);
 }
 
-// The fixed lattice the current is sampled on.
+// The fixed lattice the current is sampled on, and the three depth fractions
+// the 3-D flow is sampled at.
 template <class F>
 inline void forCurrentLattice(const OceanWorld& w, F&& f) {
     for (int j = 0; j < 5; ++j)
         for (int i = 0; i < 8; ++i)
             f(Vec2{((float)i + 0.5f) * (float)w.width / 8.0f, ((float)j + 0.5f) * (float)w.height / 5.0f});
 }
+template <class F>
+inline void forFlowSamples(const OceanWorld& w, F&& f) {
+    for (float frac : {0.1f, 0.5f, 0.9f}) forCurrentLattice(w, [&](Vec2 p) { f(p, frac * w.D); });
+}
+
+inline void hashCurrent(Hasher& h, const OceanWorld& w) {
+    const CurrentField& cf = field<peek::OwCurrent>(w);
+    h.i32((int)field<peek::CfMode>(cf));
+    h.f32(field<peek::CfStrength>(cf)); h.f32(field<peek::CfCore>(cf));
+    h.i32(field<peek::CfW>(cf)); h.i32(field<peek::CfH>(cf));
+    h.f32(field<peek::CfGyreEps>(cf)); h.f32(field<peek::CfGyreOmega>(cf));
+    h.f32(field<peek::CfGyreA>(cf)); h.f32(field<peek::CfGyreT>(cf));
+    const std::vector<float> vs = cf.vortexState();
+    h.u64(vs.size());
+    for (float x : vs) h.f32(x);
+    const auto& centers = field<peek::CfCenters>(cf);
+    h.u64(centers.size());
+    for (const Vec2& c : centers) h.v2(c);
+    h.b(w.currentActive());
+    if (w.currentActive()) forCurrentLattice(w, [&](Vec2 p) { h.v2(w.currentAt(p)); });
+    h.b(w.flowE1());
+    if (w.flowE1())
+        forFlowSamples(w, [&](Vec2 p, float d) {
+            const OceanWorld::Flow U = w.flowAt(p, d);
+            h.f32x2(U.x, U.y); h.f32(U.d);
+        });
+}
+
+inline void hashGrid(Hasher& h, const SpatialGrid& g) {
+    h.i32(field<peek::SgWidth>(g)); h.i32(field<peek::SgHeight>(g));
+    h.i32(field<peek::SgCols>(g)); h.i32(field<peek::SgRows>(g));
+    h.f32(field<peek::SgInvCell>(g));
+}
+
+inline void hashGeometry(Hasher& h, const OceanWorld& w) {
+    hashGrid(h, field<peek::OwCreatureGrid>(w));
+    hashGrid(h, field<peek::OwFoodGrid>(w));
+    const SignalGrid& s = w.signals;
+    h.i32(field<peek::SigW>(s)); h.i32(field<peek::SigH>(s)); h.i32(s.cellSize());
+    h.i32(s.cols()); h.i32(s.rows());
+    h.i32(field<peek::SigWrapCols>(s)); h.i32(field<peek::SigWrapRows>(s));
+    h.b(field<peek::SigToroidal>(s)); h.u64(s.data().size());
+    const auto& patches = field<peek::OwPatches>(w);
+    h.u64(patches.size());
+    for (const Vec2& p : patches) h.v2(p);
+    const auto& pd = field<peek::OwPatchDepth>(w);
+    h.u64(pd.size());
+    for (float d : pd) h.f32(d);
+    for (const auto& t : field<peek::OwWaves>(w)) {   // phase is in ctr
+        h.f64(t.kx); h.f64(t.ky); h.f64(t.phi);
+        h.f32x2(t.k, t.qx); h.f32x2(t.qy, t.frac);
+    }
+}
+
+inline void hashRng(Hasher& h) {
+    const auto& eng = field<peek::RgEngine>(rng);
+    const auto& x = field<peek::MtWords>(eng);
+    for (int i = 0; i < 624; i += 2) h.u64((std::uint64_t)x[i] | ((std::uint64_t)x[i + 1] << 32));
+    h.i32(field<peek::MtPos>(eng));
+}
 
 inline Fingerprint fingerprint(const OceanWorld& w, bool withActivations = true) {
     Fingerprint fp;
-    { Fnv h; hashConfig(h, w.cfg, w.ocfg); fp.cfg = h.h; }
-    { Fnv h; hashCounters(h, w); fp.ctr = h.h; }
-    { Fnv h; h.u64(w.creatures.size());
+    { Hasher h; hashConfig(h, w.cfg, w.ocfg); fp.cfg = h.value(); }
+    { Hasher h; hashCounters(h, w); fp.ctr = h.value(); }
+    { Hasher h; h.u64(w.creatures.size());
       for (const Fish& c : w.creatures) hashFish(h, c, withActivations);
-      fp.fish = h.h; }
-    { Fnv h; h.u64(w.food.size());
+      fp.fish = h.value(); }
+    { Hasher h; h.u64(w.food.size());
       for (const OceanFood& f : w.food) hashFood(h, f);
-      fp.food = h.h; }
-    { Fnv h; h.u64(w.predators.size());
+      fp.food = h.value(); }
+    { Hasher h; h.u64(w.predators.size());
       for (const OceanPredator& p : w.predators) hashPredator(h, p);
-      fp.pred = h.h; }
-    { Fnv h; const auto& d = w.signals.data(); h.u64(d.size());
-      for (std::uint8_t b : d) h.byte(b);
-      fp.sig = h.h; }
-    { Fnv h; h.b(w.currentActive());
-      if (w.currentActive()) forCurrentLattice(w, [&](Vec2 p) { h.v2(w.currentAt(p)); });
-      if (w.flowE1()) {
-          h.byte(0xE1);
-          forFlowSamples(w, [&](Vec2 p, float d) {
-              const OceanWorld::Flow U = w.flowAt(p, d);
-              h.f32(U.x); h.f32(U.y); h.f32(U.d);
-          });
-      }
-      fp.cur = h.h; }
-    { Fnv h; h.str(rng.state()); fp.rng = h.h; }
-    Fnv a;
-    for (std::uint64_t s : {fp.cfg, fp.ctr, fp.fish, fp.food, fp.pred, fp.sig, fp.cur, fp.rng}) a.u64(s);
-    fp.all = a.h;
+      fp.pred = h.value(); }
+    { Hasher h; const auto& d = w.signals.data(); h.bytes(d.data(), d.size()); fp.sig = h.value(); }
+    { Hasher h; hashCurrent(h, w); fp.cur = h.value(); }
+    { Hasher h; hashGeometry(h, w); fp.geo = h.value(); }
+    { Hasher h; hashRng(h); fp.rng = h.value(); }
+    Hasher a;
+    for (auto s : kSections) a.u64(fp.*s);
+    fp.all = a.value();
     return fp;
 }
 
-// Non-finite floats in the state. The harness requires 0: a NaN's sign and
-// payload are left to the host by the wasm spec (x86 makes 0xffc00000, ARM
-// 0x7fc00000), so a run that carries a NaN can match native on one machine
-// and not on another, and a NaN depth also slips past every 3-D range test.
-inline long countNonFinite(const OceanWorld& w) {
+// ---- non-finite floats --------------------------------------------------------
+// The harness requires 0: a NaN's sign and payload are left to the host by the
+// wasm spec (x86 makes 0xffc00000, ARM 0x7fc00000), so a run that carries a NaN
+// can match native on one machine and not on another, and a NaN depth also
+// slips past every 3-D range test. Every float and double of the hashed state:
+// fish, food, predators, the configs, the current, the geometry, the logs.
+struct NonFinite {
     long n = 0;
-    auto chk = [&](float v) { n += !std::isfinite(v); };
+    void f(float v) { n += !std::isfinite(v); }
+    void d(double v) { n += !std::isfinite(v); }
+    void f32(const char*, float v) { f(v); }
+    void i32(const char*, int) {}
+    void b(const char*, bool) {}
+};
+inline long countNonFinite(const OceanWorld& w) {
+    NonFinite nf;
+    auto f = [&](float v) { nf.f(v); };
     for (const Fish& c : w.creatures) {
         for (float v : {c.speed, c.age, c.foodReserves, c.reproTimer, c.interactTimer, c.responsiveness,
                         c.oscPeriod, c.oscPhase, c.bodySize, c.bodyElong, c.pos.x, c.pos.y, c.vel.x, c.vel.y,
                         c.lastMoveDir.x, c.lastMoveDir.y, c.depth, c.vz, c.bodyBuoy})
-            chk(v);
-        for (const Vec2& b : c.body) { chk(b.x); chk(b.y); }
-        for (const auto& nr : c.nnet.neurons) chk(nr.output);
-        for (float s : c.lastSensors) chk(s);
-        for (float a : c.lastActions) chk(a);
+            f(v);
+        for (const Vec2& b : c.body) { f(b.x); f(b.y); }
+        for (const auto& nr : c.nnet.neurons) f(nr.output);
+        for (float s : c.lastSensors) f(s);
+        for (float a : c.lastActions) f(a);
     }
-    for (const OceanFood& f : w.food) { chk(f.pos.x); chk(f.pos.y); chk(f.depth); chk(f.size); }
-    for (int i = 0; i < OceanWorld::kWaveTrains; ++i) n += !std::isfinite(w.wavePhase(i));
+    for (const OceanFood& fd : w.food) { f(fd.pos.x); f(fd.pos.y); f(fd.depth); f(fd.size); }
     for (const OceanPredator& p : w.predators)
         for (float v : {p.pos.x, p.pos.y, p.vel.x, p.vel.y, p.digestTimer, p.energy, p.age, p.speedFactor,
                         p.buddingFactor, p.depth, p.pitch})
-            chk(v);
-    return n;
+            f(v);
+    f(w.D);
+    visitSimConfig(w.cfg, nf);
+    visitOceanConfig(w.ocfg, nf);
+    const CurrentField& cf = field<peek::OwCurrent>(w);
+    for (float v : cf.vortexState()) f(v);
+    for (const Vec2& c : field<peek::CfCenters>(cf)) { f(c.x); f(c.y); }
+    for (float v : {field<peek::CfStrength>(cf), field<peek::CfCore>(cf), field<peek::CfGyreEps>(cf),
+                    field<peek::CfGyreOmega>(cf), field<peek::CfGyreA>(cf), field<peek::CfGyreT>(cf)})
+        f(v);
+    for (const auto& t : field<peek::OwWaves>(w)) {
+        for (double v : {t.kx, t.ky, t.phase, t.phi}) nf.d(v);
+        for (float v : {t.k, t.qx, t.qy, t.frac}) f(v);
+    }
+    for (const Vec2& p : field<peek::OwPatches>(w)) { f(p.x); f(p.y); }
+    for (float d : field<peek::OwPatchDepth>(w)) f(d);
+    f(field<peek::SgInvCell>(field<peek::OwCreatureGrid>(w)));
+    f(field<peek::SgInvCell>(field<peek::OwFoodGrid>(w)));
+    for (const auto& d : w.deathLog) {
+        f(d.x); f(d.y); f(d.age);
+        for (float s : d.sketch) f(s);
+    }
+    return nf.n;
 }
 
 // One fingerprint line: the step, the combined hash, a few readable counts,
 // then every section's hash.
 inline std::string fingerprintLine(const char* tag, long long step, const OceanWorld& w,
                                    const Fingerprint& fp) {
-    char buf[512];
+    char buf[600];
     std::snprintf(buf, sizeof buf,
                   "%s %lld %016llx pop=%zu food=%zu pred=%zu births=%lld deaths=%lld reseeds=%lld"
                   " | cfg=%016llx ctr=%016llx fish=%016llx food=%016llx pred=%016llx"
-                  " sig=%016llx cur=%016llx rng=%016llx\n",
+                  " sig=%016llx cur=%016llx geo=%016llx rng=%016llx",
                   tag, step, (unsigned long long)fp.all, w.creatures.size(), w.food.size(),
                   w.predators.size(), w.totalBirths, w.totalDeaths, w.totalReseeds,
                   (unsigned long long)fp.cfg, (unsigned long long)fp.ctr,
                   (unsigned long long)fp.fish, (unsigned long long)fp.food,
                   (unsigned long long)fp.pred, (unsigned long long)fp.sig,
-                  (unsigned long long)fp.cur, (unsigned long long)fp.rng);
+                  (unsigned long long)fp.cur, (unsigned long long)fp.geo, (unsigned long long)fp.rng);
     return buf;
 }
 
@@ -269,31 +549,33 @@ inline std::string fingerprintLine(const char* tag, long long step, const OceanW
 struct Dumper {
     std::FILE* f;
     void fl(const char* k, float v) { std::fprintf(f, " %s=%.9g/%08x", k, (double)v, (unsigned)bits(v)); }
+    void db(const char* k, double v) { std::fprintf(f, " %s=%.17g/%016llx", k, v, (unsigned long long)bits64(v)); }
     void v2(const char* k, Vec2 v) {
         std::fprintf(f, " %s=(%.9g/%08x,%.9g/%08x)", k, (double)v.x, (unsigned)bits(v.x),
                      (double)v.y, (unsigned)bits(v.y));
     }
     void ll(const char* k, long long v) { std::fprintf(f, " %s=%lld", k, v); }
     void ull(const char* k, unsigned long long v) { std::fprintf(f, " %s=%llu", k, v); }
+    // visitSimConfig / visitOceanConfig
+    void f32(const char* k, float v) { fl(k, v); }
+    void i32(const char* k, int v) { ll(k, v); }
+    void b(const char* k, bool v) { ll(k, v); }
 };
 
 inline void dumpState(const OceanWorld& w, std::FILE* out) {
     Dumper d{out};
-    std::fprintf(out, "world");
+    std::fprintf(out, "world format=%d", kFormatVersion);
     d.ull("frame", w.frame); d.ll("width", w.width); d.ll("height", w.height); d.fl("D", w.D);
     d.ull("fish", w.creatures.size()); d.ull("food", w.food.size()); d.ull("pred", w.predators.size());
-    std::fprintf(out, "\nconfig %s\nocean", configText(w.cfg).c_str());
-    d.fl("kBuoy", w.ocfg.kBuoy); d.fl("buoyMutation", w.ocfg.buoyMutation);
-    d.fl("pitchMax", w.ocfg.pitchMax); d.fl("vDrag", w.ocfg.vDrag); d.fl("wallBand", w.ocfg.wallBand);
-    d.fl("cHold", w.ocfg.cHold); d.fl("cPress", w.ocfg.cPress); d.ll("foodDepthMode", w.ocfg.foodDepthMode);
-    d.fl("foodDepthSpread", w.ocfg.foodDepthSpread);
-    std::fprintf(out, "\ne1");
-    d.fl("waveSpeed", w.ocfg.waveSpeed); d.fl("waveBand", w.ocfg.waveBand); d.fl("waveGravity", w.ocfg.waveGravity);
-    d.ll("deepCurrent", w.ocfg.deepCurrent); d.ll("lightEnabled", w.ocfg.lightEnabled);
-    d.fl("L0", w.ocfg.L0); d.fl("kWater", w.ocfg.kWater); d.ll("depthCostScaled", w.ocfg.depthCostScaled);
-    d.ll("sizeDrift", w.ocfg.sizeDrift); d.ll("sizeFight", w.ocfg.sizeFight); d.ll("mouthGate", w.ocfg.mouthGate);
-    d.fl("kMouth", w.ocfg.kMouth);
-    for (int i = 0; i < OceanWorld::kWaveTrains; ++i) std::fprintf(out, " phase%d=%.17g", i, w.wavePhase(i));
+    std::fprintf(out, "\nsimconfig");
+    visitSimConfig(w.cfg, d);
+    std::fprintf(out, "\noceanconfig");
+    visitOceanConfig(w.ocfg, d);
+    std::fprintf(out, "\nwaves");
+    for (const auto& t : field<peek::OwWaves>(w)) {
+        d.db("kx", t.kx); d.db("ky", t.ky); d.db("phase", t.phase); d.db("phi", t.phi);
+        d.fl("k", t.k); d.fl("qx", t.qx); d.fl("qy", t.qy); d.fl("frac", t.frac);
+    }
     std::fprintf(out, "\ncounters");
     d.ll("births", w.births); d.ll("deaths", w.deaths); d.ll("totalBirths", w.totalBirths);
     d.ll("totalDeaths", w.totalDeaths); d.ll("grace", w.totalGraceBirths); d.ll("soft", w.totalSoftBirths);
@@ -301,8 +583,22 @@ inline void dumpState(const OceanWorld& w, std::FILE* out) {
     d.ll("pBirths", w.totalPredatorBirths); d.ll("pStarve", w.totalPredatorDeathsStarvation);
     d.ll("pAge", w.totalPredatorDeathsAge); d.ll("pReseeds", w.totalPredatorReseeds);
     d.ll("reseeds", w.totalReseeds); d.ull("nextId", w.nextId_);
+    d.ll("deathsLogged", w.totalDeathsLogged_); d.ll("clusterStride", w.clusterStride_);
+    d.ll("birthsLogged", w.totalBirthsLogged_); d.ll("reproStride", w.reproStride_);
     d.ull("reproWindow", w.reproWindow_.size()); d.ull("reproWindowNext", w.reproWindowNext_);
     d.ull("deathLog", w.deathLog.size()); d.ull("birthLog", w.birthLog.size());
+    std::fprintf(out, "\ngeometry");
+    for (const SpatialGrid* g : {&field<peek::OwCreatureGrid>(w), &field<peek::OwFoodGrid>(w)}) {
+        d.ll("gridW", field<peek::SgWidth>(*g)); d.ll("gridH", field<peek::SgHeight>(*g));
+        d.ll("cols", field<peek::SgCols>(*g)); d.ll("rows", field<peek::SgRows>(*g));
+        d.fl("invCell", field<peek::SgInvCell>(*g));
+    }
+    d.ll("sigW", field<peek::SigW>(w.signals)); d.ll("sigH", field<peek::SigH>(w.signals));
+    d.ll("sigCell", w.signals.cellSize()); d.ll("sigCols", w.signals.cols()); d.ll("sigRows", w.signals.rows());
+    d.ll("sigWrapCols", field<peek::SigWrapCols>(w.signals)); d.ll("sigWrapRows", field<peek::SigWrapRows>(w.signals));
+    d.ll("sigToroidal", field<peek::SigToroidal>(w.signals));
+    for (const Vec2& p : field<peek::OwPatches>(w)) d.v2("patch", p);
+    for (float z : field<peek::OwPatchDepth>(w)) d.fl("patchDepth", z);
     std::fprintf(out, "\n");
     for (std::size_t i = 0; i < w.creatures.size(); ++i) {
         const Fish& c = w.creatures[i];
@@ -353,9 +649,22 @@ inline void dumpState(const OceanWorld& w, std::FILE* out) {
         }
         std::fprintf(out, "\n");
     }
-    std::fprintf(out, "current active=%d", (int)w.currentActive());
-    if (w.currentActive()) forCurrentLattice(w, [&](Vec2 p) { d.v2("", w.currentAt(p)); });
-    std::fprintf(out, "\nrng %s\n", rng.state().c_str());
+    {
+        const CurrentField& cf = field<peek::OwCurrent>(w);
+        std::fprintf(out, "current active=%d mode=%d", (int)w.currentActive(), (int)field<peek::CfMode>(cf));
+        d.fl("strength", field<peek::CfStrength>(cf)); d.fl("core", field<peek::CfCore>(cf));
+        d.ll("w", field<peek::CfW>(cf)); d.ll("h", field<peek::CfH>(cf));
+        d.fl("gyreEps", field<peek::CfGyreEps>(cf)); d.fl("gyreOmega", field<peek::CfGyreOmega>(cf));
+        d.fl("gyreA", field<peek::CfGyreA>(cf)); d.fl("gyreT", field<peek::CfGyreT>(cf));
+        std::fprintf(out, "\n  vortices");
+        for (float v : cf.vortexState()) d.fl("", v);
+        std::fprintf(out, "\n  centers");
+        for (const Vec2& c : field<peek::CfCenters>(cf)) d.v2("", c);
+        std::fprintf(out, "\n  lattice");
+        if (w.currentActive()) forCurrentLattice(w, [&](Vec2 p) { d.v2("", w.currentAt(p)); });
+        std::fprintf(out, "\n");
+    }
+    std::fprintf(out, "rng %s\n", rng.state().c_str());
 }
 
 // ---- the world as the page builds it (wasm/ocean_wasm.cpp, oc_init) --------

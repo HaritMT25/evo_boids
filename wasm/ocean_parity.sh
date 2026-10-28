@@ -1,37 +1,83 @@
 #!/bin/bash
-# ocean_parity.sh — the Ocean world's native-vs-wasm determinism suite
-# (PLAN_ecosystem.md §12, E0 exit test: "Ocean: native == wasm fingerprints").
+# ocean_parity.sh — the Ocean world's determinism suite (PLAN_ecosystem.md §12,
+# E0 exit test: "Ocean: native == wasm fingerprints"), with a historical oracle.
 #
 # Builds tools/ocean_parity_driver.cpp natively (g++, the flags of wasm/parity.sh)
 # and with Emscripten (the flags of wasm/build_ocean.sh: -msimd128, single-
-# threaded; run under node), runs both over the case matrix below and byte-
-# compares their output: a fingerprint of the WHOLE state every 100 steps
-# (tools/ocean_fingerprint.hpp). Any difference = the wasm build does not
-# reproduce the native one. Then builds tests/ocean_tests.cpp both ways and
-# runs it (unit checks; their output must also match between the builds).
-# A case also FAILS if its state ever holds a non-finite float, even when both
-# builds agree on it: wasm leaves a NaN's bits to the host CPU.
+# threaded; run under node), runs both over the case matrix below and holds
+# every case to three oracles:
+#   1. native == wasm, byte for byte. The driver fingerprints the WHOLE state
+#      (tools/ocean_fingerprint.hpp) after EVERY step, folds it into a rolling
+#      `chain` hash, and prints the sections and the chain every 100 steps
+#      (250 in the long cases): a divergence at any step fails, even one that
+#      heals before the next print.
+#   2. native == the committed baseline, tests/ocean_baseline/<case>.txt.
+#      Native and wasm are built from the SAME source, so a change to shared
+#      behaviour (a cost, the rng stream, a feature-OFF path Classic shares)
+#      passes oracle 1; the baseline, recorded from a known engine commit
+#      (tests/ocean_baseline/MANIFEST), is what catches it.
+#   3. the case's --expect conditions on the driver's coverage counters: it
+#      really reached the branch it is in the matrix for (a predator died of
+#      old age, the population sat at maxPopulation, the logs decimated, ...).
+# A case also FAILS if its state ever holds a non-finite float (scanned every
+# step), even when both builds agree on it: wasm leaves a NaN's bits to the host.
+# Then builds tests/ocean_tests.cpp both ways and runs it (unit checks; their
+# output must also match between the builds).
 #
 # E1 physics: the cases before the e1_* block run with every E1 knob at its
-# default (OFF) and must keep their pre-E1 fingerprints; the e1_* cases turn
-# the features on. The r_* list holds configs outside the Ocean knobs' ranges:
-# each must be REFUSED by oc_init / oc_set_param. The harness's copy of the E1
-# preset is checked against kE1PresetJson (src/ocean/ocean_config.hpp).
+# default (OFF); the e1_* cases turn the features on. The r_* list holds
+# configs outside the Ocean knobs' ranges: each must be REFUSED by oc_init /
+# oc_set_param. The harness's copy of the E1 preset is checked against
+# kE1PresetJson (src/ocean/ocean_config.hpp).
 #
 # Direct compiler calls only: CMakeLists.txt / CMakePresets.json (Classic's
 # build) are untouched. Prereq: em++ on PATH, or ~/emsdk/emsdk_env.sh.
 #
-#   wasm/ocean_parity.sh              # everything (~2-3 min on 8 cores)
+#   wasm/ocean_parity.sh              # everything (~4 min on 8 cores)
 #   JOBS=8 OCEAN_PARITY_DIR=/tmp/x wasm/ocean_parity.sh
 #   ONLY=def_s1 wasm/ocean_parity.sh  # one case (a grep -E pattern on the name)
 #   NO_TESTS=1 wasm/ocean_parity.sh   # parity cases only
 #
-# Bisecting a FAIL: the table names the first differing fingerprint (step and
-# sections). Re-run that case with --trace (every step) to find the first bad
-# step S, then --dump-step S --dump FILE on both builds and diff the dumps.
+# Bisecting a FAIL: the table names the first differing line (step and
+# sections; `chain` alone = the states differed at some step since the last
+# print and agree again). Re-run the case with --trace (every step) to find the
+# first bad step S, then --dump-step S --dump FILE on both builds (for a
+# baseline FAIL: on the old and the new engine) and diff the dumps.
+#
+# ---- Rebaselining -------------------------------------------------------------
+#   wasm/ocean_parity.sh --rebaseline
+#       runs everything and REPORTS which baselines differ and where; writes nothing
+#   wasm/ocean_parity.sh --rebaseline --overwrite --reason "what changed, and why"
+#       writes them, only if every selected case passes oracles 1 and 3, the
+#       unit checks pass and no config guard failed; records the commit, date,
+#       compilers, reason and cases in tests/ocean_baseline/MANIFEST
+# Rebaselining is legitimate ONLY when behaviour is MEANT to change: a
+# deliberate engine change (a new default path, a fix that moves a trajectory,
+# a draw added by design), a new or edited case, or a change to what the
+# harness hashes (bump ofp::kFormatVersion). It is NEVER legitimate to make a
+# failure go away: a baseline FAIL nobody intended is a regression to find
+# (--trace, --dump), not to re-record. If you cannot say which change moved
+# which case and why, do not rebaseline. Commit the new baselines WITH the
+# change that moved them, after reading `git diff tests/ocean_baseline`.
 set -u
+REBASE=0; OVERWRITE=0; REASON=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --rebaseline) REBASE=1 ;;
+        --overwrite)  OVERWRITE=1 ;;
+        --reason)     shift; REASON=${1:-} ;;
+        -h|--help)    sed -n '2,/^set -u$/p' "$0" | sed '$d' | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) echo "unknown argument: $1 (see --help)" >&2; exit 2 ;;
+    esac
+    shift
+done
+if [ "$OVERWRITE" = 1 ] && [ "$REBASE" = 0 ]; then echo "--overwrite goes only with --rebaseline" >&2; exit 2; fi
+if [ "$OVERWRITE" = 1 ] && [ -z "$REASON" ]; then
+    echo "--overwrite needs --reason \"which behaviour changed, on purpose, and why\"" >&2; exit 2
+fi
 cd "$(dirname "$0")/.."
 T0=$(date +%s)
+BASE=tests/ocean_baseline
 
 OUT=${OCEAN_PARITY_DIR:-/tmp/ocean_parity}
 JOBS=${JOBS:-4}
@@ -49,9 +95,10 @@ CXXFLAGS="-O3 -std=c++20 -ffp-contract=off -DEVO_WORLD_OCEAN -I src"
 # for --dump, EXIT_RUNTIME so stdout is flushed and main's status is the exit code.
 EMFLAGS="-msimd128 -sALLOW_MEMORY_GROWTH=1 -sENVIRONMENT=node -sNODERAWFS=1 -sEXIT_RUNTIME=1"
 
+GPP_VER=$(g++ -dumpversion); EM_VER=$(em++ --version | head -1 | sed 's/.*) //')
 echo "== tree: $(git rev-parse --abbrev-ref HEAD 2>/dev/null) $(git rev-parse --short HEAD 2>/dev/null)," \
      "$(git status --porcelain 2>/dev/null | wc -l) changed/untracked path(s)"
-echo "== building (g++ $(g++ -dumpversion), $(em++ --version | head -1 | sed 's/.*) //'))"
+echo "== building (g++ $GPP_VER, $EM_VER)"
 build () {  # build LABEL CMD...
     local label=$1; shift
     if "$@" > "$OUT/build_$label.log" 2>&1; then echo "   built $label"; else echo "   BUILD FAILED: $label"; cat "$OUT/build_$label.log"; return 1; fi
@@ -67,16 +114,18 @@ for p in $P1 $P2 ${P3:-} ${P4:-}; do wait "$p" || BUILD_OK=0; done
 [ "$BUILD_OK" = 1 ] || { echo "== BUILD FAILED"; exit 1; }
 
 # ---- the case matrix ---------------------------------------------------------
-# NAME | ARGS (driver arguments; cfg JSON written without spaces) | what it covers
+# NAME | ARGS (driver arguments; cfg JSON written without spaces; --expect
+# NAMEopV conditions on the driver's `cover` counters) | what it covers
 NAMES=(); ARGS=(); WHY=()
 add () { NAMES+=("$1"); ARGS+=("$2"); WHY+=("$3"); }
+BANDS='--expect bandTop>0 --expect bandFloor>0'
 RICH='"currentStrength":80,"currentMode":0,"currentDrift":1,"foodPatches":5,"foodDrift":true,"predatorCount":4,"predatorEconomy":true,"moveCost":7e-5,"maxNeighbors":7,"geneCost":0.005'
-add def_s1        '1 3000'                    "preview defaults (applyOceanDefaults + OceanConfig{})"
+add def_s1        "1 3000 $BANDS"             "preview defaults (applyOceanDefaults + OceanConfig{}); both wall bands hit"
 add def_s42       '42 3000'                   "defaults, another seed"
 add def_s999      '999 3000'                  "defaults, another seed"
 add def_s31415    '31415 3000'                "defaults, another seed"
-add pred_s7       '7 3000 --cfg {"predatorCount":5}'  "Stage A predators: 3-D hunt, wander pitch draws"
-add econ_s42      '42 3000 --cfg {"predatorCount":6,"predatorEconomy":true,"predatorMinPopulation":3,"predatorMaxPopulation":24,"predatorInheritance":true}' \
+add pred_s7       '7 3000 --cfg {"predatorCount":5} --expect dPred>0'  "Stage A predators: 3-D hunt, wander pitch draws"
+add econ_s42      '42 3000 --cfg {"predatorCount":6,"predatorEconomy":true,"predatorMinPopulation":3,"predatorMaxPopulation":24,"predatorInheritance":true} --expect pBirths>0 --expect predTraitVaried>0' \
                   "Stage B economy + floor + cap + inheritance (bud depth draws)"
 add rich_s5       "5 3000 --cfg {$RICH}"      "Classic's --rich set: eddies, patches+drift, economy, move/gene cost, topological 7"
 add eddies_s11    '11 3000 --cfg {"currentStrength":120,"currentEddies":8,"foodDrift":true,"foodPatches":6,"foodDepthMode":1,"foodDepthSpread":20}' \
@@ -84,11 +133,11 @@ add eddies_s11    '11 3000 --cfg {"currentStrength":120,"currentEddies":8,"foodD
 add gyre_toro_s13 '13 3000 --cfg {"currentStrength":60,"currentMode":1,"currentGyreEps":0.4,"toroidal":true,"foodDrift":true}' \
                   "double gyre, toroidal senses"
 add rich_toro_s7  "7 3000 --cfg {$RICH,\"toroidal\":true,\"foodDepthMode\":1}" "rich + toroidal + patch depths"
-add x_steep_s3    '3 3000 --cfg {"pitchMax":4,"kBuoy":25,"wallBand":100,"vDrag":0,"foodDepthMode":1,"foodPatches":4,"foodDepthSpread":500}' \
+add x_steep_s3    "3 3000 --cfg {\"pitchMax\":4,\"kBuoy\":25,\"wallBand\":100,\"vDrag\":0,\"foodDepthMode\":1,\"foodPatches\":4,\"foodDepthSpread\":500} $BANDS" \
                   "extreme: pitchMax 4, kBuoy 25, wallBand 100, no drag, spread 500"
 add x_deep_s8     '8 3000 --depth 2000 --cfg {"pitchMax":0.01,"kBuoy":-5,"vDrag":200,"wallBand":0,"buoyMutation":0.5,"toroidal":true,"cHold":0.5,"cPress":0.3}' \
                   "extreme: D 2000, pitchMax 0.01, kBuoy -5, vDrag 200, no walls, depth costs"
-add x_shallow_s4  '4 3000 --depth 10 --cfg {"pitchMax":1.5,"wallBand":5,"kBuoy":0,"foodDepthMode":1,"foodPatches":3,"foodDepthSpread":0}' \
+add x_shallow_s4  "4 3000 --depth 10 --cfg {\"pitchMax\":1.5,\"wallBand\":5,\"kBuoy\":0,\"foodDepthMode\":1,\"foodPatches\":3,\"foodDepthSpread\":0} $BANDS" \
                   "extreme: D 10 (the minimum), bands cover it all, spread 0"
 add x_osc_s6      '6 3000 --cfg {"vDrag":300,"pitchMax":2,"kBuoy":-20,"wallBand":119,"buoyMutation":1}' \
                   "extreme: vDrag 300 (vz flips sign each step), wallBand ~D/2, buoyMutation 1"
@@ -97,13 +146,23 @@ add x_tri_body_s9 '9 3000 --cfg {"triangularMotion":true,"bodyModel":true,"repro
 add live_s21      '21 3000 --cfg {"predatorCount":3} --set pitchMax=0.2@800 --set kBuoy=3@1200 --set vDrag=0.5@1200 --set wallBand=40@2000 --set buoyMutation=0.3@2000' \
                   "live oc_set_param-style changes mid-run"
 add capture_s17   '17 3000 --capture --cfg {"predatorCount":2,"currentStrength":50}' \
-                  "every fish's 46 sensor + 13 action bits hashed every 100 steps"
+                  "every fish's 46 sensor + 13 action bits hashed every step"
 add big_s42       '42 2000 --pop 1500'        "1500 founders, defaults"
 add big_toro_s9   '9 2000 --pop 1500 --w 2560 --h 1440 --cfg {"toroidal":true,"predatorCount":8,"predatorEconomy":true,"maxNeighbors":7,"currentStrength":60,"foodPatches":6,"foodDrift":true,"foodDepthMode":1}' \
                   "1500 founders, 2560x1440, toroidal, economy, topological, currents"
 add long_s42      '42 10000 --every 250'      "10k steps, defaults"
-# ---- E1 physics, features ON (the cases above are the OFF identity: every E1
-# knob at its default, fingerprints unchanged from before E1) ----
+# ---- branches the cases above never reach, each asserted with --expect ----
+add pred_age_s23  '23 6000 --cfg {"predatorCount":6,"predatorEconomy":true,"predatorMaxAge":25,"predatorMeal":15,"predatorMoveCost":0.00003,"predatorMinPopulation":3,"predatorReproEnergy":50} --expect pAge>0 --expect dPred>0 --expect pBirths>0' \
+                  "predators die of old age; a fixed predatorMeal; an explicit predatorMoveCost (96 s)"
+add gate_s29      '29 6000 --cfg {"reproMaxDistance":16,"reproSoftWidth":0,"reproGracePeriod":30} --expect grace>0 --expect gateBirths>0 --expect soft=0' \
+                  "the HARD pairing gate (soft width 0) and the grace bypass for young founders (96 s)"
+add cap_s31       '31 4000 --cfg {"maxPopulation":330} --expect capSteps>0 --expect popMax=330' \
+                  "a positive maxPopulation cap, binding for most of the run"
+add fast_logs_s41 '41 8000 --capture --logs 16,16 --cfg {"fastTanh":true,"predatorCount":2} --expect fastTanhSteps>0 --expect clusterStride>1 --expect reproStride>1 --expect deathLog>0 --expect birthLog>0' \
+                  "fastTanh nets (actions hashed); death-cluster map + birth log populated AND decimated (128 s)"
+add toro_bud_s43  '43 8000 --cfg {"toroidal":true,"predatorCount":6,"predatorEconomy":true,"predatorInheritance":true,"predatorTraitMutation":0.2,"predatorMinPopulation":2,"predatorMaxPopulation":30} --expect pBirths>0 --expect predGenMax>1 --expect predTraitVaried>0' \
+                  "toroidal predator budding + trait inheritance (128 s)"
+# ---- E1 physics, features ON (the cases above run every E1 knob at its default) ----
 # E1_PRESET must equal kE1PresetJson in src/ocean/ocean_config.hpp (checked below).
 E1_PRESET='{"waveSpeed":6,"deepCurrent":true,"currentStrength":5,"foodDrift":true,"lightEnabled":true,"depthCostScaled":true,"cHold":0.05,"cPress":0.03}'
 add e1_waves_s3   '3 3000 --cfg {"waveSpeed":8,"foodDrift":true,"predatorCount":3}' \
@@ -121,7 +180,7 @@ add e1_preset_long "7 10000 --every 250 --cfg $E1_PRESET" "E1 preset, 10k steps"
 add e1_live_s21   '21 3000 --cfg {"currentStrength":40,"foodDrift":true,"predatorCount":2} --set waveSpeed=6@500 --set deepCurrent=1@800 --set sizeDrift=1@1200 --set depthCostScaled=1@1500 --set cHold=0.05@1500 --set waveGravity=40@2000 --set waveSpeed=0@2500 --set mouthGate=1@2600 --set kMouth=0.6@2600' \
                   "E1 knobs switched live (oc_set_param), waves stopped again (clock kept)"
 add e1_capture_s17 '17 3000 --capture --cfg {"waveSpeed":6,"deepCurrent":true,"currentStrength":40,"foodDrift":true}' \
-                  "E1: sensors (CURRENT_FWD/LR read the 3-D flow) hashed every 100 steps"
+                  "E1: sensors (CURRENT_FWD/LR read the 3-D flow) hashed every step"
 add e1_x_shallow_s4 '4 3000 --depth 10 --cfg {"waveSpeed":100,"waveBand":1,"waveGravity":10000,"deepCurrent":true,"currentStrength":80,"foodDrift":true,"predatorCount":3}' \
                   "E1 extreme: D 10, waves at every range end (speed 100, band 1, g 10^4)"
 add e1_x_big_s9   '9 2000 --pop 1500 --w 2560 --h 1440 --cfg {"waveSpeed":12,"waveBand":8,"deepCurrent":true,"currentStrength":60,"toroidal":true,"foodDrift":true,"bodyModel":true,"sizeDrift":true,"sizeFight":true,"mouthGate":true,"predatorCount":6,"predatorEconomy":true,"depthCostScaled":true,"cHold":0.1,"cPress":0.1}' \
@@ -201,6 +260,20 @@ if [ "$SRC_PRESET" = "$E1_PRESET" ]; then
 else
     echo "== E1 preset DRIFT: harness '$E1_PRESET' vs ocean_config.hpp '$SRC_PRESET'"; GUARD_FAILED=1
 fi
+# Baseline files without a case (a renamed or dropped case): stale history.
+ORPHANS=""
+if [ -z "${ONLY:-}" ] && [ -d "$BASE" ]; then
+    for f in "$BASE"/*.txt; do
+        [ -e "$f" ] || continue
+        b=$(basename "$f" .txt); found=0
+        for nm in "${NAMES[@]}"; do [ "$nm" = "$b" ] && found=1 && break; done
+        [ "$found" = 1 ] || ORPHANS="$ORPHANS $b"
+    done
+    if [ -n "$ORPHANS" ]; then
+        if [ "$REBASE" = 1 ]; then echo "== baselines with no case (removed by --overwrite):$ORPHANS"
+        else echo "== baselines with no case (git rm them, or --rebaseline):$ORPHANS"; GUARD_FAILED=1; fi
+    fi
+fi
 echo "== running ${#SEL[@]} case(s), $JOBS at a time (native and wasm side by side) in $OUT"
 for i in "${SEL[@]}"; do
     while [ "$(jobs -rp | wc -l)" -ge "$JOBS" ]; do wait -n; done
@@ -208,46 +281,67 @@ for i in "${SEL[@]}"; do
 done
 wait
 
-# Which sections differ on the first differing line (fingerprint fields are k=v).
-first_diff () {
-    local ln la lb
-    ln=$(cmp "$1" "$2" 2>&1 | sed -n 's/.*line \([0-9]*\).*/\1/p')
+# The first differing line of EXPECTED and GOT, and what differs on it: for a
+# fingerprint line the step and the sections, else the line's k=v keys.
+first_diff () {  # first_diff EXPECTED GOT LABEL_OF_GOT
+    local c ln la lb
+    c=$(cmp "$1" "$2" 2>&1)
+    ln=$(echo "$c" | sed -n 's/.*line \([0-9]*\).*/\1/p')
+    if echo "$c" | grep -q EOF; then echo "$3 output $(echo "$c" | grep -q "EOF on $2" && echo ends || echo runs on) after line $ln"; return; fi
     [ -n "$ln" ] || { echo "(no line info)"; return; }
     la=$(sed -n "${ln}p" "$1"); lb=$(sed -n "${ln}p" "$2")
-    [ -n "$lb" ] || { echo "wasm output ends at line $ln"; return; }
-    echo "line $ln, step $(echo "$la" | awk '{print $2}'): $(paste -d'\t' <(echo "$la" | tr ' ' '\n') <(echo "$lb" | tr ' ' '\n') |
-        awk -F'\t' '$1 != $2 && $1 ~ /=/ {split($1, k, "="); printf "%s ", k[1]}')differ"
+    echo "line $ln ($(echo "$la" | awk '{print ($1 == "fp") ? "step " $2 : "the " $1 " line"}')): $(paste -d'\t' <(echo "$la" | tr ' ' '\n') <(echo "$lb" | tr ' ' '\n') |
+        awk -F'\t' '$1 != $2 { if ($1 ~ /=/) { split($1, k, "="); printf "%s ", k[1] } else if (!shown) { printf "value "; shown = 1 } }')differ"
 }
 secs_of () { sed -n 's/^# [0-9]* steps, \([0-9.]*\) s.*/\1/p' "$1" 2>/dev/null; }
 
-FAILED=0
+FAILED=0; NPASS=0
+CHANGED=(); declare -A CHANGE_WHY=()
 printf '\n%-16s %6s %6s %5s %6s %5s %4s %7s %7s  %s\n' CASE SEED STEPS POP BIRTHS FOOD PRED NATIVE WASM RESULT
 for i in "${SEL[@]}"; do
     name=${NAMES[$i]}
     read -r -a A <<< "${ARGS[$i]}"
-    n="$OUT/$name.native.txt"; w="$OUT/$name.wasm.txt"
+    n="$OUT/$name.native.txt"; w="$OUT/$name.wasm.txt"; b="$BASE/$name.txt"
     fin=$(grep '^final ' "$n" 2>/dev/null)
     get () { echo "$fin" | tr ' ' '\n' | sed -n "s/^$1=//p"; }
     nfp=$(grep -c '^fp ' "$n" 2>/dev/null)
     rcn=$(cat "$OUT/$name.native.rc" 2>/dev/null); rcw=$(cat "$OUT/$name.wasm.rc" 2>/dev/null)
+    ok=0
     if [ -n "${REFUSED[$i]:-}" ]; then
         res="FAIL  the page refuses this config: ${REFUSED[$i]}"
-        FAILED=1
+    elif [ "$rcn" = 5 ] && [ "$rcw" = 5 ]; then
+        res="FAIL  expectation not met (the case did not reach its branch):$(sed -n 's/^expect \(.*\) FAILED \(.*\)/ \1 \2/p' "$n" | tr '\n' ' ')"
     elif [ "$rcn" != 0 ] || [ "$rcw" != 0 ]; then
         res="FAIL  exit native=$rcn wasm=$rcw: $(tail -1 "$OUT/$name.wasm.log" 2>/dev/null) $(tail -1 "$OUT/$name.native.log" 2>/dev/null)"
-        FAILED=1
     elif [ -z "$fin" ]; then
-        res="FAIL  no final line"; FAILED=1
+        res="FAIL  no final line"
     elif [ "$(get nonfinite_max)" != 0 ]; then
         # Both builds may agree here and still not be portable: wasm leaves a
         # NaN's sign/payload to the host (x86 0xffc00000, ARM 0x7fc00000).
         res="FAIL  non-finite state from step $(get nonfinite_from) (up to $(get nonfinite_max) values)"
         cmp -s "$n" "$w" && res="$res; native == wasm on this host only"
-        FAILED=1
-    elif cmp -s "$n" "$w"; then
-        res="PASS  $nfp fingerprints identical"
+    elif ! cmp -s "$n" "$w"; then
+        res="FAIL  native != wasm: $(first_diff "$n" "$w" wasm)"
     else
-        res="FAIL  $(first_diff "$n" "$w")"; FAILED=1
+        ok=1
+    fi
+    if [ "$ok" = 1 ]; then
+        if [ ! -f "$b" ]; then
+            why="no baseline yet ($b)"
+        elif cmp -s "$n" "$b"; then
+            why=""
+        else
+            why="differs from the baseline at $(first_diff "$b" "$n" native); $(diff "$b" "$n" | grep -c '^>') line(s) differ"
+        fi
+        if [ -z "$why" ]; then
+            res="PASS  native == wasm == baseline ($nfp prints, every step chained)"; NPASS=$((NPASS + 1))
+        elif [ "$REBASE" = 1 ]; then
+            res="CHANGED  native == wasm, but $why"; CHANGED+=("$i"); CHANGE_WHY[$i]=$why
+        else
+            res="FAIL  native == wasm, but $why (an intended change? see --rebaseline; else a regression)"; FAILED=1
+        fi
+    else
+        FAILED=1
     fi
     printf '%-16s %6s %6s %5s %6s %5s %4s %6ss %6ss  %s\n' "$name" "${A[0]}" "${A[1]}" "$(get pop)" "$(get births)" \
         "$(get food)" "$(get pred)" "$(secs_of "$OUT/$name.native.log")" "$(secs_of "$OUT/$name.wasm.log")" "$res"
@@ -284,10 +378,61 @@ fi
 
 echo
 echo "== $(( $(date +%s) - T0 )) s total"
+if [ "$REBASE" = 1 ]; then
+    echo "== rebaseline: ${#CHANGED[@]} case(s) differ from their baseline or have none${ORPHANS:+; orphans:$ORPHANS}"
+    for i in "${CHANGED[@]}"; do echo "   ${NAMES[$i]}: ${CHANGE_WHY[$i]}"; done
+    if [ ${#CHANGED[@]} -eq 0 ] && [ -z "$ORPHANS" ]; then
+        echo "   nothing to write"
+    elif [ "$OVERWRITE" = 0 ]; then
+        echo "   DRY RUN: nothing written. If (and only if) these changes are the behaviour you meant, record them:"
+        echo "     $0 --rebaseline --overwrite --reason \"what changed and why\""
+    elif [ "$FAILED" = 1 ] || [ "$TESTS_OK" = 0 ] || [ "$GUARD_FAILED" = 1 ]; then
+        echo "   REFUSED: every case must pass native == wasm and its expectations, the unit checks must pass and"
+        echo "   no guard may fail before a baseline is written (fix the failures above first)"
+        exit 1
+    else
+        mkdir -p "$BASE"
+        names=""
+        for i in "${CHANGED[@]}"; do cp "$OUT/${NAMES[$i]}.native.txt" "$BASE/${NAMES[$i]}.txt"; names="$names ${NAMES[$i]}"; done
+        for o in $ORPHANS; do rm -f "$BASE/$o.txt"; done
+        fmt=$(sed -n '1s/.*format=\([0-9]*\).*/\1/p' "$OUT/${NAMES[${SEL[0]}]}.native.txt")
+        dirty=$(git status --porcelain -- src wasm/ocean_wasm.cpp 2>/dev/null | wc -l)
+        if [ ! -f "$BASE/MANIFEST" ]; then
+            cat > "$BASE/MANIFEST" << 'EOF'
+tests/ocean_baseline — the Ocean determinism harness's historical oracle.
+
+<case>.txt is ocean_parity_driver's native output for that case of
+wasm/ocean_parity.sh (whose wasm output must equal it too): the fingerprint of
+the whole world every 100 / 250 steps, the rolling chain over every step, the
+coverage counters, the expectations, the final line. wasm/ocean_parity.sh fails
+any case whose output differs from its file here, so a change to shared
+behaviour that native and wasm make identically (they are built from the same
+source) still fails.
+
+Rewrite these files ONLY with `wasm/ocean_parity.sh --rebaseline --overwrite
+--reason "..."`, ONLY when behaviour is MEANT to change (a deliberate engine
+change, a new or edited case, a change to what the harness hashes — then bump
+ofp::kFormatVersion), and NEVER to make a failure go away. Commit them with
+the change that moved them. Each rewrite is logged below (newest last).
+
+EOF
+        fi
+        {
+            echo "$(date -u +%Y-%m-%dT%H:%MZ)  engine $(git rev-parse --short HEAD 2>/dev/null)$( [ "$dirty" -gt 0 ] && echo " + $dirty uncommitted engine path(s)" )  format=$fmt  g++ $GPP_VER / $EM_VER"
+            echo "  reason: $REASON"
+            echo "  wrote:$names${ORPHANS:+; removed:$ORPHANS}"
+        } >> "$BASE/MANIFEST"
+        echo "   WROTE ${#CHANGED[@]} baseline(s) to $BASE and logged them in $BASE/MANIFEST."
+        echo "   Read the diff before committing: git diff --stat $BASE; git diff $BASE/MANIFEST"
+    fi
+    [ "$FAILED" = 1 ] || [ "$TESTS_OK" = 0 ] || [ "$GUARD_FAILED" = 1 ] && { echo "== (parity / unit / guard failures above)"; exit 1; }
+    exit 0
+fi
 if [ "$FAILED" = 1 ] || [ "$TESTS_OK" = 0 ] || [ "$GUARD_FAILED" = 1 ]; then
-    [ "$FAILED" = 1 ] && echo "== OCEAN PARITY FAILED: bisect with --trace, then --dump-step/--dump on both builds"
+    [ "$FAILED" = 1 ] && echo "== OCEAN PARITY FAILED: bisect with --trace, then --dump-step/--dump (native vs wasm, or old vs new engine)"
     [ "$TESTS_OK" = 0 ] && echo "== OCEAN UNIT CHECKS FAILED"
-    [ "$GUARD_FAILED" = 1 ] && echo "== OCEAN CONFIG GUARDS FAILED (a bad config accepted, or the E1 preset copy drifted)"
+    [ "$GUARD_FAILED" = 1 ] && echo "== OCEAN CONFIG GUARDS FAILED (a bad config accepted, the E1 preset copy drifted, or an orphan baseline)"
     exit 1
 fi
-echo "== ALL OCEAN PARITY CASES PASS: native == wasm, bit for bit; unit checks pass in both builds"
+echo "== ALL $NPASS OCEAN PARITY CASES PASS: native == wasm == baseline, bit for bit, every step; expectations met;" \
+     "unit checks pass in both builds"

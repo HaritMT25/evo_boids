@@ -957,7 +957,15 @@ private:
                 V = -A * E * tp.B;
                 if (x == 0.0f || x == D) { H = 0.0f; V = 0.0f; }
             };
-            auto at = [&](int j) { return (j == 0) ? lo[q] : (j == n) ? hi[q] : (float)((double)lo[q] + h * (double)j); };
+            // Node j: at the ideal position lo + h·j (atD, double; the piece's
+            // ends exactly), and that position as the float the formulas take
+            // (at). The lookup (depthProfiles: (d − lo)·scale) and the slopes
+            // (h·k·H) both use the ideal grid, so the rise is integrated over
+            // the ideal cell too: integrated between the float-rounded nodes it
+            // carried their rounding into the derivative (rise / h), 0.25% of
+            // V' in the 0.008-wide cells of a 1.01 band at D 240.
+            auto atD = [&](int j) { return (j == n) ? (double)hi[q] : (double)lo[q] + h * (double)j; };
+            auto at = [&](int j) { return (j == 0) ? lo[q] : (j == n) ? hi[q] : (float)atD(j); };
             pc.cell.assign((std::size_t)n, oceanflow::DepthCell{});
             for (int j = 0; j < n; ++j) {
                 const float d0 = at(j), d1 = at(j + 1);
@@ -967,9 +975,9 @@ private:
                     float H0, V0, H1, V1;
                     HV(i, d0, H0, V0);
                     HV(i, d1, H1, V1);
-                    // The rise V(d1) − V(d0) = ∫ k·H: from H, never from the two
-                    // rounded V values (see oceanflow::hval).
-                    const double rise = oceanflow::gauss3((double)d0, (double)d1, [&](double x) {
+                    // The rise V(d1) − V(d0) = ∫ k·H over the ideal cell: from H,
+                    // never from the two rounded V values (see oceanflow::hval).
+                    const double rise = oceanflow::gauss3(atD(j), atD(j + 1), [&](double x) {
                         float Hx, Vx;
                         HV(i, (float)x, Hx, Vx);
                         return k * (double)Hx;

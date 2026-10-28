@@ -2396,6 +2396,12 @@ void testFlowTables() {
         {"D 10, band 1, speed 100", 1920, 1080, 10.0f, R"({"waveSpeed":100,"waveBand":1,"waveGravity":10000})", 100.0f},
         {"100x100, D 600, speed 20", 100, 100, 600.0f, R"({"waveSpeed":20})", 20.0f},
         {"D 2000, band 300, speed 6", 1920, 1080, 2000.0f, R"({"waveSpeed":6,"waveBand":300})", 6.0f},
+        // fractional depths and bands: float-rounded node positions (the rise
+        // must be integrated over the ideal cell the lookup uses)
+        {"D 240, band 1.01, speed 6", 1920, 1080, 240.0f, R"({"waveSpeed":6,"waveBand":1.01})", 6.0f},
+        {"D 123.45, band 32, speed 6", 1920, 1080, 123.45f, R"({"waveSpeed":6})", 6.0f},
+        {"D 777.7, band 13.3, speed 9", 1500, 900, 777.7f, R"({"waveSpeed":9,"waveBand":13.3})", 9.0f},
+        {"D 10.37, band 1.7, speed 50", 1920, 1080, 10.37f, R"({"waveSpeed":50,"waveBand":1.7,"waveGravity":5000})", 50.0f},
     };
     for (const WV& v : wv) {
         OceanWorld w;
@@ -2448,6 +2454,24 @@ void testFlowTables() {
         t.expect(boundaryZero == boundaryN, "%s: the tables' flow at surface / floor not exactly 0 at %d of %d", v.name,
                  boundaryN - boundaryZero, boundaryN);
         (void)n;
+    }
+    // The Codex repro (flow-table review): 1920 x 1080, D 240, waveSpeed 6,
+    // waveBand 1.01, before any advance, train 0 at (0, 0, 239.49894714355469):
+    // exact u_x 2.0719101; with the rise integrated between float-rounded nodes
+    // the table gave 2.0772154 (0.0053 off, ~24x the budget).
+    {
+        OceanWorld w;
+        std::string err;
+        if (t.expect(ofp::initWorld(w, 1507, 1920, 1080, 240.0f, 0, R"({"waveSpeed":6,"waveBand":1.01})", err), "repro: %s",
+                     err.c_str())) {
+            const float d = 239.49894714355469f;
+            const Fl a = w.waveTrainAt(0, {0.0f, 0.0f}, d), e = w.waveTrainExactAt(0, {0.0f, 0.0f}, d);
+            const double err0 = std::max((double)std::abs(a.x - e.x), std::max((double)std::abs(a.y - e.y), (double)std::abs(a.d - e.d)));
+            const double budget = 1e-6 * std::max((double)std::abs(e.x), 1.0);
+            t.expect(err0 <= budget, "repro: train 0 at depth %.17g: table u_x %.9g, exact %.9g (|Δu| %.3g > %.3g)", (double)d,
+                     (double)a.x, (double)e.x, err0, budget);
+            t.note("repro (band 1.01, depth 239.498947): table u_x %.9g, exact %.9g, |Δu| %.2e", (double)a.x, (double)e.x, err0);
+        }
     }
 
     // ---- a discrete divergence probe, each train: tables vs exact ----

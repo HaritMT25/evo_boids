@@ -81,6 +81,11 @@
 // saw (does the steering they evolved on what they did see carry over?).
 //
 // Wiring dump (--dump-wiring PATH): see "the per-fish wiring dump" below.
+// Summary of a directory of runs (dumps + behavioural tests + CSVs):
+//   python3 tools/ocean_wiring_summary.py DIR [--course]
+// per run the final classes, the dominant class / feature / lineage, the
+// per-side behaviour, when the dominant class reached 25 / 50 % of the fish;
+// with --course the left / right / both wire fractions at every snapshot.
 #include <algorithm>
 #include <chrono>
 #include <cmath>

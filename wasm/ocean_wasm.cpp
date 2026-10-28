@@ -66,6 +66,31 @@
 //     oc_light_kwater() — the light field L(d) = L0·exp(−kWater·d) the page
 //     shades depth with when enabled; const char* oc_e1_preset() — the E1
 //     preset cfg JSON (the page merges it under ?cfg= for ?e1=1).
+//   * The page's controls (the fish card, the dashboards, the colour switch):
+//     READ-ONLY. Each reads the world and fills shim buffers; none changes
+//     anything the step reads, draws a random number or touches the world's
+//     run state, so a run with them is the run without them, step for step.
+//       oc_inspect(i) (+ oc_inspect_info / _sensors / _hidden / _actions /
+//         _conn_count / _conns): one fish of this sync's arrays, as
+//         evo_inspect (kInspectLen doubles, layout at g_inspInfo below).
+//       oc_num_senses(), oc_num_actions(), oc_num_hidden(),
+//         oc_sensor_names(), oc_action_names(): this build's brain shape.
+//       oc_summary(): population means and the run's cause-split counters
+//         (kSummaryLen doubles, layout at g_summary below).
+//       oc_families(k) (+ oc_families_data): the k biggest family lines.
+//       oc_family_color(lineageId): a line's colour, 0xRRGGBB.
+//       oc_wiring() (+ oc_wiring_data): which senses reach which actions,
+//         over the live set (evo_wiring's).
+//     Two DISPLAY switches, which change what the exports report, never the
+//     dynamics:
+//       oc_set_colour_mode(mode): oc_creature_colors from the next oc_sync,
+//         1 = by family line (the default: what it always held), 0 = by brain
+//         (the genome colour, AgentCore::color), as evo_set_colour_mode.
+//       oc_set_capture(on): SimConfig::captureActivations, so each fish's
+//         lastSensors / lastActions (the card's live brain) are kept. It
+//         changes no dynamics (ocean_tests "capture"; the harness's
+//         withActivations = false fingerprint), only those two arrays. A new
+//         world (oc_init / oc_reset) starts with it off; the page sets it again.
 //
 // Compiled with Emscripten into web/evo_ocean.{js,wasm} by wasm/build_ocean.sh
 // (-DEVO_WORLD_OCEAN, single-threaded). The page (web/ocean.js) drives it:
@@ -101,7 +126,7 @@ std::vector<float>   g_segments;   // N*12: 6 spine points x, y  (= evo_creature
 std::vector<float>   g_depth;      // N
 std::vector<float>   g_vz;         // N: Fish::vz (pitch = atan(vz))
 std::vector<float>   g_bodyParams; // N*2: bodySize, bodyElong  (= evo_body_params)
-std::vector<uint8_t> g_colors;     // N*3: family colour         (= evo_creature_colors)
+std::vector<uint8_t> g_colors;     // N*3: colour, by family or brain (= evo_creature_colors; g_colourMode)
 std::vector<double>  g_ids;        // N                           (= evo_creature_ids)
 std::vector<float>   g_food;       // F*2: x, y                   (= evo_food_xy)
 std::vector<float>   g_foodDepth;  // F
@@ -110,6 +135,10 @@ std::vector<float>   g_predDepth;  // P
 // [pop, frame, births, deaths, reseeds, depthMean, depthSd, hist0 … hist7]
 constexpr int kStatsLen = 7 + ocean::kDepthBins;
 double g_stats[kStatsLen] = {};
+
+// What oc_sync puts in g_colors: 1 = by family line (the default), 0 = by
+// brain (the genome colour). Display only (oc_set_colour_mode).
+int g_colourMode = 1;
 
 struct InitArgs {
     unsigned seed = 0;
@@ -315,7 +344,13 @@ EVO_EXPORT void oc_sync() {
         g_vz[i] = c.vz;
         g_bodyParams[i * 2 + 0] = c.bodySize;
         g_bodyParams[i * 2 + 1] = c.bodyElong;
-        familyColor(c.lineageId, &g_colors[i * 3]);
+        if (g_colourMode == 1) {
+            familyColor(c.lineageId, &g_colors[i * 3]);
+        } else {
+            g_colors[i * 3 + 0] = c.color.r;
+            g_colors[i * 3 + 1] = c.color.g;
+            g_colors[i * 3 + 2] = c.color.b;
+        }
         g_ids[i] = (double)c.id;
     }
 
@@ -458,3 +493,227 @@ EVO_EXPORT const char* oc_last_error() { return g_error.c_str(); }
 
 // 1 in the eye build (the EYE_* sensors exist; "eye" may be 1), else 0.
 EVO_EXPORT int oc_has_eye() { return kOceanHasEye ? 1 : 0; }
+
+// ---- The page's controls: READ-ONLY exports, two display switches ----------
+// (see ADDITIONS at the top). Nothing below writes anything the step reads,
+// draws from the rng or changes the world's run state.
+namespace {
+std::string g_sensorNamesCsv, g_actionNamesCsv;   // ocean::kSensorNames / kActionNames, joined
+
+// oc_inspect: 13 doubles, in this order (web/ocean.js INSPECT reads them):
+//   id, speed, foodReserves, age, bodySize, bodyElong, generation, lineageId,
+//   depth, bodyBuoy (neutral depth / D), vz, genes (genome length), reproTimer
+constexpr int kInspectLen = 13;
+double g_inspInfo[kInspectLen] = {};
+std::vector<float> g_inspSensors;   // NUM_SENSES (lastSensors: 0 unless oc_set_capture(1))
+std::vector<float> g_inspHidden;    // MAX_INTERNAL_NEURONS (neuron outputs)
+std::vector<float> g_inspActions;   // NUM_ACTIONS (lastActions: as lastSensors)
+std::vector<float> g_inspConns;     // K*5: srcIsSensor, srcNum, sinkIsAction, sinkNum, weight
+
+// oc_summary: 22 doubles, in this order (web/ocean.js SUMMARY reads them):
+//    0 food, 1 predators,
+//    2 deaths by predation, 3 by starvation, 4 by age (cumulative, the run's),
+//    5 predator births, 6 predator deaths by starvation, 7 by age,
+//    8 predators the floor added (cumulative),
+//    9 mean energy (foodReserves), 10 mean age, 11 mean speed,
+//   12 mean generation, 13 max generation,
+//   14 mean bodyBuoy, 15 its sd, 16 mean bodySize, 17 mean bodyElong,
+//   18 mean genome length, 19 family lines alive, 20 mean predator energy,
+//   21 mean |vz|
+// (means over the live fish; 0 with none)
+constexpr int kSummaryLen = 22;
+double g_summary[kSummaryLen] = {};
+
+std::vector<double> g_families;     // pairs: lineageId, fish alive in it
+std::vector<float>  g_wiring;       // 2 * NUM_SENSES * NUM_ACTIONS
+}  // namespace
+
+EVO_EXPORT int oc_num_senses()  { return NUM_SENSES; }
+EVO_EXPORT int oc_num_actions() { return NUM_ACTIONS; }
+EVO_EXPORT int oc_num_hidden()  { return MAX_INTERNAL_NEURONS; }
+// Comma-separated, in enum order (the engine's ocean::kSensorNames / kActionNames).
+EVO_EXPORT const char* oc_sensor_names() {
+    if (g_sensorNamesCsv.empty())
+        for (int s = 0; s < NUM_SENSES; ++s) { if (s) g_sensorNamesCsv += ','; g_sensorNamesCsv += ocean::kSensorNames[s]; }
+    return g_sensorNamesCsv.c_str();
+}
+EVO_EXPORT const char* oc_action_names() {
+    if (g_actionNamesCsv.empty())
+        for (int a = 0; a < NUM_ACTIONS; ++a) { if (a) g_actionNamesCsv += ','; g_actionNamesCsv += ocean::kActionNames[a]; }
+    return g_actionNamesCsv.c_str();
+}
+
+// Snapshot fish i (an index into this sync's arrays, valid until the next
+// oc_step / oc_sync) for the fish card. Returns 0 for an index out of range.
+EVO_EXPORT int oc_inspect(int index) {
+    if (!g_world || index < 0 || (size_t)index >= g_world->creatures.size()) return 0;
+    const Fish& c = g_world->creatures[(size_t)index];
+    g_inspInfo[0] = (double)c.id;
+    g_inspInfo[1] = (double)c.speed;
+    g_inspInfo[2] = (double)c.foodReserves;
+    g_inspInfo[3] = (double)c.age;
+    g_inspInfo[4] = (double)c.bodySize;
+    g_inspInfo[5] = (double)c.bodyElong;
+    g_inspInfo[6] = (double)c.generation;
+    g_inspInfo[7] = (double)c.lineageId;
+    g_inspInfo[8] = (double)c.depth;
+    g_inspInfo[9] = (double)c.bodyBuoy;
+    g_inspInfo[10] = (double)c.vz;
+    g_inspInfo[11] = (double)c.genome.size();
+    g_inspInfo[12] = (double)c.reproTimer;
+    g_inspSensors.assign(c.lastSensors, c.lastSensors + NUM_SENSES);
+    g_inspActions.assign(c.lastActions, c.lastActions + NUM_ACTIONS);
+    g_inspHidden.assign(MAX_INTERNAL_NEURONS, 0.0f);
+    for (int i = 0; i < MAX_INTERNAL_NEURONS && (size_t)i < c.nnet.neurons.size(); ++i)
+        g_inspHidden[i] = c.nnet.neurons[i].output;
+    g_inspConns.resize(c.nnet.flat.size() * 5);
+    size_t k = 0;
+    for (const auto& fc : c.nnet.flat) {
+        const Gene g = asGene(fc);
+        g_inspConns[k++] = (g.sourceType == SOURCE_SENSOR) ? 1.0f : 0.0f;
+        g_inspConns[k++] = (float)g.sourceNum;
+        g_inspConns[k++] = (g.sinkType == SINK_ACTION) ? 1.0f : 0.0f;
+        g_inspConns[k++] = (float)g.sinkNum;
+        g_inspConns[k++] = g.weightAsFloat();
+    }
+    return 1;
+}
+EVO_EXPORT const double* oc_inspect_info()   { return g_inspInfo; }
+EVO_EXPORT int oc_inspect_len()               { return kInspectLen; }
+EVO_EXPORT const float* oc_inspect_sensors() { return g_inspSensors.data(); }
+EVO_EXPORT const float* oc_inspect_hidden()  { return g_inspHidden.data(); }
+EVO_EXPORT const float* oc_inspect_actions() { return g_inspActions.data(); }
+EVO_EXPORT int oc_inspect_conn_count()       { return (int)(g_inspConns.size() / 5); }
+EVO_EXPORT const float* oc_inspect_conns()   { return g_inspConns.data(); }
+
+// Population means and the run's counters (layout at kSummaryLen). Reads the
+// world directly: no oc_sync needed.
+EVO_EXPORT const double* oc_summary() {
+    std::fill(g_summary, g_summary + kSummaryLen, 0.0);
+    if (!g_world) return g_summary;
+    const OceanWorld& w = *g_world;
+    g_summary[0] = (double)w.food.size();
+    g_summary[1] = (double)w.predators.size();
+    g_summary[2] = (double)w.totalDeathsPredation;
+    g_summary[3] = (double)w.totalDeathsStarvation;
+    g_summary[4] = (double)w.totalDeathsAge;
+    g_summary[5] = (double)w.totalPredatorBirths;
+    g_summary[6] = (double)w.totalPredatorDeathsStarvation;
+    g_summary[7] = (double)w.totalPredatorDeathsAge;
+    g_summary[8] = (double)w.totalPredatorReseeds;
+    const size_t n = w.creatures.size();
+    if (n) {
+        double e = 0, age = 0, spd = 0, gen = 0, gmax = 0, bb = 0, bb2 = 0, bs = 0, be = 0, gl = 0, avz = 0;
+        std::vector<std::uint64_t> lines;
+        lines.reserve(n);
+        for (const Fish& c : w.creatures) {
+            e += c.foodReserves; age += c.age; spd += c.speed;
+            gen += c.generation; gmax = std::max(gmax, (double)c.generation);
+            bb += c.bodyBuoy; bb2 += (double)c.bodyBuoy * c.bodyBuoy;
+            bs += c.bodySize; be += c.bodyElong; gl += (double)c.genome.size();
+            avz += std::fabs((double)c.vz);
+            lines.push_back(c.lineageId);
+        }
+        const double inv = 1.0 / (double)n;
+        g_summary[9] = e * inv; g_summary[10] = age * inv; g_summary[11] = spd * inv;
+        g_summary[12] = gen * inv; g_summary[13] = gmax;
+        const double mb = bb * inv;
+        g_summary[14] = mb; g_summary[15] = std::sqrt(std::max(0.0, bb2 * inv - mb * mb));
+        g_summary[16] = bs * inv; g_summary[17] = be * inv; g_summary[18] = gl * inv;
+        std::sort(lines.begin(), lines.end());
+        g_summary[19] = (double)(std::unique(lines.begin(), lines.end()) - lines.begin());
+        g_summary[21] = avz * inv;
+    }
+    if (!w.predators.empty()) {
+        double pe = 0;
+        for (const auto& p : w.predators) pe += p.energy;
+        g_summary[20] = pe / (double)w.predators.size();
+    }
+    return g_summary;
+}
+EVO_EXPORT int oc_summary_len() { return kSummaryLen; }
+
+// The k biggest family lines alive (ties: the lower id first), as pairs
+// (lineageId, fish) in oc_families_data. Returns how many pairs.
+EVO_EXPORT int oc_families(int k) {
+    g_families.clear();
+    if (!g_world || k <= 0) return 0;
+    std::vector<std::uint64_t> lines;
+    lines.reserve(g_world->creatures.size());
+    for (const Fish& c : g_world->creatures) lines.push_back(c.lineageId);
+    std::sort(lines.begin(), lines.end());
+    std::vector<std::pair<long long, std::uint64_t>> runs;   // (-count, id): sorts biggest first
+    for (size_t i = 0; i < lines.size();) {
+        size_t j = i;
+        while (j < lines.size() && lines[j] == lines[i]) ++j;
+        runs.push_back({-(long long)(j - i), lines[i]});
+        i = j;
+    }
+    const size_t m = std::min(runs.size(), (size_t)k);
+    std::partial_sort(runs.begin(), runs.begin() + (long)m, runs.end());
+    for (size_t i = 0; i < m; ++i) {
+        g_families.push_back((double)runs[i].second);
+        g_families.push_back((double)-runs[i].first);
+    }
+    return (int)m;
+}
+EVO_EXPORT const double* oc_families_data() { return g_families.data(); }
+
+// A family line's colour as 0xRRGGBB: the one its fish get by family.
+EVO_EXPORT int oc_family_color(double lineageId) {
+    std::uint8_t c[3];
+    familyColor((std::uint64_t)lineageId, c);
+    return (c[0] << 16) | (c[1] << 8) | c[2];
+}
+
+// Which senses reach which actions, over the live set: [0] the share of fish
+// with a path from sensor s to action a (directly or through hidden neurons),
+// [1] the share with a direct connection. Row-major, sensor rows. Returns the
+// fish counted. (wasm/evo_wasm.cpp evo_wiring, for the Ocean's brain shape.)
+EVO_EXPORT int oc_wiring() {
+    constexpr int S = NUM_SENSES, A = NUM_ACTIONS, H = MAX_INTERNAL_NEURONS;
+    static_assert(A <= 32, "the action bit sets are 32 bits");
+    g_wiring.assign(2 * S * A, 0.0f);
+    if (!g_world || g_world->creatures.empty()) return 0;
+    std::vector<long> path(S * A, 0), direct(S * A, 0);
+    for (const Fish& c : g_world->creatures) {
+        std::uint32_t reach[H] = {};   // actions reachable from hidden neuron h
+        bool grew = true;
+        while (grew) {
+            grew = false;
+            for (const auto& fc : c.nnet.flat) {
+                const int src = fc.src(), sink = fc.sink();
+                if (src < S) continue;
+                const int h = src - S;
+                const std::uint32_t add = sink < A ? (1u << sink) : reach[sink - A];
+                if ((reach[h] | add) != reach[h]) { reach[h] |= add; grew = true; }
+            }
+        }
+        std::uint32_t pathBits[S] = {}, directBits[S] = {};
+        for (const auto& fc : c.nnet.flat) {
+            const int src = fc.src(), sink = fc.sink();
+            if (src >= S) continue;
+            if (sink < A) { pathBits[src] |= 1u << sink; directBits[src] |= 1u << sink; }
+            else pathBits[src] |= reach[sink - A];
+        }
+        for (int s = 0; s < S; ++s)
+            for (int a = 0; a < A; ++a) {
+                if (pathBits[s] >> a & 1u) ++path[s * A + a];
+                if (directBits[s] >> a & 1u) ++direct[s * A + a];
+            }
+    }
+    const float inv = 1.0f / (float)g_world->creatures.size();
+    for (int k = 0; k < S * A; ++k) {
+        g_wiring[k] = (float)path[k] * inv;
+        g_wiring[S * A + k] = (float)direct[k] * inv;
+    }
+    return (int)g_world->creatures.size();
+}
+EVO_EXPORT const float* oc_wiring_data() { return g_wiring.data(); }
+
+// Display switches (see ADDITIONS): colours from the next oc_sync; the live
+// brain's lastSensors / lastActions from the next step.
+EVO_EXPORT void oc_set_colour_mode(int mode) { g_colourMode = mode == 0 ? 0 : 1; }
+EVO_EXPORT void oc_set_capture(int on) {
+    if (g_world) g_world->cfg.captureActivations = on != 0;
+}

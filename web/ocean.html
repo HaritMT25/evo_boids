@@ -4,17 +4,23 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#071f20">
-<meta name="description" content="evo_boids Ocean preview: the same evolving fish, steering in real depth in a deep tank.">
-<title>evo_boids Ocean preview</title>
+<meta name="description" content="evo_boids 3-D Ocean: the same evolving fish, steering in real depth in a deep tank.">
+<title>evo_boids · 3-D Ocean</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230b1d1f'/%3E%3Cpath d='M6 16c4-6 11-7 16-3l4-4v14l-4-4c-5 4-12 3-16-3z' fill='%2364b5e8'/%3E%3Ccircle cx='11' cy='15' r='1.4' fill='%230b1d1f'/%3E%3C/svg%3E">
-<!-- The Ocean preview (PLAN_ocean_preview.md): its own page, because
-     renderer.js calls the Classic exports unconditionally. web/ocean.js runs
-     the world (web/evo_ocean.{js,wasm}, factory createEvoOcean) and builds the
-     tank's snapshot itself; web/ocean_scene.js is the deep tank. Published
-     beside the Classic page by wasm/build_site.sh (dist/ocean.html, hashed
-     assets); single-threaded, so it needs no cross-origin isolation, and the
-     site's COOP / COEP headers do not get in its way (same-origin assets). -->
+<!-- The 3-D Ocean: the Classic page's controls (web/index.html: the top bar,
+     the dock, the settings sheet, the fish card, Turbo, the dashboards, the
+     tour) over the Ocean world. Its own page, because renderer.js calls the
+     Classic exports unconditionally: web/ocean.js runs the world
+     (web/evo_ocean.{js,wasm}, factory createEvoOcean; Turbo in
+     web/ocean_worker.js), web/ocean_scene.js draws the deep tank,
+     web/ocean_config.js holds the settings, web/ocean_dash.js the dashboards
+     (web/charts.js draws them), web/guide.js the tour (its steps from
+     ocean.js). The styles below are Classic's (the same tokens and
+     components), less the flat view's, plus the Ocean's few. Published beside
+     the Classic page by wasm/build_site.sh (dist/ocean.html, hashed assets);
+     single-threaded, so it needs no cross-origin isolation. -->
 <style>
+  /* ---------- tokens (web/index.html's) ---------- */
   :root {
     color-scheme: dark;
     --abyss: oklch(0.22 0.03 200);
@@ -27,166 +33,781 @@
     --ink-2: oklch(0.86 0.02 185);
     --ink-3: oklch(0.74 0.025 188);
     --plankton: oklch(0.86 0.19 125);
+    --plankton-ink: oklch(0.22 0.06 130);
     --plankton-soft: oklch(0.86 0.19 125 / 0.16);
     --ember: oklch(0.72 0.18 38);
+    --ember-soft: oklch(0.72 0.18 38 / 0.16);
+    --current: oklch(0.83 0.10 225);
     --deep: oklch(0.70 0.11 235);
-    --r-md: 12px;
+    --beam: oklch(0.93 0.12 95);
+    --beam-soft: oklch(0.93 0.12 95 / 0.18);
+    --focus: oklch(0.90 0.17 125);
+    --r-sm: 8px; --r-md: 12px; --r-lg: 18px;
     --shadow: 0 12px 32px oklch(0.08 0.03 210 / 0.6);
     --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
     --mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Consolas, monospace;
     --ease: cubic-bezier(0.22, 1, 0.36, 1);
     --safe-t: env(safe-area-inset-top, 0px);
     --safe-b: env(safe-area-inset-bottom, 0px);
+    --top-h: 64px;
+    --dock-h: 60px;
+    --dock-b: calc(12px + var(--safe-b));
+    /* z scale (the Turbo scrim dims the world, under every control) */
+    --z-turbo: 5; --z-hud: 10; --z-card: 20; --z-dock: 30; --z-sheet: 40;
+    --z-dash: 50; --z-toast: 60; --z-guide: 70; --z-tip: 80; --z-splash: 90;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body { height: 100%; }
   body {
     background: var(--abyss); color: var(--ink);
-    font: 14px/1.4 var(--font);
+    font: 15px/1.45 var(--font);
     overflow: hidden;
     -webkit-font-smoothing: antialiased; -webkit-text-size-adjust: 100%;
   }
-  button { font: inherit; color: inherit; cursor: pointer; -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
-  :focus-visible { outline: 2px solid var(--plankton); outline-offset: 2px; }
+  button, input, select { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+  button, label, summary, input, select, a { -webkit-tap-highlight-color: transparent; }
+  canvas, button, label, input, select { touch-action: manipulation; }
+  :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
   .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  svg.i { width: 22px; height: 22px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.8;
+          stroke-linecap: round; stroke-linejoin: round; }
 
+  /* ---------- the tank: the whole screen; the camera owns drag, pinch, twist ---------- */
   #tank { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; background: var(--abyss); }
-  body::after {   /* the tank's edges fall into deep water, as in the Classic tank view */
+  body::after {   /* the tank's edges fall into deep water, as in Classic's tank view */
     content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 1;
     background: radial-gradient(ellipse 85% 80% at 50% 48%, transparent 58%, oklch(0.10 0.03 210 / 0.55));
   }
-  .chip {
-    background: oklch(0.255 0.03 196 / 0.86);
+
+  /* ---------- buttons ---------- */
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+    min-height: 44px; padding: 0 16px;
+    border: 1px solid var(--line); border-radius: var(--r-md);
+    background: var(--surface-2); color: var(--ink);
+    font-size: 14px; font-weight: 600;
+    transition: background-color 150ms var(--ease), transform 150ms var(--ease), border-color 150ms var(--ease);
+  }
+  .btn:hover { background: var(--surface-3); }
+  .btn:active { transform: scale(0.97); }
+  .btn.primary { background: var(--plankton); color: var(--plankton-ink); border-color: transparent; }
+  .btn.primary:hover { background: oklch(0.90 0.19 125); }
+  .btn.ghost { background: transparent; border-color: transparent; color: var(--ink-2); }
+  .btn.ghost:hover { background: var(--surface-2); }
+  .btn:disabled, .btn.locked { opacity: 0.45; cursor: default; }
+  .btn:disabled:active, .btn.locked:active { transform: none; }
+  .icon-btn {
+    display: inline-grid; place-items: center;
+    width: 44px; height: 44px; flex: none;
+    border: 0; border-radius: 999px;
+    background: transparent; color: var(--ink-2);
+    transition: background-color 150ms var(--ease), color 150ms var(--ease), transform 150ms var(--ease);
+  }
+  .icon-btn:hover { background: var(--surface-3); color: var(--ink); }
+  .icon-btn:active { transform: scale(0.94); }
+  .icon-btn[aria-pressed="true"], .icon-btn[aria-expanded="true"] { background: var(--plankton-soft); color: var(--plankton); }
+  .icon-btn.locked, .icon-btn:disabled { opacity: 0.4; cursor: default; }
+  .chip-surface {
+    background: oklch(0.255 0.03 196 / 0.92);
     border: 1px solid var(--line-soft);
     box-shadow: var(--shadow);
-    border-radius: var(--r-md);
   }
 
-  /* ---------- HUD ---------- */
-  #hud {
-    position: fixed; z-index: 10;
-    top: calc(10px + var(--safe-t)); left: 10px;
-    width: 272px; padding: 10px 12px 11px;
-    font-size: 12.5px; color: var(--ink-2);
+  /* ---------- top bar: live readout + tools ---------- */
+  #topbar {
+    position: fixed; z-index: var(--z-hud);
+    top: calc(10px + var(--safe-t)); left: 10px; right: 10px;
+    display: flex; justify-content: space-between; align-items: flex-start; gap: 8px;
     pointer-events: none;
   }
-  #hud h1 { font-size: 13px; font-weight: 650; color: var(--ink); letter-spacing: 0.01em; display: flex; align-items: center; gap: 8px; }
-  #hud h1 .tag { font-size: 10.5px; font-weight: 600; color: var(--deep); border: 1px solid currentColor; border-radius: 999px; padding: 0 6px; }
-  #hud h1 .tag.mock { color: var(--ember); }
-  #hud dl { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; margin-top: 7px; }
-  #hud dt { color: var(--ink-3); }
-  #hud dd { text-align: right; color: var(--ink); font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
-  #hud dd small { color: var(--ink-3); font-size: 11px; }
-  #hud .state { margin-top: 6px; min-height: 17px; color: var(--plankton); font-weight: 600; }
-  #hud .state.paused { color: var(--ember); }
-  #hud .sel { display: flex; align-items: center; gap: 6px; min-height: 17px; color: var(--ink-2); }
-  #hud .sel i { width: 10px; height: 10px; border-radius: 3px; flex: none; }
+  #topbar > * { pointer-events: auto; }
+  #readout {
+    display: inline-flex; align-items: center; gap: 10px;
+    min-height: 44px; max-width: calc(100vw - 132px);
+    padding: 0 14px 0 10px;
+    border-radius: 999px;
+    font-size: 13px; color: var(--ink-2); text-align: left;
+    white-space: nowrap; overflow: hidden;
+  }
+  #readout .mark { display: inline-flex; align-items: center; gap: 6px; color: var(--ink); font-family: var(--mono); font-size: 13px; }
+  #readout .mark svg { width: 20px; height: 20px; color: var(--deep); }
+  #readout .mark span { display: none; }
+  #readout .mark em { font-style: normal; color: var(--deep); }
+  #readout b { color: var(--ink); font-weight: 600; }
+  #readout .sep { width: 1px; height: 16px; background: var(--line); }
+  #readout .warn { color: var(--ember); }
+  #readout .ro-depth { display: none; }
+  #tools { display: flex; gap: 6px; padding: 0; border-radius: 999px; }
+  #tools .icon-btn { width: 48px; height: 48px; }
 
-  /* depth histogram: surface on top, one bar per eighth of the depth */
-  #hist { margin-top: 8px; }
-  #hist .cap { display: flex; justify-content: space-between; color: var(--ink-3); font-size: 11px; margin-bottom: 3px; }
-  #hist .row { display: grid; grid-template-columns: 30px 1fr 34px; align-items: center; gap: 6px; height: 12px; font-size: 10.5px; }
+  #statpanel {
+    position: fixed; z-index: var(--z-hud);
+    top: calc(64px + var(--safe-t)); left: 10px;
+    width: min(340px, calc(100vw - 20px));
+    max-height: calc(100dvh - 64px - var(--dock-h) - 34px - var(--safe-t) - var(--safe-b));
+    overflow-y: auto; overscroll-behavior: contain;
+    padding: 14px 16px;
+    border-radius: var(--r-md);
+    font-size: 13px;
+  }
+  #statpanel[hidden] { display: none; }
+  #statpanel dl { display: grid; grid-template-columns: auto 1fr; gap: 6px 16px; }
+  #statpanel dt { color: var(--ink-3); }
+  #statpanel dd { color: var(--ink); text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  #statpanel dd small { color: var(--ink-3); font-size: 11px; }
+  #statpanel .notes { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line-soft); color: var(--ink-2); line-height: 1.5; }
+  #statpanel .notes:empty { display: none; }
+  /* the depth histogram: surface on top, one bar per eighth of the depth */
+  #hist { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line-soft); }
+  #hist .cap { display: flex; justify-content: space-between; color: var(--ink-3); font-size: 11px; margin-bottom: 4px; }
+  #hist .row { display: grid; grid-template-columns: 30px 1fr 34px; align-items: center; gap: 6px; height: 14px; font-size: 11px; }
   #hist .row span { color: var(--ink-3); font-family: var(--mono); text-align: right; }
   #hist .row b { font-weight: 500; color: var(--ink-2); font-family: var(--mono); text-align: right; }
   #hist .track { position: relative; height: 8px; border-radius: 2px; background: oklch(0.32 0.03 200 / 0.6); overflow: hidden; }
   #hist .bar { position: absolute; left: 0; top: 0; bottom: 0; width: 0; border-radius: 2px; transition: width 240ms var(--ease); }
-  /* the 35 % line (PLAN §6: no bin above it) */
-  #hist .track::after { content: ""; position: absolute; top: 0; bottom: 0; left: 70%; width: 1px; background: oklch(0.72 0.18 38 / 0.55); }
 
-  /* ---------- keys / buttons ---------- */
+  /* ---------- playback dock ---------- */
+  #dock {
+    position: fixed; z-index: var(--z-dock);
+    left: 50%; bottom: var(--dock-b);
+    transform: translateX(-50%);
+    width: min(calc(100vw - 20px), 470px);
+    height: var(--dock-h);
+    display: flex; align-items: center; justify-content: space-between; gap: 2px;
+    padding: 0 6px;
+    border-radius: 999px;
+    transition: transform 260ms var(--ease), opacity 200ms var(--ease);
+  }
+  #dock .speed { display: flex; align-items: center; }
+  #dock .speed .icon-btn { width: 38px; }
+  #speedlabel { min-width: 3.2em; text-align: center; font-family: var(--mono); font-size: 14px; color: var(--ink); }
+  #pausebtn { color: var(--ink); background: var(--surface-3); }
+  #turbobtn { width: auto; padding: 0 12px; gap: 6px; border-radius: 999px; font-size: 13px; font-weight: 600; color: var(--ink-2); display: inline-flex; }
+  #turbobtn[aria-pressed="true"] { background: var(--ember-soft); color: var(--ember); }
+  #turbobtn span { display: none; }
+  #lightbtn[aria-pressed="true"] { background: var(--beam-soft); color: var(--beam); }
+  body.sheet-open #dock { transform: translateX(-50%) translateY(140%); opacity: 0; pointer-events: none; }
+
+  /* ---------- the keys: a legend beside the dock (a wide screen with a mouse) ---------- */
   #keys {
-    position: fixed; z-index: 10;
-    left: 10px; bottom: calc(10px + var(--safe-b));
-    padding: 6px 12px; font-size: 12px; color: var(--ink-3);
+    position: fixed; z-index: var(--z-hud);
+    left: 12px; bottom: var(--dock-b);
+    max-width: calc(50vw - 235px - 24px);
+    padding: 7px 38px 7px 12px; border-radius: var(--r-md);
+    font-size: 12px; line-height: 1.8; color: var(--ink-3);
+    display: none;
+  }
+  #keys kbd {
+    display: inline-block; min-width: 1.6em; margin-right: 2px; padding: 0 4px;
+    border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px;
+    background: var(--surface-2); color: var(--ink); text-align: center;
+    font: 11px/1.45 var(--mono);
+  }
+  #keys .k { display: inline-block; white-space: nowrap; margin-right: 12px; }   /* lines break between keys only */
+  #keys .x { position: absolute; top: 3px; right: 3px; width: 30px; height: 30px; }
+  #keys .x svg.i { width: 16px; height: 16px; }
+  @media (min-width: 1100px) and (min-height: 561px) and (pointer: fine) {
+    body.keys-on #keys { display: block; }
+    body.keys-on.sheet-open #keys { display: none; }
+  }
+
+  /* ---------- fit-to-screen and toasts ---------- */
+  #fitbtn {
+    position: fixed; z-index: var(--z-hud);
+    top: calc(64px + var(--safe-t)); left: 50%; transform: translateX(-50%);
+    border-radius: 999px;
+  }
+  #fitbtn[hidden] { display: none; }
+  body.card-open #fitbtn { display: none; }
+  #toasts {
+    position: fixed; z-index: var(--z-toast);
+    left: 50%; transform: translateX(-50%);
+    bottom: calc(var(--dock-b) + var(--dock-h) + 12px);
+    width: min(calc(100vw - 24px), 440px);
+    display: flex; flex-direction: column; gap: 8px; align-items: center;
     pointer-events: none;
   }
-  #keys kbd { font-family: var(--mono); font-size: 11px; color: var(--ink); background: var(--surface-3); border-radius: 4px; padding: 0 5px; margin-right: 3px; }
-  #keys span { white-space: nowrap; margin-right: 10px; }
-  #btns {
-    position: fixed; z-index: 10;
-    right: 10px; bottom: calc(10px + var(--safe-b));
-    display: flex; gap: 4px; padding: 4px;
+  @media (max-width: 599px) {
+    #toasts { top: calc(66px + var(--safe-t)); bottom: auto; }
   }
-  #btns button {
-    min-width: 44px; height: 44px; padding: 0 10px;
-    border: 0; border-radius: 9px; background: transparent; color: var(--ink-2);
-    font-size: 13px; font-weight: 600;
+  .toast {
+    padding: 10px 14px; border-radius: var(--r-md);
+    background: var(--surface-2); border: 1px solid var(--line);
+    box-shadow: var(--shadow);
+    font-size: 13px; color: var(--ink); line-height: 1.4;
+    animation: toast-in 220ms var(--ease);
   }
-  #btns button:hover { background: var(--surface-3); color: var(--ink); }
-  #btns button[aria-pressed="true"] { background: var(--plankton-soft); color: var(--plankton); }
+  .toast.error { border-color: var(--ember); }
+  .toast.out { opacity: 0; transform: translateY(6px); transition: opacity 200ms, transform 200ms; }
+  @keyframes toast-in { from { opacity: 0; transform: translateY(8px); } }
 
-  #msg {
-    position: fixed; z-index: 20; left: 50%; top: 50%; transform: translate(-50%, -50%);
-    width: min(520px, calc(100vw - 32px)); padding: 18px 20px;
-    font-size: 14px; color: var(--ink-2); text-align: center;
+  /* ---------- the selected fish ----------
+   * Bottom of a narrow screen, the right of a wider one; .flip moves it to
+   * the other side when the fish swims under it. */
+  #fishcard {
+    position: fixed; z-index: var(--z-card);
+    left: 10px; right: 10px;
+    bottom: calc(var(--dock-b) + var(--dock-h) + 10px);
+    max-height: calc(100dvh - var(--dock-h) - 96px - var(--safe-t) - var(--safe-b));
+    display: flex; flex-direction: column;
+    border-radius: var(--r-lg);
+    overflow-x: hidden; overflow-y: auto;
+    overscroll-behavior: contain;
+    animation: card-in 240ms var(--ease);
   }
-  #msg[hidden] { display: none; }
-  #msg.err { color: var(--ink); border-color: var(--ember); text-align: left; white-space: pre-wrap; }
-  #msg.err b { color: var(--ember); }
+  #fishcard.flip { top: calc(64px + var(--safe-t)); bottom: auto; }
+  #fishcard[hidden] { display: none; }
+  @keyframes card-in { from { opacity: 0; transform: translateY(12px); } }
+  .fc-head { display: flex; align-items: center; gap: 12px; padding: 10px 6px 6px 12px; }
+  #iportrait { width: 56px; height: 40px; flex: none; }
+  .fc-title { flex: 1; min-width: 0; }
+  #ititle { font-size: 16px; font-weight: 650; line-height: 1.2; }
+  #isub { font-size: 13px; color: var(--ink-3); }
+  .fc-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px 14px; padding: 4px 14px 12px; }
+  .stat { min-width: 0; }
+  .stat .k { font-size: 12px; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .stat .v { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 14px; color: var(--ink); white-space: nowrap; }
+  .bar { position: relative; height: 4px; margin-top: 5px; border-radius: 2px; background: var(--surface-3); overflow: hidden; }
+  .bar i { position: absolute; inset: 0; border-radius: 2px; background: var(--plankton);
+           transform-origin: left center; transform: scaleX(0); transition: transform 300ms var(--ease); }
+  .bar .tick { position: absolute; top: -2px; bottom: -2px; width: 2px; background: var(--ink-2); }
+  #iage i { background: var(--current); }
+  #ispeed i { background: var(--ink-2); }
+  #idepth i, #ibuoy i { background: var(--deep); }
+  #ipitch i { background: var(--ink-3); }
+  .fc-brain { display: none; flex: none; flex-direction: column; border-top: 1px solid var(--line-soft); }
+  #fishcard.expanded .fc-brain { display: flex; }
+  .fc-brain .inet { position: relative; height: clamp(150px, 24dvh, 320px); }
+  .fc-brain canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+  #isense { min-height: 2.9em; padding: 6px 14px 10px; font-size: 12.5px; color: var(--ink-2); line-height: 1.4; }
+  #isense b { color: var(--ink); font-weight: 600; }
+  #iexpand svg { transition: transform 200ms var(--ease); }
+  #fishcard.expanded #iexpand svg { transform: rotate(180deg); }
 
-  /* narrow screens: the numbers and the histogram side by side, extras off */
-  @media (max-width: 700px), (max-height: 560px) {
-    #hud { width: auto; left: 8px; right: 8px; top: calc(8px + var(--safe-t)); padding: 8px 10px 6px; font-size: 11.5px; }
-    #hud .cols { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; align-items: start; }
-    #hud dl { margin-top: 5px; gap: 1px 8px; }
-    #hud .wide, #hud .x { display: none; }
-    #hud .state, #hud .sel { min-height: 0; margin-top: 3px; }
-    #hist { margin-top: 7px; }
-    #hist .cap { display: none; }
-    #hist .row { grid-template-columns: 22px minmax(0, 1fr) 26px; gap: 5px; height: 11px; }
-    #keys { display: none; }
+  /* ---------- settings sheet ---------- */
+  #drawer {
+    position: fixed; z-index: var(--z-sheet);
+    left: 0; right: 0; bottom: 0;
+    height: min(70dvh, 680px);
+    display: flex; flex-direction: column;
+    background: var(--surface);
+    border-top: 1px solid var(--line);
+    border-radius: 20px 20px 0 0;
+    box-shadow: 0 -12px 40px oklch(0.08 0.03 210 / 0.6);
+    transform: translateY(105%);
+    transition: transform 300ms var(--ease);
+    visibility: hidden;
   }
-  @media (max-width: 340px) { #hud .cols { grid-template-columns: 1fr; gap: 0; } }
-  @media (pointer: coarse) { #keys { display: none; } }
+  #drawer.open { transform: translateY(0); visibility: visible; }
+  #drawer.dragging { transition: none; }
+  .sheet-grip { display: grid; place-items: center; height: 22px; cursor: grab; touch-action: none; }
+  .sheet-grip::before { content: ""; width: 40px; height: 4px; border-radius: 2px; background: var(--line); }
+  .sheet-head { display: flex; align-items: center; gap: 8px; padding: 0 8px 4px 18px; touch-action: none; }
+  .sheet-head h2 { flex: 1; font-size: 18px; font-weight: 650; }
+  #tabs {
+    display: flex; gap: 2px; padding: 0 10px;
+    overflow-x: auto; scrollbar-width: none;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  #tabs::-webkit-scrollbar { display: none; }
+  #tabs button {
+    flex: none; min-height: 44px; padding: 0 12px;
+    border: 0; border-bottom: 2px solid transparent;
+    background: none; color: var(--ink-3);
+    font-size: 14px; font-weight: 600; white-space: nowrap;
+    transition: color 150ms var(--ease), border-color 150ms var(--ease);
+  }
+  #tabs button:hover { color: var(--ink); }
+  #tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--plankton); }
+  #tabs button .dot { display: inline-block; width: 6px; height: 6px; margin-left: 6px; border-radius: 3px; background: var(--plankton); vertical-align: 2px; }
+  #panels { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 4px 18px 24px; }
+  .panel[hidden] { display: none; }
+  .panel h3 { margin: 18px 0 2px; font-size: 13px; font-weight: 600; color: var(--ink-3); }
+
+  .field {
+    display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center;
+    column-gap: 14px; row-gap: 2px;
+    min-height: 56px; padding: 8px 0;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .field:last-child { border-bottom: 0; }
+  .field .name { display: block; font-size: 14px; color: var(--ink); line-height: 1.3; }
+  .field .lt { cursor: help; text-decoration: underline dotted var(--line); text-underline-offset: 3px; }
+  .field .key { display: block; font-family: var(--mono); font-size: 11px; color: var(--ink-3); }
+  .field .desc { display: block; margin-top: 2px; font-size: 12px; color: var(--ink-3); line-height: 1.4; }
+  .field .ctl { justify-self: end; display: flex; align-items: center; }
+  .livetag {
+    display: inline-block; margin-left: 6px; padding: 0 6px;
+    border-radius: 999px; background: var(--plankton-soft); color: var(--plankton);
+    font-size: 11px; font-weight: 600; line-height: 18px; vertical-align: 1px;
+    text-decoration: none;
+  }
+  .field.inert .name, .field.inert .ctl { opacity: 0.5; }
+  .needs { grid-column: 1 / -1; font-size: 12px; color: var(--ink-3); }
+  .needs:empty { display: none; }
+
+  .stepper { display: flex; align-items: stretch; height: 40px; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--surface-2); }
+  .stepper button { width: 36px; border: 0; background: none; color: var(--ink-2); display: grid; place-items: center; }
+  .stepper button:hover { background: var(--surface-3); color: var(--ink); }
+  .stepper button svg { width: 18px; height: 18px; }
+  .stepper input {
+    width: 6.2em; border: 0; border-inline: 1px solid var(--line-soft);
+    background: transparent; text-align: center;
+    font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 14px;
+    -moz-appearance: textfield; appearance: textfield;
+  }
+  .stepper input::-webkit-outer-spin-button, .stepper input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+  .stepper input:focus { outline: none; background: var(--surface-3); }
+  .stepper:focus-within { border-color: var(--plankton); }
+  select {
+    height: 40px; max-width: 13.5em; padding: 0 30px 0 12px; border: 1px solid var(--line); border-radius: 10px;
+    background: var(--surface-2) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23b8cbc6' stroke-width='2.4' stroke-linecap='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E") no-repeat right 10px center;
+    appearance: none; font-size: 14px; text-overflow: ellipsis;
+  }
+  input.switch {
+    appearance: none; -webkit-appearance: none;
+    position: relative; width: 48px; height: 28px; flex: none;
+    border-radius: 999px; background: var(--surface-3); border: 1px solid var(--line);
+    transition: background-color 180ms var(--ease), border-color 180ms var(--ease);
+    cursor: pointer;
+  }
+  input.switch::before {
+    content: ""; position: absolute; top: 3px; left: 3px;
+    width: 20px; height: 20px; border-radius: 50%;
+    background: var(--ink-2);
+    transition: transform 180ms var(--ease), background-color 180ms var(--ease);
+  }
+  input.switch:checked { background: var(--plankton); border-color: transparent; }
+  input.switch:checked::before { transform: translateX(20px); background: var(--plankton-ink); }
+  input.switch:disabled { cursor: default; }
+
+  .run-hero { margin-top: 14px; padding: 16px; border-radius: var(--r-md); background: var(--surface-2); border: 1px solid var(--line-soft); }
+  .run-hero .btn { width: 100%; min-height: 50px; font-size: 15px; }
+  .run-hero p { margin-top: 10px; font-size: 13px; color: var(--ink-3); }
+  #randnote { margin-top: 10px; font-size: 13px; color: var(--plankton); line-height: 1.5; }
+  #randnote:empty { display: none; }
+  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; }
+  .panel .hint { margin-top: 8px; font-size: 12px; color: var(--ink-3); line-height: 1.45; }
+  .panel .preset { margin-top: 14px; padding: 12px 14px; border-radius: var(--r-md); background: var(--surface-2); border: 1px solid var(--line-soft); }
+  .panel .preset .btn { width: 100%; }
+  .panel .preset p { margin-top: 8px; font-size: 12.5px; color: var(--ink-3); line-height: 1.45; }
+  #modeline { margin-top: 6px; font-size: 12px; color: var(--ink-3); line-height: 1.5; }
+  #credit { margin-top: 24px; font-size: 12px; color: var(--ink-3); line-height: 1.6; }
+  #credit a { color: var(--ink-2); }
+
+  #applybar {
+    display: flex; align-items: center; gap: 12px;
+    padding: 12px 16px calc(12px + var(--safe-b));
+    border-top: 1px solid var(--line-soft);
+    background: var(--surface);
+  }
+  #restart { flex: none; min-width: 120px; }
+  #restart.pending { background: var(--plankton); color: var(--plankton-ink); border-color: transparent; }
+  #err { flex: 1; min-width: 0; font-size: 13px; line-height: 1.35; color: var(--ink-3); }
+  #err.error { color: var(--ember); }
+
+  /* ---------- turbo (as web/index.html: dims the world, not the controls) ---------- */
+  #turbo {
+    position: fixed; inset: 0; z-index: var(--z-turbo);
+    display: grid; place-items: center;
+    padding: calc(var(--top-h) + var(--safe-t)) 16px calc(var(--dock-h) + var(--dock-b) + 10px);
+    background: oklch(0.12 0.03 205 / 0.55);
+    pointer-events: none;
+    transition: right 300ms var(--ease);
+  }
+  #turbo[hidden] { display: none; }
+  #turbo .card { pointer-events: auto; width: min(400px, 100%); padding: 22px 22px 18px; border-radius: var(--r-lg); text-align: center; }
+  #turbo h2 { display: flex; align-items: center; justify-content: center; gap: 8px; font-size: 20px; font-weight: 650; color: var(--ember); }
+  #turbo p { margin-top: 6px; font-size: 14px; color: var(--ink-2); }
+  #turbostats { margin-top: 14px; display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; text-align: left; }
+  #turbostats div { padding: 10px 12px; border-radius: var(--r-sm); background: var(--surface-2); }
+  #turbostats span { display: block; font-size: 12px; color: var(--ink-3); }
+  #turbostats b { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 16px; font-weight: 600; }
+  #turbo .btn { margin-top: 16px; width: 100%; }
+  @media (max-height: 560px) {
+    #turbo .card { padding: 12px 14px; }
+    #turbo h2 { font-size: 16px; }
+    #turbomsg { display: none; }
+    #turbostats { margin-top: 8px; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+    #turbostats div { padding: 6px 8px; }
+    #turbostats b { font-size: 14px; }
+    #turbo .btn { margin-top: 10px; min-height: 40px; }
+  }
+  @media (max-width: 959px) and (min-height: 760px) {
+    body.sheet-open #turbo { padding-bottom: calc(min(70dvh, 680px) + 8px); }
+    body.sheet-open #turbo .card { padding: 12px 14px; }
+    body.sheet-open #turbo h2 { font-size: 16px; }
+    body.sheet-open #turbomsg { display: none; }
+    body.sheet-open #turbostats { margin-top: 8px; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+    body.sheet-open #turbostats div { padding: 6px 8px; }
+    body.sheet-open #turbostats b { font-size: 14px; }
+    body.sheet-open #turbo .btn { margin-top: 10px; min-height: 40px; }
+  }
+
+  /* ---------- loading ---------- */
+  #splash {
+    position: fixed; inset: 0; z-index: var(--z-splash);
+    display: grid; place-items: center; text-align: center; padding: 20px;
+    background: radial-gradient(ellipse at 50% 40%, oklch(0.30 0.045 215), var(--abyss) 70%);
+    transition: opacity 500ms var(--ease), visibility 500ms;
+  }
+  #splash.done { opacity: 0; visibility: hidden; }
+  #splash .word { font-family: var(--mono); font-size: 28px; letter-spacing: -0.01em; color: var(--ink); display: inline-flex; align-items: center; gap: 10px; }
+  #splash .word svg { width: 40px; height: 40px; color: var(--deep); }
+  #splash p { margin: 8px auto 0; color: var(--ink-2); font-size: 15px; max-width: 32ch; }
+  #splashstate { margin-top: 18px; font-size: 13px; color: var(--ink-3); white-space: pre-wrap; max-width: 60ch; }
+  #splashstate.error { color: var(--ember); text-align: left; }
+  #splash .swim { display: block; width: 120px; height: 2px; margin: 18px auto 0; border-radius: 1px; background: var(--surface-3); overflow: hidden; position: relative; }
+  #splash .swim::after { content: ""; position: absolute; inset: 0 auto 0 0; width: 40%; background: var(--deep); animation: swim 1.1s var(--ease) infinite; }
+  #splash.failed .swim { display: none; }
+  @keyframes swim { from { transform: translateX(-100%); } to { transform: translateX(260%); } }
+
+  /* ---------- tooltip ---------- */
+  #tooltip {
+    display: none; position: fixed; z-index: var(--z-tip);
+    max-width: 300px; padding: 10px 12px;
+    border-radius: var(--r-md); background: var(--surface-2); border: 1px solid var(--line);
+    box-shadow: var(--shadow);
+    font-size: 13px; line-height: 1.45; pointer-events: none;
+  }
+  #tooltip .tipd { color: var(--ink); }
+  #tooltip .tipt { margin-top: 4px; color: var(--plankton); }
+
+  /* ---------- the tour (web/guide.js) ---------- */
+  #guide { position: fixed; inset: 0; z-index: var(--z-guide); pointer-events: none; }
+  #guide .spot {
+    position: fixed; left: 0; top: 0; border-radius: 14px;
+    box-shadow: 0 0 0 200vmax oklch(0.08 0.03 210 / 0.6);
+    outline: 2px solid var(--plankton); outline-offset: 0;
+    transition: transform 220ms var(--ease);
+  }
+  #guide .spot.none { outline: 0; }
+  #guide .card {
+    position: fixed; pointer-events: auto;
+    width: min(340px, calc(100vw - 24px));
+    padding: 16px 18px 14px;
+    border-radius: var(--r-lg);
+    background: var(--surface); border: 1px solid var(--line);
+    box-shadow: var(--shadow);
+    color: var(--ink-2); line-height: 1.5; font-size: 14px;
+  }
+  #guide h2 { font-size: 17px; font-weight: 650; color: var(--ink); margin-bottom: 6px; }
+  #guide p { margin-bottom: 4px; }
+  #guide b { color: var(--ink); }
+  #guide kbd { padding: 0 5px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; background: var(--surface-2); font: 12px var(--mono); color: var(--ink); }
+  #guide .nav { display: flex; align-items: center; gap: 8px; margin-top: 14px; }
+  #guide .count { flex: 1; font-size: 12px; color: var(--ink-3); font-family: var(--mono); }
+  #guide button { min-height: 40px; padding: 0 14px; border-radius: 10px; font-size: 14px; font-weight: 600; border: 1px solid var(--line); background: var(--surface-2); }
+  #guide button:hover { background: var(--surface-3); }
+  #guide .skip { border-color: transparent; background: none; color: var(--ink-3); }
+  #guide .next { background: var(--plankton); color: var(--plankton-ink); border-color: transparent; }
+
+  /* ---------- dashboards (web/ocean_dash.js, charts in web/charts.js) ---------- */
+  #dash {
+    position: fixed; inset: 0; z-index: var(--z-dash);
+    display: flex; flex-direction: column;
+    background: var(--abyss); color: var(--ink);
+    padding-top: var(--safe-t);
+  }
+  #dash[hidden] { display: none; }
+  #dash .dhead { display: flex; align-items: center; gap: 8px 12px; padding: 10px 12px 0 16px; flex-wrap: wrap; }
+  #dash h2 { display: inline-flex; align-items: center; gap: 8px; font-size: 18px; font-weight: 650; white-space: nowrap; }
+  #dtabs { order: 3; flex-basis: 100%; display: flex; gap: 2px; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+  #dtabs::-webkit-scrollbar { display: none; }
+  #dtabs button {
+    flex: none; min-height: 44px; padding: 0 12px;
+    border: 0; border-bottom: 2px solid transparent; border-radius: 0;
+    background: none; color: var(--ink-3); font-size: 14px; font-weight: 600; white-space: nowrap;
+  }
+  #dtabs button:hover { color: var(--ink); }
+  #dtabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--plankton); }
+  #dash .dtools { display: flex; gap: 6px; margin-left: auto; }
+  #dash .dtools .btn { min-height: 40px; padding: 0 12px; font-size: 13px; }
+  #dnote { padding: 8px 16px 10px; font-size: 13px; color: var(--ink-3); border-bottom: 1px solid var(--line-soft); }
+  #dgrid {
+    flex: 1 1 auto; overflow-y: auto; overscroll-behavior: contain;
+    padding: 12px 12px calc(28px + var(--safe-b));
+    display: grid; grid-template-columns: 1fr; gap: 12px; align-content: start;
+  }
+  .dcard { background: var(--surface); border: 1px solid var(--line-soft); border-radius: var(--r-md); padding: 12px 12px 10px; min-width: 0; }
+  .dcard.wide { grid-column: 1 / -1; }
+  .dcard h3 { font-size: 14px; font-weight: 650; }
+  .dcard .cap { font-size: 13px; color: var(--ink-3); line-height: 1.45; margin: 3px 0 8px; max-width: 70ch; }
+  .dcard .cbox { position: relative; height: 200px; }
+  .dcard .cbox.tall { height: 300px; }
+  .dcard .cbox.xtall { height: 640px; }
+  .dcard .cbox canvas { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: pan-y; }
+  .dcard .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 6px; font-size: 12px; color: var(--ink-3); }
+  .dcard .legend:empty { display: none; }
+  .legend .li { display: inline-flex; align-items: center; gap: 5px; }
+  .legend i, .charttip i { display: inline-block; flex: none; width: 12px; height: 10px; border-radius: 2px; }
+  .legend b { color: var(--ink); font-weight: 600; }
+  .legend .scale { display: inline-block; width: 140px; height: 10px; border-radius: 2px; }
+  .dcard .cnote { font-size: 12px; color: var(--ink-3); margin-top: 4px; }
+  .dcard .cnote:empty { display: none; }
+  .dcard.off .cbox, .dcard.off .legend { display: none; }
+  .dcard.off .cnote { color: var(--ink-2); font-size: 13px; }
+  .charttip {
+    position: fixed; z-index: var(--z-tip); display: none; pointer-events: none;
+    min-width: 130px; max-width: 300px; padding: 7px 10px;
+    border-radius: var(--r-sm); background: var(--surface-2); border: 1px solid var(--line);
+    font: 12px/1.45 var(--font); color: var(--ink);
+  }
+  .charttip .th { color: var(--ink-3); margin-bottom: 2px; }
+  .charttip .tr { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+  .charttip .tr span { flex: 1; color: var(--ink-3); }
+  .charttip .tr b { font-weight: 600; font-variant-numeric: tabular-nums; }
+
+  /* ---------- larger screens ---------- */
+  @media (min-width: 600px) {
+    #readout .mark span { display: inline; }
+    #readout .ro-depth { display: inline; }
+    #turbobtn span { display: inline; }
+    #fishcard { left: auto; right: 16px; width: 380px; }
+    #fishcard.flip { left: 16px; right: auto; top: auto; bottom: calc(var(--dock-b) + var(--dock-h) + 10px); }
+    #dgrid { grid-template-columns: repeat(auto-fill, minmax(440px, 1fr)); padding: 14px 16px 28px; gap: 14px; }
+    #dtabs { order: 0; flex: 1 1 auto; flex-basis: auto; }
+    .dcard { padding: 14px 16px 12px; }
+    .dcard .cbox { height: 210px; }
+    .dcard .cbox.tall { height: 340px; }
+    .dcard .cbox.xtall { height: 700px; }
+  }
+  @media (max-width: 420px) {
+    #dock { padding: 0 3px; }
+    #dock .speed .icon-btn { width: 32px; }
+    #speedlabel { min-width: 2.6em; }
+    #dock > .icon-btn { width: 40px; }
+  }
+  @media (min-width: 960px) {
+    #drawer {
+      left: auto; top: 0; width: 400px; height: 100dvh;
+      border-top: 0; border-left: 1px solid var(--line);
+      border-radius: 0;
+      transform: translateX(100%);
+      padding-top: var(--safe-t);
+    }
+    .sheet-grip { display: none; }
+    .sheet-head { padding-top: 14px; }
+    body.sheet-open #turbo { right: 406px; }
+    body.sheet-open #dock { transform: translateX(calc(-50% - 200px)); opacity: 1; pointer-events: auto; }
+    body.sheet-open #fishcard { right: 416px; }
+    body.sheet-open #tools { margin-right: 400px; }
+    body.sheet-open #toasts { transform: translateX(calc(-50% - 200px)); }
+    #fishcard, #fishcard.flip { top: calc(76px + var(--safe-t)); bottom: auto; max-height: calc(100dvh - 180px); }
+    #fishcard.expanded .fc-brain .inet { height: 340px; }
+  }
+  @media (pointer: coarse) {
+    .stepper { height: 44px; }
+    .stepper button { width: 44px; }
+    .stepper input, select { font-size: 16px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: 1ms !important; transition-duration: 1ms !important; }
+    #splash .swim::after { animation: none; width: 100%; }
+  }
 </style>
 </head>
 <body>
-  <canvas id="tank" aria-label="the ocean as a deep 3D tank: drag to move (up and down when looking through the side), right-drag or two fingers to turn (below the horizontal too), scroll or pinch to zoom, E and Q to rise and sink, click a fish to mark it"></canvas>
+  <!-- icons: web/index.html's set, plus the replay and the flashlight -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <symbol id="i-fish" viewBox="0 0 24 24"><path d="M3 12c3-4.5 8.5-5.5 13-2.5L20 6v12l-4-3.5C11.5 17.5 6 16.5 3 12Z"/><circle cx="8" cy="11.3" r=".9" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4.5v15l12-7.5-12-7.5Z" fill="currentColor"/></symbol>
+    <symbol id="i-pause" viewBox="0 0 24 24"><rect x="6" y="4.5" width="4" height="15" rx="1.2" fill="currentColor" stroke="none"/><rect x="14" y="4.5" width="4" height="15" rx="1.2" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="i-minus" viewBox="0 0 24 24"><path d="M5 12h14"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 2.5 4.5 14H11l-1 7.5 8.5-11.5H12l1-7.5Z"/></symbol>
+    <symbol id="i-dice" viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="17" height="17" rx="4"/><circle cx="8.5" cy="8.5" r="1.1" fill="currentColor" stroke="none"/><circle cx="15.5" cy="15.5" r="1.1" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.1" fill="currentColor" stroke="none"/><circle cx="15.5" cy="8.5" r="1.1" fill="currentColor" stroke="none"/><circle cx="8.5" cy="15.5" r="1.1" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2.2"/><circle cx="10" cy="17" r="2.2"/></symbol>
+    <symbol id="i-chart" viewBox="0 0 24 24"><path d="M4 20h16M7 16v-5M12 16V6M17 16v-8"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+    <symbol id="i-restart" viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 2.4-5.7M4 4v4.5h4.5"/></symbol>
+    <symbol id="i-replay" viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.4-5.7M20 4v4.5h-4.5"/><path d="M10 9v6l5-3-5-3Z" fill="currentColor" stroke="none"/></symbol>
+    <symbol id="i-save" viewBox="0 0 24 24"><path d="M12 4v11m0 0-4-4m4 4 4-4M5 19h14"/></symbol>
+    <symbol id="i-load" viewBox="0 0 24 24"><path d="M12 15V4m0 0L8 8m4-4 4 4M5 19h14"/></symbol>
+    <symbol id="i-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M9.6 9.5a2.5 2.5 0 1 1 3.3 2.4c-.6.2-.9.7-.9 1.3v.6"/><circle cx="12" cy="16.6" r=".6" fill="currentColor"/></symbol>
+    <symbol id="i-follow" viewBox="0 0 24 24"><circle cx="12" cy="12" r="6.5"/><circle cx="12" cy="12" r="2" fill="currentColor" stroke="none"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3"/></symbol>
+    <symbol id="i-frame" viewBox="0 0 24 24"><path d="M4 9V5.5A1.5 1.5 0 0 1 5.5 4H9M15 4h3.5A1.5 1.5 0 0 1 20 5.5V9M20 15v3.5a1.5 1.5 0 0 1-1.5 1.5H15M9 20H5.5A1.5 1.5 0 0 1 4 18.5V15"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m6 15 6-6 6 6"/></symbol>
+    <symbol id="i-light" viewBox="0 0 24 24"><path d="M8.5 3.5h7l-1.2 5.2 .9 1.8v9a1 1 0 0 1-1 1h-4.4a1 1 0 0 1-1-1v-9l.9-1.8-1.2-5.2Z"/><path d="M10.2 13.5h3.6"/><path d="M4.5 4.5 6 6M19.5 4.5 18 6M3 9.5h2M19 9.5h2"/></symbol>
+  </svg>
 
-  <div id="hud" class="chip" aria-live="off">
-    <h1>evo_boids Ocean <span class="tag" id="h-tag">preview</span></h1>
-    <div class="cols">
-      <dl>
-        <dt>fish</dt><dd id="h-pop">–</dd>
-        <dt>frame</dt><dd id="h-frame">–</dd>
-        <dt>seed</dt><dd id="h-seed">–</dd>
-        <dt>births</dt><dd id="h-births">–</dd>
-        <dt>reseeds</dt><dd id="h-reseeds">–</dd>
-        <dt class="wide">deaths</dt><dd class="wide" id="h-deaths">–</dd>
-        <dt>depth</dt><dd id="h-depth">–</dd>
-        <dt>speed</dt><dd id="h-speed">–</dd>
-      </dl>
-      <div id="hist" aria-label="share of fish per depth eighth, surface first">
-        <div class="cap"><span>depth</span><span>share of fish</span></div>
+  <canvas id="tank" aria-label="the ocean as a deep 3D tank: drag to move (up and down when looking through the side), right-drag or two fingers to turn, scroll or pinch to zoom, W A S D to move, Q and E down and up, click or tap a fish to inspect it"></canvas>
+
+  <header id="topbar">
+    <button id="readout" class="chip-surface" aria-expanded="false" aria-controls="statpanel" title="live numbers: tap for details">
+      <span class="mark"><svg class="i"><use href="#i-fish"/></svg><span>evo_boids <em>Ocean</em></span></span>
+      <span class="sep" aria-hidden="true"></span>
+      <span><b id="ro-fish" class="num">–</b> fish</span>
+      <span>gen <b id="ro-gen" class="num">–</b></span>
+      <span class="ro-depth">depth <b id="ro-depth" class="num">–</b></span>
+      <span><b id="ro-fps" class="num">–</b> fps</span>
+    </button>
+    <div id="tools" class="chip-surface">
+      <button id="dashbtn" class="icon-btn" aria-label="dashboards: charts of this run" aria-expanded="false" title="Dashboards"><svg class="i"><use href="#i-chart"/></svg></button>
+      <button id="menubtn" class="icon-btn" aria-label="settings" aria-expanded="false" aria-controls="drawer" title="Settings"><svg class="i"><use href="#i-sliders"/></svg></button>
+    </div>
+  </header>
+  <div id="statpanel" class="chip-surface" hidden aria-live="off">
+    <dl id="statlist"></dl>
+    <div id="hist" aria-label="share of fish per depth eighth, surface first">
+      <div class="cap"><span>depth</span><span>share of fish</span></div>
+    </div>
+    <div class="notes" id="statnotes"></div>
+  </div>
+  <button id="fitbtn" class="btn chip-surface" hidden><svg class="i"><use href="#i-frame"/></svg>Fit the world to this screen</button>
+  <div id="toasts" aria-live="polite"></div>
+  <div id="keys" class="chip-surface" role="note" aria-label="keyboard shortcuts">
+    <button id="keysclose" class="icon-btn x" title="Hide the keys (? shows them again)" aria-label="hide the keys"><svg class="i"><use href="#i-close"/></svg></button>
+    <div id="keysmove"></div>
+    <div><span class="k"><kbd>F</kbd> follow a fish</span><span class="k"><kbd>L</kbd> flashlight</span><span class="k"><kbd>C</kbd> fit the view</span><span class="k"><kbd>Esc</kbd> let go</span></div>
+    <div><span class="k"><kbd>Space</kbd> pause</span><span class="k"><kbd>+</kbd><kbd>−</kbd> speed</span><span class="k"><kbd>R</kbd> new world</span><span class="k"><kbd>?</kbd> these keys</span></div>
+  </div>
+
+  <section id="fishcard" class="chip-surface" hidden aria-label="the selected fish">
+    <div class="fc-head">
+      <canvas id="iportrait" aria-hidden="true"></canvas>
+      <div class="fc-title"><div id="ititle">Fish</div><div id="isub"></div></div>
+      <button id="followbtn" class="icon-btn" aria-pressed="false" title="Follow this fish (F)"><svg class="i"><use href="#i-follow"/></svg><span class="sr">follow</span></button>
+      <button id="iexpand" class="icon-btn" aria-expanded="false" title="Show its brain"><svg class="i"><use href="#i-chevron"/></svg><span class="sr">brain</span></button>
+      <button id="iclose" class="icon-btn" aria-label="close"><svg class="i"><use href="#i-close"/></svg></button>
+    </div>
+    <div class="fc-stats">
+      <div class="stat"><div class="k">Energy</div><div class="v" id="ienergyv">–</div><div class="bar" id="ienergy"><i></i><span class="tick"></span></div></div>
+      <div class="stat"><div class="k">Age</div><div class="v" id="iagev">–</div><div class="bar" id="iage"><i></i></div></div>
+      <div class="stat"><div class="k">Speed</div><div class="v" id="ispeedv">–</div><div class="bar" id="ispeed"><i></i></div></div>
+      <div class="stat"><div class="k">Depth</div><div class="v" id="idepthv">–</div><div class="bar" id="idepth"><i></i><span class="tick"></span></div></div>
+      <div class="stat"><div class="k" title="where it floats without effort (inherited)">Neutral depth</div><div class="v" id="ibuoyv">–</div><div class="bar" id="ibuoy"><i></i></div></div>
+      <div class="stat"><div class="k">Pitch</div><div class="v" id="ipitchv">–</div><div class="bar" id="ipitch"><i></i><span class="tick"></span></div></div>
+    </div>
+    <div class="fc-brain">
+      <div class="inet"><canvas id="inetc" aria-label="its neural network, live"></canvas></div>
+      <p id="isense"></p>
+    </div>
+  </section>
+
+  <nav id="dock" class="chip-surface" aria-label="playback">
+    <button id="pausebtn" class="icon-btn" title="Pause (Space)" aria-label="pause"><svg class="i"><use href="#i-pause"/></svg></button>
+    <div class="speed" role="group" aria-label="speed">
+      <button id="slower" class="icon-btn" title="Fewer steps per frame (− or ↓)" aria-label="slower"><svg class="i"><use href="#i-minus"/></svg></button>
+      <output id="speedlabel" aria-live="polite">1×</output>
+      <button id="faster" class="icon-btn" title="More steps per frame (+ or ↑)" aria-label="faster"><svg class="i"><use href="#i-plus"/></svg></button>
+    </div>
+    <button id="turbobtn" class="icon-btn" aria-pressed="false" title="Turbo: run headless in a worker at full speed; the hand-off is exact"><svg class="i"><use href="#i-bolt"/></svg><span>Turbo</span></button>
+    <button id="randombtn" class="icon-btn" title="Randomize: a new world from tested ranges" aria-label="randomize the world"><svg class="i"><use href="#i-dice"/></svg></button>
+    <button id="lightbtn" class="icon-btn" aria-pressed="false" title="Flashlight (L): clear light where you look; on by itself while you follow a fish" aria-label="flashlight"><svg class="i"><use href="#i-light"/></svg></button>
+    <button id="viewbtn" class="icon-btn" title="Fit the view (C)" aria-label="fit the view"><svg class="i"><use href="#i-frame"/></svg></button>
+  </nav>
+
+  <aside id="drawer" role="dialog" aria-label="settings" aria-modal="false">
+    <div class="sheet-grip" id="grip" aria-hidden="true"></div>
+    <div class="sheet-head">
+      <h2>Settings</h2>
+      <button id="guidebtn" class="btn ghost" title="replay the tour"><svg class="i"><use href="#i-help"/></svg>Tour</button>
+      <button id="drawerclose" class="icon-btn" aria-label="close settings"><svg class="i"><use href="#i-close"/></svg></button>
+    </div>
+    <nav id="tabs" role="tablist" aria-label="settings sections"></nav>
+    <div id="panels">
+      <section class="panel" data-tab="run" id="panel-run">
+        <div class="run-hero">
+          <button id="randombig" class="btn primary"><svg class="i"><use href="#i-dice"/></svg>Randomize the world</button>
+          <p>Draws a whole setup from ranges that worked in experiments (predators, currents, the E1 physics, schooling rules) and restarts.</p>
+          <p id="randnote"></p>
+        </div>
+        <h3>This world</h3>
+        <div class="row2">
+          <button id="newworld" class="btn" title="the same settings, a new seed (R)"><svg class="i"><use href="#i-restart"/></svg>New world</button>
+          <button id="replay" class="btn" title="this world again from its start (Shift+R)"><svg class="i"><use href="#i-replay"/></svg>Replay</button>
+        </div>
+        <h3>Playback</h3>
+        <div class="field" id="f_governor">
+          <span><span class="name"><span class="lt">Hold 60 fps</span></span><span class="desc">Runs fewer steps per frame, then draws the tank with less detail, when this device can't keep up.</span></span>
+          <span class="ctl"><input id="governor" class="switch" type="checkbox" role="switch" checked aria-label="hold 60 fps"></span>
+        </div>
+        <h3>View</h3>
+        <div class="field" id="f_followLight">
+          <span><span class="name"><span class="lt">Flashlight while following</span></span><span class="desc">While you follow a fish, clear light shows it and what is around it in true colours. The dock's flashlight (L) lights where you look.</span></span>
+          <span class="ctl"><input id="followLight" class="switch" type="checkbox" role="switch" checked aria-label="flashlight while following"></span>
+        </div>
+        <div class="field" id="f_colourBrain">
+          <span><span class="name"><span class="lt">Colour by brain similarity</span></span><span class="desc">Off (the default): each family line has its own colour, the same one it has in the dashboards. On: a fish's colour comes from its genome, so similar brains look alike.</span></span>
+          <span class="ctl"><input id="colourBrain" class="switch" type="checkbox" role="switch" aria-label="colour by brain similarity"></span>
+        </div>
+        <p id="modeline"></p>
+        <h3>Save &amp; load</h3>
+        <div class="row2">
+          <button id="savecp" class="btn" title="the settings and seed, as a file"><svg class="i"><use href="#i-save"/></svg>Save setup</button>
+          <button id="loadcp" class="btn" title="a saved setup: restarts with it"><svg class="i"><use href="#i-load"/></svg>Load setup</button>
+        </div>
+        <p class="hint">A setup is the settings and the seed, so loading one replays that world from its start. The Ocean cannot save the fish themselves yet (Classic's Save world can). After a restart the page's address carries the setup too: bookmark or share it.</p>
+        <input id="cpfile" type="file" accept=".json" hidden>
+        <h3>Defaults</h3>
+        <button id="advreset" class="btn ghost" style="margin-top:8px">Reset every setting</button>
+        <p id="credit">evo_boids © 2026 Harit Tarwani ·
+          <a href="https://creativecommons.org/licenses/by-nc/4.0/" target="_blank" rel="noopener noreferrer">CC BY-NC 4.0</a><br>
+          <a id="classiclink" href="index.html">Classic (2-D)</a> · the flat world, as the native app draws it</p>
+      </section>
+      <!-- the other panels are built by ocean.js (EvoOceanConfig.TABS) -->
+    </div>
+    <div id="applybar">
+      <button id="restart" class="btn"><svg class="i"><use href="#i-restart"/></svg><span>Restart</span></button>
+      <span id="err" role="status"></span>
+    </div>
+  </aside>
+
+  <div id="turbo" hidden>
+    <div class="card chip-surface" role="status">
+      <h2><svg class="i"><use href="#i-bolt"/></svg>Turbo</h2>
+      <p id="turbomsg">Running headless in a background worker. Nothing is drawn, so it goes many times faster.</p>
+      <div id="turbostats">
+        <div><span>Steps / s</span><b id="ts-rate">–</b></div>
+        <div><span>Steps this run</span><b id="ts-steps">–</b></div>
+        <div><span>Fish</span><b id="ts-pop">–</b></div>
+        <div><span>Food</span><b id="ts-food">–</b></div>
+      </div>
+      <button id="turboexit" class="btn primary">Stop Turbo and watch</button>
+    </div>
+  </div>
+
+  <div id="dash" role="dialog" aria-label="dashboards" hidden>
+    <div class="dhead">
+      <h2><svg class="i"><use href="#i-chart"/></svg>Dashboards</h2>
+      <nav id="dtabs" role="tablist"></nav>
+      <div class="dtools">
+        <button id="dcsv" class="btn" title="every recorded sample, as a spreadsheet"><svg class="i"><use href="#i-save"/></svg>CSV</button>
+        <button id="dclose" class="icon-btn" aria-label="close the dashboards"><svg class="i"><use href="#i-close"/></svg></button>
       </div>
     </div>
-    <div class="state" id="h-state"></div>
-    <div class="sel" id="h-sel"></div>
+    <p id="dnote"></p>
+    <div id="dgrid"></div>
   </div>
 
-  <div id="keys" class="chip">
-    <span><kbd>space</kbd>pause</span><span><kbd>+</kbd><kbd>-</kbd>speed</span><span><kbd>F</kbd>follow a fish</span><span><kbd>R</kbd>new world</span><span><kbd>shift</kbd><kbd>R</kbd>replay</span><span><kbd>E</kbd><kbd>Q</kbd>up / down</span><span><kbd>C</kbd>full view</span><span>drag move · right-drag turn · scroll zoom</span>
+  <div id="splash" aria-live="polite">
+    <div>
+      <div class="word"><svg class="i"><use href="#i-fish"/></svg>evo_boids Ocean</div>
+      <p>The same evolving fish, steering in depth.</p>
+      <span class="swim" aria-hidden="true"></span>
+      <div id="splashstate">Starting the ocean…</div>
+    </div>
   </div>
-  <div id="btns" class="chip" role="toolbar" aria-label="ocean controls">
-    <button id="b-pause" aria-pressed="false" title="Pause (space)">Pause</button>
-    <button id="b-slower" title="Fewer steps per frame (-)">&minus;</button>
-    <button id="b-faster" title="More steps per frame (+)">+</button>
-    <button id="b-follow" aria-pressed="false" title="Follow a random fish (F)">Follow</button>
-    <button id="b-reset" title="A new world with a new seed (R; shift+R replays this one)">New world</button>
-  </div>
-
-  <div id="msg" class="chip">Starting the ocean…</div>
 
   <script>
-    /* Asset URLs, relative to this page. mock: a JS stand-in for the engine,
-     * used only with ?mock=1 and never shipped in web/. */
+    /* Asset URLs, relative to this page. The deploy build (wasm/build_site.sh)
+     * rewrites this block with content-hashed names. mock: a JS stand-in for
+     * the engine, used only with ?mock=1 and never shipped in web/. */
     window.EVO_ASSETS = {
       ocean: "evo_ocean.js", oceanWasm: "evo_ocean.wasm",
+      worker: "ocean_worker.js",
       mock: "ocean_mock.js",
       three: "vendor/three.bundle.min.js"
     };
   </script>
   <script src="ocean_scene.js"></script>
+  <script src="ocean_config.js"></script>
+  <script src="charts.js"></script>
+  <script src="ocean_dash.js"></script>
   <script src="ocean.js"></script>
+  <script src="guide.js"></script>
 </body>
 </html>

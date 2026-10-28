@@ -37,8 +37,8 @@
     --top-h: 64px;     /* the top bar's band: 10 px + 48 px buttons + 6 px */
     --dock-h: 60px;
     --dock-b: calc(12px + var(--safe-b));
-    /* z scale */
-    --z-hud: 10; --z-card: 20; --z-dock: 30; --z-sheet: 40; --z-turbo: 45;
+    /* z scale (the Turbo scrim dims the world, under every control) */
+    --z-turbo: 5; --z-hud: 10; --z-card: 20; --z-dock: 30; --z-sheet: 40;
     --z-dash: 50; --z-toast: 60; --z-guide: 70; --z-tip: 80; --z-splash: 90;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -394,12 +394,20 @@
   #err { flex: 1; min-width: 0; font-size: 13px; line-height: 1.35; color: var(--ink-3); }
   #err.error { color: var(--ember); }
 
-  /* ---------- turbo ---------- */
+  /* ---------- turbo ----------
+   * While Turbo runs, the world is dimmed, not the controls: the scrim sits
+   * under the top bar, the dock, the fish card and the settings (--z-turbo is
+   * below --z-hud) and never takes clicks, so the menu, the dashboards and the
+   * Turbo button look as live as they are. The card is centred in the band
+   * between the top bar and the dock, and beside the open settings on a wide
+   * screen, like the stage. */
   #turbo {
     position: fixed; inset: 0; z-index: var(--z-turbo);
-    display: grid; place-items: center; padding: 20px;
+    display: grid; place-items: center;
+    padding: calc(var(--top-h) + var(--safe-t)) 16px calc(var(--dock-h) + var(--dock-b) + 10px);
     background: oklch(0.12 0.03 205 / 0.55);
     pointer-events: none;
+    transition: right 300ms var(--ease);
   }
   #turbo[hidden] { display: none; }
   #turbo .card {
@@ -416,6 +424,29 @@
   #turbostats span { display: block; font-size: 12px; color: var(--ink-3); }
   #turbostats b { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 16px; font-weight: 600; }
   #turbo .btn { margin-top: 16px; width: 100%; }
+  /* a short window (a landscape phone, an embed): a compact card that fits
+   * between the top bar and the dock */
+  @media (max-height: 560px) {
+    #turbo .card { padding: 12px 14px; }
+    #turbo h2 { font-size: 16px; }
+    #turbomsg { display: none; }
+    #turbostats { margin-top: 8px; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+    #turbostats div { padding: 6px 8px; }
+    #turbostats b { font-size: 14px; }
+    #turbo .btn { margin-top: 10px; min-height: 40px; }
+  }
+  /* the settings as a bottom sheet hide the dock: the card, compact, moves
+   * into the band above the sheet, so Stop stays in reach (where it fits) */
+  @media (max-width: 959px) and (min-height: 760px) {
+    body.sheet-open #turbo { padding-bottom: calc(min(70dvh, 680px) + 8px); }
+    body.sheet-open #turbo .card { padding: 12px 14px; }
+    body.sheet-open #turbo h2 { font-size: 16px; }
+    body.sheet-open #turbomsg { display: none; }
+    body.sheet-open #turbostats { margin-top: 8px; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+    body.sheet-open #turbostats div { padding: 6px 8px; }
+    body.sheet-open #turbostats b { font-size: 14px; }
+    body.sheet-open #turbo .btn { margin-top: 10px; min-height: 40px; }
+  }
 
   /* ---------- loading ---------- */
   #splash {
@@ -564,7 +595,7 @@
     }
     .sheet-grip { display: none; }
     .sheet-head { padding-top: 14px; }
-    body.sheet-open #stage { right: 406px; }
+    body.sheet-open #stage, body.sheet-open #turbo { right: 406px; }
     body.sheet-open #dock { transform: translateX(calc(-50% - 200px)); opacity: 1; pointer-events: auto; }
     body.sheet-open #fishcard { right: 416px; }
     body.sheet-open #tools { margin-right: 400px; }

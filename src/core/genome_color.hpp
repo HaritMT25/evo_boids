@@ -5,7 +5,16 @@
 #include <vector>
 #include "connectivity.hpp"
 #include "color.hpp"
+#include "portable_math.hpp"
+#ifdef EVO_WORLD_OCEAN
+#ifdef EVO_OCEAN_EYE
+#include "../ocean/plane_data_ocean_eye.hpp"   // + the 18 eye sensors => STATS_DIM 1900
+#else
+#include "../ocean/plane_data_ocean.hpp"   // Ocean's sensor list => its own STATS_DIM
+#endif
+#else
 #include "plane_data.hpp"
+#endif
 
 // Project the (source,sink) connectivity vector onto 3 fixed random directions
 // (a 3-component cousin of the 16-bit species SimHash) -> RGB. Projection is
@@ -41,7 +50,7 @@ inline Color genomeColor(const Genome& genome) {
     // near-linear so the mapping stays smooth; raise toward ~0.1 for more vivid.
     constexpr float K = 0.06f;
     auto chan = [](double v) {
-        return static_cast<int>(std::lround(137.5 + 97.5 * std::tanh(K * v)));
+        return static_cast<int>(std::lround(137.5 + 97.5 * evomath::tanh(K * v)));
     };
     return Color(chan(proj[0]), chan(proj[1]), chan(proj[2]));
 }

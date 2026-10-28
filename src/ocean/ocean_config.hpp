@@ -161,15 +161,50 @@ inline void applyOceanDefaults(SimConfig& c) {
 inline constexpr const char* kE1PresetJson =
     R"({"waveSpeed":6,"deepCurrent":true,"currentStrength":5,"foodDrift":true,"lightEnabled":true,"depthCostScaled":true,"cHold":0.05,"cPress":0.03})";
 
+// The int-typed SimConfig keys: checkpoint::readConfig reads each with
+// jsonm::Value::intOr, a plain (int) cast of the JSON double, which is
+// undefined behaviour outside int's range (x86 gives INT_MIN, wasm traps or
+// saturates) and silently truncates a fraction ({"currentMode":0.5} was mode
+// 0). readOceanJson refuses any such value before the reader sees it: the
+// number must be a whole number in int's range. Must list exactly
+// readConfig's intOr keys: wasm/ocean_parity.sh checks it.
+inline constexpr const char* kSimConfigIntKeys[] = {
+    "reproWindow", "reproMinCluster", "minPopulation", "maxPopulation", "targetFood",
+    "maxNeighbors", "genomeMinLength", "genomeMaxLength", "genomeInitMin", "genomeInitMax",
+    "currentMode", "currentEddies", "foodPatches", "predatorCount",
+    "predatorMinPopulation", "predatorMaxPopulation",
+};
+inline bool isSimConfigIntKey(const std::string& k) {
+    for (const char* i : kSimConfigIntKeys) if (k == i) return true;
+    return false;
+}
+// x is a whole number in int's range (so (int)x is defined and exact). NaN and
+// ±inf fail.
+inline bool isIntValue(double x) {
+    return x >= -2147483648.0 && x <= 2147483647.0 && std::trunc(x) == x;
+}
+
 // A flat cfg JSON object (null / empty = nothing to change) into both configs:
 // SimConfig keys through the checkpoint reader, Ocean keys through
-// readOceanConfig. Returns false with `err` set on malformed JSON or a bool
-// key that is not a bool.
+// readOceanConfig. Returns false with `err` set on malformed JSON, an int key
+// whose number is not a whole number in int's range (checked before the
+// reader casts it, every occurrence of the key), or a bool key that is not a
+// bool.
 inline bool readOceanJson(const char* json, SimConfig& sc, OceanConfig& oc, std::string& err) {
     if (!json || !json[0]) return true;
     const std::string wrapped = std::string("{\"config\":") + json + "}";
     jsonm::Value root;
     if (!jsonm::Parser::parse(wrapped, root, err)) { err = "config parse error: " + err; return false; }
+    if (const jsonm::Value* o = root.find("config"); o && o->isObject())
+        for (const auto& kv : o->obj)
+            if (kv.second.type == jsonm::Value::Type::Number && isSimConfigIntKey(kv.first) &&
+                !isIntValue(kv.second.num)) {
+                char buf[160];
+                std::snprintf(buf, sizeof buf, "%s must be a whole number that fits an int (got %.17g)",
+                              kv.first.c_str(), kv.second.num);
+                err = buf;
+                return false;
+            }
     checkpoint::readConfig(root, sc);
     if (const jsonm::Value* o = root.find("config"))
         if (!readOceanConfig(*o, oc, &err)) return false;
@@ -230,6 +265,21 @@ inline bool oceanConfigValid(const OceanConfig& c) { return oceanConfigError(c).
 //     never ended (wrapCoord is constant-time now too).
 //   * foodPatchRadius in [0, 1e5]: a toroidal patch's food is placed at
 //     wrapCoord(centre ± R); 1e30 sent that to the same endless loop.
+// And the keys whose value reaches an (int) conversion while stepping, where
+// an out-of-range value is undefined behaviour (and differs native / wasm):
+//   * foodSpawnBase, foodSpawnAmp in [-1e4, 1e4] (defaults 3, 2): each step
+//     spawns (int)(base + amp·sin(·)) times; 1e20 was accepted (finite).
+//   * targetFood in [0, 1e6]: the spawn cap is targetFood·2 (int arithmetic),
+//     and init lays out targetFood items.
+//   * maxSpeed <= 2000 and predatorSpeed in [0, 2000] (defaults 150, 110): a
+//     fish moves at most 2·maxSpeed·dt per step (speedFactor <= 2), a
+//     predator 2·predatorSpeed·dt — at dt 0.016 under 64, less than the
+//     smallest world (100), so the single add / subtract wraps keep positions
+//     in the world, and SpatialGrid's (int)(position / cell) stays in range.
+//   * every radius (perceptionRadius, interactRadius, pickupRadius,
+//     predatorPerception, predatorCaptureRadius) <= 1e6: SpatialGrid casts
+//     (centre ± radius) / cell to int, cell = perceptionRadius >= 1 (a
+//     toroidal world already holds them under min(W, H) / 2; radiusError).
 inline std::string oceanSimConfigError(const SimConfig& c) {
     const struct { const char* name; float v, lo, hi; } r[] = {
         {"currentStrength", c.currentStrength, 0.0f, 1000.0f},
@@ -237,6 +287,15 @@ inline std::string oceanSimConfigError(const SimConfig& c) {
         {"currentDrift", c.currentDrift, -100.0f, 100.0f},
         {"currentGyreEps", c.currentGyreEps, -1.0f, 1.0f},
         {"foodPatchRadius", c.foodPatchRadius, 0.0f, 100000.0f},
+        {"foodSpawnBase", c.foodSpawnBase, -10000.0f, 10000.0f},
+        {"foodSpawnAmp", c.foodSpawnAmp, -10000.0f, 10000.0f},
+        {"maxSpeed", c.maxSpeed, 0.0f, 2000.0f},
+        {"predatorSpeed", c.predatorSpeed, 0.0f, 2000.0f},
+        {"perceptionRadius", c.perceptionRadius, 0.0f, 1000000.0f},
+        {"interactRadius", c.interactRadius, 0.0f, 1000000.0f},
+        {"pickupRadius", c.pickupRadius, 0.0f, 1000000.0f},
+        {"predatorPerception", c.predatorPerception, 0.0f, 1000000.0f},
+        {"predatorCaptureRadius", c.predatorCaptureRadius, 0.0f, 1000000.0f},
     };
     for (const auto& e : r)
         if (!(e.v >= e.lo && e.v <= e.hi)) {   // NaN fails both
@@ -247,5 +306,6 @@ inline std::string oceanSimConfigError(const SimConfig& c) {
         }
     if (c.currentMode != 0 && c.currentMode != 1) return "currentMode must be 0 (eddies) or 1 (gyre)";
     if (c.currentEddies < 0 || c.currentEddies > 100) return "currentEddies must be in [0, 100]";
+    if (c.targetFood < 0 || c.targetFood > 1000000) return "targetFood must be in [0, 1000000]";
     return "";
 }

@@ -18,7 +18,11 @@
 //     oceanSimConfigError: currentStrength in [0, 1000], currentEddies in
 //     [0, 100], currentCore in [0, 1e5], currentDrift in [-100, 100],
 //     currentGyreEps in [-1, 1], currentMode 0 / 1, foodPatchRadius in
-//     [0, 1e5]).
+//     [0, 1e5]), or a key whose value reaches an int conversion out of range
+//     (foodSpawnBase / foodSpawnAmp in [-1e4, 1e4], targetFood in [0, 1e6],
+//     maxSpeed <= 2000, predatorSpeed in [0, 2000], every radius <= 1e6); and
+//     (readOceanJson) an int-typed key whose JSON number is not a whole
+//     number in int's range, before the shared reader casts it.
 //   * oc_set_param: the Ocean keys kBuoy, pitchMax, vDrag, wallBand,
 //     buoyMutation, cHold, cPress, foodDepthSpread, the E1 keys (waveSpeed,
 //     waveBand, waveGravity, L0, kWater, kMouth, and the on/off keys
@@ -26,7 +30,9 @@
 //     mouthGate as 0 / 1), plus every key evo_set_param accepts. pitchMax
 //     must be > 0. The changed config must pass oc_init's checks as stored
 //     (after the float / int conversion), including every Ocean knob's range
-//     (ocean_config.hpp oceanConfigError).
+//     (ocean_config.hpp oceanConfigError, oceanSimConfigError). An int key's
+//     value must be a whole number (0.5 is refused, not stored as 0) and goes
+//     to the reader as its exact integer.
 //   * With no cfgJson the world is the tuned preview (applyOceanDefaults +
 //     OceanConfig defaults, src/ocean/ocean_config.hpp).
 //
@@ -345,7 +351,8 @@ EVO_EXPORT const char* oc_e1_preset()          { return kE1PresetJson; }
 // top, or any key evo_set_param accepts (read fresh every step). Values must
 // be finite and >= 0, and the config they make must pass oc_init's checks AS
 // STORED (pitchMax and maxSpeed > 0 after the float conversion, every float
-// finite, minSpeed <= maxSpeed; an integer knob must fit an int). Returns 0
+// finite, minSpeed <= maxSpeed; an integer knob must be a whole number that
+// fits an int). Returns 0
 // and sets oc_last_error() on refusal, leaving the config unchanged.
 EVO_EXPORT int oc_set_param(const char* name, double value) {
     g_error.clear();
@@ -366,14 +373,12 @@ EVO_EXPORT int oc_set_param(const char* name, double value) {
         "newbornEnergy", "mutationMultiplier", "minSpeed", "maxSpeed",
         "predatorMinPopulation", "predatorMaxPopulation", "predatorTraitMutation",
     };
-    static const char* const kLiveInt[] = {   // the int-typed keys of kLive
-        "maxPopulation", "minPopulation", "targetFood", "predatorMinPopulation",
-        "predatorMaxPopulation",
-    };
-    bool live = false, isInt = false;
+    bool live = false;
     for (const char* k : kOcean) if (name && std::strcmp(name, k) == 0) { live = true; break; }
     for (const char* k : kLive)  if (name && std::strcmp(name, k) == 0) { live = true; break; }
-    for (const char* k : kLiveInt) if (name && std::strcmp(name, k) == 0) { isInt = true; break; }
+    // The int-typed keys of kLive (maxPopulation, minPopulation, targetFood,
+    // predatorMinPopulation, predatorMaxPopulation): readConfig's int keys.
+    const bool isInt = name && isSimConfigIntKey(name);
     if (!live) {
         g_error = std::string("not a live parameter (change it and restart): ") + (name ? name : "(null)");
         return 0;
@@ -382,8 +387,8 @@ EVO_EXPORT int oc_set_param(const char* name, double value) {
         g_error = std::string(name) + " must be finite and >= 0";
         return 0;
     }
-    if (isInt && !(value <= (double)std::numeric_limits<int>::max())) {
-        g_error = std::string(name) + " must fit an int";   // the JSON reader's (int) cast
+    if (isInt && !isIntValue(value)) {
+        g_error = std::string(name) + " must be a whole number that fits an int";   // the JSON reader's (int) cast
         return 0;
     }
     if (std::strcmp(name, "pitchMax") == 0 && !(value > 0.0)) {
@@ -395,8 +400,12 @@ EVO_EXPORT int oc_set_param(const char* name, double value) {
             g_error = std::string(name) + " is on / off: 0 or 1";
             return 0;
         }
+    // The value as JSON text: an int key as its exact integer ("%.9g" turned
+    // 2147483647 into 2.14748365e+09 > INT_MAX, an undefined cast in the
+    // reader), any other key "%.9g".
     char num[40];
-    std::snprintf(num, sizeof num, "%.9g", value);
+    if (isInt) std::snprintf(num, sizeof num, "%lld", (long long)value);   // a whole number in [0, INT_MAX] here
+    else       std::snprintf(num, sizeof num, "%.9g", value);
     const std::string json = std::string("{\"") + name + "\":" + num + "}";
     SimConfig cfg = g_world->cfg;
     OceanConfig oc = g_world->ocfg;

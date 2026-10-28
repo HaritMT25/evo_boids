@@ -77,11 +77,17 @@ bool parseSet(const char* s, LiveSet& out) {
     return !out.name.empty() && out.step >= 0;
 }
 
-// oc_set_param's path: the value through "%.9g" into a one-key JSON, read onto
-// copies of both configs, clamped, assigned.
+// oc_set_param's path: the value into a one-key JSON (an int key, which must
+// be a whole number, as its exact integer; any other "%.9g"), read onto copies
+// of both configs, clamped, checked, assigned.
 bool applySet(OceanWorld& w, const LiveSet& s) {
     char num[40];
-    std::snprintf(num, sizeof num, "%.9g", s.value);
+    if (isSimConfigIntKey(s.name)) {
+        if (!isIntValue(s.value)) return false;
+        std::snprintf(num, sizeof num, "%lld", (long long)s.value);
+    } else {
+        std::snprintf(num, sizeof num, "%.9g", s.value);
+    }
     const std::string json = "{\"" + s.name + "\":" + num + "}";
     SimConfig sc = w.cfg;
     OceanConfig oc = w.ocfg;

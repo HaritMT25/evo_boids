@@ -202,6 +202,19 @@ public:
         if (r >= span) r -= span;
         return r;
     }
+    // The preview's single-pass wrap of food and predators (`if (v < 0) v +=
+    // span; else if (v >= span) v -= span;`), exactly as it was for every v in
+    // [-span, 2·span) — an add that rounds up still leaves span there, as it
+    // always did — and wrapCoord further out, where one pass left the value
+    // outside the world (100 eddies at strength 1000 in a 100-wide world move
+    // food ~150 in a step). The bounded cases never go further out: their
+    // results are unchanged.
+    static float wrapPreview(float v, float span) {
+        if (v < -span || v >= 2.0f * span) return wrapCoord(v, span);
+        if (v < 0.0f) v += span;
+        else if (v >= span) v -= span;
+        return v;
+    }
     float clampDepth(float z) const { return std::clamp(z, 0.0f, D); }
 
     // ---- E1: flow and light ------------------------------------------------
@@ -388,8 +401,8 @@ public:
                 if (!f.alive) continue;
                 Vec2 v = current_.velocityAt(f.pos);
                 f.pos.x += v.x * dt;  f.pos.y += v.y * dt;
-                if (f.pos.x < 0) f.pos.x += width;  else if (f.pos.x >= width)  f.pos.x -= width;
-                if (f.pos.y < 0) f.pos.y += height; else if (f.pos.y >= height) f.pos.y -= height;
+                f.pos.x = wrapPreview(f.pos.x, (float)width);
+                f.pos.y = wrapPreview(f.pos.y, (float)height);
             }
         }
 
@@ -675,10 +688,11 @@ private:
             c.pos.x += cur.x * dt;
             c.pos.y += cur.y * dt;
         }
-        if (c.pos.x < 0) c.pos.x += width;
-        if (c.pos.x >= width) c.pos.x -= width;
-        if (c.pos.y < 0) c.pos.y += height;
-        if (c.pos.y >= height) c.pos.y -= height;
+        // The preview's two-step wrap (`if (x < 0) x += W; if (x >= W) x -= W;`)
+        // is wrapCoord's own one-pass branch, so wrapCoord gives the same bits
+        // for every x in [-W, 2·W), and wraps a multi-span excursion too.
+        c.pos.x = wrapCoord(c.pos.x, (float)width);
+        c.pos.y = wrapCoord(c.pos.y, (float)height);
         hot_[i] = {c.pos, c.vel, c.depth};
 
         c.updateBody();
@@ -1026,8 +1040,8 @@ private:
                 p.pos.x += cur.x * dt;
                 p.pos.y += cur.y * dt;
             }
-            if (p.pos.x < 0) p.pos.x += width;  else if (p.pos.x >= width)  p.pos.x -= width;
-            if (p.pos.y < 0) p.pos.y += height; else if (p.pos.y >= height) p.pos.y -= height;
+            p.pos.x = wrapPreview(p.pos.x, (float)width);
+            p.pos.y = wrapPreview(p.pos.y, (float)height);
 
             if (bestIdx >= 0 && p.digestTimer <= 0.0f && creatures[bestIdx].alive) {
                 Fish& prey = creatures[bestIdx];

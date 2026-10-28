@@ -86,9 +86,22 @@
 //   wrap          OceanWorld::wrapCoord (constant time) == the loops it
 //                 replaced, bit for bit, at every edge of [-span, 2·span) and
 //                 [0, span) and on sweeps (multi-pass ones too, whole-number
-//                 spans); far values land in [0, span) as the exact remainder;
-//                 inf / NaN end; the config that hung (currentStrength 1e20,
-//                 validation bypassed) steps with every position in the world
+//                 spans); far values (to ±3.4e38) == the exact remainder,
+//                 worked out from the float's bits; inf / NaN end; the config
+//                 that hung (currentStrength 1e20, validation bypassed) steps
+//                 with every position in the world; wrapPreview (food /
+//                 predators, flow off) == the old single pass on [-span,
+//                 2·span), wrapCoord beyond; a flow of > 1 span per step with
+//                 the 3-D flow off keeps everything in a 100 x 100 world (its
+//                 fingerprint printed: compared native vs wasm)
+//   shim_ints     int keys: every readConfig int key is in kSimConfigIntKeys
+//                 (by member); whole numbers to INT_MIN / INT_MAX read exactly,
+//                 a fraction, 2^31, ±1e300, 1e999 refused before the cast (also
+//                 a repeated key); oc_set_param writes an int exactly
+//                 (2147483647 used to become 2.14748365e+09); foodSpawn*,
+//                 targetFood, the speeds and the radii refused beyond their
+//                 ranges (init and live, world unchanged); at maxSpeed /
+//                 predatorSpeed 2000 everything stays in a 100 x 100 world
 //
 // `ocean_tests --accepts SEED STEPS [driver args]` instead asks the shim
 // whether it would accept one ocean_parity_driver case (see acceptsMain).
@@ -1887,6 +1900,8 @@ void testRanges() {
         {"currentDrift", -100, 100, R"("currentStrength":80,"foodDrift":true,"deepCurrent":true,)"},
         {"currentGyreEps", -1, 1, R"("currentStrength":80,"currentMode":1,"deepCurrent":true,"foodDrift":true,)"},
         {"foodPatchRadius", 0, 100000, R"("toroidal":true,"foodPatches":3,)"},
+        {"foodSpawnBase", -10000, 10000, ""}, {"foodSpawnAmp", -10000, 10000, ""},
+        {"maxSpeed", 30, 2000, ""}, {"predatorSpeed", 0, 2000, R"("predatorCount":3,)"},
     };
     auto cfgOf = [](const K& k, double v) {
         char num[40];
@@ -1958,6 +1973,108 @@ void testRanges() {
             if (!t.expect(f.pos.x >= 0.0f && f.pos.x < (float)W && f.pos.y >= 0.0f && f.pos.y < (float)W, "corner %d: food off the map", big)) break;
     }
     t.note("%d configs accepted, %d refused; %d runs at range ends, all finite", accepted, refused, runs);
+}
+
+// Integer knobs and the values that reach an int conversion (the Codex
+// determinism hunt: oc_set_param wrote 2147483647 as "2.14748365e+09", an
+// undefined (int) cast in the shared JSON reader; foodSpawnBase 1e20 reached
+// (int)foodRate while stepping).
+void testShimInts() {
+    Test t("shim_ints");
+    struct S2 { const char* k; double v; };
+    // Every int-typed SimConfig key, by member (so the compiler checks each is
+    // an int): kSimConfigIntKeys lists exactly these.
+    const struct { const char* key; int SimConfig::*m; } ints[] = {
+        {"reproWindow", &SimConfig::reproWindow}, {"reproMinCluster", &SimConfig::reproMinCluster},
+        {"minPopulation", &SimConfig::minPopulation}, {"maxPopulation", &SimConfig::maxPopulation},
+        {"targetFood", &SimConfig::targetFood}, {"maxNeighbors", &SimConfig::maxNeighbors},
+        {"genomeMinLength", &SimConfig::genomeMinLength}, {"genomeMaxLength", &SimConfig::genomeMaxLength},
+        {"genomeInitMin", &SimConfig::genomeInitMin}, {"genomeInitMax", &SimConfig::genomeInitMax},
+        {"currentMode", &SimConfig::currentMode}, {"currentEddies", &SimConfig::currentEddies},
+        {"foodPatches", &SimConfig::foodPatches}, {"predatorCount", &SimConfig::predatorCount},
+        {"predatorMinPopulation", &SimConfig::predatorMinPopulation},
+        {"predatorMaxPopulation", &SimConfig::predatorMaxPopulation},
+    };
+    t.expect(sizeof(ints) / sizeof(ints[0]) == sizeof(kSimConfigIntKeys) / sizeof(kSimConfigIntKeys[0]),
+             "kSimConfigIntKeys has %zu keys, the member table %zu", sizeof(kSimConfigIntKeys) / sizeof(kSimConfigIntKeys[0]),
+             sizeof(ints) / sizeof(ints[0]));
+    for (const auto& k : ints) {
+        t.expect(isSimConfigIntKey(k.key), "%s is not in kSimConfigIntKeys", k.key);
+        // The reader really reads it; whole numbers to the range ends read
+        // exactly; a fraction, or one past either end, is refused before the
+        // cast, the config untouched.
+        for (const auto& v : {std::pair<const char*, int>{"3", 3}, {"-3", -3}, {"2.0", 2}, {"1e3", 1000}, {"-0", 0},
+                              {"2147483647", 2147483647}, {"-2147483648", -2147483647 - 1}}) {
+            SimConfig sc;
+            OceanConfig oc;
+            std::string err;
+            const std::string j = std::string("{\"") + k.key + "\":" + v.first + "}";
+            t.expect(readOceanJson(j.c_str(), sc, oc, err) && sc.*k.m == v.second, "%s: read %d, want %d (%s)", j.c_str(), sc.*k.m,
+                     v.second, err.c_str());
+        }
+        for (const char* v : {"0.5", "3.75", "-3.75", "1e-300", "2147483647.5", "-2147483648.5", "2147483648", "-2147483649",
+                              "1e300", "-1e300", "1e999"}) {
+            SimConfig sc, before;
+            OceanConfig oc;
+            std::string err;
+            const std::string j = std::string("{\"") + k.key + "\":" + v + "}";
+            t.expect(!readOceanJson(j.c_str(), sc, oc, err) && sc.*k.m == before.*k.m && !err.empty(), "%s accepted", j.c_str());
+        }
+    }
+    // A repeated key: every occurrence is checked, not only the one the reader takes.
+    for (const char* c : {R"({"predatorCount":2,"predatorCount":3e9})", R"({"maxPopulation":2147483648})",
+                          R"({"foodPatches":-1e10})", R"({"minPopulation":1e999})", R"({"currentMode":0.5})",
+                          R"({"currentMode":1e300})", R"({"currentEddies":2.5})", R"({"predatorCount":2,"predatorCount":2.5})"})
+        t.expect(oc_init(1301, 1920, 1080, 240.0, 50, c) == 0 && std::strstr(oc_last_error(), "whole number"), "%s: %s", c,
+                 oc_last_error());
+    t.expect(oc_init(1301, 1920, 1080, 240.0, 50, R"({"maxPopulation":2147483647,"predatorMaxPopulation":2147483647})") == 1 &&
+                 g_world->cfg.maxPopulation == 2147483647 && g_world->cfg.predatorMaxPopulation == 2147483647,
+             "INT_MAX through oc_init: %s", oc_last_error());
+
+    // oc_set_param: an int knob reaches the reader as its exact integer.
+    t.expect(oc_init(1302, 1920, 1080, 240.0, 100, nullptr) == 1, "oc_init: %s", oc_last_error());
+    for (const char* k : {"maxPopulation", "predatorMaxPopulation", "minPopulation"}) {
+        const int want = std::strcmp(k, "minPopulation") == 0 ? 7 : 2147483647;
+        const double v = (double)want;
+        t.expect(oc_set_param(k, v) == 1, "oc_set_param(%s, %.17g) refused: %s", k, v, oc_last_error());
+        const int got = std::strcmp(k, "maxPopulation") == 0 ? g_world->cfg.maxPopulation
+                      : std::strcmp(k, "predatorMaxPopulation") == 0 ? g_world->cfg.predatorMaxPopulation : g_world->cfg.minPopulation;
+        t.expect(got == want, "oc_set_param(%s, %.17g) stored %d, want %d", k, v, got, want);
+    }
+    for (const S2& s : {S2{"maxPopulation", 2147483648.0}, S2{"maxPopulation", 0.5}, S2{"minPopulation", 7.9}, S2{"targetFood", 100.25}})
+        t.expect(oc_set_param(s.k, s.v) == 0 && std::strstr(oc_last_error(), "whole number"), "oc_set_param(%s, %.17g): %s", s.k, s.v,
+                 oc_last_error());
+    t.expect(g_world->cfg.minPopulation == 7, "a refused int change was stored");
+    oc_step(100);
+    t.expect(ofp::countNonFinite(*g_world) == 0, "non-finite after the int changes");
+
+    // Values that reach an int conversion while stepping: refused, at init and live.
+    for (const char* c : {R"({"foodSpawnBase":1e20})", R"({"foodSpawnAmp":-1e20})", R"({"foodSpawnBase":10001})",
+                          R"({"targetFood":1000001})", R"({"targetFood":-1})", R"({"maxSpeed":2000.5})", R"({"maxSpeed":1e30})",
+                          R"({"predatorSpeed":-1})", R"({"predatorSpeed":1e30,"predatorCount":2})",
+                          R"({"predatorPerception":1e30,"predatorCount":2})", R"({"perceptionRadius":2e6})",
+                          R"({"pickupRadius":1e7})", R"({"interactRadius":1e7})", R"({"predatorCaptureRadius":1e7})"})
+        t.expect(oc_init(1303, 1920, 1080, 240.0, 50, c) == 0, "%s accepted", c);
+    t.expect(oc_init(1304, 1920, 1080, 240.0, 100, nullptr) == 1, "oc_init: %s", oc_last_error());
+    const ofp::Fingerprint before = ofp::fingerprint(*g_world);
+    struct S { const char* k; double v; };
+    for (const S& s : {S{"foodSpawnBase", 1e20}, S{"foodSpawnAmp", 1e5}, S{"targetFood", 2147483647}, S{"targetFood", 1000001},
+                       S{"maxSpeed", 1e30}, S{"maxSpeed", 2001}})
+        t.expect(oc_set_param(s.k, s.v) == 0, "oc_set_param(%s, %g) accepted", s.k, s.v);
+    t.expect(ofp::fingerprint(*g_world) == before, "a refused oc_set_param changed the world");
+    // The ends run, and fish / predators stay in the world (one step < the smallest world).
+    for (const char* c : {R"({"maxSpeed":2000,"minSpeed":0,"predatorCount":3,"predatorSpeed":2000})",
+                          R"({"maxSpeed":2000,"minSpeed":2000,"triangularMotion":true,"bodyModel":true,"predatorCount":3,"predatorSpeed":2000,"toroidal":true,"perceptionRadius":40,"predatorPerception":40})",
+                          R"({"predatorPerception":1000000,"predatorCount":2,"targetFood":1000000,"foodSpawnBase":0,"foodSpawnAmp":0})"}) {
+        if (!t.expect(oc_init(1305, 100, 100, 240.0, 40, c) == 1, "%s refused: %s", c, oc_last_error())) continue;
+        bool inside = true;
+        for (int s = 0; s < 100 && inside; ++s) {
+            oc_step(1);
+            for (const Fish& f : g_world->creatures) inside &= f.pos.x >= 0.0f && f.pos.x < 100.0f && f.pos.y >= 0.0f && f.pos.y < 100.0f;
+            for (const OceanPredator& p : g_world->predators) inside &= p.pos.x >= 0.0f && p.pos.x < 100.0f && p.pos.y >= 0.0f && p.pos.y < 100.0f;
+        }
+        t.expect(inside && ofp::countNonFinite(*g_world) == 0, "%s in a 100 x 100 world: a position left the world or went non-finite", c);
+    }
 }
 #endif
 
@@ -2035,9 +2152,84 @@ void testWrap() {
         const float got = OceanWorld::wrapCoord(v, 1920.0f);
         t.expect(got == want && !std::signbit(got), "wrapCoord(%.9g, 1920) = %.9g, want %.9g", (double)v, (double)got, (double)want);
     }
-    for (float v : {1e20f, -1e20f, 3.4e38f, -3.4e38f}) {
-        const float got = OceanWorld::wrapCoord(v, 1080.0f);
-        t.expect(got >= 0.0f && got < 1080.0f, "wrapCoord(%.9g, 1080) = %.9g", (double)v, (double)got);
+    // Beyond uint64: the exact remainder from the float's bits, |v| = M·2^k
+    // (M < 2^24 whole), r = (M mod s)·(2^k mod s) mod s — no fmod involved —
+    // and the values worked out by hand (Python's exact integers): 1e20f,
+    // -1e20f, 3.4e38f, -3.4e38f mod 1080 = 632, 448, 224, 856.
+    auto exactWrap = [](float v, std::uint64_t s) {
+        int e = 0;
+        const float m = std::frexp(std::abs(v), &e);   // |v| = m·2^e, m in [0.5, 1)
+        const std::uint64_t M = (std::uint64_t)std::ldexp(m, 24);
+        std::uint64_t p = 1 % s;
+        for (int k = 0; k < e - 24; ++k) p = (p * 2) % s;
+        const std::uint64_t r = ((M % s) * p) % s;
+        return (float)((v >= 0.0f || r == 0) ? r : s - r);
+    };
+    const struct { float v, span, want; } far[] = {
+        {1e20f, 1080.0f, 632.0f}, {-1e20f, 1080.0f, 448.0f}, {3.4e38f, 1080.0f, 224.0f}, {-3.4e38f, 1080.0f, 856.0f},
+        {1e20f, 1920.0f, 512.0f}, {-1e20f, 1920.0f, 1408.0f}, {3.4e38f, 1920.0f, 1664.0f}, {-3.4e38f, 1920.0f, 256.0f},
+        {7.9e17f, 1080.0f, 88.0f}, {-7.9e17f, 1080.0f, 992.0f},
+    };
+    for (const auto& f : far) {
+        const float got = OceanWorld::wrapCoord(f.v, f.span), bitsWant = exactWrap(f.v, (std::uint64_t)f.span);
+        t.expect(got == f.want && bitsWant == f.want && !std::signbit(got), "wrapCoord(%.9g, %g) = %.9g, want %.9g (from the bits: %.9g)",
+                 (double)f.v, (double)f.span, (double)got, (double)f.want, (double)bitsWant);
+    }
+    for (int k = 0; k < 2000; ++k) {   // random far floats, both signs, spans 1080 / 1920 / 100
+        const float v = (u01() < 0.5f ? -1.0f : 1.0f) * std::ldexp(1.0f + u01(), 25 + (int)(u01() * 100.0f));
+        for (float span : {100.0f, 1080.0f, 1920.0f}) {
+            const float got = OceanWorld::wrapCoord(v, span), want = exactWrap(v, (std::uint64_t)span);
+            t.expect(std::memcmp(&got, &want, sizeof got) == 0, "wrapCoord(%a, %g) = %.9g, the exact remainder is %.9g", (double)v,
+                     (double)span, (double)got, (double)want);
+        }
+    }
+    // wrapPreview (food / predators with the 3-D flow off): the old single
+    // pass, bit for bit, on [-span, 2·span); wrapCoord further out.
+    long previewSame = 0;
+    for (float span : {100.0f, 333.25f, 1080.0f, 1920.0f}) {
+        auto onePass = [span](float v) { if (v < 0) v += span; else if (v >= span) v -= span; return v; };
+        std::vector<float> vs;
+        for (float x : {-span, 0.0f, -0.0f, span, 2.0f * span})
+            for (float v : {x, std::nextafter(x, -INFINITY), std::nextafter(x, INFINITY)}) vs.push_back(v);
+        for (float v : {-1e-30f, -1e-8f, -0.5f * span}) vs.push_back(v);
+        for (int k = 0; k < 20000; ++k) vs.push_back(-span + 3.0f * span * u01());
+        for (float v : vs) {
+            const bool in = v >= -span && v < 2.0f * span;
+            const float got = OceanWorld::wrapPreview(v, span), want = in ? onePass(v) : OceanWorld::wrapCoord(v, span);
+            previewSame += t.expect(std::memcmp(&got, &want, sizeof got) == 0, "wrapPreview(%a, %g) = %a, want %a", (double)v,
+                                    (double)span, (double)got, (double)want);
+        }
+        for (float v : {-2.0f * span, -1.5f * span, 2.5f * span, 7.25f * span, 1e20f, -1e20f}) {
+            const float got = OceanWorld::wrapPreview(v, span);
+            previewSame += t.expect(got == OceanWorld::wrapCoord(v, span) && got >= 0.0f && got < span,
+                                    "wrapPreview(%.9g, %g) = %.9g: not wrapCoord's", (double)v, (double)span, (double)got);
+        }
+    }
+    // The 3-D flow off, a flow of more than a span per step (the council's
+    // trigger: 100 eddies at strength 1000 in a 100 x 100 world; one pass left
+    // food at x ~ -154.55): every position stays in the world, and the run's
+    // fingerprint is printed so the harness compares it native vs wasm.
+    for (const char* c : {R"({"currentStrength":1000,"currentEddies":100,"currentCore":50,"currentDrift":0,"foodDrift":true,"targetFood":1})",
+                          R"({"currentStrength":1000,"currentEddies":100,"currentCore":50,"currentMode":0,"foodDrift":true,"targetFood":50,"predatorCount":3,"predatorEconomy":true})"}) {
+        OceanWorld w;
+        std::string err;
+        if (!t.expect(ofp::initWorld(w, 11, 100, 100, 240.0f, 0, c, err), "%s: %s", c, err.c_str())) continue;
+        bool inside = true;
+        float maxStep = 0.0f;   // the largest flow displacement in one step, at a food / fish / predator
+        for (int s = 0; s < 200; ++s) {
+            w.update(0.016f);
+            for (const OceanFood& f : w.food) {
+                inside &= f.pos.x >= 0.0f && f.pos.x <= 100.0f && f.pos.y >= 0.0f && f.pos.y <= 100.0f;
+                const Vec2 u = w.currentAt(f.pos);
+                maxStep = std::max(maxStep, std::max(std::abs(u.x), std::abs(u.y)) * 0.016f);
+            }
+            for (const Fish& f : w.creatures) inside &= f.pos.x >= 0.0f && f.pos.x < 100.0f && f.pos.y >= 0.0f && f.pos.y < 100.0f;
+            for (const OceanPredator& p : w.predators) inside &= p.pos.x >= 0.0f && p.pos.x <= 100.0f && p.pos.y >= 0.0f && p.pos.y <= 100.0f;
+        }
+        t.expect(inside && ofp::countNonFinite(w) == 0, "%s: a position left the 100 x 100 world or went non-finite", c);
+        t.expect(maxStep > 100.0f, "%s: the flow never moved anything more than a span in a step (max %.3g)", c, (double)maxStep);
+        t.note("flow off, > 1 span / step (max %.0f): 200 steps in the world, fingerprint %016llx", (double)maxStep,
+               (unsigned long long)ofp::fingerprint(w).all);
     }
     for (float v : {INFINITY, -INFINITY, NAN}) t.expect(std::isnan(OceanWorld::wrapCoord(v, 1920.0f)), "wrapCoord(%g) not NaN", (double)v);
     // The config that hung (validation bypassed): it now steps, and the flow
@@ -2063,7 +2255,8 @@ void testWrap() {
         t.expect(inside, "currentStrength 1e20 (unvalidated): a position left the world (%zu fish, %zu food)", w.creatures.size(),
                  w.food.size());
     }
-    t.note("%ld values == the loops bit for bit (%ld of them more than one pass); far / non-finite values end", compared, multi);
+    t.note("%ld values == the loops bit for bit (%ld of them more than one pass); far values == the exact remainder;"
+           " wrapPreview == the old single pass / wrapCoord at %ld values", compared, multi, previewSame);
 }
 
 #ifndef OCEAN_TESTS_NO_SHIM
@@ -2166,6 +2359,7 @@ int main(int argc, char** argv) {
     ot::testLight();
 #ifndef OCEAN_TESTS_NO_SHIM
     ot::testRanges();
+    ot::testShimInts();
 #endif
     ot::testE1Hash();
 #ifndef OCEAN_TESTS_NO_SHIM

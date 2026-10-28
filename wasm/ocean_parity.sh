@@ -232,6 +232,23 @@ radd r_cur_drift    '1 10 --cfg {"currentStrength":50,"currentDrift":1e30}'
 radd r_cur_eps      '1 10 --cfg {"currentStrength":50,"currentMode":1,"currentGyreEps":2}'
 radd r_cur_mode     '1 10 --cfg {"currentStrength":50,"currentMode":2}'
 radd r_patch_radius '1 10 --cfg {"toroidal":true,"foodPatches":3,"foodPatchRadius":1e30}'
+# Int keys must be whole numbers in int's range (checked before the shared
+# reader's (int) cast), and the values that reach an int conversion while stepping.
+radd r_int_big      '1 10 --cfg {"maxPopulation":2147483648}'
+radd r_int_neg_big  '1 10 --cfg {"foodPatches":-1e10}'
+radd r_int_frac     '1 10 --cfg {"currentMode":0.5}'
+radd r_int_dup      '1 10 --cfg {"predatorCount":2,"predatorCount":1e300}'
+radd r_live_int     '1 10 --set maxPopulation=2147483648@5'
+radd r_live_frac    '1 10 --set minPopulation=7.5@5'
+radd r_food_base    '1 10 --cfg {"foodSpawnBase":1e20}'
+radd r_food_amp     '1 10 --cfg {"foodSpawnAmp":-1e20}'
+radd r_live_food    '1 10 --set foodSpawnBase=1e20@5'
+radd r_target_food  '1 10 --cfg {"targetFood":2000000000}'
+radd r_live_target  '1 10 --set targetFood=2147483647@5'
+radd r_speed        '1 10 --cfg {"maxSpeed":1e30}'
+radd r_live_speed   '1 10 --set maxSpeed=1e30@5'
+radd r_pred_speed   '1 10 --cfg {"predatorCount":2,"predatorSpeed":1e30}'
+radd r_radius_big   '1 10 --cfg {"predatorCount":2,"predatorPerception":1e30}'
 
 run_one () {  # run_one INDEX: native and wasm side by side
     local i=$1 name=${NAMES[$1]}
@@ -281,6 +298,15 @@ if [ "$SRC_PRESET" = "$E1_PRESET" ]; then
     echo "== E1 preset: the harness's copy == kE1PresetJson"
 else
     echo "== E1 preset DRIFT: harness '$E1_PRESET' vs ocean_config.hpp '$SRC_PRESET'"; GUARD_FAILED=1
+fi
+# The Ocean's pre-cast check of int keys (ocean_config.hpp kSimConfigIntKeys)
+# must cover exactly the keys checkpoint::readConfig reads with intOr.
+RC_INT=$(sed -n '/^inline void readConfig/,/^}/p' src/core/checkpoint_io.hpp | grep -o 'intOr("[A-Za-z]*"' | sed 's/intOr("//;s/"//' | sort | tr '\n' ' ')
+OC_INT=$(sed -n '/kSimConfigIntKeys\[\] = {/,/};/p' src/ocean/ocean_config.hpp | grep -o '"[A-Za-z]*"' | tr -d '"' | sort | tr '\n' ' ')
+if [ -n "$RC_INT" ] && [ "$RC_INT" = "$OC_INT" ]; then
+    echo "== int keys: kSimConfigIntKeys == checkpoint::readConfig's intOr keys ($(echo "$OC_INT" | wc -w))"
+else
+    echo "== int keys DRIFT: readConfig reads '$RC_INT', kSimConfigIntKeys lists '$OC_INT'"; GUARD_FAILED=1
 fi
 # Baseline files without a case (a renamed or dropped case): stale history.
 ORPHANS=""
@@ -480,7 +506,7 @@ fi
 if [ "$FAILED" = 1 ] || [ "$TESTS_OK" = 0 ] || [ "$GUARD_FAILED" = 1 ]; then
     [ "$FAILED" = 1 ] && echo "== OCEAN PARITY FAILED: bisect with --trace, then --dump-step/--dump (native vs wasm, or old vs new engine)"
     [ "$TESTS_OK" = 0 ] && echo "== OCEAN UNIT CHECKS FAILED"
-    [ "$GUARD_FAILED" = 1 ] && echo "== OCEAN CONFIG GUARDS FAILED (a bad config accepted, the E1 preset copy drifted, or an orphan baseline)"
+    [ "$GUARD_FAILED" = 1 ] && echo "== OCEAN CONFIG GUARDS FAILED (a bad config accepted, the E1 preset copy or the int-key list drifted, or an orphan baseline)"
     exit 1
 fi
 if [ -n "${NO_TESTS:-}" ]; then

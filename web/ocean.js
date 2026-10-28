@@ -408,7 +408,7 @@
     var saved = store("evo_boids.ocean.tab");
     setSheetTab(saved && el("panel-" + saved) ? saved : "run");
   }
-  /* the Water tab's "Tuned E1 preset": its keys into the sheet */
+  /* the Water (E1) tab's "Tuned E1 preset": its keys into the sheet */
   function presetBox() {
     var box = document.createElement("div");
     box.className = "preset";
@@ -1557,7 +1557,8 @@
         { drawer: true, tab: "depth", scroll: "#f_kBuoy", place: h.drawerSides, title: "Your own settings",
           target: function () { return h.rectOf("#f_kBuoy"); },
           body: function () {
-            return "Change anything by hand: the depth physics here, waves, light and currents under Water. " +
+            return "Change anything by hand: the depth physics here, waves, light, currents and the tuned E1 preset " +
+                   "under Water (E1). " +
                    (h.touch() ? "Tap" : "Hover over") + " a setting's name to see what it does. Changes apply on " +
                    "<b>Restart</b>; settings marked <i>live</i> apply at once.";
           } },

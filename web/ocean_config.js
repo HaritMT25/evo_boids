@@ -90,7 +90,7 @@
     { id: "depth", title: "Depth", groups: [
       ["Swimming in depth", ["kBuoy", "pitchMax", "vDrag", "wallBand"]],
       ["What depth costs", ["cHold", "cPress", "depthCostScaled"]]] },
-    { id: "ocean", title: "Water", groups: [
+    { id: "ocean", title: "Water (E1)", groups: [
       ["Currents", ["currentStrength", "currentMode", "currentEddies", "currentCore", "currentDrift", "deepCurrent"]],
       ["Waves", ["waveSpeed", "waveBand", "waveGravity"]],
       ["Light", ["lightEnabled", "L0", "kWater"]],
@@ -170,7 +170,7 @@
     population: { d: "Starting fish (the world reseeds below the reseed floor).", t: "try: 200-600; more than ~1500 gets slow in a browser" },
     depth: { d: "How deep the sea is, in world units (the tank is 1920 x 1080 across, or the same area on its side on a portrait screen). Fish, food and predators live anywhere from the surface to the floor.", t: "try: 240 (the default); 120 is a shallow sea, 480 a deep one" },
     toroidal: { d: "Senses wrap across the world's sides — no walls, no sensory dead zone at the edges. Depth never wraps: the surface and the floor are real.", t: "try: on; cures the wall-hugger phenotype" },
-    bodyModel: { d: "Heritable body size and elongation: bigger = slower and costlier, longer = turns worse. The size laws (Water tab) act on the size.", t: "try: on; founders start at 1.0 and bodies drift from births" },
+    bodyModel: { d: "Heritable body size and elongation: bigger = slower and costlier, longer = turns worse. The size laws (the Water (E1) tab) act on the size.", t: "try: on; founders start at 1.0 and bodies drift from births" },
     maxPopulation: { d: "Birth cap: no births while the population is at or above it (0 = none). Applies live.", t: "try: 0, or 600 to keep a big run fast" },
     minPopulation: { d: "Reseed floor: random founders are added when the population falls below it. Applies live.", t: "try: 50 (the default)" },
     minSpeed: { d: "Minimum swim speed. Applies live.", t: "try: 0 when the swimming cost is above 0 (drifting allowed)" },

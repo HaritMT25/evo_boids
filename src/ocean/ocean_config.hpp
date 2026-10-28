@@ -23,6 +23,7 @@
 // unit-test world is inside them — but bounded, e.g. kBuoy = -1e37 used to be
 // accepted and overflowed vz to inf - inf = NaN within 50 steps.
 // ----------------------------------------------------------------------------
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -280,6 +281,13 @@ inline bool oceanConfigValid(const OceanConfig& c) { return oceanConfigError(c).
 //     predatorPerception, predatorCaptureRadius) <= 1e6: SpatialGrid casts
 //     (centre ± radius) / cell to int, cell = perceptionRadius >= 1 (a
 //     toroidal world already holds them under min(W, H) / 2; radiusError).
+// And: every other float the step reads finite (maxTurnRate, the cooldowns,
+// ages, energies, the predator economy's ...), minPopulation, predatorCount
+// and foodPatches <= kOceanMaxCount.
+inline constexpr int kOceanMaxCount = 100000;        // founders, the reseed floor, predators, food patches
+inline constexpr int kOceanMaxWorldSide = 100000;    // world width / height (the depth's own ceiling too)
+inline constexpr double kOceanMaxGridCells = 16777216.0;   // per neighbour grid (2^24)
+
 inline std::string oceanSimConfigError(const SimConfig& c) {
     const struct { const char* name; float v, lo, hi; } r[] = {
         {"currentStrength", c.currentStrength, 0.0f, 1000.0f},
@@ -307,5 +315,53 @@ inline std::string oceanSimConfigError(const SimConfig& c) {
     if (c.currentMode != 0 && c.currentMode != 1) return "currentMode must be 0 (eddies) or 1 (gyre)";
     if (c.currentEddies < 0 || c.currentEddies > 100) return "currentEddies must be in [0, 100]";
     if (c.targetFood < 0 || c.targetFood > 1000000) return "targetFood must be in [0, 1000000]";
+    // Every other float the Ocean step reads must at least be finite: a JSON
+    // number past FLT_MAX (1e39) is an infinite float — maxTurnRate inf made
+    // the heading NaN in one step; an infinite cooldown, age or predator-
+    // economy value poisons the timers and energies the same way.
+    const struct { const char* name; float v; } finite[] = {
+        {"reproMaxDistance", c.reproMaxDistance}, {"reproSoftWidth", c.reproSoftWidth},
+        {"reproGracePeriod", c.reproGracePeriod}, {"bodyMutation", c.bodyMutation},
+        {"foodEnergy", c.foodEnergy}, {"metabolicRate", c.metabolicRate}, {"geneCost", c.geneCost},
+        {"moveCost", c.moveCost}, {"maxAge", c.maxAge}, {"reproEnergy", c.reproEnergy},
+        {"newbornEnergy", c.newbornEnergy}, {"reproCooldown", c.reproCooldown},
+        {"interactCooldown", c.interactCooldown}, {"minSpeed", c.minSpeed}, {"maxTurnRate", c.maxTurnRate},
+        {"mutationMultiplier", c.mutationMultiplier}, {"predatorCooldown", c.predatorCooldown},
+        {"predatorMetabolism", c.predatorMetabolism}, {"predatorMoveCost", c.predatorMoveCost},
+        {"predatorReproEnergy", c.predatorReproEnergy}, {"predatorNewbornEnergy", c.predatorNewbornEnergy},
+        {"predatorMeal", c.predatorMeal}, {"predatorMaxAge", c.predatorMaxAge},
+        {"predatorTraitMutation", c.predatorTraitMutation},
+    };
+    for (const auto& e : finite)
+        if (!std::isfinite(e.v)) return std::string(e.name) + " must be finite";
+    // Counts that size allocations (founders added each step up to the floor,
+    // predators, food-patch centres): generous ceilings against resource
+    // exhaustion (an int key may hold up to 2^31 - 1).
+    if (c.minPopulation > kOceanMaxCount) return "minPopulation must be <= " + std::to_string(kOceanMaxCount);
+    if (c.predatorCount > kOceanMaxCount) return "predatorCount must be <= " + std::to_string(kOceanMaxCount);
+    if (c.foodPatches > kOceanMaxCount) return "foodPatches must be <= " + std::to_string(kOceanMaxCount);
+    return "";
+}
+
+// oc_init's world: width and height in [100, kOceanMaxWorldSide], founders in
+// [0, kOceanMaxCount], and neighbour grids (SpatialGrid, cell = perception
+// radius, two of them) of at most kOceanMaxGridCells cells each — a 1e5 x 1e5
+// world with perceptionRadius 1 would ask for 1e10. "" when it fits, else why
+// not. Checked by oc_init (wasm/ocean_wasm.cpp) and the harness's world
+// builder (tools/ocean_fingerprint.hpp initWorld).
+inline std::string oceanWorldSizeError(const SimConfig& c, int width, int height, int population) {
+    if (width < 100 || height < 100 || width > kOceanMaxWorldSide || height > kOceanMaxWorldSide)
+        return "world width and height must be in [100, " + std::to_string(kOceanMaxWorldSide) + "] (got " +
+               std::to_string(width) + " x " + std::to_string(height) + ")";
+    if (population < 0 || population > kOceanMaxCount)
+        return "population must be in [0, " + std::to_string(kOceanMaxCount) + "] (got " + std::to_string(population) + ")";
+    const double cell = std::max(1.0, (double)c.perceptionRadius);   // the shim's clamp: >= 1
+    const double cells = ((double)width / cell + 1.0) * ((double)height / cell + 1.0);
+    if (!(cells <= kOceanMaxGridCells)) {
+        char buf[200];
+        std::snprintf(buf, sizeof buf, "perceptionRadius %g makes a %d x %d world's neighbour grid %.3g cells (at most %.3g)",
+                      (double)c.perceptionRadius, width, height, cells, kOceanMaxGridCells);
+        return buf;
+    }
     return "";
 }

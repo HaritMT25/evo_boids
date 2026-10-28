@@ -675,8 +675,9 @@ inline void dumpState(const OceanWorld& w, std::FILE* out) {
 // ---- the world as the page builds it (wasm/ocean_wasm.cpp, oc_init) --------
 // Mirrors oc_init's config path: applyOceanDefaults, then the cfg JSON
 // (SimConfig + OceanConfig keys), then clampConfig (a copy of the shim's),
-// then rng.seed and init. Only oceanConfigError and oceanSimConfigError (the
-// Ocean's ranges, src/ocean/ocean_config.hpp) are checked here; the shim's
+// then rng.seed and init. Only oceanConfigError, oceanSimConfigError and
+// oceanWorldSizeError (the Ocean's ranges, src/ocean/ocean_config.hpp) are
+// checked here; the shim's
 // full refusal list stays the shim's: wasm/ocean_parity.sh runs every case
 // through the real oc_init / oc_set_param first (ocean_tests --accepts), and
 // tests/ocean_tests.cpp checks that this path and the shim's give the same
@@ -712,6 +713,8 @@ inline bool initWorld(OceanWorld& w, unsigned seed, int width, int height, float
     SimConfig sc;
     OceanConfig oc;
     if (!buildConfigs(cfgJson, depth, sc, oc, err)) return false;
+    err = oceanWorldSizeError(sc, width, height, pop);
+    if (!err.empty()) { err = "bad world dimensions or population: " + err; return false; }
     rng.seed(seed);
     w.cfg = sc;
     w.ocfg = oc;

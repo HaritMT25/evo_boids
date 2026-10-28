@@ -20,8 +20,13 @@
 //     currentGyreEps in [-1, 1], currentMode 0 / 1, foodPatchRadius in
 //     [0, 1e5]), or a key whose value reaches an int conversion out of range
 //     (foodSpawnBase / foodSpawnAmp in [-1e4, 1e4], targetFood in [0, 1e6],
-//     maxSpeed <= 2000, predatorSpeed in [0, 2000], every radius <= 1e6); and
-//     (readOceanJson) an int-typed key whose JSON number is not a whole
+//     maxSpeed <= 2000, predatorSpeed in [0, 2000], every radius <= 1e6); a
+//     non-finite value in any other float the step reads (maxTurnRate, the
+//     cooldowns, maxAge, the energies, the predator economy's floats, ...);
+//     minPopulation, predatorCount or foodPatches above 1e5; a width or
+//     height outside [100, 1e5], a population outside [0, 1e5], or neighbour
+//     grids (cell = perceptionRadius) over 2^24 cells (oceanWorldSizeError);
+//     and (readOceanJson) an int-typed key whose JSON number is not a whole
 //     number in int's range, before the shared reader casts it.
 //   * oc_set_param: the Ocean keys kBuoy, pitchMax, vDrag, wallBand,
 //     buoyMutation, cHold, cPress, foodDepthSpread, the E1 keys (waveSpeed,
@@ -225,8 +230,15 @@ EVO_EXPORT int oc_init(unsigned seed, int width, int height, double depth, int p
     if (!readOceanJson(cfgJson, cfg, oc, g_error)) return 0;
     clampConfig(cfg);
     if (std::isfinite(depth) && depth <= 0.0) depth = OceanConfig{}.depth;
-    if (width < 100 || height < 100 || population < 0 || !std::isfinite(depth) || depth < 10.0) {
+    if (!std::isfinite(depth) || depth < 10.0) {
         g_error = "bad world dimensions or population";
+        return 0;
+    }
+    // Width / height in [100, 1e5], population in [0, 1e5], neighbour grids
+    // of at most 2^24 cells (ocean_config.hpp oceanWorldSizeError).
+    g_error = oceanWorldSizeError(cfg, width, height, population);
+    if (!g_error.empty()) {
+        g_error = "bad world dimensions or population: " + g_error;
         return 0;
     }
     oc.depth = (float)depth;

@@ -249,6 +249,26 @@ radd r_speed        '1 10 --cfg {"maxSpeed":1e30}'
 radd r_live_speed   '1 10 --set maxSpeed=1e30@5'
 radd r_pred_speed   '1 10 --cfg {"predatorCount":2,"predatorSpeed":1e30}'
 radd r_radius_big   '1 10 --cfg {"predatorCount":2,"predatorPerception":1e30}'
+# Every other float the step reads must be finite (1e39 is an infinite float),
+# and the counts / world sizes that size allocations have generous ceilings.
+radd r_turn_inf     '1 10 --cfg {"triangularMotion":true,"maxTurnRate":1e39}'
+radd r_cooldown_inf '1 10 --cfg {"interactCooldown":1e39}'
+radd r_repro_cd_inf '1 10 --cfg {"reproCooldown":-1e39}'
+radd r_pred_metab   '1 10 --cfg {"predatorCount":2,"predatorEconomy":true,"predatorMetabolism":1e39}'
+radd r_pred_cd_inf  '1 10 --cfg {"predatorCount":2,"predatorCooldown":1e39}'
+radd r_pred_meal    '1 10 --cfg {"predatorCount":2,"predatorEconomy":true,"predatorMeal":1e39}'
+radd r_pred_repro   '1 10 --cfg {"predatorCount":2,"predatorEconomy":true,"predatorReproEnergy":-1e39}'
+radd r_pred_age_inf '1 10 --cfg {"predatorCount":2,"predatorEconomy":true,"predatorMaxAge":1e39}'
+# (Each just past its ceiling, and still small enough to allocate: were the
+# check missing, oc_init would accept it, not crash into a false "refused".)
+radd r_pop_big      '1 10 --pop 100001'
+radd r_width_big    '1 10 --w 100001'
+radd r_height_big   '1 10 --h 100001'
+radd r_grid_cells   '1 10 --w 6000 --h 3000 --cfg {"perceptionRadius":1,"interactRadius":1,"pickupRadius":1}'
+radd r_minpop_big   '1 10 --cfg {"minPopulation":100001}'
+radd r_live_minpop  '1 10 --set minPopulation=100001@5'
+radd r_predcount_big '1 10 --cfg {"predatorCount":100001}'
+radd r_patches_big  '1 10 --cfg {"foodPatches":100001}'
 
 run_one () {  # run_one INDEX: native and wasm side by side
     local i=$1 name=${NAMES[$1]}

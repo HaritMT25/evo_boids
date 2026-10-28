@@ -118,7 +118,14 @@
 //                 (2147483647 used to become 2.14748365e+09); foodSpawn*,
 //                 targetFood, the speeds and the radii refused beyond their
 //                 ranges (init and live, world unchanged); at maxSpeed /
-//                 predatorSpeed 2000 everything stays in a 100 x 100 world
+//                 predatorSpeed 2000 everything stays in a 100 x 100 world;
+//                 a non-finite maxTurnRate / cooldown / predator-economy
+//                 float, minPopulation / predatorCount / foodPatches / founders
+//                 / width / height over 1e5, or neighbour grids over 2^24
+//                 cells refused (init and live, the world kept); the ceilings
+//                 themselves accepted. (Every shim call is made before
+//                 oc_last_error() is read: as arguments of one expect() their
+//                 order was unspecified.)
 //
 // `ocean_tests --accepts SEED STEPS [driver args]` instead asks the shim
 // whether it would accept one ocean_parity_driver case (see acceptsMain).
@@ -931,13 +938,19 @@ void testReproducible() {
 void testReset() {
     Test t("reset");
     const char* cfg = R"({"predatorCount":4,"predatorEconomy":true,"currentStrength":60,"foodPatches":4,"foodDepthMode":1,"kBuoy":2})";
-    if (!t.expect(oc_init(77, 1920, 1080, 240.0, 300, cfg) == 1, "oc_init refused: %s", oc_last_error())) return;
+    // Every shim call below is made BEFORE oc_last_error() is read: as two
+    // arguments of one call their order would be unspecified (a stale message,
+    // or a pointer the shim call then reallocated).
+    const int init0 = oc_init(77, 1920, 1080, 240.0, 300, cfg);
+    if (!t.expect(init0 == 1, "oc_init refused: %s", oc_last_error())) return;
     const ofp::Fingerprint f0 = ofp::fingerprint(*g_world);
     oc_step(400);
     const ofp::Fingerprint f400 = ofp::fingerprint(*g_world);
-    t.expect(oc_set_param("kBuoy", 5.0) == 1 && oc_set_param("pitchMax", 0.2) == 1, "oc_set_param refused: %s", oc_last_error());
+    const bool setOk = oc_set_param("kBuoy", 5.0) == 1 && oc_set_param("pitchMax", 0.2) == 1;
+    t.expect(setOk, "oc_set_param refused: %s", oc_last_error());
     oc_step(100);
-    t.expect(oc_reset() == 1, "oc_reset failed: %s", oc_last_error());
+    const int reset0 = oc_reset();
+    t.expect(reset0 == 1, "oc_reset failed: %s", oc_last_error());
     t.expect(ofp::fingerprint(*g_world) == f0, "oc_reset did not restore the initial world");
     oc_step(400);
     t.expect(ofp::fingerprint(*g_world) == f400, "after oc_reset, 400 steps differ from the first 400");
@@ -965,7 +978,8 @@ void testReset() {
         const ofp::Fingerprint h300 = ofp::fingerprint(w);
         const std::string r300 = rng.state();
         rng.seed(999);   // the shim must not depend on what the rng held before oc_init
-        if (!t.expect(oc_init(78, 1600, 900, 300.0, 250, c) == 1, "oc_init: %s", oc_last_error())) continue;
+        const int initOk = oc_init(78, 1600, 900, 300.0, 250, c);
+        if (!t.expect(initOk == 1, "oc_init: %s", oc_last_error())) continue;
         t.expect(ofp::fingerprint(*g_world) == h0 && rng.state() == r0, "shim vs harness differ after init (cfg %s)",
                  c ? c : "{}");
         oc_step(300);
@@ -2116,7 +2130,8 @@ void testLight() {
         t.expect(worstDeep < 6e-7, "kWater 1: lightAt off L0·exp(-d) by %.3g (relative) down to depth 87", worstDeep);
     }
 #ifndef OCEAN_TESTS_NO_SHIM
-    t.expect(oc_init(902, 1920, 1080, 240.0, 50, R"({"lightEnabled":true,"L0":2.5,"kWater":0.01})") == 1, "oc_init: %s", oc_last_error());
+    const int initOk = oc_init(902, 1920, 1080, 240.0, 50, R"({"lightEnabled":true,"L0":2.5,"kWater":0.01})");
+    t.expect(initOk == 1, "oc_init: %s", oc_last_error());
     t.expect(oc_light_enabled() == 1 && oc_light_l0() == 2.5 && oc_light_kwater() == (double)0.01f, "light exports %d %g %g",
              oc_light_enabled(), oc_light_l0(), oc_light_kwater());
     t.expect(oc_set_param("lightEnabled", 0.0) == 1 && oc_light_enabled() == 0, "lightEnabled 0 via oc_set_param");
@@ -2178,7 +2193,8 @@ void testRanges() {
     for (const K& k : ks) {
         for (double v : {k.lo, k.hi}) {
             const std::string c = cfgOf(k, v);
-            if (!t.expect(oc_init(1001, 1920, 1080, 240.0, 100, c.c_str()) == 1, "%s refused: %s", c.c_str(), oc_last_error())) continue;
+            const int initOk = oc_init(1001, 1920, 1080, 240.0, 100, c.c_str());
+            if (!t.expect(initOk == 1, "%s refused: %s", c.c_str(), oc_last_error())) continue;
             ++accepted;
             oc_step(300);
             ++runs;
@@ -2200,12 +2216,15 @@ void testRanges() {
                           R"({"currentMode":2})", R"({"currentMode":-1})", R"({"currentEddies":101})", R"({"currentEddies":-1})",
                           R"({"currentMode":1,"currentStrength":1e20,"deepCurrent":true,"foodDrift":true,"targetFood":1})"})
         refused += t.expect(oc_init(1002, 1920, 1080, 240.0, 100, c) == 0, "%s accepted", c);
-    for (const char* c : {R"({"deepCurrent":1,"sizeDrift":true,"mouthGate":0,"foodDepthMode":1})"})
-        accepted += t.expect(oc_init(1002, 1920, 1080, 240.0, 100, c) == 1, "%s refused: %s", c, oc_last_error());
+    for (const char* c : {R"({"deepCurrent":1,"sizeDrift":true,"mouthGate":0,"foodDepthMode":1})"}) {
+        const int initOk = oc_init(1002, 1920, 1080, 240.0, 100, c);
+        accepted += t.expect(initOk == 1, "%s refused: %s", c, oc_last_error());
+    }
     // The current's int keys at their ends, run.
     for (const char* c : {R"({"currentEddies":100,"currentStrength":1000,"foodDrift":true,"targetFood":300,"deepCurrent":true})",
                           R"({"currentEddies":0,"currentStrength":1000,"foodDrift":true,"currentMode":0})"}) {
-        if (!t.expect(oc_init(1006, 1920, 1080, 240.0, 100, c) == 1, "%s refused: %s", c, oc_last_error())) continue;
+        const int initOk = oc_init(1006, 1920, 1080, 240.0, 100, c);
+        if (!t.expect(initOk == 1, "%s refused: %s", c, oc_last_error())) continue;
         ++accepted;
         oc_step(300);
         ++runs;
@@ -2213,7 +2232,10 @@ void testRanges() {
     }
     // The sea's depth (oc_init's argument): [10, 100000].
     refused += t.expect(oc_init(1003, 1920, 1080, 100001.0, 50, nullptr) == 0, "depth 100001 accepted");
-    accepted += t.expect(oc_init(1003, 1920, 1080, 100000.0, 50, nullptr) == 1, "depth 100000 refused: %s", oc_last_error());
+    {
+        const int initOk = oc_init(1003, 1920, 1080, 100000.0, 50, nullptr);
+        accepted += t.expect(initOk == 1, "depth 100000 refused: %s", oc_last_error());
+    }
     // Live: refused as stored, the world unchanged.
     t.expect(oc_init(1004, 1920, 1080, 240.0, 100, nullptr) == 1, "oc_init");
     const ofp::Fingerprint before = ofp::fingerprint(*g_world);
@@ -2223,15 +2245,18 @@ void testRanges() {
         refused += t.expect(oc_set_param(s.k, s.v) == 0, "oc_set_param(%s, %g) accepted", s.k, s.v);
     t.expect(ofp::fingerprint(*g_world) == before, "a refused oc_set_param changed the world");
     for (const S& s : {S{"kBuoy", 1000}, S{"waveSpeed", 100}, S{"waveBand", 1}, S{"mouthGate", 1}, S{"deepCurrent", 1},
-                       S{"kWater", 1}, S{"cHold", 100}, S{"sizeFight", 0}})
-        accepted += t.expect(oc_set_param(s.k, s.v) == 1, "oc_set_param(%s, %g) refused: %s", s.k, s.v, oc_last_error());
+                       S{"kWater", 1}, S{"cHold", 100}, S{"sizeFight", 0}}) {
+        const int setOk = oc_set_param(s.k, s.v);
+        accepted += t.expect(setOk == 1, "oc_set_param(%s, %g) refused: %s", s.k, s.v, oc_last_error());
+    }
     oc_step(300);
     t.expect(ofp::countNonFinite(*g_world) == 0, "live extremes: non-finite state");
     // The flow's extreme corners: the smallest / largest world, waves at their limits.
     for (int big = 0; big < 2; ++big) {
         const char* c = R"({"waveSpeed":100,"waveBand":1,"waveGravity":10000,"deepCurrent":true,"currentStrength":80,"foodDrift":true,"predatorCount":2})";
         const int W = big ? 20000 : 100;
-        if (!t.expect(oc_init(1005, W, W, big ? 100000.0 : 10.0, 60, c) == 1, "corner %d: %s", big, oc_last_error())) continue;
+        const int initOk = oc_init(1005, W, W, big ? 100000.0 : 10.0, 60, c);
+        if (!t.expect(initOk == 1, "corner %d: %s", big, oc_last_error())) continue;
         oc_step(200);
         ++runs;
         t.expect(ofp::countNonFinite(*g_world) == 0, "corner world %dx%d: non-finite state", W, W);
@@ -2290,26 +2315,34 @@ void testShimInts() {
     // A repeated key: every occurrence is checked, not only the one the reader takes.
     for (const char* c : {R"({"predatorCount":2,"predatorCount":3e9})", R"({"maxPopulation":2147483648})",
                           R"({"foodPatches":-1e10})", R"({"minPopulation":1e999})", R"({"currentMode":0.5})",
-                          R"({"currentMode":1e300})", R"({"currentEddies":2.5})", R"({"predatorCount":2,"predatorCount":2.5})"})
-        t.expect(oc_init(1301, 1920, 1080, 240.0, 50, c) == 0 && std::strstr(oc_last_error(), "whole number"), "%s: %s", c,
-                 oc_last_error());
-    t.expect(oc_init(1301, 1920, 1080, 240.0, 50, R"({"maxPopulation":2147483647,"predatorMaxPopulation":2147483647})") == 1 &&
-                 g_world->cfg.maxPopulation == 2147483647 && g_world->cfg.predatorMaxPopulation == 2147483647,
-             "INT_MAX through oc_init: %s", oc_last_error());
+                          R"({"currentMode":1e300})", R"({"currentEddies":2.5})", R"({"predatorCount":2,"predatorCount":2.5})"}) {
+        const int initRc = oc_init(1301, 1920, 1080, 240.0, 50, c);   // before oc_last_error() is read
+        t.expect(initRc == 0 && std::strstr(oc_last_error(), "whole number"), "%s: %s", c, oc_last_error());
+    }
+    {
+        const int initRc = oc_init(1301, 1920, 1080, 240.0, 50, R"({"maxPopulation":2147483647,"predatorMaxPopulation":2147483647})");
+        t.expect(initRc == 1 && g_world->cfg.maxPopulation == 2147483647 && g_world->cfg.predatorMaxPopulation == 2147483647,
+                 "INT_MAX through oc_init: %s", oc_last_error());
+    }
 
     // oc_set_param: an int knob reaches the reader as its exact integer.
-    t.expect(oc_init(1302, 1920, 1080, 240.0, 100, nullptr) == 1, "oc_init: %s", oc_last_error());
+    {
+        const int initRc = oc_init(1302, 1920, 1080, 240.0, 100, nullptr);
+        t.expect(initRc == 1, "oc_init: %s", oc_last_error());
+    }
     for (const char* k : {"maxPopulation", "predatorMaxPopulation", "minPopulation"}) {
         const int want = std::strcmp(k, "minPopulation") == 0 ? 7 : 2147483647;
         const double v = (double)want;
-        t.expect(oc_set_param(k, v) == 1, "oc_set_param(%s, %.17g) refused: %s", k, v, oc_last_error());
+        const int setRc = oc_set_param(k, v);
+        t.expect(setRc == 1, "oc_set_param(%s, %.17g) refused: %s", k, v, oc_last_error());
         const int got = std::strcmp(k, "maxPopulation") == 0 ? g_world->cfg.maxPopulation
                       : std::strcmp(k, "predatorMaxPopulation") == 0 ? g_world->cfg.predatorMaxPopulation : g_world->cfg.minPopulation;
         t.expect(got == want, "oc_set_param(%s, %.17g) stored %d, want %d", k, v, got, want);
     }
-    for (const S2& s : {S2{"maxPopulation", 2147483648.0}, S2{"maxPopulation", 0.5}, S2{"minPopulation", 7.9}, S2{"targetFood", 100.25}})
-        t.expect(oc_set_param(s.k, s.v) == 0 && std::strstr(oc_last_error(), "whole number"), "oc_set_param(%s, %.17g): %s", s.k, s.v,
-                 oc_last_error());
+    for (const S2& s : {S2{"maxPopulation", 2147483648.0}, S2{"maxPopulation", 0.5}, S2{"minPopulation", 7.9}, S2{"targetFood", 100.25}}) {
+        const int setRc = oc_set_param(s.k, s.v);
+        t.expect(setRc == 0 && std::strstr(oc_last_error(), "whole number"), "oc_set_param(%s, %.17g): %s", s.k, s.v, oc_last_error());
+    }
     t.expect(g_world->cfg.minPopulation == 7, "a refused int change was stored");
     oc_step(100);
     t.expect(ofp::countNonFinite(*g_world) == 0, "non-finite after the int changes");
@@ -2321,7 +2354,10 @@ void testShimInts() {
                           R"({"predatorPerception":1e30,"predatorCount":2})", R"({"perceptionRadius":2e6})",
                           R"({"pickupRadius":1e7})", R"({"interactRadius":1e7})", R"({"predatorCaptureRadius":1e7})"})
         t.expect(oc_init(1303, 1920, 1080, 240.0, 50, c) == 0, "%s accepted", c);
-    t.expect(oc_init(1304, 1920, 1080, 240.0, 100, nullptr) == 1, "oc_init: %s", oc_last_error());
+    {
+        const int initRc = oc_init(1304, 1920, 1080, 240.0, 100, nullptr);
+        t.expect(initRc == 1, "oc_init: %s", oc_last_error());
+    }
     const ofp::Fingerprint before = ofp::fingerprint(*g_world);
     struct S { const char* k; double v; };
     for (const S& s : {S{"foodSpawnBase", 1e20}, S{"foodSpawnAmp", 1e5}, S{"targetFood", 2147483647}, S{"targetFood", 1000001},
@@ -2332,7 +2368,8 @@ void testShimInts() {
     for (const char* c : {R"({"maxSpeed":2000,"minSpeed":0,"predatorCount":3,"predatorSpeed":2000})",
                           R"({"maxSpeed":2000,"minSpeed":2000,"triangularMotion":true,"bodyModel":true,"predatorCount":3,"predatorSpeed":2000,"toroidal":true,"perceptionRadius":40,"predatorPerception":40})",
                           R"({"predatorPerception":1000000,"predatorCount":2,"targetFood":1000000,"foodSpawnBase":0,"foodSpawnAmp":0})"}) {
-        if (!t.expect(oc_init(1305, 100, 100, 240.0, 40, c) == 1, "%s refused: %s", c, oc_last_error())) continue;
+        const int initRc = oc_init(1305, 100, 100, 240.0, 40, c);
+        if (!t.expect(initRc == 1, "%s refused: %s", c, oc_last_error())) continue;
         bool inside = true;
         for (int s = 0; s < 100 && inside; ++s) {
             oc_step(1);
@@ -2341,6 +2378,55 @@ void testShimInts() {
         }
         t.expect(inside && ofp::countNonFinite(*g_world) == 0, "%s in a 100 x 100 world: a position left the world or went non-finite", c);
     }
+
+    // Every other float the step reads must be finite (JSON 1e39 is an infinite
+    // float; maxTurnRate inf made a NaN heading), and the counts / sizes that
+    // size allocations have ceilings: refused (the world kept), live too; just
+    // under, accepted.
+    {
+        const int initRc = oc_init(1306, 1920, 1080, 240.0, 50, nullptr);
+        t.expect(initRc == 1, "oc_init: %s", oc_last_error());
+    }
+    const ofp::Fingerprint kept = ofp::fingerprint(*g_world);
+    int refusedNew = 0;
+    for (const char* c : {R"({"triangularMotion":true,"maxTurnRate":1e39})", R"({"interactCooldown":1e39})", R"({"reproCooldown":-1e39})",
+                          R"({"predatorCount":2,"predatorCooldown":1e39})", R"({"predatorEconomy":true,"predatorMetabolism":1e39})",
+                          R"({"predatorMoveCost":-1e39})", R"({"predatorReproEnergy":1e39})", R"({"predatorNewbornEnergy":1e39})",
+                          R"({"predatorMeal":1e39})", R"({"predatorMaxAge":1e39})", R"({"minPopulation":100001})",
+                          R"({"predatorCount":100001})", R"({"foodPatches":100001})"}) {
+        const int initRc = oc_init(1307, 1920, 1080, 240.0, 50, c);
+        refusedNew += t.expect(initRc == 0, "%s accepted", c);
+    }
+    const struct { int W, H, pop; const char* cfg; } dims[] = {
+        {100001, 1080, 50, nullptr}, {1920, 100001, 50, nullptr}, {1920, 1080, 100001, nullptr}, {99, 1080, 50, nullptr},
+        {6000, 3000, 50, R"({"perceptionRadius":1,"interactRadius":1,"pickupRadius":1})"},   // 18M grid cells > 2^24
+    };
+    for (const auto& dm : dims) {
+        const int initRc = oc_init(1307, dm.W, dm.H, 240.0, dm.pop, dm.cfg);
+        refusedNew += t.expect(initRc == 0, "oc_init %d x %d, %d founders (%s) accepted", dm.W, dm.H, dm.pop, dm.cfg ? dm.cfg : "{}");
+    }
+    {
+        const int setRc = oc_set_param("minPopulation", 100001.0);
+        refusedNew += t.expect(setRc == 0, "oc_set_param(minPopulation, 100001) accepted");
+    }
+    t.expect(ofp::fingerprint(*g_world) == kept, "a refused oc_init / oc_set_param changed the world");
+    int acceptedEdge = 0;
+    for (const char* c : {R"({"triangularMotion":true,"maxTurnRate":3e38})", R"({"minPopulation":100000,"predatorCount":3000,"foodPatches":100000})",
+                          R"({"perceptionRadius":2,"interactRadius":1,"pickupRadius":1})"}) {
+        const int initRc = oc_init(1308, 1920, 1080, 240.0, 50, c);
+        acceptedEdge += t.expect(initRc == 1, "%s refused: %s", c, oc_last_error());
+    }
+    {
+        const int initRc = oc_init(1308, 100000, 1080, 240.0, 50, nullptr);
+        acceptedEdge += t.expect(initRc == 1, "a 100000 x 1080 world refused: %s", oc_last_error());
+        const int setRc = oc_set_param("minPopulation", 100000.0);
+        acceptedEdge += t.expect(setRc == 1, "oc_set_param(minPopulation, 100000) refused: %s", oc_last_error());
+    }
+    {
+        const int initRc = oc_init(1309, 1920, 1080, 240.0, 50, nullptr);   // release the big worlds
+        t.expect(initRc == 1, "oc_init: %s", oc_last_error());
+    }
+    t.note("non-finite floats / allocation ceilings: %d refused, %d at the edge accepted", refusedNew, acceptedEdge);
 }
 #endif
 
@@ -2536,7 +2622,8 @@ void testPreset() {
     t.expect(oc.waveSpeed > 0.0f && oc.deepCurrent && oc.lightEnabled && oc.depthCostScaled && sc.currentStrength > 0.0f &&
              sc.foodDrift, "the preset does not turn on waves, deep currents, light and scaled costs");
     t.expect(std::strcmp(oc_e1_preset(), kE1PresetJson) == 0, "oc_e1_preset() is not kE1PresetJson");
-    t.expect(oc_init(1201, 1920, 1080, 240.0, 300, kE1PresetJson) == 1, "oc_init refused the preset: %s", oc_last_error());
+    const int initRc = oc_init(1201, 1920, 1080, 240.0, 300, kE1PresetJson);
+    t.expect(initRc == 1, "oc_init refused the preset: %s", oc_last_error());
     oc_step(500);
     t.expect(ofp::countNonFinite(*g_world) == 0 && g_world->flowE1() && g_world->waveClockStarted(), "preset world");
     t.note("kE1PresetJson = %s", kE1PresetJson);

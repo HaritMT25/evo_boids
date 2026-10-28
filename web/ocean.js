@@ -196,14 +196,25 @@
     /* the user dragged/refit the camera away: stop wanting it */
     if (!on) wantFollow = false;
   }
-  function reset() {
+  /* R: a new world (new seed); Shift+R: replay this one from the start.
+   * Either way the camera stays where it is — C is the key that moves it. */
+  function reset(replay) {
     if (scene.following()) scene.setFollow(false);
     wantFollow = false; selectedId = null;
-    if (!M._oc_reset()) { fail("oc_reset failed", lastError()); return; }
     var w0 = W, h0 = H, d0 = D;
-    readWorld();
+    if (replay) {
+      if (!M._oc_reset()) { fail("oc_reset failed", lastError()); return; }
+      readWorld();
+    } else {
+      INIT.seed = (Math.random() * 4294967296) >>> 0;
+      try { initWorld(); } catch (err) { fail("oc_init failed", lastError()); return; }
+      try {
+        var u = new URL(location.href);
+        u.searchParams.set("seed", String(INIT.seed));
+        history.replaceState(null, "", u);   /* a reload keeps this world */
+      } catch (err) { /* file:// or a sandboxed frame: the seed is in the HUD */ }
+    }
     if (W !== w0 || H !== h0 || D !== d0) scene.setWorld(W, H, D);
-    else scene.resetView(true);
     rates.reset();
     stepMs = 0;
     dirtyHud = true;
@@ -272,6 +283,7 @@
     /* <small class="x">: extras a narrow screen leaves out */
     setText("h-pop", fmtInt(s.n) + ' <small class="x">· ' + fmtInt(s.fc) + " food · " + s.pc + " pred</small>");
     setText("h-frame", fmtInt(frame) + ' <small class="x">· ' + (frame * DT / 60).toFixed(1) + " min</small>");
+    setText("h-seed", String(INIT.seed));
     setText("h-births", fmtInt(births) + (rb !== null ? ' <small class="x">· ' + rb.toFixed(1) + "/1k fr</small>" : ""));
     setText("h-reseeds", fmtInt(reseeds) + (rr !== null ? ' <small class="x">· ' + rr.toFixed(1) + "/1k fr</small>" : ""));
     setText("h-deaths", fmtInt(g("deaths")));
@@ -338,7 +350,7 @@
       else if (k === "+" || k === "=") changeSpeed(1);
       else if (k === "-" || k === "_") changeSpeed(-1);
       else if (k === "f" || k === "F") follow();
-      else if (k === "r" || k === "R") reset();
+      else if (k === "r" || k === "R") reset(e.shiftKey);
       else if (k === "c" || k === "C") { wantFollow = false; scene.resetView(true); }
       else if (k === "Escape") unfollow();
       else if (k === "." && paused) stepOnce = true;
@@ -350,7 +362,7 @@
     btn("b-slower", function () { changeSpeed(-1); });
     btn("b-faster", function () { changeSpeed(1); });
     btn("b-follow", function () { if (scene.following()) unfollow(); else follow(); });
-    btn("b-reset", reset);
+    btn("b-reset", function () { reset(false); });
     /* a short tap or click marks the fish nearest it on screen; empty water
      * lets go. A drag, pinch or long press belongs to the camera. */
     var tap = null;

@@ -642,7 +642,7 @@ private:
             flow_.TxS[i] = (float)(t.kx / kk * flow_.xScale);
             flow_.TyS[i] = (float)(t.ky / kk * flow_.yScale);
         }
-        flow_.yRot.resize(oceanflow::kYCells);
+        flow_.yRot.assign(oceanflow::kYCells, oceanflow::TrigV{});
     }
 
     static std::uint32_t floatKey(float v) { std::uint32_t u; std::memcpy(&u, &v, 4); return u; }
@@ -687,7 +687,7 @@ private:
                 if (x == 0.0f || x == D) { H = 0.0f; V = 0.0f; }
             };
             auto at = [&](int j) { return (j == 0) ? lo[q] : (j == n) ? hi[q] : (float)((double)lo[q] + h * (double)j); };
-            pc.cell.resize((std::size_t)n);
+            pc.cell.assign((std::size_t)n, oceanflow::DepthCell{});
             for (int j = 0; j < n; ++j) {
                 const float d0 = at(j), d1 = at(j + 1);
                 oceanflow::DepthCell& cl = pc.cell[j];
@@ -743,17 +743,21 @@ private:
                     oceanflow::cosSin(waves_[i].phi - waves_[i].phase, c.cp[i], c.sp[i]);
                     c.keyPhase[i] = kp[i];
                 }
-                const oceanflow::YCell* base = oceanflow::yBaseTable().cell;
-                for (int j = 0; j < oceanflow::kYCells; ++j)
-                    for (int q = 0; q < kWaveTrains - 1; ++q) {
-                        oceanflow::TrigCell r = base[j].t[q];
-                        const float cr = c.cp[q + 1], sr = c.sp[q + 1];
+                const oceanflow::TrigV* base = oceanflow::yBaseTable().cell;
+                const oceanflow::TrigCell lane0 = {c.cp[0], 0.0f, 0.0f, 0.0f, c.sp[0], 0.0f, 0.0f, 0.0f};
+                for (int j = 0; j < oceanflow::kYCells; ++j) {
+                    oceanflow::TrigV& y = c.yRot[j];
+                    oceanflow::setLane(y, 0, lane0);   // train 0 (n = 0): its constant y factor
+                    for (int i = 1; i < kWaveTrains; ++i) {
+                        oceanflow::TrigCell r = oceanflow::getLane(base[j], i);
+                        const float cr = c.cp[i], sr = c.sp[i];
                         oceanflow::rotate(r.c, r.s, cr, sr);
                         oceanflow::rotate(r.dc, r.ds, cr, sr);
                         oceanflow::rotate(r.mc0, r.ms0, cr, sr);
                         oceanflow::rotate(r.mc1, r.ms1, cr, sr);
-                        c.yRot[j].t[q] = r;
+                        oceanflow::setLane(y, i, r);
                     }
+                }
                 c.phaseKeyed = true;
             }
         }
@@ -808,14 +812,15 @@ private:
         }
         return U;
     }
-    // Every train's V and V' = dV/dd at depth d from the pieces; false = not
-    // from the tables (none built, or d is NaN).
-    bool depthProfiles(float d, float V[kWaveTrains], float Vd[kWaveTrains]) const {
+    // Every train's V and V' = dV/dd at depth d from the pieces (a train per
+    // lane); false = not from the tables (none built, or d is NaN).
+    bool depthProfiles(float d, oceanflow::v4f& V, oceanflow::v4f& Vd) const {
         const oceanflow::FlowCache& c = flow_;
         if (!c.depthOn) return false;
         if (!(d > 0.0f && d < D)) {
             if (!(d <= 0.0f || d >= D)) return false;   // NaN
-            for (int i = 0; i < kWaveTrains; ++i) { V[i] = 0.0f; Vd[i] = 0.0f; }   // surface, floor, outside
+            V = oceanflow::v4f{};                        // surface, floor, outside
+            Vd = oceanflow::v4f{};
             return true;
         }
         const int q = (d <= c.b) ? 0 : (d <= c.Dh) ? 1 : (d <= c.Dmb) ? 2 : 3;
@@ -824,12 +829,10 @@ private:
         if (!(s >= 0.0 && s <= (double)pc.n + 0.5)) return false;
         int j = (int)s;
         if (j > pc.n - 1) j = pc.n - 1;
-        const oceanflow::Basis B = oceanflow::basis((float)(s - (double)j));
+        const oceanflow::BasisV B = oceanflow::basisV((float)(s - (double)j));
         const oceanflow::DepthCell& cl = pc.cell[j];
-        for (int i = 0; i < kWaveTrains; ++i) {
-            V[i] = oceanflow::hval(B, cl.v[i], cl.dv[i], cl.m0[i], cl.m1[i]);
-            Vd[i] = oceanflow::hder(B, cl.dv[i], cl.m0[i], cl.m1[i]) * pc.dScale;
-        }
+        V = oceanflow::hval(B, cl.v, cl.dv, cl.m0, cl.m1);
+        Vd = oceanflow::hder(B, cl.dv, cl.m0, cl.m1) * oceanflow::splat(pc.dScale);
         return true;
     }
     // A periodic cell coordinate: v·scale in [0, N) after at most one add /
@@ -848,39 +851,32 @@ private:
     //   u_x = (T_x V') P, u_y = (T_y V') P, u_d = (−V)(T_x ∂x P + T_y ∂y P),
     // P = cos θ from the cos / sin tables; false = use the exact formulas.
     bool wavesTable(Vec2 p, float d, Flow u[kWaveTrains]) const {
+        using oceanflow::v4f;
         const oceanflow::FlowCache& c = flow_;
-        float V[kWaveTrains], Vd[kWaveTrains];
+        v4f V, Vd;
         if (!depthProfiles(d, V, Vd)) return false;
         int ix, iy;
         float tx, ty;
         if (!cellCoord(p.x, c.xScale, oceanflow::kXCells, ix, tx)) return false;
         if (!cellCoord(p.y, c.yScale, oceanflow::kYCells, iy, ty)) return false;
-        const oceanflow::Basis bx = oceanflow::basis(tx), by = oceanflow::basis(ty);
-        const oceanflow::XCell& X = oceanflow::xTable().cell[ix];
-        const oceanflow::YCell& Y = c.yRot[iy];
+        const oceanflow::BasisV bx = oceanflow::basisV(tx), by = oceanflow::basisV(ty);
+        const oceanflow::TrigV& X = oceanflow::xTable().cell[ix];
+        const oceanflow::TrigV& Y = c.yRot[iy];   // lane 0: train 0's constant factor
+        const v4f cx = oceanflow::hval(bx, X.c, X.dc, X.mc0, X.mc1);
+        const v4f sx = oceanflow::hval(bx, X.s, X.ds, X.ms0, X.ms1);
+        const v4f cxd = oceanflow::hder(bx, X.dc, X.mc0, X.mc1);   // per unit t
+        const v4f sxd = oceanflow::hder(bx, X.ds, X.ms0, X.ms1);
+        const v4f cy = oceanflow::hval(by, Y.c, Y.dc, Y.mc0, Y.mc1);
+        const v4f sy = oceanflow::hval(by, Y.s, Y.ds, Y.ms0, Y.ms1);
+        const v4f cyd = oceanflow::hder(by, Y.dc, Y.mc0, Y.mc1);
+        const v4f syd = oceanflow::hder(by, Y.ds, Y.ms0, Y.ms1);
+        const v4f P = cx * cy - sx * sy;
+        const v4f gradT = c.TxS * (cxd * cy - sxd * sy) + c.TyS * (cx * cyd - sx * syd);   // T·∇P
+        const v4f ux = (c.Tx * Vd) * P, uy = (c.Ty * Vd) * P, ud = (-V) * gradT;
         for (int i = 0; i < kWaveTrains; ++i) {
-            const oceanflow::TrigCell& a = X.t[i];
-            const float cx = oceanflow::hval(bx, a.c, a.dc, a.mc0, a.mc1);
-            const float sx = oceanflow::hval(bx, a.s, a.ds, a.ms0, a.ms1);
-            const float cxd = oceanflow::hder(bx, a.dc, a.mc0, a.mc1);   // per unit t
-            const float sxd = oceanflow::hder(bx, a.ds, a.ms0, a.ms1);
-            float P, gradT;   // P and T·∇P
-            if (i == 0) {     // n = 0: the y factor is cos / sin(φ0 − phase)
-                const float cy = c.cp[0], sy = c.sp[0];
-                P = cx * cy - sx * sy;
-                gradT = c.TxS[0] * (cxd * cy - sxd * sy);
-            } else {
-                const oceanflow::TrigCell& e = Y.t[i - 1];
-                const float cy = oceanflow::hval(by, e.c, e.dc, e.mc0, e.mc1);
-                const float sy = oceanflow::hval(by, e.s, e.ds, e.ms0, e.ms1);
-                const float cyd = oceanflow::hder(by, e.dc, e.mc0, e.mc1);
-                const float syd = oceanflow::hder(by, e.ds, e.ms0, e.ms1);
-                P = cx * cy - sx * sy;
-                gradT = c.TxS[i] * (cxd * cy - sxd * sy) + c.TyS[i] * (cx * cyd - sx * syd);
-            }
-            u[i].x = (c.Tx[i] * Vd[i]) * P;
-            u[i].y = (c.Ty[i] * Vd[i]) * P;
-            u[i].d = (-V[i]) * gradT;
+            u[i].x = ux[i];
+            u[i].y = uy[i];
+            u[i].d = ud[i];
         }
         return true;
     }

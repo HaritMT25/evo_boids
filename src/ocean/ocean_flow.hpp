@@ -108,6 +108,27 @@ inline float hder(const Basis& B, float dv, float m0, float m1) {   // d/dt
     return (B.a * dv + B.b * m0) + B.c * m1;
 }
 
+// ---- four lanes: the three wave trains side by side ---------------------------
+// The wave tables are evaluated with the trains in the lanes of a 4-wide float
+// vector (GCC / Clang vector extensions: SSE2 on x86-64, SIMD128 under
+// -msimd128). Lane-wise +, −, × are IEEE single operations, each lane runs the
+// same operation tree a scalar evaluation would, so the bits are the scalar
+// ones in every build (no FMA: -ffp-contract=off, no relaxed SIMD); lane 3 is
+// padding (zeros).
+typedef float v4f __attribute__((vector_size(16)));
+inline v4f splat(float x) { return v4f{x, x, x, x}; }
+struct BasisV { v4f h10, h01, h11, a, b, c; };
+inline BasisV basisV(float t) {
+    const Basis B = basis(t);
+    return {splat(B.h10), splat(B.h01), splat(B.h11), splat(B.a), splat(B.b), splat(B.c)};
+}
+inline v4f hval(const BasisV& B, v4f v0, v4f dv, v4f m0, v4f m1) {
+    return ((v0 + B.h01 * dv) + B.h10 * m0) + B.h11 * m1;
+}
+inline v4f hder(const BasisV& B, v4f dv, v4f m0, v4f m1) {   // d/dt
+    return (B.a * dv + B.b * m0) + B.c * m1;
+}
+
 // Three-point Gauss–Legendre on [x0, x1] (exact for quintics), in double.
 template <class F>
 double gauss3(double x0, double x1, F&& f) {
@@ -165,20 +186,31 @@ inline TrigCell trigCell(int mode, int j, int N) {
     return {c0, (float)(-2.0 * (double)sm * (double)sh), (float)(-w * (double)s0), (float)(-w * (double)s1),
             s0, (float)(2.0 * (double)cm * (double)sh), (float)(w * (double)c0), (float)(w * (double)c1)};
 }
-struct XCell { TrigCell t[kTrains]; };       // the three trains at one x cell
-struct YCell { TrigCell t[kTrains - 1]; };   // trains 1, 2 (n != 0) at one y cell
-struct XTable {
-    XCell cell[kXCells];
+// One table cell with the trains in the lanes (lane i = train i, lane 3 zero).
+struct TrigV { v4f c, dc, mc0, mc1, s, ds, ms0, ms1; };
+inline void setLane(TrigV& v, int i, const TrigCell& t) {
+    v.c[i] = t.c; v.dc[i] = t.dc; v.mc0[i] = t.mc0; v.mc1[i] = t.mc1;
+    v.s[i] = t.s; v.ds[i] = t.ds; v.ms0[i] = t.ms0; v.ms1[i] = t.ms1;
+}
+inline TrigCell getLane(const TrigV& v, int i) {
+    return {v.c[i], v.dc[i], v.mc0[i], v.mc1[i], v.s[i], v.ds[i], v.ms0[i], v.ms1[i]};
+}
+struct XTable {   // the three trains' x factors
+    TrigV cell[kXCells];
     XTable() {
-        for (int j = 0; j < kXCells; ++j)
-            for (int i = 0; i < kTrains; ++i) cell[j].t[i] = trigCell(kWaveModes[i][0], j, kXCells);
+        for (int j = 0; j < kXCells; ++j) {
+            cell[j] = TrigV{};
+            for (int i = 0; i < kTrains; ++i) setLane(cell[j], i, trigCell(kWaveModes[i][0], j, kXCells));
+        }
     }
 };
-struct YTable {
-    YCell cell[kYCells];
+struct YTable {   // the y factors of trains 1, 2 (n != 0) at phase 0; lane 0 (train 0) zero
+    TrigV cell[kYCells];
     YTable() {
-        for (int j = 0; j < kYCells; ++j)
-            for (int i = 1; i < kTrains; ++i) cell[j].t[i - 1] = trigCell(kWaveModes[i][1], j, kYCells);
+        for (int j = 0; j < kYCells; ++j) {
+            cell[j] = TrigV{};
+            for (int i = 1; i < kTrains; ++i) setLane(cell[j], i, trigCell(kWaveModes[i][1], j, kYCells));
+        }
     }
 };
 inline const XTable& xTable() { static const XTable t; return t; }
@@ -190,9 +222,9 @@ inline void rotate(float& c, float& s, float cr, float sr) {
     s = ns;
 }
 
-// One depth cell, per train: V at its start, its rise (∫ k·H over the cell),
-// the slopes h·k·H at both ends.
-struct DepthCell { float v[kTrains], dv[kTrains], m0[kTrains], m1[kTrains]; };
+// One depth cell, a train per lane: V at its start, its rise (∫ k·H over the
+// cell), the slopes h·k·H at both ends.
+struct DepthCell { v4f v, dv, m0, m1; };
 struct DepthPiece {
     float lo = 0.0f;
     int n = 0;                    // cells
@@ -218,7 +250,7 @@ struct FlowCache {
     std::vector<Eddy> eddies;
 
     // ---- the waves ----
-    float Tx[kTrains] = {}, Ty[kTrains] = {};   // K / |K|² (init: the world size)
+    v4f Tx = {}, Ty = {};         // K / |K|² per lane (init: the world size)
     // Depth pieces, keyed on the bits of waveSpeed (the amplitudes), waveBand
     // (b) and D; rebuilt by OceanWorld::ensureFlow when a key moves.
     bool depthKeyed = false;      // the key below is set
@@ -228,12 +260,15 @@ struct FlowCache {
     DepthPiece piece[4];
     // Horizontal (init: the world size): cells per unit, T in cell units.
     double xScale = 0.0, yScale = 0.0;          // kXCells / W, kYCells / H
-    float TxS[kTrains] = {}, TyS[kTrains] = {}; // T_x · xScale, T_y · yScale
+    v4f TxS = {}, TyS = {};                     // T_x · xScale, T_y · yScale per lane
     // The phase factors, keyed on the bits of the three phases.
     bool phaseKeyed = false;
     std::uint64_t keyPhase[kTrains] = {};
     float cp[kTrains] = {}, sp[kTrains] = {};   // cos / sin(φ0 − phase)
-    std::vector<YCell> yRot;                    // trains 1, 2 at this phase (kYCells)
+    // The y factors at this phase (kYCells): trains 1, 2 rotated from the
+    // static base; lane 0 is train 0's constant (cp[0], sp[0], no rise or
+    // slope), so its y factor is that constant exactly (v0 + h·0 = v0).
+    std::vector<TrigV> yRot;
 };
 
 }  // namespace oceanflow

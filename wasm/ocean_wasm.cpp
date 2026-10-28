@@ -46,7 +46,8 @@
 //     off; with eye 0, "blind") are 0 or 1 in the eye build (-DEVO_OCEAN_EYE)
 //     and must stay 0 in the plain one; oc_has_eye() says which build this is.
 //     eyeCode (the eye's encoding, a bitmask: 1 faded contrast, 2 opponent
-//     pairs, 4 summed sectors) is 0..7 in the eye build and must stay 0 in the
+//     pairs, 4 summed sectors; and the cloaks 8 the eye ignores fish, 16 the
+//     eye ignores food) is 0..31 in the eye build and must stay 0 in the
 //     plain one.
 //   * steerFrame (OceanConfig::steerFrame: STEER_X / STEER_Y in world x / y, or
 //     in the fish's own frame) is 0 or 1 in both builds; foodLife (seconds,

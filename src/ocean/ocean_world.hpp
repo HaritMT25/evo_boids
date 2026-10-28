@@ -125,6 +125,16 @@
 //          [−1, 1]; CON in [−2, 2] in both (open intervals with bit 2).
 // Every encoding sees the same objects in the same order as code 0 (no extra
 // queries, no draws), so eye-only mode's bit-identity holds for each.
+// Two ablation bits (the "cloaked" eye) choose which KINDS of object the eye
+// bins at all — the nearest or the sum is then over the rest, so a cloaked
+// kind neither shows nor hides anything behind it:
+//   bit 3 (8)  the eye ignores fish (food and predators still seen)
+//   bit 4 (16) the eye ignores food (fish and predators still seen)
+// Predators are always seen. Only the eye is cloaked: every labeled sense
+// (and the interaction vote) is unchanged, so with the labels on the loops run
+// as before and only skip the eye's bin; in eye-only mode eyeScan skips the
+// cloaked kind's query altogether (it feeds nothing else). Each composes with
+// the encodings (e.g. 12 = summed sectors over food and predators). No draws.
 //
 // Eye-only mode (OceanConfig::eyeOnly, the eye build only): the 23 LABELED
 // exteroceptive senses the eye replaces (ocean::kLabeledSenses) read 0 and are
@@ -1572,24 +1582,28 @@ private:
     // predator loops — the same queries, every object within R in the same
     // visit order (so the same 18 inputs, ties included), none of the labeled
     // sums, the topological cut, the nearest-neighbour genome compare or the
-    // long probe. Bin: EyeBin (nearest) or EyeSum (summed sectors).
+    // long probe. Bin: EyeBin (nearest) or EyeSum (summed sectors). A cloaked
+    // kind (eyeCode 8 / 16) is not queried at all: here its query feeds nothing
+    // else (neighbors_ is scratch).
     template <class Bin>
     void eyeScan(const Fish& c, int selfIdx, Vec2 fwd, Vec2 rht, Bin* eye) {
         const float R = cfg.perceptionRadius, R2 = R * R;
-        std::vector<int>& neighbors = neighbors_;
-        neighbors.clear();
-        if (cfg.toroidal) creatureGrid_.queryRadiusWrapped(c.pos, R, neighbors);
-        else              creatureGrid_.queryRadius(c.pos, R, neighbors);
-        for (int ni : neighbors) {
-            if (ni == selfIdx) continue;
-            const FishHot& other = hot_[ni];
-            float dx = other.pos.x - c.pos.x;
-            float dy = other.pos.y - c.pos.y;
-            if (cfg.toroidal) { dx = wrapDx(dx); dy = wrapDy(dy); }
-            const float dz = other.depth - c.depth;
-            const float d2 = dx * dx + dy * dy + dz * dz;
-            if (d2 > R2) continue;
-            eyeSee(eye, fwd, rht, dx, dy, dz, d2, other.eyeSize, other.eyeCon, R);
+        if (!(ocfg.eyeCode & kEyeCodeNoFish)) {
+            std::vector<int>& neighbors = neighbors_;
+            neighbors.clear();
+            if (cfg.toroidal) creatureGrid_.queryRadiusWrapped(c.pos, R, neighbors);
+            else              creatureGrid_.queryRadius(c.pos, R, neighbors);
+            for (int ni : neighbors) {
+                if (ni == selfIdx) continue;
+                const FishHot& other = hot_[ni];
+                float dx = other.pos.x - c.pos.x;
+                float dy = other.pos.y - c.pos.y;
+                if (cfg.toroidal) { dx = wrapDx(dx); dy = wrapDy(dy); }
+                const float dz = other.depth - c.depth;
+                const float d2 = dx * dx + dy * dy + dz * dz;
+                if (d2 > R2) continue;
+                eyeSee(eye, fwd, rht, dx, dy, dz, d2, other.eyeSize, other.eyeCon, R);
+            }
         }
         auto look = [&](int fi, Vec2 fp) {
             float dx = fp.x - c.pos.x;
@@ -1600,8 +1614,10 @@ private:
             if (d2 > R2) return;
             eyeSee(eye, fwd, rht, dx, dy, dz, d2, ocean::kEyeFoodSize, food[fi].eyeCon, R);
         };
-        if (cfg.toroidal) foodGrid_.forEachInRadiusWrapped(c.pos, R, look);
-        else              foodGrid_.forEachInRadius(c.pos, R, look);
+        if (!(ocfg.eyeCode & kEyeCodeNoFood)) {
+            if (cfg.toroidal) foodGrid_.forEachInRadiusWrapped(c.pos, R, look);
+            else              foodGrid_.forEachInRadius(c.pos, R, look);
+        }
         for (std::size_t k = 0; k < predators.size(); ++k) {
             const OceanPredator& p = predators[k];
             float dx = p.pos.x - c.pos.x;
@@ -1626,6 +1642,10 @@ private:
         using Bin = std::conditional_t<Sum, EyeSum, EyeBin>;
         [[maybe_unused]] Bin eye[ocean::kEyeSectors];
         if constexpr (Eye) eyeInit(eye);
+        // The cloaks (eyeCode 8 / 16): the eye skips that kind's objects; the
+        // labeled senses below still use them.
+        [[maybe_unused]] const bool eyeFish = !(ocfg.eyeCode & kEyeCodeNoFish);
+        [[maybe_unused]] const bool eyeFood = !(ocfg.eyeCode & kEyeCodeNoFood);
 #else
         static_assert(!Sum, "summed sectors need the eye build");
 #endif
@@ -1699,7 +1719,7 @@ private:
                 const float d2 = dx * dx + dy * dy + dz * dz;
                 if (d2 > R2) continue;
 #ifdef EVO_OCEAN_EYE
-                if constexpr (Eye) eyeSee(eye, fwd, rht, dx, dy, dz, d2, other.eyeSize, other.eyeCon, R);
+                if constexpr (Eye) { if (eyeFish) eyeSee(eye, fwd, rht, dx, dy, dz, d2, other.eyeSize, other.eyeCon, R); }
 #endif
                 attendTo(ni, other, dx, dy, dz, std::sqrt(d2));
             }
@@ -1720,7 +1740,7 @@ private:
                 if (d2 > R2) continue;
                 ++inRadiusCount;
 #ifdef EVO_OCEAN_EYE
-                if constexpr (Eye) eyeSee(eye, fwd, rht, dx, dy, dz, d2, other.eyeSize, other.eyeCon, R);
+                if constexpr (Eye) { if (eyeFish) eyeSee(eye, fwd, rht, dx, dy, dz, d2, other.eyeSize, other.eyeCon, R); }
 #endif
                 if (have == keepMax) {
                     const Candidate& worst = best[have - 1];
@@ -1779,8 +1799,8 @@ private:
             const float d2 = dx * dx + dy * dy + dz * dz;
             if (d2 > R2) return;
 #ifdef EVO_OCEAN_EYE
-            // The eye sees every item within R (size does not hide it) ...
-            if constexpr (Eye) eyeSee(eye, fwd, rht, dx, dy, dz, d2, ocean::kEyeFoodSize, food[fi].eyeCon, R);
+            // The eye sees every item within R (size does not hide it; unless cloaked) ...
+            if constexpr (Eye) { if (eyeFood) eyeSee(eye, fwd, rht, dx, dy, dz, d2, ocean::kEyeFoodSize, food[fi].eyeCon, R); }
 #endif
             // ... the smell senses only what this fish could swallow.
             if (ocfg.mouthGate && food[fi].size > ocfg.kMouth * c.bodySize) return;   // E1: not food for me

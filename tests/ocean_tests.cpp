@@ -29,15 +29,20 @@
 //                 exactly (1 − z/wb)·3·dt, capped at D/2 in a shallow sea
 //   capture       captureActivations changes no dynamics
 //   eye           (eye build) a hand-built scene's 18 eye inputs bit for bit;
-//                 off = 0; in range; no side effects (eyeCode 0 and 7)
+//                 off = 0; in range; no side effects (eyeCode 0, 7 and 31)
 //   eye_only      (eye build) eyeOnly: the 23 labeled inputs 0, every other
 //                 input bit-identical to the labeled run's; blind likewise;
-//                 also with eyeCode 7
+//                 also with eyeCode 7, 8 (cloaked fish: no neighbour query in
+//                 eye-only mode) and 20 (cloaked food + summed sectors)
 //   eye_code      (eye build) eyeCode: a scene with several objects per sector,
-//                 the 18 inputs bit for bit for every code 0..7 (and 4 / 7
-//                 eye-only); non-eye inputs unchanged; faded contrast 0 at R;
-//                 ranges in populated worlds; 0..7 valid, live via oc_set_param
-//                 (plain build: eyeCode must stay 0)
+//                 the 18 inputs bit for bit for every code 0..31 — the
+//                 encodings x the cloaks (8 the eye ignores fish, 16 food) —
+//                 and seven codes eye-only; non-eye (labeled) inputs unchanged
+//                 by any code; the cloaks by name (a cloaked kind neither shows
+//                 nor hides: the food behind a nearer fish, the predator behind
+//                 the food; 24 = predators only); faded contrast 0 at R;
+//                 ranges in populated worlds; 0..31 valid, live via
+//                 oc_set_param (plain build: eyeCode must stay 0)
 //   food_life     foodLife: an item goes on the step its age reaches foodLife;
 //                 off, none do; the first stock's ages spread; draws unchanged
 //   reproducible  same seed twice -> identical fingerprints; another seed and a
@@ -1187,14 +1192,14 @@ void testEye() {
     // they see, so a world of them (with food and wandering predators that draw
     // and capture) must run identically with the eye on and off — same state,
     // same draws — and differ only in lastSensors. (k = 2: the eye on with every
-    // eyeCode bit set.)
+    // encoding bit set; k = 3: every eyeCode bit, the cloaks too.)
     {
-        ofp::Fingerprint fp[3];
+        ofp::Fingerprint fp[4];
         long nonzero = 0;
-        for (int k = 0; k < 3; ++k) {
+        for (int k = 0; k < 4; ++k) {
             OceanConfig oc;
             oc.eye = k ? 1 : 0;
-            oc.eyeCode = (k == 2) ? kEyeCodeAll : 0;
+            oc.eyeCode = (k == 2) ? kEyeCodeAll : (k == 3) ? kEyeCodeMax : 0;
             OceanWorld w;
             initQuiet(w, 64, 240.0f, oc, /*capture*/ true);
             w.cfg.predatorCount = 3;
@@ -1216,11 +1221,11 @@ void testEye() {
                 for (const Fish& c : w.creatures)
                     for (int e = 0; e < ocean::kEyeInputs; ++e) nonzero += (c.lastSensors[ocean::kEyeFirst + e] != 0.0f);
         }
-        for (int k = 1; k < 3; ++k)
+        for (int k = 1; k < 4; ++k)
             t.expect(fp[0].ctr == fp[k].ctr && fp[0].fish == fp[k].fish && fp[0].food == fp[k].food &&
                          fp[0].pred == fp[k].pred && fp[0].rng == fp[k].rng,
                      "the eye (eyeCode %d) changed an unwired world (fish %016llx vs %016llx, rng %016llx vs %016llx)",
-                     k == 2 ? kEyeCodeAll : 0, (unsigned long long)fp[0].fish, (unsigned long long)fp[k].fish,
+                     k == 2 ? kEyeCodeAll : k == 3 ? kEyeCodeMax : 0, (unsigned long long)fp[0].fish, (unsigned long long)fp[k].fish,
                      (unsigned long long)fp[0].rng, (unsigned long long)fp[k].rng);
         t.expect(nonzero > 0, "the eye saw nothing in the side-effect world");
     }
@@ -1282,11 +1287,16 @@ void testEyeOnly() {
     };
     struct Case { bool toroidal; int maxNeighbors; };
     for (const Case cs : {Case{false, 0}, Case{true, 7}}) {
-        for (int mode = 0; mode < 3; ++mode) {   // blind, eye-only, eye-only with eyeCode 7
-            const int eye = mode ? 1 : 0, code = (mode == 2) ? kEyeCodeAll : 0;
+        // blind, eye-only, eye-only with eyeCode 7, and the cloaks (8: no fish
+        // query in eye-only mode; 16 + summed: no food query)
+        for (int mode = 0; mode < 5; ++mode) {
+            static const int kCode[5] = {0, 0, kEyeCodeAll, kEyeCodeNoFish, kEyeCodeNoFood | kEyeCodeSummed};
+            const int eye = mode ? 1 : 0, code = kCode[mode];
             const Run lab = run(eye, 0, cs.toroidal, cs.maxNeighbors, code);
             const Run only = run(eye, 1, cs.toroidal, cs.maxNeighbors, code);
-            const char* name = (mode == 0) ? "blind" : (mode == 1) ? "eye-only" : "eye-only (eyeCode 7)";
+            static const char* kName[5] = {"blind", "eye-only", "eye-only (eyeCode 7)", "eye-only (eyeCode 8)",
+                                           "eye-only (eyeCode 20)"};
+            const char* name = kName[mode];
             t.expect(only.fp.ctr == lab.fp.ctr && only.fp.fish == lab.fp.fish && only.fp.food == lab.fp.food &&
                          only.fp.pred == lab.fp.pred && only.fp.sig == lab.fp.sig && only.fp.rng == lab.fp.rng,
                      "%s (toroidal %d, topo %d) changed an unwired world (fish %016llx vs %016llx, rng %016llx vs %016llx)",
@@ -1301,12 +1311,13 @@ void testEyeOnly() {
         }
     }
     t.note("23 labeled inputs 0 in eye-only and blind; kept + eye inputs bit-identical to the labeled runs"
-           " (eyeCode 0 and 7)");
+           " (eyeCode 0, 7, 8, 20)");
 }
 
 // OceanConfig::eyeCode (bit 0 faded contrast, bit 1 opponent pairs, bit 2
-// summed sectors). (1) A hand-built scene with several objects per sector, for
-// every code 0..7 (and code 4 / 7 in eye-only mode): the 18 inputs bit for bit
+// summed sectors; the cloaks bit 3 no fish, bit 4 no food). (1) A hand-built
+// scene with several objects per sector, for every code 0..31 (and seven codes
+// in eye-only mode): the 18 inputs bit for bit
 // against the definitions, computed here the same way. The engine visits fish
 // (grid order), then food (grid order), then predators (index order); float
 // sums depend on order, so every sector holds at most two objects of a group
@@ -1376,6 +1387,9 @@ void testEyeCode() {
         float nd2[6], nsize[6], ncon[6], sp[6] = {}, ss[6] = {}, sc[6] = {};
         for (int k = 0; k < 6; ++k) { nd2[k] = std::numeric_limits<float>::infinity(); nsize[k] = ncon[k] = 0.0f; }
         for (const Obj& o : objs) {
+            // The cloaks: that kind is not binned at all (bits 3 / 4).
+            if ((code & kEyeCodeNoFish) && o.type == kFish) continue;
+            if ((code & kEyeCodeNoFood) && o.type == kFood) continue;
             const Vec2 pos = {P.x + o.dx, P.y + o.dy};
             const float oz = z + o.dz;
             const float dx = pos.x - P.x, dy = pos.y - P.y, dz = oz - z;
@@ -1415,12 +1429,14 @@ void testEyeCode() {
     };
     static const char* kSec[] = {"ahead", "behind", "left", "right", "up", "down"};
     std::vector<float> rest0;   // code 0's non-eye inputs
-    float got7[ocean::kEyeInputs] = {}, got0[ocean::kEyeInputs] = {};
+    float got7[ocean::kEyeInputs] = {}, got0[ocean::kEyeInputs] = {}, gotNF[ocean::kEyeInputs] = {},
+          gotND[ocean::kEyeInputs] = {}, got24[ocean::kEyeInputs] = {};
     struct V { int code, eyeOnly; };
     std::vector<V> vs;
-    for (int c = 0; c <= kEyeCodeAll; ++c) vs.push_back({c, 0});
-    vs.push_back({kEyeCodeSummed, 1});
-    vs.push_back({kEyeCodeAll, 1});
+    for (int c = 0; c <= kEyeCodeMax; ++c) vs.push_back({c, 0});   // every encoding x cloak
+    for (int c : {kEyeCodeSummed, kEyeCodeAll, kEyeCodeNoFish, kEyeCodeNoFood, kEyeCodeNoFish | kEyeCodeSummed,
+                  kEyeCodeNoFood | kEyeCodeAll, kEyeCodeCloaks | kEyeCodeOpponent})
+        vs.push_back({c, 1});   // eye-only: the cloaked kind's query is skipped
     for (const V& vv : vs) {
         OceanWorld w;
         const int v = build(w, vv.code, vv.eyeOnly);
@@ -1440,13 +1456,40 @@ void testEyeCode() {
         std::vector<float> rest;
         for (int k = 0; k < NUM_SENSES; ++k) if (!ocean::isEyeSense(k)) rest.push_back(S[k]);
         if (vv.code == 0) { rest0 = rest; std::memcpy(got0, S + ocean::kEyeFirst, sizeof got0); }
-        else t.expect(rest == rest0, "eyeCode %d changed a non-eye input", vv.code);
+        else t.expect(rest == rest0, "eyeCode %d changed a non-eye input", vv.code);   // the labels see every kind
         if (vv.code == kEyeCodeAll) std::memcpy(got7, S + ocean::kEyeFirst, sizeof got7);
+        if (vv.code == kEyeCodeNoFish) std::memcpy(gotNF, S + ocean::kEyeFirst, sizeof gotNF);
+        if (vv.code == kEyeCodeNoFood) std::memcpy(gotND, S + ocean::kEyeFirst, sizeof gotND);
+        if (vv.code == kEyeCodeCloaks) std::memcpy(got24, S + ocean::kEyeFirst, sizeof got24);
     }
     t.note("scene, code 0: ahead %.4f/%.4f/%.4f left %.4f/%.4f/%.4f right %.4f/%.4f/%.4f", got0[0], got0[1], got0[2],
            got0[6], got0[7], got0[8], got0[9], got0[10], got0[11]);
     t.note("scene, code 7: ahead %.4f/%.4f/%.4f left+right %.4f/%.4f/%.4f right-left %.4f/%.4f/%.4f", got7[0],
            got7[1], got7[2], got7[6], got7[7], got7[8], got7[9], got7[10], got7[11]);
+    // The cloaks, by name (besides the model above): a cloaked kind neither
+    // shows nor hides. Code 8: the fish nearest up (25 above) gives way to the
+    // food 60 above, the fish right / down to the predators behind them;
+    // code 16: the food ahead (30) gives way to the fish (46), both food items
+    // behind to the predator; code 24: only predators.
+    {
+        const float foodUp = ocean::eyeContrast(ocean::kEyeFoodBright, z - 60.0f);
+        const float predCon = ocean::eyeContrast(ocean::kEyePredBright, z), fishCon = ocean::eyeContrast(ocean::kEyeFishBright, z);
+        const float predBehindCon = ocean::eyeContrast(ocean::kEyePredBright, z + 10.0f);
+        t.expect(gotNF[14] == foodUp && got0[14] != foodUp && gotNF[11] == predCon && gotNF[0] == got0[0],
+                 "code 8: up CON %.6g (food %.6g), right CON %.6g (predator %.6g)", gotNF[14], foodUp, gotNF[11], predCon);
+        t.expect(gotND[2] != got0[2] && gotND[5] == predBehindCon,
+                 "code 16: ahead CON %.6g, behind CON %.6g (predator %.6g)", gotND[2], gotND[5], predBehindCon);
+        t.expect(std::abs(gotND[2] - fishCon) < 0.05f, "code 16: ahead CON %.6g is not a fish's (%.6g)", gotND[2], fishCon);
+        bool onlyPred = true;
+        for (int k = 0; k < ocean::kEyeSectors; ++k) {
+            const float cn = got24[3 * k + 2];
+            const bool empty = got24[3 * k] == 0.0f && got24[3 * k + 1] == 0.0f && cn == 0.0f;
+            onlyPred &= empty || cn < 0.0f;   // predators are dark: CON < 0 at these depths
+        }
+        t.expect(onlyPred && got24[6] == 0.0f && got24[12] == 0.0f, "code 24: a sector shows a fish or food item");
+        t.note("cloaks: code 8 up CON %.4f (food) vs code 0 %.4f (fish); code 16 behind CON %.4f (predator); "
+               "code 24 left/up empty", gotNF[14], got0[14], gotND[5]);
+    }
 
     // (2) Faded contrast fades to exactly 0 at R: one food item 100 ahead.
     for (int code : {0, kEyeCodeFaded, kEyeCodeSummed}) {
@@ -1515,22 +1558,26 @@ void testEyeCode() {
                slots ? 100.0 * occupied / slots : 0.0);
     }
 
-    // (4) Validity: 0..7 in the eye build; live through oc_set_param.
+    // (4) Validity: 0..31 in the eye build; live through oc_set_param.
     {
         OceanConfig oc;
-        bool ok = oceanConfigValid(oc) && oc.eyeCode == 0;
-        for (int c = 0; c <= kEyeCodeAll; ++c) { oc.eyeCode = c; ok &= oceanConfigValid(oc); }
-        t.expect(ok, "an eyeCode in 0..7 refused (or the default is not 0)");
-        for (int c : {-1, 8, 16, 1 << 30}) { oc.eyeCode = c; t.expect(!oceanConfigValid(oc), "eyeCode %d accepted", c); }
+        bool ok = oceanConfigValid(oc) && oc.eyeCode == 0 && kEyeCodeMax == 31;
+        for (int c = 0; c <= kEyeCodeMax; ++c) { oc.eyeCode = c; ok &= oceanConfigValid(oc); }
+        t.expect(ok, "an eyeCode in 0..31 refused (or the default is not 0)");
+        for (int c : {-1, 32, 64, 1 << 30}) { oc.eyeCode = c; t.expect(!oceanConfigValid(oc), "eyeCode %d accepted", c); }
 #ifndef OCEAN_TESTS_NO_SHIM
         t.expect(oc_init(69, 1920, 1080, 240.0, 50, R"({"eye":1,"eyeCode":7})") == 1, "oc_init eyeCode 7: %s",
                  oc_last_error());
         t.expect(g_world && g_world->ocfg.eyeCode == 7, "eyeCode not stored");
         t.expect(oc_set_param("eyeCode", 5.0) == 1 && g_world->ocfg.eyeCode == 5, "oc_set_param eyeCode 5: %s",
                  oc_last_error());
-        t.expect(oc_set_param("eyeCode", 8.0) == 0 && g_world->ocfg.eyeCode == 5, "oc_set_param eyeCode 8 accepted");
-        t.note("oc_set_param(eyeCode, 8): %s", oc_last_error());
-        t.expect(oc_init(69, 1920, 1080, 240.0, 50, R"({"eye":1,"eyeCode":9})") == 0, "oc_init eyeCode 9 accepted");
+        t.expect(oc_set_param("eyeCode", 24.0) == 1 && g_world->ocfg.eyeCode == 24, "oc_set_param eyeCode 24: %s",
+                 oc_last_error());
+        t.expect(oc_set_param("eyeCode", 32.0) == 0 && g_world->ocfg.eyeCode == 24, "oc_set_param eyeCode 32 accepted");
+        t.note("oc_set_param(eyeCode, 32): %s", oc_last_error());
+        t.expect(oc_init(69, 1920, 1080, 240.0, 50, R"({"eye":1,"eyeCode":33})") == 0, "oc_init eyeCode 33 accepted");
+        t.expect(oc_init(69, 1920, 1080, 240.0, 50, R"({"eye":1,"eyeCode":16})") == 1 && g_world->ocfg.eyeCode == 16,
+                 "oc_init eyeCode 16: %s", oc_last_error());
 #endif
     }
 }
@@ -1546,7 +1593,7 @@ void testEye() {
     oc.eyeOnly = 1;
     t.expect(!oceanConfigValid(oc), "eyeOnly = 1 accepted by a build without the eye");
     oc.eyeOnly = 0;
-    for (int c = 1; c <= kEyeCodeAll; ++c) { oc.eyeCode = c; t.expect(!oceanConfigValid(oc), "eyeCode = %d accepted by a build without the eye", c); }
+    for (int c = 1; c <= kEyeCodeMax; ++c) { oc.eyeCode = c; t.expect(!oceanConfigValid(oc), "eyeCode = %d accepted by a build without the eye", c); }
 #ifndef OCEAN_TESTS_NO_SHIM
     t.expect(oc_init(69, 1920, 1080, 240.0, 50, R"({"eyeCode":1})") == 0, "oc_init eyeCode 1 accepted without the eye");
     t.expect(oc_init(69, 1920, 1080, 240.0, 50, nullptr) == 1 && oc_set_param("eyeCode", 4.0) == 0,
@@ -1720,6 +1767,7 @@ void testReproducible() {
       w.food[13].eyeCon = std::numeric_limits<float>::infinity();
       t.expect(ofp::countNonFinite(w) == nf + 1, "a non-finite food eyeCon is not counted"); w.food[13].eyeCon = keep; }
     { const int keep = w.ocfg.eyeCode; w.ocfg.eyeCode = 5; only("eyeCode (0 -> 5)", &FP::cfg); w.ocfg.eyeCode = keep; }
+    { const int keep = w.ocfg.eyeCode; w.ocfg.eyeCode = kEyeCodeNoFood; only("eyeCode (0 -> 16, a cloak)", &FP::cfg); w.ocfg.eyeCode = keep; }
 #endif
     { long nf = ofp::countNonFinite(w); const float keep = w.food[13].age;
       w.food[13].age = std::numeric_limits<float>::quiet_NaN();
@@ -3686,7 +3734,7 @@ void testPreset() {
 // eye, eyeOnly, eyeCode, steerFrame (int keys) and foodLife through the real
 // oc_init / oc_set_param: an int key's JSON number must be a whole number in
 // int's range (refused before any cast, at every occurrence of the key), then
-// lie in its range (eye / eyeOnly 0..1 and eyeCode 0..7 in the eye build, 0 in
+// lie in its range (eye / eyeOnly 0..1 and eyeCode 0..31 in the eye build, 0 in
 // the plain one; steerFrame 0..1); foodLife in [0, 1e6]; a refused call keeps
 // the world as it was.
 void testVisionKeys() {
@@ -3707,7 +3755,7 @@ void testVisionKeys() {
             refused += t.expect(tryInit(c) == 0, "%s accepted", c.c_str());
         }
         // whole numbers outside the key's range: refused by the range check
-        for (const char* v : {"-1", "8", "2147483647", "-2147483648"}) {
+        for (const char* v : {"-1", "32", "2147483647", "-2147483648"}) {   // 32: past every key's range (eyeCode 0..31)
             const std::string c = std::string("{\"") + k + "\":" + v + "}";
             const int ok = tryInit(c);
             refused += t.expect(ok == 0 && std::string(oc_last_error()).find(k) != std::string::npos,
@@ -3729,7 +3777,8 @@ void testVisionKeys() {
         {R"({"eyeOnly":1})", true, false},        {R"({"eyeOnly":2})", false, false},
         {R"({"eye":1,"eyeOnly":1,"eyeCode":7})", true, false},
         {R"({"eyeCode":1})", true, false},        {R"({"eyeCode":7})", true, false},
-        {R"({"eyeCode":8})", false, false},
+        {R"({"eyeCode":8})", true, false},        {R"({"eye":1,"eyeOnly":1,"eyeCode":16})", true, false},
+        {R"({"eyeCode":31})", true, false},       {R"({"eyeCode":32})", false, false},
         {R"({"foodLife":0})", true, true},        {R"({"foodLife":12.5})", true, true},
         {R"({"foodLife":1e6})", true, true},      {R"({"foodLife":1000001})", false, false},
         {R"({"foodLife":-0.001})", false, false}, {R"({"foodLife":1e39})", false, false},
@@ -3751,7 +3800,7 @@ void testVisionKeys() {
         const ofp::Fingerprint before = ofp::fingerprint(*g_world);
         struct L { const char* key; double v; };
         const L bad[] = {{"steerFrame", 0.5}, {"steerFrame", 2.0}, {"steerFrame", 2147483648.0}, {"eyeOnly", 1.5},
-                         {"eyeCode", 8.0}, {"eyeCode", 1e300}, {"eye", 0.25}, {"eye", 2.0}, {"foodLife", 1e7},
+                         {"eyeCode", 32.0}, {"eyeCode", 1e300}, {"eye", 0.25}, {"eye", 2.0}, {"foodLife", 1e7},
                          {"foodLife", std::numeric_limits<double>::infinity()}, {"foodLife", -1.0},
                          {"eyeCode", std::numeric_limits<double>::quiet_NaN()}};
         for (const L& l : bad) {

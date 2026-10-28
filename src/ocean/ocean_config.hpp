@@ -52,6 +52,18 @@ struct OceanConfig {
     // column and the current. The pairwise interaction vote's own contact
     // inputs (kernel::interactionVote) are not senses and are unchanged.
     int   eyeOnly         = 0;
+    // The compound eye's encoding (the eye build only, like eye): a bitmask,
+    // 0 = the eye as ocean_world.hpp's header describes it (bit-identical to
+    // the build before this key existed). No effect while eye is 0. The 18
+    // EYE_* inputs keep their names; what they report (ocean_world.hpp,
+    // "eyeCode"):
+    //   1 faded contrast: CON = PROX x (b − L(z)), fading to 0 at R
+    //   2 opponent pairs: the LEFT slot reports left + right and the RIGHT
+    //     slot right − left, UP up + down and DOWN down − up, per feature
+    //     (invertible: one wire can steer both ways)
+    //   4 summed sectors: each sector sums over every object in it (squashed
+    //     x / (1 + |x|)) instead of reporting only the nearest
+    int   eyeCode         = 0;
     // The frame STEER_X / STEER_Y push in (the non-triangular motion model):
     // 0 = world x / y, Classic's (and NEAREST_FOOD_DX / DY's) frame;
     // 1 = the fish's own frame: STEER_X along its right axis (the "right" of the
@@ -78,6 +90,15 @@ inline constexpr bool kOceanHasEye = true;
 inline constexpr bool kOceanHasEye = false;
 #endif
 
+// OceanConfig::eyeCode's bits.
+inline constexpr int kEyeCodeFaded    = 1;   // CON = PROX x (b − L)
+inline constexpr int kEyeCodeOpponent = 2;   // left/right, up/down as sum and difference
+inline constexpr int kEyeCodeSummed   = 4;   // every object in a sector, not the nearest
+inline constexpr int kEyeCodeAll      = kEyeCodeFaded | kEyeCodeOpponent | kEyeCodeSummed;
+inline constexpr bool eyeCodeValid(int code) {
+    return code == 0 || (kOceanHasEye && code > 0 && code <= kEyeCodeAll);
+}
+
 // Every key defaults to the value already in `c` (the checkpoint reader's rule).
 // `o` is the flat config object itself, not a {"config": ...} wrapper. "depth"
 // is not read: oc_init's argument sets it.
@@ -94,6 +115,7 @@ inline void readOceanConfig(const jsonm::Value& o, OceanConfig& c) {
     c.foodDepthSpread = o.floatOr("foodDepthSpread", c.foodDepthSpread);
     c.eye             = o.intOr("eye", c.eye);
     c.eyeOnly         = o.intOr("eyeOnly", c.eyeOnly);
+    c.eyeCode         = o.intOr("eyeCode", c.eyeCode);
     c.steerFrame      = o.intOr("steerFrame", c.steerFrame);
     c.foodLife        = o.floatOr("foodLife", c.foodLife);
 }
@@ -127,6 +149,6 @@ inline bool oceanConfigValid(const OceanConfig& c) {
            fin(c.vDrag) && c.vDrag >= 0.0f && fin(c.wallBand) && c.wallBand >= 0.0f &&
            fin(c.cHold) && fin(c.cPress) && fin(c.foodDepthSpread) && c.foodDepthSpread >= 0.0f &&
            (c.eye == 0 || (kOceanHasEye && c.eye == 1)) &&
-           (c.eyeOnly == 0 || (kOceanHasEye && c.eyeOnly == 1)) &&
+           (c.eyeOnly == 0 || (kOceanHasEye && c.eyeOnly == 1)) && eyeCodeValid(c.eyeCode) &&
            (c.steerFrame == 0 || c.steerFrame == 1) && fin(c.foodLife) && c.foodLife >= 0.0f;
 }

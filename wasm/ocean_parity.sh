@@ -24,7 +24,8 @@
 # Two builds: the plain Ocean build (-DEVO_WORLD_OCEAN; every case not named
 # eye_*) and the compound-eye build (+ -DEVO_OCEAN_EYE: 64 sensors, its own
 # planes; the eye_* cases, eye on unless the case says otherwise; eye_only_* /
-# eye_blind_* = OceanConfig::eyeOnly with the eye on / off). Each build's
+# eye_blind_* = OceanConfig::eyeOnly with the eye on / off; eye_code* =
+# OceanConfig::eyeCode, the eye's encodings). Each build's
 # native and wasm binaries are compared with each other, and each build's unit
 # checks run natively and under node.
 #
@@ -172,6 +173,24 @@ add eye_life_steer_only_s3 "3 5000 --cfg {$EXP,$SV,\"eye\":1,\"eyeOnly\":1,\"ste
                   "eye-only + own frame + foodLife 8 + sparse valuable food + the experiment's economy"
 add eye_life_steer_blind_s4 "4 3000 --cfg {$EXP,$SV,\"eyeOnly\":1,\"steerFrame\":1,\"foodLife\":8}" \
                   "blind + own frame + foodLife 8 + sparse valuable food"
+# ---- eye encodings (OceanConfig::eyeCode: 1 faded contrast, 2 opponent pairs, 4 summed sectors) ----
+add eye_code1_s1  '1 3000 --cfg {"eye":1,"eyeCode":1}' "eyeCode 1 (faded contrast), defaults"
+add eye_code2_capture_s17 '17 3000 --capture --cfg {"eye":1,"eyeCode":2,"predatorCount":2,"currentStrength":50}' \
+                  "eyeCode 2 (opponent pairs), every fish's sensor + action bits hashed"
+add eye_code4_capture_s17 '17 3000 --capture --cfg {"eye":1,"eyeCode":4,"predatorCount":2,"currentStrength":50}' \
+                  "eyeCode 4 (summed sectors), every fish's sensor + action bits hashed"
+add eye_code4_rich_toro_s7 "7 3000 --cfg {$RICH,\"toroidal\":true,\"foodDepthMode\":1,\"eye\":1,\"eyeCode\":4}" \
+                  "summed sectors + rich (economy predators; topological 7: sums before the cut) + toroidal"
+add eye_code7_only_capture_s17 '17 3000 --capture --cfg {"eye":1,"eyeOnly":1,"eyeCode":7,"predatorCount":2,"currentStrength":50}' \
+                  "eyeCode 7 (all three) + eye-only, every fish's sensor + action bits hashed"
+add eye_code7_steer_only_exp_s3 "3 5000 --cfg {$EXP,\"eye\":1,\"eyeOnly\":1,\"steerFrame\":1,\"eyeCode\":7}" \
+                  "eyeCode 7 + eye-only + own-frame steering, the eye experiment's economy"
+add eye_code7_life_steer_only_s3 "3 5000 --cfg {$EXP,$SV,\"eye\":1,\"eyeOnly\":1,\"steerFrame\":1,\"foodLife\":8,\"eyeCode\":7}" \
+                  "eyeCode 7 + eye-only + own frame + foodLife 8 + sparse valuable food + the experiment's economy"
+add eye_code7_big_s42 '42 2000 --pop 1500 --cfg {"eye":1,"eyeCode":7}' \
+                  "eyeCode 7, 1500 founders: long per-sector float sums in visit order"
+add eye_code_live_s21 '21 3000 --cfg {"predatorCount":3,"eye":1} --set eyeCode=4@500 --set eyeCode=7@1000 --set eyeOnly=1@1500 --set eyeCode=2@2000 --set eyeCode=1@2400 --set eyeCode=0@2700' \
+                  "eyeCode switched mid-run (oc_set_param): 0 -> 4 -> 7 -> 7 eye-only -> 2 -> 1 -> 0"
 
 run_one () {  # run_one INDEX: native and wasm side by side
     local i=$1 name=${NAMES[$1]} s

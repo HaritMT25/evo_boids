@@ -4,6 +4,8 @@
 // A world is built (fresh: N founders; or evolved: then run E steps), copied
 // as a snapshot (world + rng), and every timed run restores the snapshot, sets
 // OceanConfig::eye to its variant, runs --warm untimed steps and times --steps.
+// A variant is EYE or EYE:CODE (CODE = OceanConfig::eyeCode, default 0), so
+// --variants 1,1:7,1 times the eye's encodings 0 vs 7 with an A/A control.
 // Each rep runs every variant once, the start rotating with the rep (rep r
 // starts at variant r mod V), so every variant sits at every position equally
 // often. A variant list like 0,1,0 gives the A/B (on/off) and an A/A control
@@ -126,15 +128,22 @@ int main(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--wiring")) wiring = true;
         else { std::fprintf(stderr, "unknown or incomplete argument: %s\n", argv[i]); return 2; }
     }
-    std::vector<int> variants;
+    std::vector<int> variants, codes;   // per variant: OceanConfig::eye, OceanConfig::eyeCode
     for (const char* p = variantsArg.c_str(); *p;) {
         variants.push_back(std::atoi(p));
+        while (*p && *p != ',' && *p != ':') ++p;
+        codes.push_back(*p == ':' ? std::atoi(++p) : 0);
         while (*p && *p != ',') ++p;
         if (*p == ',') ++p;
     }
     const int V = (int)variants.size();
-    for (int v : variants)
-        if (v != 0 && !kOceanHasEye) { std::fprintf(stderr, "this build has no eye: --variants 0 only\n"); return 2; }
+    for (int vi = 0; vi < V; ++vi) {
+        if ((variants[vi] != 0 || codes[vi] != 0) && !kOceanHasEye) {
+            std::fprintf(stderr, "this build has no eye: --variants 0 only\n");
+            return 2;
+        }
+        if (!eyeCodeValid(codes[vi])) { std::fprintf(stderr, "bad eyeCode %d\n", codes[vi]); return 2; }
+    }
 
     OceanWorld world;
     std::string err;
@@ -177,6 +186,7 @@ int main(int argc, char** argv) {
             OceanWorld w = snap;
             rng = rsnap;
             w.ocfg.eye = variants[vi];
+            w.ocfg.eyeCode = codes[vi];
             for (int s = 0; s < warm; ++s) w.update(0.016f);
 #ifdef EVO_OCEAN_PROF
             w.oprof = {};
@@ -198,8 +208,8 @@ int main(int argc, char** argv) {
             P.sensNs += w.oprof.sensNs; P.ffNs += w.oprof.ffNs; P.moveNs += w.oprof.moveNs;
             P.steps += w.oprof.steps; P.fishSteps += w.oprof.fishSteps;
 #endif
-            std::printf("run label=%s variant=%d(eye%d) rep=%d ms_per_step=%.4f pop_mean=%.1f\n",
-                        label.c_str(), vi, variants[vi], r, ms[vi].back(), popMean[vi].back());
+            std::printf("run label=%s variant=%d(eye%d code%d) rep=%d ms_per_step=%.4f pop_mean=%.1f\n",
+                        label.c_str(), vi, variants[vi], codes[vi], r, ms[vi].back(), popMean[vi].back());
         }
     }
 
@@ -210,8 +220,8 @@ int main(int argc, char** argv) {
         const double med = median(m);
         const double lo = *std::min_element(m.begin(), m.end()), hi = *std::max_element(m.begin(), m.end());
         const double pm = median(popMean[vi]);
-        std::printf("  variant=%d eye=%d median_ms=%.4f min=%.4f max=%.4f spread=%.1f%% pop=%.0f us_per_fish_step=%.3f\n",
-                    vi, variants[vi], med, lo, hi, med > 0 ? 100.0 * (hi - lo) / med : 0.0, pm,
+        std::printf("  variant=%d eye=%d code=%d median_ms=%.4f min=%.4f max=%.4f spread=%.1f%% pop=%.0f us_per_fish_step=%.3f\n",
+                    vi, variants[vi], codes[vi], med, lo, hi, med > 0 ? 100.0 * (hi - lo) / med : 0.0, pm,
                     pm > 0 ? 1e3 * med / pm : 0.0);
 #ifdef EVO_OCEAN_PROF
         const OceanWorld::OceanProf& P = prof[vi];
@@ -231,8 +241,8 @@ int main(int argc, char** argv) {
         std::vector<double> rat;
         for (int r = 0; r < reps; ++r) rat.push_back(ms[vi][r] / ms[0][r]);
         const double lo = *std::min_element(rat.begin(), rat.end()), hi = *std::max_element(rat.begin(), rat.end());
-        std::printf("  ratio variant%d/variant0 (eye%d/eye%d): median %.4f [min %.4f max %.4f]\n", vi,
-                    variants[vi], variants[0], median(rat), lo, hi);
+        std::printf("  ratio variant%d/variant0 (eye%d:%d/eye%d:%d): median %.4f [min %.4f max %.4f]\n", vi,
+                    variants[vi], codes[vi], variants[0], codes[0], median(rat), lo, hi);
     }
     return 0;
 }

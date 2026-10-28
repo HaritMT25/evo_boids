@@ -92,6 +92,7 @@ inline void hashConfig(Fnv& h, const SimConfig& c, const OceanConfig& o) {
     // stay those of the build before the eye existed. eyeOnly shares the word
     // (bit 1), so with eyeOnly 0 the hashed bytes are the ones before it existed.
     h.i32(o.eye | (o.eyeOnly << 1));
+    if (o.eyeCode != 0) h.i32(0x45430000 | o.eyeCode);   // likewise: eyeCode 0 hashes as before it existed
 #endif
 }
 
@@ -269,6 +270,7 @@ inline void dumpState(const OceanWorld& w, std::FILE* out) {
 #ifdef EVO_OCEAN_EYE
     d.ll("eye", w.ocfg.eye);
     d.ll("eyeOnly", w.ocfg.eyeOnly);
+    d.ll("eyeCode", w.ocfg.eyeCode);
 #endif
     std::fprintf(out, "\ncounters");
     d.ll("births", w.births); d.ll("deaths", w.deaths); d.ll("totalBirths", w.totalBirths);

@@ -84,6 +84,31 @@
 // outside R or index past an array (no fish is born, dies or is reordered, and
 // no predator is added or removed, during the per-fish phase).
 //
+// Eye encodings (OceanConfig::eyeCode, a bitmask, the eye build only; 0 = the
+// eye above, bit for bit). They answer three limits of the nearest-object
+// code for small evolved nets: a unipolar left / right pair needs two wires of
+// opposite sign to steer both ways; CON does not fade with distance (it jumps
+// from b − L to 0 at R); and the nearest object hides everything behind it.
+// The 18 sensor names stay; what they report:
+//   bit 0 (1) faded contrast: CON = PROX x (b − L(z)), 0 at R.
+//   bit 2 (4) summed sectors: each sector sums over EVERY object in it, in
+//          the eye's visit order (fish, then food, then predators; float sums
+//          in that order), squashed by q(x) = x / (1 + |x|):
+//              PROX = q(Σ (1 − d/R)),  SIZE = q(Σ s / (s + d)),
+//              CON  = q(Σ (1 − d/R)(b − L(z)))   (always faded: bit 0 adds nothing)
+//          so PROX and SIZE are in [0, 1) and CON in (−1, 1); one object at
+//          d gives PROX = (1 − d/R) / (2 − d/R). An empty sector reads 0.
+//   bit 1 (2) opponent pairs, applied last (after bit 0 / bit 2), per feature:
+//              EYE_LEFT_*  = left + right     EYE_RIGHT_* = right − left
+//              EYE_UP_*    = up + down        EYE_DOWN_*  = down − up
+//          (AHEAD / BEHIND unchanged). Invertible — left = (L' − R') / 2,
+//          right = (L' + R') / 2 — so nothing is lost, and EYE_RIGHT_* is
+//          signed: one wire from it to STEER_X can turn toward either side.
+//          PROX / SIZE: the sum slots are in [0, 2], the difference slots in
+//          [−1, 1]; CON in [−2, 2] in both (open intervals with bit 2).
+// Every encoding sees the same objects in the same order as code 0 (no extra
+// queries, no draws), so eye-only mode's bit-identity holds for each.
+//
 // Eye-only mode (OceanConfig::eyeOnly, the eye build only): the 23 LABELED
 // exteroceptive senses the eye replaces (ocean::kLabeledSenses) read 0 and are
 // not computed:
@@ -121,6 +146,7 @@
 #include <cstring>
 #include <limits>
 #include <string>
+#include <type_traits>
 #include <vector>
 #ifdef EVO_OCEAN_PROF
 #include <chrono>
@@ -450,10 +476,17 @@ public:
 
         // ---- per-fish phase: sensors, network, movement, metabolism ----------
 #ifdef EVO_OCEAN_EYE
+        // Summed sectors (eyeCode bit 2) change what the eye accumulates per
+        // object, so they are their own instantiation; the other bits only
+        // change eyeWrite, once per fish.
+        const bool eyeSum = (ocfg.eyeCode & kEyeCodeSummed) != 0;
         if (ocfg.eyeOnly) {   // labels off: the eye alone, or nothing ("blind")
-            if (ocfg.eye) { for (int i = 0; i < numCreatures; ++i) stepFish<true, false>(i, dt); }
-            else          { for (int i = 0; i < numCreatures; ++i) stepFish<false, false>(i, dt); }
+            if (ocfg.eye && eyeSum) { for (int i = 0; i < numCreatures; ++i) stepFish<true, false, true>(i, dt); }
+            else if (ocfg.eye)      { for (int i = 0; i < numCreatures; ++i) stepFish<true, false>(i, dt); }
+            else                    { for (int i = 0; i < numCreatures; ++i) stepFish<false, false>(i, dt); }
         } else
+        if (ocfg.eye && eyeSum) { for (int i = 0; i < numCreatures; ++i) stepFish<true, true, true>(i, dt); }
+        else
         if (ocfg.eye) { for (int i = 0; i < numCreatures; ++i) stepFish<true>(i, dt); }
         else
 #endif
@@ -587,7 +620,9 @@ private:
     // ---- the compound eye ---------------------------------------------------
     std::vector<float> predCon_;   // per predator, this step: dark − ambient light
 
-    struct EyeBin { float d2, size, con; };   // the nearest object in one sector
+    struct EyeBin { float d2, size, con; };     // the nearest object in one sector
+    struct EyeSum { float prox, size, con; };   // summed sectors (eyeCode bit 2): the running
+                                                // Σ(1 − d/R), Σ s/(s + d), Σ(1 − d/R)(b − L)
 
     // The step's looks, before the per-fish phase: every fish's size and
     // contrast (stepFish refreshes its own after it moves, as hot_ does), and
@@ -602,28 +637,59 @@ private:
             predCon_[k] = ocean::eyeContrast(ocean::kEyePredBright, predators[k].depth);
     }
 
-    // One object at offset (dx, dy, dz), d2 = its squared distance (<= R²): its
-    // sector is the dominant axis of the offset in the level frame (fwd, rht,
-    // depth; pitch ignored, see the header comment), and it replaces the
-    // sector's object if strictly nearer (ties: the first seen, so the result
-    // follows the deterministic visit order).
-    static void eyeSee(EyeBin* eye, Vec2 fwd, Vec2 rht, float dx, float dy, float dz, float d2,
-                       float size, float con) {
+    // An offset's sector: the dominant axis of (dx, dy, dz) in the level frame
+    // (fwd, rht, depth; pitch ignored, see the header comment).
+    static int eyeSector(Vec2 fwd, Vec2 rht, float dx, float dy, float dz) {
         const float a = dx * fwd.x + dy * fwd.y;   // + ahead
         const float b = dx * rht.x + dy * rht.y;   // + right (as PREDATOR_LR)
         const float aa = std::abs(a), ab = std::abs(b), az = std::abs(dz);
         // (A branch-free form of this pick — selects for the sector and for the
         // nearest-so-far update — gives the same bits but measured no faster:
         // +1-2 points of step time natively, +4-7 under wasm; 2026-10-27.)
-        int k;
-        if (aa >= ab && aa >= az) k = (a >= 0.0f) ? 0 : 1;    // ahead / behind
-        else if (ab >= az)        k = (b <= 0.0f) ? 2 : 3;    // left / right
-        else                      k = (dz <= 0.0f) ? 4 : 5;   // up (shallower) / down
-        EyeBin& e = eye[k];
-        if (d2 < e.d2) { e.d2 = d2; e.size = size; e.con = con; }
+        if (aa >= ab && aa >= az) return (a >= 0.0f) ? 0 : 1;    // ahead / behind
+        if (ab >= az)             return (b <= 0.0f) ? 2 : 3;    // left / right
+        return (dz <= 0.0f) ? 4 : 5;                             // up (shallower) / down
     }
 
-    static void eyeWrite(const EyeBin* eye, float R, float sensors[]) {
+    // One object at offset (dx, dy, dz), d2 = its squared distance (<= R²),
+    // world size `size`, contrast `con` (b − L). Nearest mode: it replaces its
+    // sector's object if strictly nearer (ties: the first seen, so the result
+    // follows the deterministic visit order).
+    static void eyeSee(EyeBin* eye, Vec2 fwd, Vec2 rht, float dx, float dy, float dz, float d2,
+                       float size, float con, float /*R*/) {
+        EyeBin& e = eye[eyeSector(fwd, rht, dx, dy, dz)];
+        if (d2 < e.d2) { e.d2 = d2; e.size = size; e.con = con; }
+    }
+    // Summed sectors (eyeCode bit 2): it adds to its sector's sums, in visit order.
+    static void eyeSee(EyeSum* eye, Vec2 fwd, Vec2 rht, float dx, float dy, float dz, float d2,
+                       float size, float con, float R) {
+        EyeSum& e = eye[eyeSector(fwd, rht, dx, dy, dz)];
+        const float d = std::sqrt(d2);
+        const float p = 1.0f - d / R;
+        e.prox += p;
+        e.size += size / (size + d);
+        e.con  += p * con;
+    }
+
+    static void eyeInit(EyeBin* eye) {
+        for (int k = 0; k < ocean::kEyeSectors; ++k) eye[k] = {std::numeric_limits<float>::infinity(), 0.0f, 0.0f};
+    }
+    static void eyeInit(EyeSum* eye) {
+        for (int k = 0; k < ocean::kEyeSectors; ++k) eye[k] = {0.0f, 0.0f, 0.0f};
+    }
+
+    // eyeCode bit 1, last: left / right and up / down as sum and difference.
+    static void eyeOpponent(float sensors[]) {
+        float* s = sensors + ocean::kEyeFirst;
+        for (int pair = 2; pair <= 4; pair += 2)        // sectors (2 left, 3 right), (4 up, 5 down)
+            for (int f = 0; f < 3; ++f) {
+                const float lo = s[3 * pair + f], hi = s[3 * pair + 3 + f];
+                s[3 * pair + f]     = lo + hi;          // LEFT = left + right, UP = up + down
+                s[3 * pair + 3 + f] = hi - lo;          // RIGHT = right − left, DOWN = down − up
+            }
+    }
+
+    static void eyeWrite(const EyeBin* eye, float R, int code, float sensors[]) {
         const float R2 = R * R;
         for (int k = 0; k < ocean::kEyeSectors; ++k) {
             float* s = sensors + ocean::kEyeFirst + 3 * k;
@@ -632,8 +698,21 @@ private:
             const float d = std::sqrt(e.d2);
             s[0] = 1.0f - d / R;            // proximity
             s[1] = e.size / (e.size + d);   // apparent size s/d, squashed: x / (1 + x)
-            s[2] = e.con;                   // brightness contrast
+            s[2] = (code & kEyeCodeFaded) ? s[0] * e.con   // contrast, faded by proximity
+                                          : e.con;         // brightness contrast
         }
+        if (code & kEyeCodeOpponent) eyeOpponent(sensors);
+    }
+    static float eyeSquash(float x) { return x / (1.0f + std::abs(x)); }
+    static void eyeWrite(const EyeSum* eye, float /*R*/, int code, float sensors[]) {
+        for (int k = 0; k < ocean::kEyeSectors; ++k) {
+            float* s = sensors + ocean::kEyeFirst + 3 * k;
+            const EyeSum& e = eye[k];       // an empty sector's sums are 0 and squash to 0
+            s[0] = eyeSquash(e.prox);
+            s[1] = eyeSquash(e.size);
+            s[2] = eyeSquash(e.con);        // always faded (bit 0 adds nothing)
+        }
+        if (code & kEyeCodeOpponent) eyeOpponent(sensors);
     }
 #endif
 
@@ -667,7 +746,9 @@ private:
     // Eye: the compound eye is on this step (only ever true in the eye build).
     // Labels: the labeled exteroceptive senses are computed (false only in the
     // eye build's eye-only mode, OceanConfig::eyeOnly).
-    template <bool Eye, bool Labels = true>
+    // Sum: the eye sums every object per sector (OceanConfig::eyeCode bit 2;
+    // only with Eye).
+    template <bool Eye, bool Labels = true, bool Sum = false>
     void stepFish(int i, float dt) {
         Fish& c = creatures[i];
         if (!c.alive) return;
@@ -678,7 +759,7 @@ private:
 
         float sensors[NUM_SENSES];
         std::memset(sensors, 0, sizeof(sensors));
-        computeSensors<Eye, Labels>(c, i, sensors);
+        computeSensors<Eye, Labels, Sum>(c, i, sensors);
 #ifdef EVO_OCEAN_PROF
         const auto p1 = pclk::now();
 #endif
@@ -861,8 +942,9 @@ private:
     // predator loops — the same queries, every object within R in the same
     // visit order (so the same 18 inputs, ties included), none of the labeled
     // sums, the topological cut, the nearest-neighbour genome compare or the
-    // long probe.
-    void eyeScan(const Fish& c, int selfIdx, Vec2 fwd, Vec2 rht, EyeBin* eye) {
+    // long probe. Bin: EyeBin (nearest) or EyeSum (summed sectors).
+    template <class Bin>
+    void eyeScan(const Fish& c, int selfIdx, Vec2 fwd, Vec2 rht, Bin* eye) {
         const float R = cfg.perceptionRadius, R2 = R * R;
         std::vector<int>& neighbors = neighbors_;
         neighbors.clear();
@@ -877,7 +959,7 @@ private:
             const float dz = other.depth - c.depth;
             const float d2 = dx * dx + dy * dy + dz * dz;
             if (d2 > R2) continue;
-            eyeSee(eye, fwd, rht, dx, dy, dz, d2, other.eyeSize, other.eyeCon);
+            eyeSee(eye, fwd, rht, dx, dy, dz, d2, other.eyeSize, other.eyeCon, R);
         }
         auto look = [&](int fi, Vec2 fp) {
             float dx = fp.x - c.pos.x;
@@ -886,7 +968,7 @@ private:
             const float dz = food[fi].depth - c.depth;
             const float d2 = dx * dx + dy * dy + dz * dz;
             if (d2 > R2) return;
-            eyeSee(eye, fwd, rht, dx, dy, dz, d2, ocean::kEyeFoodSize, food[fi].eyeCon);
+            eyeSee(eye, fwd, rht, dx, dy, dz, d2, ocean::kEyeFoodSize, food[fi].eyeCon, R);
         };
         if (cfg.toroidal) foodGrid_.forEachInRadiusWrapped(c.pos, R, look);
         else              foodGrid_.forEachInRadius(c.pos, R, look);
@@ -897,12 +979,12 @@ private:
             if (cfg.toroidal) { dx = wrapDx(dx); dy = wrapDy(dy); }
             const float dz = p.depth - c.depth;
             const float d2 = dx * dx + dy * dy + dz * dz;
-            if (d2 <= R2) eyeSee(eye, fwd, rht, dx, dy, dz, d2, ocean::kEyePredSize, predCon_[k]);
+            if (d2 <= R2) eyeSee(eye, fwd, rht, dx, dy, dz, d2, ocean::kEyePredSize, predCon_[k], R);
         }
     }
 #endif
 
-    template <bool Eye, bool Labels = true>
+    template <bool Eye, bool Labels = true, bool Sum = false>
     void computeSensors(const Fish& c, int selfIdx, float sensors[]) {
         const Vec2 fwd = c.forward();
         const Vec2 rht = {-fwd.y, fwd.x};
@@ -910,10 +992,12 @@ private:
 #ifdef EVO_OCEAN_EYE
         // The compound eye: filled by the neighbour, food and predator loops
         // below (every object within R, before any topological cut), written
-        // at the end.
-        [[maybe_unused]] EyeBin eye[ocean::kEyeSectors];
-        if constexpr (Eye)
-            for (EyeBin& e : eye) e = {std::numeric_limits<float>::infinity(), 0.0f, 0.0f};
+        // at the end. Nearest object per sector, or (Sum) sums per sector.
+        using Bin = std::conditional_t<Sum, EyeSum, EyeBin>;
+        [[maybe_unused]] Bin eye[ocean::kEyeSectors];
+        if constexpr (Eye) eyeInit(eye);
+#else
+        static_assert(!Sum, "summed sectors need the eye build");
 #endif
 
         sensors[LOC_X] = c.pos.x / width;
@@ -947,7 +1031,7 @@ private:
             // (stepFish's memset) and are not computed; the eye, if on, looks.
             if constexpr (Eye) eyeScan(c, selfIdx, fwd, rht, eye);
             writeColumnSensors(c, fwd, rht, sensors);
-            if constexpr (Eye) eyeWrite(eye, R, sensors);
+            if constexpr (Eye) eyeWrite(eye, R, ocfg.eyeCode, sensors);
             sensors[RANDOM_SENSOR] = rng.range(-1.0f, 1.0f);
             return;
         }
@@ -985,7 +1069,7 @@ private:
                 const float d2 = dx * dx + dy * dy + dz * dz;
                 if (d2 > R2) continue;
 #ifdef EVO_OCEAN_EYE
-                if constexpr (Eye) eyeSee(eye, fwd, rht, dx, dy, dz, d2, other.eyeSize, other.eyeCon);
+                if constexpr (Eye) eyeSee(eye, fwd, rht, dx, dy, dz, d2, other.eyeSize, other.eyeCon, R);
 #endif
                 attendTo(ni, other, dx, dy, dz, std::sqrt(d2));
             }
@@ -1006,7 +1090,7 @@ private:
                 if (d2 > R2) continue;
                 ++inRadiusCount;
 #ifdef EVO_OCEAN_EYE
-                if constexpr (Eye) eyeSee(eye, fwd, rht, dx, dy, dz, d2, other.eyeSize, other.eyeCon);
+                if constexpr (Eye) eyeSee(eye, fwd, rht, dx, dy, dz, d2, other.eyeSize, other.eyeCon, R);
 #endif
                 if (have == keepMax) {
                     const Candidate& worst = best[have - 1];
@@ -1065,7 +1149,7 @@ private:
             const float d2 = dx * dx + dy * dy + dz * dz;
             if (d2 > R2) return;
 #ifdef EVO_OCEAN_EYE
-            if constexpr (Eye) eyeSee(eye, fwd, rht, dx, dy, dz, d2, ocean::kEyeFoodSize, food[fi].eyeCon);
+            if constexpr (Eye) eyeSee(eye, fwd, rht, dx, dy, dz, d2, ocean::kEyeFoodSize, food[fi].eyeCon, R);
 #endif
             ++foodCount;
             const float dist = std::sqrt(d2);
@@ -1101,7 +1185,7 @@ private:
                 if constexpr (Eye)
                     if (d2 <= R2)
                         eyeSee(eye, fwd, rht, dx, dy, dz, d2, ocean::kEyePredSize,
-                               predCon_[&p - predators.data()]);
+                               predCon_[&p - predators.data()], R);
 #endif
             }
             if (seen) {
@@ -1130,7 +1214,7 @@ private:
         sensors[LONGPROBE_POP_FWD] = tanhCountOver5(probeCount);
 
 #ifdef EVO_OCEAN_EYE
-        if constexpr (Eye) eyeWrite(eye, R, sensors);   // off: stays 0 (stepFish's memset)
+        if constexpr (Eye) eyeWrite(eye, R, ocfg.eyeCode, sensors);   // off: stays 0 (stepFish's memset)
 #endif
 
         sensors[RANDOM_SENSOR] = rng.range(-1.0f, 1.0f);

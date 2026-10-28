@@ -71,6 +71,11 @@ int main(int argc, char** argv) {
     oc.depth = (float)depth;
     if (!oceanConfigValid(oc)) { std::fprintf(stderr, "bad ocean config: %s\n", oceanConfigError(oc).c_str()); return 2; }
     if (const std::string se = oceanSimConfigError(sc); !se.empty()) { std::fprintf(stderr, "bad config for the Ocean: %s\n", se.c_str()); return 2; }
+    // oc_init's world checks (wasm/ocean_wasm.cpp): width / height / founders
+    // and the neighbour grids' cell count (oceanWorldSizeError, before any
+    // allocation), and every radius (OceanWorld::radiusError).
+    if (const std::string we = oceanWorldSizeError(sc, W, H, pop); !we.empty()) { std::fprintf(stderr, "bad world: %s\n", we.c_str()); return 2; }
+    if (const std::string re = OceanWorld::radiusError(sc, W, H); !re.empty()) { std::fprintf(stderr, "bad radius: %s\n", re.c_str()); return 2; }
 
     rng.seed(seed);
     OceanWorld w;

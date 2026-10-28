@@ -15,6 +15,10 @@
 //                 expressions; NEAREST_FOOD_DZ / AVG_NEIGHBOR_DZ in range; the
 //                 food direction is a unit vector; every sensor finite
 //   capture       captureActivations changes no dynamics
+//   eye           (eye build) a hand-built scene's 18 eye inputs bit for bit;
+//                 off = 0; in range; no side effects
+//   eye_only      (eye build) eyeOnly: the 23 labeled inputs 0, every other
+//                 input bit-identical to the labeled run's; blind likewise
 //   reproducible  same seed twice -> identical fingerprints; another seed and a
 //                 1-ulp change in any section change the hash
 //   reset         oc_init / oc_reset (the shim, wasm/ocean_wasm.cpp) replay
@@ -527,6 +531,81 @@ void testEye() {
         t.expect(nonzero > 0, "the eye saw nothing in the side-effect world");
     }
 }
+
+// Eye-only mode (OceanConfig::eyeOnly). An unwired world (as in testEye (3):
+// fish act the same whatever they sense) is run with the labels on and off,
+// eye on and off: every run must have the same state and draws; in eye-only
+// mode the 23 labeled inputs are exactly 0 every fish-step, and every other
+// input (own state, pheromones, current, RANDOM_SENSOR, and the 18 eye inputs)
+// is bit-identical to the labeled run's, fish-step by fish-step.
+void testEyeOnly() {
+    Test t("eye_only");
+    t.expect(ocean::kNumLabeledSenses == 23, "labeled list has %d senses", ocean::kNumLabeledSenses);
+    {
+        OceanConfig oc;
+        oc.eyeOnly = 1;
+        t.expect(oceanConfigValid(oc), "eyeOnly = 1 refused by the eye build");
+        oc.eye = 1;
+        t.expect(oceanConfigValid(oc), "eye 1 + eyeOnly 1 refused");
+        oc.eyeOnly = 2;
+        t.expect(!oceanConfigValid(oc), "eyeOnly = 2 accepted");
+    }
+    struct Run { ofp::Fingerprint fp; std::vector<std::uint64_t> kept; long labeledNonZero = 0, fishSteps = 0; };
+    auto run = [&](int eye, int eyeOnly, bool toroidal, int maxNeighbors) {
+        Run r;
+        OceanConfig oc;
+        oc.eye = eye;
+        oc.eyeOnly = eyeOnly;
+        OceanWorld w;
+        initQuiet(w, 65, 240.0f, oc, /*capture*/ true, toroidal);
+        w.cfg.maxNeighbors = maxNeighbors;
+        w.cfg.predatorCount = 3;
+        w.cfg.currentStrength = 60.0f;   // CURRENT_FWD / LR non-zero (the field is built at
+        w.init(1920, 1080, 240.0f, 0);   // init: rebuild; init also makes the 3 hunters)
+        for (int j = 0; j < 400; ++j) {
+            const Vec2 p = {rng.range(10.0f, 1910.0f), rng.range(10.0f, 1070.0f)};
+            // One EMIT_SIGNAL0 wire from an undriven neuron (0.5): pheromones,
+            // the same in every mode; nothing else is wired.
+            addFish(w, p, rng.range(0.0f, 240.0f), {mkGene(false, 0, EMIT_SIGNAL0, kStrong)}, 0.5f);
+        }
+        for (int j = 0; j < 600; ++j) w.spawnFood();
+        for (int s = 0; s < 300; ++s) {
+            w.update(0.016f);
+            ofp::Fnv h;
+            for (const Fish& c : w.creatures) {
+                if (c.age <= 0.0f) continue;
+                ++r.fishSteps;
+                for (int k = 0; k < NUM_SENSES; ++k) {
+                    if (ocean::isLabeledSense(k)) { r.labeledNonZero += (c.lastSensors[k] != 0.0f); continue; }
+                    h.f32(c.lastSensors[k]);
+                }
+            }
+            r.kept.push_back(h.h);
+        }
+        r.fp = ofp::fingerprint(w, /*withActivations*/ false);
+        return r;
+    };
+    struct Case { bool toroidal; int maxNeighbors; };
+    for (const Case cs : {Case{false, 0}, Case{true, 7}}) {
+        for (int eye = 0; eye < 2; ++eye) {
+            const Run lab = run(eye, 0, cs.toroidal, cs.maxNeighbors);
+            const Run only = run(eye, 1, cs.toroidal, cs.maxNeighbors);
+            const char* name = eye ? "eye-only" : "blind";
+            t.expect(only.fp.ctr == lab.fp.ctr && only.fp.fish == lab.fp.fish && only.fp.food == lab.fp.food &&
+                         only.fp.pred == lab.fp.pred && only.fp.sig == lab.fp.sig && only.fp.rng == lab.fp.rng,
+                     "%s (toroidal %d, topo %d) changed an unwired world (fish %016llx vs %016llx, rng %016llx vs %016llx)",
+                     name, cs.toroidal, cs.maxNeighbors, (unsigned long long)only.fp.fish,
+                     (unsigned long long)lab.fp.fish, (unsigned long long)only.fp.rng, (unsigned long long)lab.fp.rng);
+            t.expect(only.labeledNonZero == 0, "%s: %ld labeled inputs not 0", name, only.labeledNonZero);
+            t.expect(lab.labeledNonZero > lab.fishSteps, "labels on but the labeled inputs are nearly all 0 (%ld)",
+                     lab.labeledNonZero);
+            t.expect(only.kept == lab.kept && only.fishSteps == lab.fishSteps && only.fishSteps > 100000,
+                     "%s (toroidal %d, topo %d): a kept / eye input differs from the labeled run's", name,
+                     cs.toroidal, cs.maxNeighbors);
+        }
+    }
+    t.note("23 labeled inputs 0 in eye-only and blind; kept + eye inputs bit-identical to the labeled runs");
+}
 #else
 // The plain Ocean build has no eye: the key is accepted only as 0.
 void testEye() {
@@ -535,8 +614,12 @@ void testEye() {
     t.expect(oceanConfigValid(oc), "default config refused");
     oc.eye = 1;
     t.expect(!oceanConfigValid(oc), "eye = 1 accepted by a build without the eye");
+    oc.eye = 0;
+    oc.eyeOnly = 1;
+    t.expect(!oceanConfigValid(oc), "eyeOnly = 1 accepted by a build without the eye");
     t.expect(NUM_SENSES == 46, "NUM_SENSES %d, expected 46", (int)NUM_SENSES);
 }
+void testEyeOnly() {}
 #endif
 
 std::vector<ofp::Fingerprint> runPrints(unsigned seed, const char* cfg, int pop, int steps, int every) {
@@ -971,6 +1054,7 @@ int main(int argc, char** argv) {
     ot::testSensors();
     ot::testCaptureNeutral();
     ot::testEye();
+    ot::testEyeOnly();
     ot::testReproducible();
 #ifndef OCEAN_TESTS_NO_SHIM
     ot::testReset();

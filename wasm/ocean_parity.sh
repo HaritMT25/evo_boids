@@ -23,7 +23,8 @@
 #
 # Two builds: the plain Ocean build (-DEVO_WORLD_OCEAN; every case not named
 # eye_*) and the compound-eye build (+ -DEVO_OCEAN_EYE: 64 sensors, its own
-# planes; the eye_* cases, eye on unless the case says otherwise). Each build's
+# planes; the eye_* cases, eye on unless the case says otherwise; eye_only_* /
+# eye_blind_* = OceanConfig::eyeOnly with the eye on / off). Each build's
 # native and wasm binaries are compared with each other, and each build's unit
 # checks run natively and under node.
 #
@@ -130,6 +131,21 @@ add eye_live_s21  '21 3000 --cfg {"predatorCount":3} --set eye=1@500 --set eye=0
 add eye_big_toro_s9 '9 2000 --pop 1500 --w 2560 --h 1440 --cfg {"toroidal":true,"predatorCount":8,"predatorEconomy":true,"maxNeighbors":7,"currentStrength":60,"foodPatches":6,"foodDrift":true,"foodDepthMode":1,"eye":1}' \
                   "eye on, 1500 founders, 2560x1440, toroidal, economy, topological, currents"
 add eye_long_s42  '42 10000 --every 250 --cfg {"eye":1}' "eye on, 10k steps"
+# ---- eye-only mode (OceanConfig::eyeOnly: the 23 labeled senses 0 and skipped) ----
+EXP='"predatorCount":4,"predatorEconomy":true,"predatorCooldown":3,"predatorMetabolism":2,"predatorMeal":10,"predatorReproEnergy":60,"predatorMaxPopulation":6,"predatorMinPopulation":2,"predatorInheritance":true'
+add eye_only_s1   '1 3000 --cfg {"eye":1,"eyeOnly":1}' "eye-only: the eye alone, defaults"
+add eye_blind_s1  '1 3000 --cfg {"eyeOnly":1}' "blind: eyeOnly with the eye off (own state, pheromones, current)"
+add eye_only_capture_s17 '17 3000 --capture --cfg {"eye":1,"eyeOnly":1,"predatorCount":2,"currentStrength":50}' \
+                  "eye-only, every fish's 64 sensor bits hashed (23 labeled = 0)"
+add eye_only_rich_s5 "5 3000 --cfg {$RICH,\"eye\":1,\"eyeOnly\":1}" \
+                  "eye-only + rich: economy predators, topological 7 (no cut in eye-only)"
+add eye_only_rich_toro_s7 "7 3000 --cfg {$RICH,\"toroidal\":true,\"foodDepthMode\":1,\"eye\":1,\"eyeOnly\":1}" \
+                  "eye-only + rich + toroidal (wrapped offsets) + patch depths"
+add eye_only_exp_s3 "3 5000 --cfg {$EXP,\"eye\":1,\"eyeOnly\":1}" \
+                  "eye-only, the eye experiment's predator economy (meal 10, cap 6, floor 2, inheritance)"
+add eye_blind_exp_toro_s4 "4 3000 --cfg {$EXP,\"toroidal\":true,\"eyeOnly\":1}" "blind + the experiment's economy, toroidal"
+add eye_only_live_s21 '21 3000 --cfg {"predatorCount":3,"eye":1} --set eyeOnly=1@500 --set eye=0@1200 --set eyeOnly=0@1800 --set eyeOnly=1@2400 --set eye=1@2600' \
+                  "eyeOnly / eye switched mid-run: labeled+eye -> eye-only -> blind -> labeled -> blind -> eye-only"
 
 run_one () {  # run_one INDEX: native and wasm side by side
     local i=$1 name=${NAMES[$1]} s

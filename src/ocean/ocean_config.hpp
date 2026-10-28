@@ -41,6 +41,17 @@ struct OceanConfig {
     // so anywhere else it must stay 0 (oceanConfigValid). Off, the eye inputs
     // read 0 — the same as six empty sectors — and cost nothing per object.
     int   eye             = 0;
+    // Eye-only mode (the eye build only; 0 = off, 1 = on): the LABELED
+    // exteroceptive senses — the ones the eye replaces: food direction /
+    // distance / density, the predator bearing, the neighbour offsets,
+    // headings, counts and attributes, the long probe — read 0 and are not
+    // computed (ocean::kLabeledSenses, ocean_world.hpp). Own state,
+    // proprioception, pheromones, the current and RANDOM_SENSOR stay. With
+    // eye = 1 the fish see only through the compound eye; with eye = 0
+    // ("blind") they sense nothing outside their own body but the pheromone
+    // column and the current. The pairwise interaction vote's own contact
+    // inputs (kernel::interactionVote) are not senses and are unchanged.
+    int   eyeOnly         = 0;
 };
 
 // Does this build have the compound eye's sensors?
@@ -65,6 +76,7 @@ inline void readOceanConfig(const jsonm::Value& o, OceanConfig& c) {
     c.foodDepthMode   = o.intOr("foodDepthMode", c.foodDepthMode);
     c.foodDepthSpread = o.floatOr("foodDepthSpread", c.foodDepthSpread);
     c.eye             = o.intOr("eye", c.eye);
+    c.eyeOnly         = o.intOr("eyeOnly", c.eyeOnly);
 }
 
 // The preview's SimConfig starting point (tuned with tools/ocean_probe.cpp).
@@ -95,5 +107,6 @@ inline bool oceanConfigValid(const OceanConfig& c) {
            c.buoyMutation >= 0.0f && fin(c.pitchMax) && c.pitchMax > 0.0f &&
            fin(c.vDrag) && c.vDrag >= 0.0f && fin(c.wallBand) && c.wallBand >= 0.0f &&
            fin(c.cHold) && fin(c.cPress) && fin(c.foodDepthSpread) && c.foodDepthSpread >= 0.0f &&
-           (c.eye == 0 || (kOceanHasEye && c.eye == 1));
+           (c.eye == 0 || (kOceanHasEye && c.eye == 1)) &&
+           (c.eyeOnly == 0 || (kOceanHasEye && c.eyeOnly == 1));
 }

@@ -84,8 +84,10 @@ inline void hashConfig(Fnv& h, const SimConfig& c, const OceanConfig& o) {
     h.f32(o.wallBand); h.f32(o.cHold); h.f32(o.cPress); h.i32(o.foodDepthMode);
     h.f32(o.foodDepthSpread);
 #ifdef EVO_OCEAN_EYE
-    h.i32(o.eye);   // the eye build only: the plain build's eye is always 0 and its
-                    // fingerprints stay those of the build before the eye existed
+    // The eye build only: the plain build's eye is always 0 and its fingerprints
+    // stay those of the build before the eye existed. eyeOnly shares the word
+    // (bit 1), so with eyeOnly 0 the hashed bytes are the ones before it existed.
+    h.i32(o.eye | (o.eyeOnly << 1));
 #endif
 }
 
@@ -250,6 +252,7 @@ inline void dumpState(const OceanWorld& w, std::FILE* out) {
     d.fl("foodDepthSpread", w.ocfg.foodDepthSpread);
 #ifdef EVO_OCEAN_EYE
     d.ll("eye", w.ocfg.eye);
+    d.ll("eyeOnly", w.ocfg.eyeOnly);
 #endif
     std::fprintf(out, "\ncounters");
     d.ll("births", w.births); d.ll("deaths", w.deaths); d.ll("totalBirths", w.totalBirths);

@@ -46,6 +46,25 @@
 // queries — and draws no random numbers. Off (or in the plain Ocean build)
 // the 18 inputs read 0, the same as six empty sectors.
 //
+// Eye-only mode (OceanConfig::eyeOnly, the eye build only): the 23 LABELED
+// exteroceptive senses the eye replaces (ocean::kLabeledSenses) read 0 and are
+// not computed:
+//     food:       NEAREST_FOOD_DX/DY/DZ, NEAREST_FOOD_DIST, FOOD_DENSITY
+//     predators:  PREDATOR_FWD/LR/PROX
+//     neighbours: NEIGHBOR_COUNT, AVG_NEIGHBOR_DX/DY/DZ,
+//                 AVG_NEIGHBOR_HEADING_X/Y, NEAREST_NEIGHBOR_DIST,
+//                 POPULATION_DENSITY/FWD/LR, LONGPROBE_POP_FWD,
+//                 NEAREST_NEIGHBOR_AGE/FOOD, GENETIC_SIM_NEAREST/FWD
+// Kept (23): own state and proprioception (LOC_X/Y/Z, BOUNDARY_DIST_X/Y/Z,
+// BOUNDARY_DIST, OWN_VEL_X/Y/Z, OWN_SPEED, LAST_MOVE_DIR_X/Y, AGE,
+// FOOD_RESERVES, OSCILLATOR, RESPONSIVENESS), the non-visual senses
+// (SIGNAL0/_FWD/_LR, CURRENT_FWD/LR) and RANDOM_SENSOR; plus the 18 EYE_*
+// inputs when the eye is on (eye 0 + eyeOnly 1 = "blind"). The eye sees the
+// same objects in the same order as with the labels on, so its 18 inputs are
+// bit-identical between the two modes for the same state. The pairwise
+// interaction vote (kernel::interactionVote) builds its own contact inputs and
+// is unchanged. No draws are added or removed (RANDOM_SENSOR is still drawn).
+//
 // Build note: the eye build has 64 sensors, so genes decode with % 64 instead
 // of % 46 and its colour / SimHash planes are its own (STATS_DIM 1900); that is
 // a different genetics from the plain Ocean build even with the eye off, which
@@ -171,6 +190,24 @@ constexpr float kEyePredBright = 0.05f;
 // L(z) = exp(−kEyeWater·z), through evomath::expm1f (bit-identical native / wasm).
 inline float eyeAmbient(float z) { return 1.0f + evomath::expm1f(-kEyeWater * z); }
 inline float eyeContrast(float bright, float z) { return bright - eyeAmbient(z); }
+
+// The labeled exteroceptive senses eye-only mode zeroes (OceanConfig::eyeOnly;
+// see the header comment). Everything else that is not EYE_* is kept.
+inline constexpr int kLabeledSenses[] = {
+    NEAREST_FOOD_DX, NEAREST_FOOD_DY, NEAREST_FOOD_DIST, FOOD_DENSITY, NEAREST_FOOD_DZ,
+    PREDATOR_FWD, PREDATOR_LR, PREDATOR_PROX,
+    NEIGHBOR_COUNT, AVG_NEIGHBOR_DX, AVG_NEIGHBOR_DY, AVG_NEIGHBOR_DZ,
+    AVG_NEIGHBOR_HEADING_X, AVG_NEIGHBOR_HEADING_Y, NEAREST_NEIGHBOR_DIST,
+    POPULATION_DENSITY, POPULATION_FWD, POPULATION_LR, LONGPROBE_POP_FWD,
+    NEAREST_NEIGHBOR_AGE, NEAREST_NEIGHBOR_FOOD, GENETIC_SIM_NEAREST, GENETIC_SIM_FWD,
+};
+inline constexpr int kNumLabeledSenses = (int)(sizeof(kLabeledSenses) / sizeof(kLabeledSenses[0]));
+static_assert(kNumLabeledSenses == 23, "eye-only mode's labeled-sense list changed");
+inline constexpr bool isLabeledSense(int s) {
+    for (int l : kLabeledSenses) if (l == s) return true;
+    return false;
+}
+inline constexpr bool isEyeSense(int s) { return s >= kEyeFirst && s < kEyeFirst + kEyeInputs; }
 #endif
 
 }  // namespace ocean
@@ -185,6 +222,8 @@ public:
     std::vector<OceanFood> food;
     SignalGrid signals;
     long long totalReseeds = 0;             // founders the minPopulation floor added (not births)
+    long long totalFoodEaten = 0;           // food items eaten by fish (a statistic: not
+                                            // part of the fingerprint, changes nothing)
 
     static constexpr float LONGPROBE_DIST = 200.0f;
     static constexpr float LONGPROBE_RADIUS = 30.0f;   // the probe's horizontal reach
@@ -262,6 +301,7 @@ public:
         food.clear();
         for (int i = 0; i < cfg.targetFood; ++i) spawnFood();
         totalReseeds = 0;
+        totalFoodEaten = 0;
     }
 
     void spawnFood() {
@@ -348,6 +388,10 @@ public:
 
         // ---- per-fish phase: sensors, network, movement, metabolism ----------
 #ifdef EVO_OCEAN_EYE
+        if (ocfg.eyeOnly) {   // labels off: the eye alone, or nothing ("blind")
+            if (ocfg.eye) { for (int i = 0; i < numCreatures; ++i) stepFish<true, false>(i, dt); }
+            else          { for (int i = 0; i < numCreatures; ++i) stepFish<false, false>(i, dt); }
+        } else
         if (ocfg.eye) { for (int i = 0; i < numCreatures; ++i) stepFish<true>(i, dt); }
         else
 #endif
@@ -381,6 +425,7 @@ public:
                 if (dist2(c.pos, c.depth, f.pos, f.depth) > pr2) continue;
                 f.alive = false;
                 c.foodReserves += cfg.foodEnergy;
+                ++totalFoodEaten;
             }
 
             if (c.interactTimer <= 0.0f) {
@@ -557,7 +602,9 @@ private:
     }
 
     // Eye: the compound eye is on this step (only ever true in the eye build).
-    template <bool Eye>
+    // Labels: the labeled exteroceptive senses are computed (false only in the
+    // eye build's eye-only mode, OceanConfig::eyeOnly).
+    template <bool Eye, bool Labels = true>
     void stepFish(int i, float dt) {
         Fish& c = creatures[i];
         if (!c.alive) return;
@@ -568,7 +615,7 @@ private:
 
         float sensors[NUM_SENSES];
         std::memset(sensors, 0, sizeof(sensors));
-        computeSensors<Eye>(c, i, sensors);
+        computeSensors<Eye, Labels>(c, i, sensors);
 #ifdef EVO_OCEAN_PROF
         const auto p1 = pclk::now();
 #endif
@@ -723,7 +770,69 @@ private:
         }
     }
 
-    template <bool Eye>
+    // The pheromone column and the current: horizontal, as Classic (kept in
+    // eye-only mode: they are not what the eye replaces).
+    void writeColumnSensors(const Fish& c, Vec2 fwd, Vec2 rht, float sensors[]) {
+        sensors[SIGNAL0] = signals.read(c.pos);
+        sensors[SIGNAL0_FWD] = signals.readInDir(c.pos, fwd) - signals.readInDir(c.pos, {-fwd.x, -fwd.y});
+        sensors[SIGNAL0_LR] = signals.readInDir(c.pos, rht) - signals.readInDir(c.pos, {-rht.x, -rht.y});
+        if (current_.active()) {
+            Vec2 cur = current_.velocityAt(c.pos);
+            sensors[CURRENT_FWD] = evomath::tanhf((cur.x * fwd.x + cur.y * fwd.y) / 100.0f);
+            sensors[CURRENT_LR]  = evomath::tanhf((cur.x * rht.x + cur.y * rht.y) / 100.0f);
+        } else {
+            sensors[CURRENT_FWD] = 0.0f;
+            sensors[CURRENT_LR]  = 0.0f;
+        }
+    }
+
+#ifdef EVO_OCEAN_EYE
+    // Eye-only mode: the eye's half of computeSensors' neighbour, food and
+    // predator loops — the same queries, every object within R in the same
+    // visit order (so the same 18 inputs, ties included), none of the labeled
+    // sums, the topological cut, the nearest-neighbour genome compare or the
+    // long probe.
+    void eyeScan(const Fish& c, int selfIdx, Vec2 fwd, Vec2 rht, EyeBin* eye) {
+        const float R = cfg.perceptionRadius, R2 = R * R;
+        std::vector<int>& neighbors = neighbors_;
+        neighbors.clear();
+        if (cfg.toroidal) creatureGrid_.queryRadiusWrapped(c.pos, R, neighbors);
+        else              creatureGrid_.queryRadius(c.pos, R, neighbors);
+        for (int ni : neighbors) {
+            if (ni == selfIdx) continue;
+            const FishHot& other = hot_[ni];
+            float dx = other.pos.x - c.pos.x;
+            float dy = other.pos.y - c.pos.y;
+            if (cfg.toroidal) { dx = wrapDx(dx); dy = wrapDy(dy); }
+            const float dz = other.depth - c.depth;
+            const float d2 = dx * dx + dy * dy + dz * dz;
+            if (d2 > R2) continue;
+            eyeSee(eye, fwd, rht, dx, dy, dz, d2, other.eyeSize, other.eyeCon);
+        }
+        auto look = [&](int fi, Vec2 fp) {
+            float dx = fp.x - c.pos.x;
+            float dy = fp.y - c.pos.y;
+            if (cfg.toroidal) { dx = wrapDx(dx); dy = wrapDy(dy); }
+            const float dz = food[fi].depth - c.depth;
+            const float d2 = dx * dx + dy * dy + dz * dz;
+            if (d2 > R2) return;
+            eyeSee(eye, fwd, rht, dx, dy, dz, d2, ocean::kEyeFoodSize, food[fi].eyeCon);
+        };
+        if (cfg.toroidal) foodGrid_.forEachInRadiusWrapped(c.pos, R, look);
+        else              foodGrid_.forEachInRadius(c.pos, R, look);
+        for (std::size_t k = 0; k < predators.size(); ++k) {
+            const OceanPredator& p = predators[k];
+            float dx = p.pos.x - c.pos.x;
+            float dy = p.pos.y - c.pos.y;
+            if (cfg.toroidal) { dx = wrapDx(dx); dy = wrapDy(dy); }
+            const float dz = p.depth - c.depth;
+            const float d2 = dx * dx + dy * dy + dz * dz;
+            if (d2 <= R2) eyeSee(eye, fwd, rht, dx, dy, dz, d2, ocean::kEyePredSize, predCon_[k]);
+        }
+    }
+#endif
+
+    template <bool Eye, bool Labels = true>
     void computeSensors(const Fish& c, int selfIdx, float sensors[]) {
         const Vec2 fwd = c.forward();
         const Vec2 rht = {-fwd.y, fwd.x};
@@ -761,6 +870,18 @@ private:
         sensors[LOC_Z] = c.depth / D;
         sensors[OWN_VEL_Z] = c.vz / ocfg.pitchMax;
         sensors[BOUNDARY_DIST_Z] = evomath::tanhf(std::min(c.depth, D - c.depth) / (0.25f * D));
+
+#ifdef EVO_OCEAN_EYE
+        if constexpr (!Labels) {
+            // Eye-only mode: the labeled senses (ocean::kLabeledSenses) stay 0
+            // (stepFish's memset) and are not computed; the eye, if on, looks.
+            if constexpr (Eye) eyeScan(c, selfIdx, fwd, rht, eye);
+            writeColumnSensors(c, fwd, rht, sensors);
+            if constexpr (Eye) eyeWrite(eye, R, sensors);
+            sensors[RANDOM_SENSOR] = rng.range(-1.0f, 1.0f);
+            return;
+        }
+#endif
 
         // ---- neighbours: (x, y) grid candidates, kept if within R in 3-D ----
         std::vector<int>& neighbors = neighbors_;
@@ -893,17 +1014,7 @@ private:
         sensors[FOOD_DENSITY] = tanhCountOver10(foodCount);
 
         // ---- pheromone column and current: horizontal, as Classic ----
-        sensors[SIGNAL0] = signals.read(c.pos);
-        sensors[SIGNAL0_FWD] = signals.readInDir(c.pos, fwd) - signals.readInDir(c.pos, {-fwd.x, -fwd.y});
-        sensors[SIGNAL0_LR] = signals.readInDir(c.pos, rht) - signals.readInDir(c.pos, {-rht.x, -rht.y});
-        if (current_.active()) {
-            Vec2 cur = current_.velocityAt(c.pos);
-            sensors[CURRENT_FWD] = evomath::tanhf((cur.x * fwd.x + cur.y * fwd.y) / 100.0f);
-            sensors[CURRENT_LR]  = evomath::tanhf((cur.x * rht.x + cur.y * rht.y) / 100.0f);
-        } else {
-            sensors[CURRENT_FWD] = 0.0f;
-            sensors[CURRENT_LR]  = 0.0f;
-        }
+        writeColumnSensors(c, fwd, rht, sensors);
 
         // ---- nearest predator within R in 3-D; bearing from its horizontal part ----
         {

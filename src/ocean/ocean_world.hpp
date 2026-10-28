@@ -268,7 +268,13 @@ public:
     static constexpr float LONGPROBE_DIST = 200.0f;
     static constexpr float LONGPROBE_RADIUS = 30.0f;   // the probe's horizontal reach
 
-    // Every radius this world queries or tests with must be finite and >= 0.
+    // Every radius this world queries or tests with must be finite and >= 0,
+    // and so must its square: each one is used squared (R², the pickup,
+    // interaction, detection and capture radii², the grid's r²), and a radius
+    // of 2^64 (about 1.8e19) or more squares to an infinite float. (With
+    // R² = inf an empty eye sector, d² = inf, passed d² <= R² and read
+    // PROX = 1 − inf/R = −inf.) With R² finite every object the eye bins has a
+    // finite d² <= R², so all 18 eye inputs are finite.
     // In a toroidal world each one must also be < min(w, h) / 2: that is the
     // bound SpatialGrid::queryRadiusWrapped / forEachInRadiusWrapped assume
     // (spatial_grid.hpp) — a wider disk overlaps its own image across the seam
@@ -287,6 +293,9 @@ public:
         for (const auto& e : radii) {
             if (!std::isfinite(e.r) || e.r < 0.0f)
                 return std::string(e.name) + " must be finite and >= 0";
+            if (!std::isfinite(e.r * e.r))
+                return std::string(e.name) + " " + std::to_string(e.r) +
+                       " is too large: its square overflows a float (keep it below 1.8e19)";
             if (c.toroidal && !(2.0f * e.r < (float)std::min(w, h)))
                 return std::string(e.name) + " " + std::to_string(e.r) +
                        " needs a toroidal world wider and taller than twice it (got " +

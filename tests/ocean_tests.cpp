@@ -27,6 +27,9 @@
 //                 off, none do; the first stock's ages spread; draws unchanged
 //   reproducible  same seed twice -> identical fingerprints; another seed and a
 //                 1-ulp change in any section change the hash
+//   radii         every radius must be finite, >= 0 and have a finite float
+//                 square (oc_init refuses 1e20, accepts the largest float below
+//                 2^64); (eye build) at that perceptionRadius every input is finite
 //   reset         oc_init / oc_reset (the shim, wasm/ocean_wasm.cpp) replay
 //                 exactly, live oc_set_param changes are dropped, and the shim's
 //                 world == the harness's ofp::initWorld world
@@ -940,6 +943,88 @@ void testReproducible() {
     t.expect(ofp::fingerprint(w) == base, "restoring every bump did not restore the hash");
 }
 
+// OceanWorld::radiusError (the shim's oc_init check): every radius must be
+// finite, >= 0 and have a finite float square — every radius is used squared,
+// and with perceptionRadius² = inf an empty eye sector read PROX = −inf.
+void testRadii() {
+    Test t("radii");
+    struct Key { const char* name; float SimConfig::*field; };
+    const Key keys[] = {
+        {"perceptionRadius", &SimConfig::perceptionRadius}, {"interactRadius", &SimConfig::interactRadius},
+        {"pickupRadius", &SimConfig::pickupRadius}, {"predatorPerception", &SimConfig::predatorPerception},
+        {"predatorCaptureRadius", &SimConfig::predatorCaptureRadius},
+    };
+    const float big = std::nextafter(18446744073709551616.0f, 0.0f);   // the largest float below 2^64
+    t.expect(std::isfinite(big * big) && !std::isfinite(18446744073709551616.0f * 18446744073709551616.0f),
+             "2^64 is not the float square's overflow bound");
+    for (const Key& k : keys) {
+        SimConfig c;
+        applyOceanDefaults(c);
+        t.expect(OceanWorld::radiusError(c, 1920, 1080).empty(), "defaults refused");
+        for (float bad : {1e20f, 18446744073709551616.0f, 1e38f, std::numeric_limits<float>::infinity(),
+                          std::numeric_limits<float>::quiet_NaN(), -1.0f}) {
+            c.*k.field = bad;
+            const std::string e = OceanWorld::radiusError(c, 1920, 1080);
+            t.expect(!e.empty() && e.find(k.name) == 0, "%s = %g accepted (or the error names another key: %s)",
+                     k.name, (double)bad, e.c_str());
+        }
+        c.*k.field = big;   // non-toroidal: no size bound
+        t.expect(OceanWorld::radiusError(c, 1920, 1080).empty(), "%s = %g refused", k.name, (double)big);
+    }
+#ifndef OCEAN_TESTS_NO_SHIM
+    // oc_init refuses each (and keeps the previous world); the largest accepted
+    // value is accepted.
+    if (t.expect(oc_init(91, 1920, 1080, 240.0, 60, nullptr) == 1, "oc_init: %s", oc_last_error())) {
+        oc_step(5);
+        const ofp::Fingerprint before = ofp::fingerprint(*g_world);
+        std::string firstError;
+        for (const Key& k : keys) {
+            const std::string cfg = std::string("{\"") + k.name + "\":1e20}";
+            t.expect(oc_init(92, 1920, 1080, 240.0, 60, cfg.c_str()) == 0 &&
+                         std::strstr(oc_last_error(), k.name) != nullptr,
+                     "oc_init accepted %s (error: %s)", cfg.c_str(), oc_last_error());
+            t.expect(ofp::fingerprint(*g_world) == before, "a refused oc_init (%s) changed the world", cfg.c_str());
+            if (firstError.empty()) firstError = oc_last_error();
+        }
+        t.note("oc_init {\"perceptionRadius\":1e20}: %s", firstError.c_str());
+        t.expect(oc_init(93, 1920, 1080, 240.0, 60, R"({"perceptionRadius":1.8e19})") == 1,
+                 "perceptionRadius 1.8e19 refused: %s", oc_last_error());
+    }
+#endif
+#ifdef EVO_OCEAN_EYE
+    // The largest accepted perceptionRadius, eye on: every fish sees everything,
+    // every sensor stays finite and an empty sector still reads 0.
+    {
+        OceanWorld w;
+        std::string err;
+        char cfg[160];
+        std::snprintf(cfg, sizeof cfg, R"({"perceptionRadius":%.9g,"eye":1,"predatorCount":2,"targetFood":100})",
+                      (double)big);
+        if (t.expect(ofp::initWorld(w, 94, 1920, 1080, 240.0f, 60, cfg, err), "init: %s", err.c_str()) &&
+            t.expect(w.cfg.perceptionRadius == big && OceanWorld::radiusError(w.cfg, 1920, 1080).empty(),
+                     "perceptionRadius %.9g stored", (double)w.cfg.perceptionRadius)) {
+            w.cfg.captureActivations = true;
+            long nonFinite = 0, empty = 0, full = 0;
+            for (int s = 0; s < 20; ++s) {
+                w.update(0.016f);
+                for (const Fish& c : w.creatures) {
+                    if (c.age <= 0.0f) continue;
+                    for (int k = 0; k < NUM_SENSES; ++k) nonFinite += !finite(c.lastSensors[k]);
+                    for (int k = 0; k < ocean::kEyeSectors; ++k) {
+                        const float* e = c.lastSensors + ocean::kEyeFirst + 3 * k;
+                        if (e[0] == 0.0f && e[1] == 0.0f && e[2] == 0.0f) ++empty; else ++full;
+                    }
+                }
+            }
+            t.expect(nonFinite == 0, "%ld non-finite sensors with perceptionRadius %.9g", nonFinite, (double)big);
+            t.expect(empty > 0 && full > 0, "sectors: %ld empty, %ld full (expected both)", empty, full);
+            t.note("perceptionRadius %.9g, eye on, 20 steps: all sensors finite; %ld empty / %ld full sectors",
+                   (double)big, empty, full);
+        }
+    }
+#endif
+}
+
 #ifndef OCEAN_TESTS_NO_SHIM
 void testReset() {
     Test t("reset");
@@ -1324,6 +1409,7 @@ int main(int argc, char** argv) {
     ot::testEyeOnly();
     ot::testFoodLife();
     ot::testReproducible();
+    ot::testRadii();
 #ifndef OCEAN_TESTS_NO_SHIM
     ot::testReset();
 #endif

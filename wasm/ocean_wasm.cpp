@@ -12,8 +12,9 @@
 //     <= genomeMaxLength <= 80 (GENOME_*); speeds other than finite
 //     0 <= minSpeed <= maxSpeed with maxSpeed > 0; a reversed min/max pair is
 //     refused, not swapped as evo_init does; a radius that is not finite and
-//     >= 0, or, toroidal, not < min(width, height) / 2 (the wrapped grid
-//     query's bound; OceanWorld::radiusError).
+//     >= 0, whose square is not a finite float (>= ~1.8e19: every radius is
+//     used squared), or, toroidal, not < min(width, height) / 2 (the wrapped
+//     grid query's bound; OceanWorld::radiusError).
 //   * oc_set_param: the Ocean keys kBuoy, pitchMax, vDrag, wallBand,
 //     buoyMutation, cHold, cPress, foodDepthSpread, eye, eyeOnly, steerFrame,
 //     foodLife, plus every key evo_set_param accepts. pitchMax must be > 0. The changed
@@ -180,7 +181,8 @@ bool configOk(const SimConfig& cfg, const OceanConfig& oc, int width, int height
     };
     for (const auto& f : liveFloats)
         if (!std::isfinite(f.v)) { g_error = std::string(f.name) + " must be finite"; return false; }
-    // Radii: finite, >= 0, and in a toroidal world < min(width, height) / 2.
+    // Radii: finite, >= 0, a finite square, and in a toroidal world
+    // < min(width, height) / 2.
     g_error = OceanWorld::radiusError(cfg, width, height);
     if (!g_error.empty()) return false;
     if (!oceanConfigValid(oc)) {

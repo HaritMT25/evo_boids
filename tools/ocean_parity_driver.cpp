@@ -20,7 +20,8 @@
 //        tools/ocean_parity_driver.cpp -o opd.js -sALLOW_MEMORY_GROWTH=1 -sNODERAWFS=1 -sEXIT_RUNTIME=1
 //   ./opd 42 3000 > a.txt && node opd.js 42 3000 > b.txt && cmp a.txt b.txt
 //
-// wasm/ocean_parity.sh runs the case matrix.
+// wasm/ocean_parity.sh runs the case matrix. Built with -DEVO_OCEAN_EYE too
+// (the compound-eye build: its header line says build=eye).
 //
 // The world is built the way the page builds it (oc_init in wasm/ocean_wasm.cpp:
 // applyOceanDefaults, the cfg JSON, the shim's clamps; ofp::initWorld), so a
@@ -42,8 +43,9 @@
 //   --dump PATH        write the full state as text (tools/ocean_fingerprint.hpp
 //                      dumpState) at --dump-step (default: the last step)
 //   --dump-step S      which step to dump (0 = right after init)
-//   --capture          captureActivations on: every fish's 46 sensors and 13
-//                      actions of its last step are hashed too (not a cfg JSON key)
+//   --capture          captureActivations on: every fish's 46 sensors (64 in the
+//                      eye build) and 13 actions of its last step are hashed too
+//                      (not a cfg JSON key)
 //   --logs C,R         the death-cluster map and the birth log on, kept to C and
 //                      R records (clusterMap / clusterMax, reproLog / reproLogMax:
 //                      not cfg JSON keys either — the checkpoint reader, and so
@@ -82,7 +84,7 @@ bool parseSet(const char* s, LiveSet& out) {
 // of both configs, clamped, checked, assigned.
 bool applySet(OceanWorld& w, const LiveSet& s) {
     char num[40];
-    if (isSimConfigIntKey(s.name)) {
+    if (isSimConfigIntKey(s.name) || isOceanIntKey(s.name)) {
         if (!isIntValue(s.value)) return false;
         std::snprintf(num, sizeof num, "%lld", (long long)s.value);
     } else {
@@ -110,6 +112,18 @@ struct Coverage {
     long long fastTanhSteps = 0; // fish-steps whose net ran with cfg.fastTanh
     long long popMax = 0, predMax = 0, predGenMax = 0;
     long long predTraitVaried = 0;   // predator-steps with an inherited (non-1) trait
+    // The ocean-vision features (OceanConfig eye / eyeOnly / eyeCode / steerFrame /
+    // foodLife). Printed in the `cover` line only when non-zero (kQuietWhenZero):
+    // they are 0 in every case without those features, whose baselines were
+    // recorded before the counters existed.
+    long long eyeSteps = 0;          // fish-steps that ran with the compound eye on
+    long long eyeOnlySteps = 0;      // fish-steps in eye-only mode (labeled senses off)
+    long long eyeCodeMask = 0;       // OR of the eyeCode bits that ran with the eye on
+    long long eyeE1Steps = 0;        // fish-steps with the eye on while the E1 3-D flow ran
+    long long eyeLit = 0;            // fish (captured) whose last step had an eye input != 0
+    long long labeledLit = 0;        // fish (captured) in eye-only mode with a labeled input != 0 (must stay 0)
+    long long steerOwnSteps = 0;     // fish-steps that pushed STEER_X / STEER_Y in their own frame
+    long long agesKept = 0;          // steps that began with foodLife off and a food age kept != 0
     void before(const OceanWorld& w) {
         const float wb = std::min(w.ocfg.wallBand, 0.5f * w.D);   // the step's own band (stepFish)
         for (const Fish& c : w.creatures) {
@@ -119,6 +133,17 @@ struct Coverage {
         }
         if (w.cfg.maxPopulation > 0 && (long long)w.creatures.size() >= w.cfg.maxPopulation) ++capSteps;
         if (w.cfg.fastTanh) fastTanhSteps += (long long)w.creatures.size();
+        const long long n = (long long)w.creatures.size();
+        if (w.ocfg.eye) {
+            eyeSteps += n;
+            eyeCodeMask |= w.ocfg.eyeCode;
+            if (w.flowE1()) eyeE1Steps += n;
+        }
+        if (w.ocfg.eyeOnly) eyeOnlySteps += n;
+        if (w.ocfg.steerFrame == 1 && !w.cfg.triangularMotion) steerOwnSteps += n;
+        if (!(w.ocfg.foodLife > 0.0f))
+            for (const OceanFood& f : w.food)
+                if (f.age != 0.0f) { ++agesKept; break; }
     }
     void after(const OceanWorld& w) {
         popMax = std::max(popMax, (long long)w.creatures.size());
@@ -127,6 +152,20 @@ struct Coverage {
             predGenMax = std::max(predGenMax, (long long)p.generation);
             predTraitVaried += (p.speedFactor != 1.0f || p.buddingFactor != 1.0f);
         }
+#ifdef EVO_OCEAN_EYE
+        if (w.cfg.captureActivations)
+            for (const Fish& c : w.creatures) {
+                if (!c.alive || c.age <= 0.0f) continue;   // newborns / founders: not sensed yet
+                bool lit = false, lab = false;
+                for (int k = 0; k < NUM_SENSES; ++k) {
+                    if (c.lastSensors[k] == 0.0f) continue;
+                    if (ocean::isEyeSense(k)) lit = true;
+                    else if (ocean::isLabeledSense(k)) lab = true;
+                }
+                eyeLit += lit;
+                labeledLit += (lab && w.ocfg.eyeOnly);
+            }
+#endif
     }
     // Every counter, by name, with the engine's own totals.
     std::map<std::string, long long> values(const OceanWorld& w) const {
@@ -144,7 +183,19 @@ struct Coverage {
             {"bandTop", bandTop}, {"bandFloor", bandFloor}, {"capSteps", capSteps},
             {"fastTanhSteps", fastTanhSteps}, {"popMax", popMax}, {"predMax", predMax},
             {"predGenMax", predGenMax}, {"predTraitVaried", predTraitVaried},
+            {"eyeSteps", eyeSteps}, {"eyeOnlySteps", eyeOnlySteps}, {"eyeCodeMask", eyeCodeMask},
+            {"eyeE1Steps", eyeE1Steps}, {"eyeLit", eyeLit}, {"labeledLit", labeledLit},
+            {"steerOwnSteps", steerOwnSteps}, {"foodExpired", w.totalFoodExpired},
+            {"agesKept", agesKept},
         };
+    }
+    // The counters the `cover` line leaves out while they are 0 (see above).
+    static bool quietWhenZero(const std::string& k) {
+        static const char* const kQuietWhenZero[] = {"eyeSteps", "eyeOnlySteps", "eyeCodeMask", "eyeE1Steps",
+                                                     "eyeLit", "labeledLit", "steerOwnSteps", "foodExpired",
+                                                     "agesKept"};
+        for (const char* q : kQuietWhenZero) if (k == q) return true;
+        return false;
     }
 };
 
@@ -247,9 +298,9 @@ int main(int argc, char** argv) {
         w.cfg.reproLog = true;
         w.cfg.reproLogMax = reproLogMax;
     }
-    std::printf("ocean_parity format=%d seed=%u steps=%ld every=%ld world=%dx%dx%.9g pop=%d capture=%d logs=%d,%d cfg=%s\n",
-                ofp::kFormatVersion, seed, steps, every, W, H, depth, pop, (int)capture, clusterMax, reproLogMax,
-                cfgJson ? cfgJson : "{}");
+    std::printf("ocean_parity format=%d%s seed=%u steps=%ld every=%ld world=%dx%dx%.9g pop=%d capture=%d logs=%d,%d cfg=%s\n",
+                ofp::kFormatVersion, kOceanHasEye ? " build=eye" : "", seed, steps, every, W, H, depth, pop,
+                (int)capture, clusterMax, reproLogMax, cfgJson ? cfgJson : "{}");
     for (const LiveSet& s : sets) std::printf("set %s=%.9g @%ld\n", s.name.c_str(), s.value, s.step);
     for (const Expect& e : expects) {
         // An unknown counter name is a harness error, not a pass.
@@ -303,7 +354,8 @@ int main(int argc, char** argv) {
 
     const auto values = cover.values(w);
     std::printf("cover");
-    for (const auto& kv : values) std::printf(" %s=%lld", kv.first.c_str(), kv.second);
+    for (const auto& kv : values)
+        if (kv.second != 0 || !Coverage::quietWhenZero(kv.first)) std::printf(" %s=%lld", kv.first.c_str(), kv.second);
     std::printf("\n");
     int unmet = 0;
     for (const Expect& e : expects) {

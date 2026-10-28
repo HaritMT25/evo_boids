@@ -8,11 +8,15 @@
 // depend on geometry is the kernel's (kernel.hpp) and WorldCommon's, called the
 // way World calls it; what is here is what depth changes:
 //
-//   * fish move horizontally exactly as Classic's creatures, then vertically:
+//   * fish move horizontally exactly as Classic's creatures (OceanConfig::
+//     steerFrame 1 turns STEER_X / STEER_Y into the fish's own frame: right,
+//     ahead), then vertically:
 //       vz += steerZ·3·dt + kBuoy·(bodyBuoy·D − depth)/D·dt (+ MOVE_RANDOM's
 //       third draw, + a soft push inside wallBand of surface / floor);
 //       vz −= vz·vDrag·dt; |vz| ≤ pitchMax; depth += vz·speed·dt
 //   * depth costs (OceanConfig cHold / cPress) after kernel::stepMetabolism
+//   * optional food lifetime (OceanConfig::foodLife): uneaten food is removed
+//     foodLife seconds after it appeared
 //   * eating, interaction, sensing and the predators' capture use 3-D
 //     distance: the SpatialGrid is still on (x, y), its candidates are
 //     filtered by 3-D distance (a shallow sea: candidates per query stay
@@ -44,6 +48,126 @@
 //     food (OceanFood::size, 1 for now) only if size <= kMouth·bodySize, for
 //     eating and for the smell sensors alike.
 // No E1 feature draws from the rng.
+//
+// The compound eye (build variant -DEVO_OCEAN_EYE, switched by OceanConfig::eye;
+// PLAN_fish_patterns §7). One general sense: every object within the
+// perception radius R — fish, food, predators — is binned by the dominant
+// axis of its offset in the fish's LEVEL frame (forward = the horizontal
+// heading, right = its perpendicular, down = depth) into six sectors: ahead,
+// behind, left, right, up, down. Per sector, the NEAREST object gives three
+// inputs (18 sensors, EYE_*):
+//     PROX = 1 − d/R
+//     SIZE = s / (s + d)       apparent size s/d, squashed to [0, 1)
+//     CON  = b − L(z)          brightness against the ambient light at the
+//                              object's depth, L(z) = exp(−kEyeWater·z)
+// Objects differ only in (s, b): food glows (small, b = 1), predators are
+// dark and large (b = 0.05), fish are b = 0.5 and s = bodySize x the body
+// length (a placeholder until patterns give fish an appearance). The eye is
+// computed inside the existing neighbour, food and predator loops — no extra
+// queries — and draws no random numbers. Off (or in the plain Ocean build)
+// the 18 inputs read 0, the same as six empty sectors.
+//
+// Why LEVEL (the fish's pitch is ignored, deliberately): a fish has no pitched
+// body to look out of. It swims along a horizontal unit heading (Fish::vel) at
+// `speed` and changes depth through a separate rate (vz; depth += vz·speed·dt;
+// its drawn pitch is atan(vz)), and its motor commands act in that same level
+// frame: STEER_X / STEER_Y (steerFrame 1: right / ahead of the horizontal
+// heading) and STEER_Z (down). A level eye reports every offset in exactly the
+// frame the fish can act in — ahead / behind / left / right against the
+// heading and STEER_X, up / down against STEER_Z — whatever vz is at the
+// moment. A pitched eye would tilt "ahead" into depth by atan(vz) (27° at the
+// default pitchMax 0.5, 76° at pitchMax 4) and give "up" a different motor
+// meaning at every pitch.
+//
+// What the eye sees within one step (the rule every labeled sense follows too,
+// and Classic's World): fish are stepped in index order, each sensing and then
+// moving, while the spatial grid holds every fish's START-of-step (x, y).
+// Candidates are the grid's: the stored positions within R in (x, y) of the
+// viewer's own start-of-step position (it senses before it moves). The eye
+// then takes each candidate's offset from hot_, which a fish rewrites as soon
+// as it has moved (with its new depth's contrast). So for viewer j:
+//   * a fish i > j (not stepped yet) is seen exactly where it starts the step;
+//   * a fish i < j (already stepped) is seen at its MOVED position, but only if
+//     its start-of-step (x, y) was within R too: one that swam into range this
+//     step is first seen next step (it is within one step's travel, maxSpeed·dt
+//     plus the current, of the edge of R), and one that swam out is dropped by
+//     the 3-D test on the moved offset (d² <= R²);
+//   * food (drifted before the grid is built, eaten only after the per-fish
+//     phase) and predators (a linear scan; they move after the per-fish phase)
+//     are seen exactly where they are, with this step's contrast.
+// Every binned object is within R of the viewer in 3-D (the test is on the
+// offset actually used), so PROX is in [0, 1] and SIZE in (0, 1]; the stale grid
+// can only delay a fish entering the edge of R by one step, never bin an object
+// outside R or index past an array (no fish is born, dies or is reordered, and
+// no predator is added or removed, during the per-fish phase).
+//
+// Eye encodings (OceanConfig::eyeCode, a bitmask, the eye build only; 0 = the
+// eye above, bit for bit). They answer three limits of the nearest-object
+// code for small evolved nets: a unipolar left / right pair needs two wires of
+// opposite sign to steer both ways; CON does not fade with distance (it jumps
+// from b − L to 0 at R); and the nearest object hides everything behind it.
+// The 18 sensor names stay; what they report:
+//   bit 0 (1) faded contrast: CON = PROX x (b − L(z)), 0 at R.
+//   bit 2 (4) summed sectors: each sector sums over EVERY object in it, in
+//          the eye's visit order (fish, then food, then predators; float sums
+//          in that order), squashed by q(x) = x / (1 + |x|):
+//              PROX = q(Σ (1 − d/R)),  SIZE = q(Σ s / (s + d)),
+//              CON  = q(Σ (1 − d/R)(b − L(z)))   (always faded: bit 0 adds nothing)
+//          so PROX and SIZE are in [0, 1) and CON in (−1, 1); one object at
+//          d gives PROX = (1 − d/R) / (2 − d/R). An empty sector reads 0.
+//   bit 1 (2) opponent pairs, applied last (after bit 0 / bit 2), per feature:
+//              EYE_LEFT_*  = left + right     EYE_RIGHT_* = right − left
+//              EYE_UP_*    = up + down        EYE_DOWN_*  = down − up
+//          (AHEAD / BEHIND unchanged). Invertible — left = (L' − R') / 2,
+//          right = (L' + R') / 2 — so nothing is lost, and EYE_RIGHT_* is
+//          signed: one wire from it to STEER_X can turn toward either side.
+//          PROX / SIZE: the sum slots are in [0, 2], the difference slots in
+//          [−1, 1]; CON in [−2, 2] in both (open intervals with bit 2).
+// Every encoding sees the same objects in the same order as code 0 (no extra
+// queries, no draws), so eye-only mode's bit-identity holds for each.
+//
+// Eye-only mode (OceanConfig::eyeOnly, the eye build only): the 23 LABELED
+// exteroceptive senses the eye replaces (ocean::kLabeledSenses) read 0 and are
+// not computed:
+//     food:       NEAREST_FOOD_DX/DY/DZ, NEAREST_FOOD_DIST, FOOD_DENSITY
+//     predators:  PREDATOR_FWD/LR/PROX
+//     neighbours: NEIGHBOR_COUNT, AVG_NEIGHBOR_DX/DY/DZ,
+//                 AVG_NEIGHBOR_HEADING_X/Y, NEAREST_NEIGHBOR_DIST,
+//                 POPULATION_DENSITY/FWD/LR, LONGPROBE_POP_FWD,
+//                 NEAREST_NEIGHBOR_AGE/FOOD, GENETIC_SIM_NEAREST/FWD
+// Kept (23): own state and proprioception (LOC_X/Y/Z, BOUNDARY_DIST_X/Y/Z,
+// BOUNDARY_DIST, OWN_VEL_X/Y/Z, OWN_SPEED, LAST_MOVE_DIR_X/Y, AGE,
+// FOOD_RESERVES, OSCILLATOR, RESPONSIVENESS), the non-visual senses
+// (SIGNAL0/_FWD/_LR, CURRENT_FWD/LR) and RANDOM_SENSOR; plus the 18 EYE_*
+// inputs when the eye is on (eye 0 + eyeOnly 1 = "blind"). The eye sees the
+// same objects in the same order as with the labels on, so its 18 inputs are
+// bit-identical between the two modes for the same state. The pairwise
+// interaction vote (kernel::interactionVote) builds its own contact inputs and
+// is unchanged. No draws are added or removed (RANDOM_SENSOR is still drawn).
+//
+// Build note: the eye build has 64 sensors, so genes decode with % 64 instead
+// of % 46 and its colour / SimHash planes are its own (STATS_DIM 1900); that is
+// a different genetics from the plain Ocean build even with the eye off, which
+// is why it is a separate build and the plain one is untouched.
+//
+// -DEVO_OCEAN_PROF adds a phase profiler (oprof: sensor gather, feedForward,
+// movement + metabolism, the grid build and the serial phase) for the eye
+// benchmark (tools/ocean_eye_bench.cpp); it changes no state.
+//
+// E1 with the eye build's features (each keeps its own definition):
+//   * the eye sees every food item within R whatever its size: mouthGate
+//     gates eating and the smell sensors (NEAREST_FOOD_*, FOOD_DENSITY), not
+//     sight;
+//   * a food item's eyeCon (the contrast the eye sees) is set at spawn and
+//     set again whenever the E1 flow moves the item in depth (foodDrift), so
+//     it is always eyeContrast(food glow, its depth) — without E1 food never
+//     changes depth, so the set at spawn is the only one;
+//   * a fish's look (hot_ eyeSize / eyeCon) is refreshed after it has moved,
+//     flow drift included; predators' contrast is taken before the per-fish
+//     phase (they move, and drift, after it);
+//   * foodLife ages food after this step's drift and before the spawn;
+//   * CURRENT_FWD / LR (kept in eye-only mode) read the 3-D flow under E1;
+//   * steerFrame turns STEER_X / STEER_Y before the flow drift is added.
 // ----------------------------------------------------------------------------
 #ifndef EVO_WORLD_OCEAN
 #error "ocean_world.hpp needs the Ocean sensor list: compile with -DEVO_WORLD_OCEAN"
@@ -52,8 +176,13 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <string>
+#include <type_traits>
 #include <vector>
+#ifdef EVO_OCEAN_PROF
+#include <chrono>
+#endif
 #include "../core/world.hpp"   // SignalGrid, MAX_TOPOLOGICAL_NEIGHBORS, and through it the
                                // kernel, WorldCommon, SpatialGrid, CurrentField, Predator
 #include "ocean_config.hpp"
@@ -67,6 +196,11 @@ struct OceanFood {
     bool  alive = true;
     float size  = 1.0f;   // E1: what mouthGate compares with kMouth·bodySize (always 1
                           // until E2 sizes the particles)
+    float age   = 0.0f;   // seconds since it appeared (counted only with OceanConfig::foodLife > 0)
+#ifdef EVO_OCEAN_EYE
+    float eyeCon = 0.0f;  // what the eye sees: glow − ambient light at its depth (set at
+                          // spawn, and again whenever the E1 flow moves it in depth)
+#endif
 };
 
 struct OceanPredator : Predator {
@@ -91,6 +225,14 @@ inline constexpr const char* kSensorNames[] = {
     "CURRENT_FWD","CURRENT_LR",
     "PREDATOR_FWD","PREDATOR_LR","PREDATOR_PROX","RANDOM_SENSOR",
     "LOC_Z","OWN_VEL_Z","NEAREST_FOOD_DZ","AVG_NEIGHBOR_DZ","BOUNDARY_DIST_Z",
+#ifdef EVO_OCEAN_EYE
+    "EYE_AHEAD_PROX","EYE_AHEAD_SIZE","EYE_AHEAD_CON",
+    "EYE_BEHIND_PROX","EYE_BEHIND_SIZE","EYE_BEHIND_CON",
+    "EYE_LEFT_PROX","EYE_LEFT_SIZE","EYE_LEFT_CON",
+    "EYE_RIGHT_PROX","EYE_RIGHT_SIZE","EYE_RIGHT_CON",
+    "EYE_UP_PROX","EYE_UP_SIZE","EYE_UP_CON",
+    "EYE_DOWN_PROX","EYE_DOWN_SIZE","EYE_DOWN_CON",
+#endif
 };
 static_assert(sizeof(kSensorNames) / sizeof(kSensorNames[0]) == NUM_SENSES,
               "ocean::kSensorNames is out of sync with the Sensor enum");
@@ -131,6 +273,44 @@ inline bool sensorWiresAction(const NeuralNet& nn, int s, int a) {
 
 constexpr int kDepthBins = 8;
 
+#ifdef EVO_OCEAN_EYE
+// ---- the compound eye's constants (see the header comment) -----------------
+constexpr int   kEyeSectors    = 6;        // ahead, behind, left, right, up, down
+constexpr int   kEyeFirst      = EYE_AHEAD_PROX;
+constexpr int   kEyeInputs     = 3 * kEyeSectors;
+static_assert(EYE_DOWN_CON == kEyeFirst + kEyeInputs - 1, "eye sensors must be contiguous");
+constexpr float kEyeWater      = 0.01f;    // ambient light L(z) = exp(−kEyeWater·z): 0.09 at z = 240
+constexpr float kEyeFishLen    = 20.0f;    // a fish's size in world units per unit bodySize
+                                           // (its 6-point spine: 5 segments of 4)
+constexpr float kEyeFishBright = 0.5f;     // placeholder until patterns exist
+constexpr float kEyeFoodSize   = 4.0f;     // food glows: small and bright
+constexpr float kEyeFoodBright = 1.0f;
+constexpr float kEyePredSize   = 60.0f;    // predators: large and dark
+constexpr float kEyePredBright = 0.05f;
+
+// L(z) = exp(−kEyeWater·z), through evomath::expm1f (bit-identical native / wasm).
+inline float eyeAmbient(float z) { return 1.0f + evomath::expm1f(-kEyeWater * z); }
+inline float eyeContrast(float bright, float z) { return bright - eyeAmbient(z); }
+
+// The labeled exteroceptive senses eye-only mode zeroes (OceanConfig::eyeOnly;
+// see the header comment). Everything else that is not EYE_* is kept.
+inline constexpr int kLabeledSenses[] = {
+    NEAREST_FOOD_DX, NEAREST_FOOD_DY, NEAREST_FOOD_DIST, FOOD_DENSITY, NEAREST_FOOD_DZ,
+    PREDATOR_FWD, PREDATOR_LR, PREDATOR_PROX,
+    NEIGHBOR_COUNT, AVG_NEIGHBOR_DX, AVG_NEIGHBOR_DY, AVG_NEIGHBOR_DZ,
+    AVG_NEIGHBOR_HEADING_X, AVG_NEIGHBOR_HEADING_Y, NEAREST_NEIGHBOR_DIST,
+    POPULATION_DENSITY, POPULATION_FWD, POPULATION_LR, LONGPROBE_POP_FWD,
+    NEAREST_NEIGHBOR_AGE, NEAREST_NEIGHBOR_FOOD, GENETIC_SIM_NEAREST, GENETIC_SIM_FWD,
+};
+inline constexpr int kNumLabeledSenses = (int)(sizeof(kLabeledSenses) / sizeof(kLabeledSenses[0]));
+static_assert(kNumLabeledSenses == 23, "eye-only mode's labeled-sense list changed");
+inline constexpr bool isLabeledSense(int s) {
+    for (int l : kLabeledSenses) if (l == s) return true;
+    return false;
+}
+inline constexpr bool isEyeSense(int s) { return s >= kEyeFirst && s < kEyeFirst + kEyeInputs; }
+#endif
+
 }  // namespace ocean
 
 class OceanWorld : public WorldCommon {
@@ -143,11 +323,22 @@ public:
     std::vector<OceanFood> food;
     SignalGrid signals;
     long long totalReseeds = 0;             // founders the minPopulation floor added (not births)
+    long long totalFoodEaten = 0;           // food items eaten by fish (a statistic: not
+                                            // part of the fingerprint, changes nothing)
+    long long totalFoodExpired = 0;         // food items that reached foodLife uneaten (likewise)
 
     static constexpr float LONGPROBE_DIST = 200.0f;
     static constexpr float LONGPROBE_RADIUS = 30.0f;   // the probe's horizontal reach
 
-    // Every radius this world queries or tests with must be finite and >= 0.
+    // Every radius this world queries or tests with must be finite and >= 0,
+    // and so must its square: each one is used squared (R², the pickup,
+    // interaction, detection and capture radii², the grid's r²), and a radius
+    // of 2^64 (about 1.8e19) or more squares to an infinite float. (With
+    // R² = inf an empty eye sector, d² = inf, passed d² <= R² and read
+    // PROX = 1 − inf/R = −inf.) With R² finite every object the eye bins has a
+    // finite d² <= R², so all 18 eye inputs are finite. (Every accepted config
+    // is also held to radii <= 1e6 by oceanSimConfigError, the int-cast bound;
+    // this square test is radiusError's own guarantee, whoever calls it.)
     // In a toroidal world each one must also be < min(w, h) / 2: that is the
     // bound SpatialGrid::queryRadiusWrapped / forEachInRadiusWrapped assume
     // (spatial_grid.hpp) — a wider disk overlaps its own image across the seam
@@ -166,6 +357,9 @@ public:
         for (const auto& e : radii) {
             if (!std::isfinite(e.r) || e.r < 0.0f)
                 return std::string(e.name) + " must be finite and >= 0";
+            if (!std::isfinite(e.r * e.r))
+                return std::string(e.name) + " " + std::to_string(e.r) +
+                       " is too large: its square overflows a float (keep it below 1.8e19)";
             if (c.toroidal && !(2.0f * e.r < (float)std::min(w, h)))
                 return std::string(e.name) + " " + std::to_string(e.r) +
                        " needs a toroidal world wider and taller than twice it (got " +
@@ -377,7 +571,13 @@ public:
 
         food.clear();
         for (int i = 0; i < cfg.targetFood; ++i) spawnFood();
+        if (ocfg.foodLife > 0.0f) {   // the first stock's ages spread over [0, foodLife)
+            const float n = (float)food.size();
+            for (std::size_t i = 0; i < food.size(); ++i) food[i].age = ocfg.foodLife * ((float)i / n);
+        }
         totalReseeds = 0;
+        totalFoodEaten = 0;
+        totalFoodExpired = 0;
     }
 
     void spawnFood() {
@@ -404,10 +604,17 @@ public:
         } else {
             f.depth = rng.range(0.0f, D);
         }
+#ifdef EVO_OCEAN_EYE
+        f.eyeCon = ocean::eyeContrast(ocean::kEyeFoodBright, f.depth);   // no draws
+#endif
         food.push_back(f);
     }
 
     void update(float dt) {
+#ifdef EVO_OCEAN_PROF
+        using pclk = std::chrono::steady_clock;
+        const auto tStep0 = pclk::now();
+#endif
         frame++;
         births = 0;
         deaths = 0;
@@ -425,7 +632,13 @@ public:
                     const Flow U = flowFast(f.pos, f.depth);
                     f.pos.x = wrapCoord(f.pos.x + U.x * dt, (float)width);
                     f.pos.y = wrapCoord(f.pos.y + U.y * dt, (float)height);
+#ifdef EVO_OCEAN_EYE
+                    const float z0 = f.depth;
+#endif
                     f.depth = clampDepth(f.depth + U.d * dt);
+#ifdef EVO_OCEAN_EYE
+                    if (f.depth != z0) f.eyeCon = ocean::eyeContrast(ocean::kEyeFoodBright, f.depth);   // no draws
+#endif
                 }
             }
         } else if (cfg.foodDrift && current_.active()) {
@@ -435,6 +648,14 @@ public:
                 f.pos.x += v.x * dt;  f.pos.y += v.y * dt;
                 f.pos.x = wrapPreview(f.pos.x, (float)width);
                 f.pos.y = wrapPreview(f.pos.y, (float)height);
+            }
+        }
+
+        if (ocfg.foodLife > 0.0f) {   // food older than foodLife is gone, eaten or not
+            for (auto& f : food) {
+                if (!f.alive) continue;
+                f.age += dt;
+                if (f.age >= ocfg.foodLife) { f.alive = false; ++totalFoodExpired; }
             }
         }
 
@@ -461,9 +682,35 @@ public:
         foodGrid_.build();
 
         pending_.assign(numCreatures, PendingSignal{});
+#ifdef EVO_OCEAN_EYE
+        if (ocfg.eye) eyePrepare();
+#endif
+#ifdef EVO_OCEAN_PROF
+        const auto tFish0 = pclk::now();
+        oprof.buildNs += std::chrono::duration<double, std::nano>(tFish0 - tStep0).count();
+#endif
 
         // ---- per-fish phase: sensors, network, movement, metabolism ----------
-        for (int i = 0; i < numCreatures; ++i) stepFish(i, dt);
+#ifdef EVO_OCEAN_EYE
+        // Summed sectors (eyeCode bit 2) change what the eye accumulates per
+        // object, so they are their own instantiation; the other bits only
+        // change eyeWrite, once per fish.
+        const bool eyeSum = (ocfg.eyeCode & kEyeCodeSummed) != 0;
+        if (ocfg.eyeOnly) {   // labels off: the eye alone, or nothing ("blind")
+            if (ocfg.eye && eyeSum) { for (int i = 0; i < numCreatures; ++i) stepFish<true, false, true>(i, dt); }
+            else if (ocfg.eye)      { for (int i = 0; i < numCreatures; ++i) stepFish<true, false>(i, dt); }
+            else                    { for (int i = 0; i < numCreatures; ++i) stepFish<false, false>(i, dt); }
+        } else
+        if (ocfg.eye && eyeSum) { for (int i = 0; i < numCreatures; ++i) stepFish<true, true, true>(i, dt); }
+        else
+        if (ocfg.eye) { for (int i = 0; i < numCreatures; ++i) stepFish<true>(i, dt); }
+        else
+#endif
+        for (int i = 0; i < numCreatures; ++i) stepFish<false>(i, dt);
+#ifdef EVO_OCEAN_PROF
+        const auto tSerial0 = pclk::now();
+        oprof.fishPhaseNs += std::chrono::duration<double, std::nano>(tSerial0 - tFish0).count();
+#endif
 
         // ---- serial phase: signals, deaths, eating, interaction --------------
         std::vector<Fish> newborns;
@@ -490,6 +737,7 @@ public:
                 if (ocfg.mouthGate && f.size > ocfg.kMouth * c.bodySize) continue;   // E1: too big to swallow
                 f.alive = false;
                 c.foodReserves += cfg.foodEnergy;
+                ++totalFoodEaten;
             }
 
             if (c.interactTimer <= 0.0f) {
@@ -525,7 +773,25 @@ public:
             const int toAdd = cfg.minPopulation - (int)creatures.size();
             for (int j = 0; j < toAdd; ++j) { addFounder(); totalReseeds++; }
         }
+#ifdef EVO_OCEAN_PROF
+        const auto tEnd = pclk::now();
+        oprof.serialNs += std::chrono::duration<double, std::nano>(tEnd - tSerial0).count();
+        oprof.totalNs  += std::chrono::duration<double, std::nano>(tEnd - tStep0).count();
+        oprof.steps++;
+        oprof.fishSteps += numCreatures;
+#endif
     }
+
+#ifdef EVO_OCEAN_PROF
+    // Wall time per phase, summed over steps (single-threaded, so the per-fish
+    // split sens + ff + move is a share of fishPhaseNs; the clock calls in it
+    // cost a little, which is why it is a separate build).
+    struct OceanProf {
+        double buildNs = 0, fishPhaseNs = 0, serialNs = 0, totalNs = 0;
+        double sensNs = 0, ffNs = 0, moveNs = 0;   // inside the per-fish phase
+        long long steps = 0, fishSteps = 0;
+    } oprof;
+#endif
 
     bool currentActive() const { return current_.active(); }
     // The 2-D current the step uses: while flowE1() with eddies, the Ocean's
@@ -556,7 +822,12 @@ public:
     }
 
 private:
-    struct FishHot { Vec2 pos; Vec2 vel; float depth; };
+    struct FishHot {
+        Vec2 pos; Vec2 vel; float depth;
+#ifdef EVO_OCEAN_EYE
+        float eyeSize, eyeCon;   // how the eye sees this fish (set only while it is on)
+#endif
+    };
     struct PendingSignal { bool wants = false; Vec2 pos; };
     struct Candidate { float distSq, dx, dy, dz; int index; };
 
@@ -906,6 +1177,106 @@ private:
     // formulas (sizeDrift alone: the preview's current, unweighted).
     Flow flowStep(Vec2 p, float d) const { return flowE1() ? flowFast(p, d) : flowExactAt(p, d); }
 
+#ifdef EVO_OCEAN_EYE
+    // ---- the compound eye ---------------------------------------------------
+    std::vector<float> predCon_;   // per predator, this step: dark − ambient light
+
+    struct EyeBin { float d2, size, con; };     // the nearest object in one sector
+    struct EyeSum { float prox, size, con; };   // summed sectors (eyeCode bit 2): the running
+                                                // Σ(1 − d/R), Σ s/(s + d), Σ(1 − d/R)(b − L)
+
+    // The step's looks, before the per-fish phase: every fish's size and
+    // contrast (stepFish refreshes its own after it moves, as hot_ does), and
+    // every predator's contrast (predators move after the per-fish phase).
+    void eyePrepare() {
+        for (std::size_t i = 0; i < creatures.size(); ++i) {
+            hot_[i].eyeSize = ocean::kEyeFishLen * creatures[i].bodySize;
+            hot_[i].eyeCon  = ocean::eyeContrast(ocean::kEyeFishBright, hot_[i].depth);
+        }
+        predCon_.resize(predators.size());
+        for (std::size_t k = 0; k < predators.size(); ++k)
+            predCon_[k] = ocean::eyeContrast(ocean::kEyePredBright, predators[k].depth);
+    }
+
+    // An offset's sector: the dominant axis of (dx, dy, dz) in the level frame
+    // (fwd, rht, depth; pitch ignored, see the header comment).
+    static int eyeSector(Vec2 fwd, Vec2 rht, float dx, float dy, float dz) {
+        const float a = dx * fwd.x + dy * fwd.y;   // + ahead
+        const float b = dx * rht.x + dy * rht.y;   // + right (as PREDATOR_LR)
+        const float aa = std::abs(a), ab = std::abs(b), az = std::abs(dz);
+        // (A branch-free form of this pick — selects for the sector and for the
+        // nearest-so-far update — gives the same bits but measured no faster:
+        // +1-2 points of step time natively, +4-7 under wasm; 2026-10-27.)
+        if (aa >= ab && aa >= az) return (a >= 0.0f) ? 0 : 1;    // ahead / behind
+        if (ab >= az)             return (b <= 0.0f) ? 2 : 3;    // left / right
+        return (dz <= 0.0f) ? 4 : 5;                             // up (shallower) / down
+    }
+
+    // One object at offset (dx, dy, dz), d2 = its squared distance (<= R²),
+    // world size `size`, contrast `con` (b − L). Nearest mode: it replaces its
+    // sector's object if strictly nearer (ties: the first seen, so the result
+    // follows the deterministic visit order).
+    static void eyeSee(EyeBin* eye, Vec2 fwd, Vec2 rht, float dx, float dy, float dz, float d2,
+                       float size, float con, float /*R*/) {
+        EyeBin& e = eye[eyeSector(fwd, rht, dx, dy, dz)];
+        if (d2 < e.d2) { e.d2 = d2; e.size = size; e.con = con; }
+    }
+    // Summed sectors (eyeCode bit 2): it adds to its sector's sums, in visit order.
+    static void eyeSee(EyeSum* eye, Vec2 fwd, Vec2 rht, float dx, float dy, float dz, float d2,
+                       float size, float con, float R) {
+        EyeSum& e = eye[eyeSector(fwd, rht, dx, dy, dz)];
+        const float d = std::sqrt(d2);
+        const float p = 1.0f - d / R;
+        e.prox += p;
+        e.size += size / (size + d);
+        e.con  += p * con;
+    }
+
+    static void eyeInit(EyeBin* eye) {
+        for (int k = 0; k < ocean::kEyeSectors; ++k) eye[k] = {std::numeric_limits<float>::infinity(), 0.0f, 0.0f};
+    }
+    static void eyeInit(EyeSum* eye) {
+        for (int k = 0; k < ocean::kEyeSectors; ++k) eye[k] = {0.0f, 0.0f, 0.0f};
+    }
+
+    // eyeCode bit 1, last: left / right and up / down as sum and difference.
+    static void eyeOpponent(float sensors[]) {
+        float* s = sensors + ocean::kEyeFirst;
+        for (int pair = 2; pair <= 4; pair += 2)        // sectors (2 left, 3 right), (4 up, 5 down)
+            for (int f = 0; f < 3; ++f) {
+                const float lo = s[3 * pair + f], hi = s[3 * pair + 3 + f];
+                s[3 * pair + f]     = lo + hi;          // LEFT = left + right, UP = up + down
+                s[3 * pair + 3 + f] = hi - lo;          // RIGHT = right − left, DOWN = down − up
+            }
+    }
+
+    static void eyeWrite(const EyeBin* eye, float R, int code, float sensors[]) {
+        const float R2 = R * R;
+        for (int k = 0; k < ocean::kEyeSectors; ++k) {
+            float* s = sensors + ocean::kEyeFirst + 3 * k;
+            const EyeBin& e = eye[k];
+            if (!(e.d2 <= R2)) { s[0] = s[1] = s[2] = 0.0f; continue; }   // empty sector
+            const float d = std::sqrt(e.d2);
+            s[0] = 1.0f - d / R;            // proximity
+            s[1] = e.size / (e.size + d);   // apparent size s/d, squashed: x / (1 + x)
+            s[2] = (code & kEyeCodeFaded) ? s[0] * e.con   // contrast, faded by proximity
+                                          : e.con;         // brightness contrast
+        }
+        if (code & kEyeCodeOpponent) eyeOpponent(sensors);
+    }
+    static float eyeSquash(float x) { return x / (1.0f + std::abs(x)); }
+    static void eyeWrite(const EyeSum* eye, float /*R*/, int code, float sensors[]) {
+        for (int k = 0; k < ocean::kEyeSectors; ++k) {
+            float* s = sensors + ocean::kEyeFirst + 3 * k;
+            const EyeSum& e = eye[k];       // an empty sector's sums are 0 and squash to 0
+            s[0] = eyeSquash(e.prox);
+            s[1] = eyeSquash(e.size);
+            s[2] = eyeSquash(e.con);        // always faded (bit 0 adds nothing)
+        }
+        if (code & kEyeCodeOpponent) eyeOpponent(sensors);
+    }
+#endif
+
     // Squared 3-D distance; (x, y) by minimum image when the senses wrap.
     float dist2(Vec2 a, float za, Vec2 b, float zb) const {
         float dx = b.x - a.x, dy = b.y - a.y;
@@ -933,17 +1304,35 @@ private:
         return p;
     }
 
+    // Eye: the compound eye is on this step (only ever true in the eye build).
+    // Labels: the labeled exteroceptive senses are computed (false only in the
+    // eye build's eye-only mode, OceanConfig::eyeOnly).
+    // Sum: the eye sums every object per sector (OceanConfig::eyeCode bit 2;
+    // only with Eye).
+    template <bool Eye, bool Labels = true, bool Sum = false>
     void stepFish(int i, float dt) {
         Fish& c = creatures[i];
         if (!c.alive) return;
+#ifdef EVO_OCEAN_PROF
+        using pclk = std::chrono::steady_clock;
+        const auto p0 = pclk::now();
+#endif
 
         float sensors[NUM_SENSES];
         std::memset(sensors, 0, sizeof(sensors));
-        computeSensors(c, i, sensors);
+        computeSensors<Eye, Labels, Sum>(c, i, sensors);
+#ifdef EVO_OCEAN_PROF
+        const auto p1 = pclk::now();
+#endif
 
         float actions[NUM_ACTIONS];
         std::memset(actions, 0, sizeof(actions));
         feedForward(c.nnet, sensors, actions, cfg.fastTanh);
+#ifdef EVO_OCEAN_PROF
+        const auto p2 = pclk::now();
+        oprof.sensNs += std::chrono::duration<double, std::nano>(p1 - p0).count();
+        oprof.ffNs   += std::chrono::duration<double, std::nano>(p2 - p1).count();
+#endif
 
         if (cfg.captureActivations) {
             std::memcpy(c.lastSensors, sensors, sizeof(sensors));
@@ -975,8 +1364,15 @@ private:
             float moveRnd = actions[MOVE_RANDOM] * resp;
             float speedAdj = actions[SPEED_ADJUST] * resp;
 
-            c.vel.x += steerX * 3.0f * dt;
-            c.vel.y += steerY * 3.0f * dt;
+            if (ocfg.steerFrame == 1) {   // the fish's own frame: x = right, y = ahead
+                const Vec2 f0 = c.forward();
+                const Vec2 r0 = {-f0.y, f0.x};
+                c.vel.x += (r0.x * steerX + f0.x * steerY) * 3.0f * dt;
+                c.vel.y += (r0.y * steerX + f0.y * steerY) * 3.0f * dt;
+            } else {
+                c.vel.x += steerX * 3.0f * dt;
+                c.vel.y += steerY * 3.0f * dt;
+            }
             auto fwd = c.forward();
             c.vel.x += fwd.x * moveFwd * 2.0f * dt;
             c.vel.y += fwd.y * moveFwd * 2.0f * dt;
@@ -1036,6 +1432,12 @@ private:
         c.pos.x = wrapCoord(c.pos.x, (float)width);
         c.pos.y = wrapCoord(c.pos.y, (float)height);
         hot_[i] = {c.pos, c.vel, c.depth};
+#ifdef EVO_OCEAN_EYE
+        if constexpr (Eye) {
+            hot_[i].eyeSize = ocean::kEyeFishLen * c.bodySize;
+            hot_[i].eyeCon  = ocean::eyeContrast(ocean::kEyeFishBright, c.depth);
+        }
+#endif
 
         c.updateBody();
 
@@ -1057,6 +1459,9 @@ private:
         }
 
         if (actions[EMIT_SIGNAL0] > 0.0f) pending_[i] = {true, c.pos};
+#ifdef EVO_OCEAN_PROF
+        oprof.moveNs += std::chrono::duration<double, std::nano>(pclk::now() - p2).count();
+#endif
     }
 
     void doInteraction(Fish& c1, Fish& c2, std::vector<Fish>& newborns) {
@@ -1101,10 +1506,89 @@ private:
         }
     }
 
+    // The pheromone column and the current: horizontal, as Classic (kept in
+    // eye-only mode: they are not what the eye replaces).
+    void writeColumnSensors(const Fish& c, Vec2 fwd, Vec2 rht, float sensors[]) {
+        sensors[SIGNAL0] = signals.read(c.pos);
+        sensors[SIGNAL0_FWD] = signals.readInDir(c.pos, fwd) - signals.readInDir(c.pos, {-fwd.x, -fwd.y});
+        sensors[SIGNAL0_LR] = signals.readInDir(c.pos, rht) - signals.readInDir(c.pos, {-rht.x, -rht.y});
+        if (flowE1()) {
+            // E1: the water's horizontal flow here (deep current × f(d) + waves).
+            const Flow U = flowFast(c.pos, c.depth);
+            sensors[CURRENT_FWD] = evomath::tanhf((U.x * fwd.x + U.y * fwd.y) / 100.0f);
+            sensors[CURRENT_LR]  = evomath::tanhf((U.x * rht.x + U.y * rht.y) / 100.0f);
+        } else if (current_.active()) {
+            Vec2 cur = current_.velocityAt(c.pos);
+            sensors[CURRENT_FWD] = evomath::tanhf((cur.x * fwd.x + cur.y * fwd.y) / 100.0f);
+            sensors[CURRENT_LR]  = evomath::tanhf((cur.x * rht.x + cur.y * rht.y) / 100.0f);
+        } else {
+            sensors[CURRENT_FWD] = 0.0f;
+            sensors[CURRENT_LR]  = 0.0f;
+        }
+    }
+
+#ifdef EVO_OCEAN_EYE
+    // Eye-only mode: the eye's half of computeSensors' neighbour, food and
+    // predator loops — the same queries, every object within R in the same
+    // visit order (so the same 18 inputs, ties included), none of the labeled
+    // sums, the topological cut, the nearest-neighbour genome compare or the
+    // long probe. Bin: EyeBin (nearest) or EyeSum (summed sectors).
+    template <class Bin>
+    void eyeScan(const Fish& c, int selfIdx, Vec2 fwd, Vec2 rht, Bin* eye) {
+        const float R = cfg.perceptionRadius, R2 = R * R;
+        std::vector<int>& neighbors = neighbors_;
+        neighbors.clear();
+        if (cfg.toroidal) creatureGrid_.queryRadiusWrapped(c.pos, R, neighbors);
+        else              creatureGrid_.queryRadius(c.pos, R, neighbors);
+        for (int ni : neighbors) {
+            if (ni == selfIdx) continue;
+            const FishHot& other = hot_[ni];
+            float dx = other.pos.x - c.pos.x;
+            float dy = other.pos.y - c.pos.y;
+            if (cfg.toroidal) { dx = wrapDx(dx); dy = wrapDy(dy); }
+            const float dz = other.depth - c.depth;
+            const float d2 = dx * dx + dy * dy + dz * dz;
+            if (d2 > R2) continue;
+            eyeSee(eye, fwd, rht, dx, dy, dz, d2, other.eyeSize, other.eyeCon, R);
+        }
+        auto look = [&](int fi, Vec2 fp) {
+            float dx = fp.x - c.pos.x;
+            float dy = fp.y - c.pos.y;
+            if (cfg.toroidal) { dx = wrapDx(dx); dy = wrapDy(dy); }
+            const float dz = food[fi].depth - c.depth;
+            const float d2 = dx * dx + dy * dy + dz * dz;
+            if (d2 > R2) return;
+            eyeSee(eye, fwd, rht, dx, dy, dz, d2, ocean::kEyeFoodSize, food[fi].eyeCon, R);
+        };
+        if (cfg.toroidal) foodGrid_.forEachInRadiusWrapped(c.pos, R, look);
+        else              foodGrid_.forEachInRadius(c.pos, R, look);
+        for (std::size_t k = 0; k < predators.size(); ++k) {
+            const OceanPredator& p = predators[k];
+            float dx = p.pos.x - c.pos.x;
+            float dy = p.pos.y - c.pos.y;
+            if (cfg.toroidal) { dx = wrapDx(dx); dy = wrapDy(dy); }
+            const float dz = p.depth - c.depth;
+            const float d2 = dx * dx + dy * dy + dz * dz;
+            if (d2 <= R2) eyeSee(eye, fwd, rht, dx, dy, dz, d2, ocean::kEyePredSize, predCon_[k], R);
+        }
+    }
+#endif
+
+    template <bool Eye, bool Labels = true, bool Sum = false>
     void computeSensors(const Fish& c, int selfIdx, float sensors[]) {
         const Vec2 fwd = c.forward();
         const Vec2 rht = {-fwd.y, fwd.x};
         const float R = cfg.perceptionRadius, R2 = R * R;
+#ifdef EVO_OCEAN_EYE
+        // The compound eye: filled by the neighbour, food and predator loops
+        // below (every object within R, before any topological cut), written
+        // at the end. Nearest object per sector, or (Sum) sums per sector.
+        using Bin = std::conditional_t<Sum, EyeSum, EyeBin>;
+        [[maybe_unused]] Bin eye[ocean::kEyeSectors];
+        if constexpr (Eye) eyeInit(eye);
+#else
+        static_assert(!Sum, "summed sectors need the eye build");
+#endif
 
         sensors[LOC_X] = c.pos.x / width;
         sensors[LOC_Y] = c.pos.y / height;
@@ -1130,6 +1614,18 @@ private:
         sensors[LOC_Z] = c.depth / D;
         sensors[OWN_VEL_Z] = c.vz / ocfg.pitchMax;
         sensors[BOUNDARY_DIST_Z] = evomath::tanhf(std::min(c.depth, D - c.depth) / (0.25f * D));
+
+#ifdef EVO_OCEAN_EYE
+        if constexpr (!Labels) {
+            // Eye-only mode: the labeled senses (ocean::kLabeledSenses) stay 0
+            // (stepFish's memset) and are not computed; the eye, if on, looks.
+            if constexpr (Eye) eyeScan(c, selfIdx, fwd, rht, eye);
+            writeColumnSensors(c, fwd, rht, sensors);
+            if constexpr (Eye) eyeWrite(eye, R, ocfg.eyeCode, sensors);
+            sensors[RANDOM_SENSOR] = rng.range(-1.0f, 1.0f);
+            return;
+        }
+#endif
 
         // ---- neighbours: (x, y) grid candidates, kept if within R in 3-D ----
         std::vector<int>& neighbors = neighbors_;
@@ -1162,6 +1658,9 @@ private:
                 const float dz = other.depth - c.depth;
                 const float d2 = dx * dx + dy * dy + dz * dz;
                 if (d2 > R2) continue;
+#ifdef EVO_OCEAN_EYE
+                if constexpr (Eye) eyeSee(eye, fwd, rht, dx, dy, dz, d2, other.eyeSize, other.eyeCon, R);
+#endif
                 attendTo(ni, other, dx, dy, dz, std::sqrt(d2));
             }
             inRadiusCount = neighborCount;
@@ -1180,6 +1679,9 @@ private:
                 const float d2 = dx * dx + dy * dy + dz * dz;
                 if (d2 > R2) continue;
                 ++inRadiusCount;
+#ifdef EVO_OCEAN_EYE
+                if constexpr (Eye) eyeSee(eye, fwd, rht, dx, dy, dz, d2, other.eyeSize, other.eyeCon, R);
+#endif
                 if (have == keepMax) {
                     const Candidate& worst = best[have - 1];
                     if (d2 > worst.distSq || (d2 == worst.distSq && ni > worst.index)) continue;
@@ -1236,6 +1738,11 @@ private:
             const float dz = food[fi].depth - c.depth;
             const float d2 = dx * dx + dy * dy + dz * dz;
             if (d2 > R2) return;
+#ifdef EVO_OCEAN_EYE
+            // The eye sees every item within R (size does not hide it) ...
+            if constexpr (Eye) eyeSee(eye, fwd, rht, dx, dy, dz, d2, ocean::kEyeFoodSize, food[fi].eyeCon, R);
+#endif
+            // ... the smell senses only what this fish could swallow.
             if (ocfg.mouthGate && food[fi].size > ocfg.kMouth * c.bodySize) return;   // E1: not food for me
             ++foodCount;
             const float dist = std::sqrt(d2);
@@ -1253,23 +1760,8 @@ private:
         sensors[NEAREST_FOOD_DIST] = foodDist / R;
         sensors[FOOD_DENSITY] = tanhCountOver10(foodCount);
 
-        // ---- pheromone column and current: horizontal, as Classic ----
-        sensors[SIGNAL0] = signals.read(c.pos);
-        sensors[SIGNAL0_FWD] = signals.readInDir(c.pos, fwd) - signals.readInDir(c.pos, {-fwd.x, -fwd.y});
-        sensors[SIGNAL0_LR] = signals.readInDir(c.pos, rht) - signals.readInDir(c.pos, {-rht.x, -rht.y});
-        if (flowE1()) {
-            // E1: the water's horizontal flow here (deep current × f(d) + waves).
-            const Flow U = flowFast(c.pos, c.depth);
-            sensors[CURRENT_FWD] = evomath::tanhf((U.x * fwd.x + U.y * fwd.y) / 100.0f);
-            sensors[CURRENT_LR]  = evomath::tanhf((U.x * rht.x + U.y * rht.y) / 100.0f);
-        } else if (current_.active()) {
-            Vec2 cur = current_.velocityAt(c.pos);
-            sensors[CURRENT_FWD] = evomath::tanhf((cur.x * fwd.x + cur.y * fwd.y) / 100.0f);
-            sensors[CURRENT_LR]  = evomath::tanhf((cur.x * rht.x + cur.y * rht.y) / 100.0f);
-        } else {
-            sensors[CURRENT_FWD] = 0.0f;
-            sensors[CURRENT_LR]  = 0.0f;
-        }
+        // ---- pheromone column and current: horizontal, as Classic (E1: the 3-D flow) ----
+        writeColumnSensors(c, fwd, rht, sensors);
 
         // ---- nearest predator within R in 3-D; bearing from its horizontal part ----
         {
@@ -1282,6 +1774,12 @@ private:
                 const float dz = p.depth - c.depth;
                 const float d2 = dx * dx + dy * dy + dz * dz;
                 if (d2 < bestD2) { bestD2 = d2; ox = dx; oy = dy; seen = true; }
+#ifdef EVO_OCEAN_EYE
+                if constexpr (Eye)
+                    if (d2 <= R2)
+                        eyeSee(eye, fwd, rht, dx, dy, dz, d2, ocean::kEyePredSize,
+                               predCon_[&p - predators.data()], R);
+#endif
             }
             if (seen) {
                 const float d = std::sqrt(bestD2);
@@ -1307,6 +1805,10 @@ private:
             creatureGrid_.forEachInRadius(probePos, LONGPROBE_RADIUS, probe);
         }
         sensors[LONGPROBE_POP_FWD] = tanhCountOver5(probeCount);
+
+#ifdef EVO_OCEAN_EYE
+        if constexpr (Eye) eyeWrite(eye, R, ocfg.eyeCode, sensors);   // off: stays 0 (stepFish's memset)
+#endif
 
         sensors[RANDOM_SENSOR] = rng.range(-1.0f, 1.0f);
     }

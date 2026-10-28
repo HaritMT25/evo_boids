@@ -25,7 +25,9 @@
 # output must also match between the builds).
 #
 # E1 physics: the cases before the e1_* block run with every E1 knob at its
-# default (OFF); the e1_* cases turn the features on. The r_* list holds
+# default (OFF); the e1_* cases turn the features on (so do steer_life_e1_s5
+# and eye_e1_*). The ocean-vision keys (steerFrame, foodLife, eye, eyeOnly,
+# eyeCode) are at their defaults (0) in every case before the steer_* block. The r_* list holds
 # configs outside the Ocean knobs' ranges (oceanConfigError) and the Ocean's
 # ranges for SimConfig keys (oceanSimConfigError): each must be REFUSED by
 # oc_init / oc_set_param. The harness's copy of the E1 preset is checked against
@@ -34,10 +36,29 @@
 # Direct compiler calls only: CMakeLists.txt / CMakePresets.json (Classic's
 # build) are untouched. Prereq: em++ on PATH, or ~/emsdk/emsdk_env.sh.
 #
-#   wasm/ocean_parity.sh              # everything (~4 min on 8 cores)
+#   wasm/ocean_parity.sh              # everything (~8 min on 8 cores, both builds)
 #   JOBS=8 OCEAN_PARITY_DIR=/tmp/x wasm/ocean_parity.sh
 #   ONLY=def_s1 wasm/ocean_parity.sh  # one case (a grep -E pattern on the name)
 #   NO_TESTS=1 wasm/ocean_parity.sh   # parity cases only
+#   NO_EYE=1 wasm/ocean_parity.sh     # the plain Ocean build only
+#
+# Two builds: the plain Ocean build (-DEVO_WORLD_OCEAN; every case not named
+# eye_*) and the compound-eye build (+ -DEVO_OCEAN_EYE: 64 sensors, its own
+# planes and genetics; the eye_* cases, eye on unless the case says otherwise;
+# eye_only_* / eye_blind_* = OceanConfig::eyeOnly with the eye on / off;
+# eye_code* = OceanConfig::eyeCode, the eye's encodings; eye_e1_* = with E1
+# physics on). Each build's native and wasm binaries are compared with each
+# other and with the baselines, each build's unit checks run natively and
+# under node, and the r_eye_* refusals are asked of the eye build's shim.
+#   NO_EYE=1 wasm/ocean_parity.sh     # the plain Ocean build only
+#
+# Two builds: the plain Ocean build (-DEVO_WORLD_OCEAN; every case not named
+# eye_*) and the compound-eye build (+ -DEVO_OCEAN_EYE: 64 sensors, its own
+# planes; the eye_* cases, eye on unless the case says otherwise; eye_only_* /
+# eye_blind_* = OceanConfig::eyeOnly with the eye on / off; eye_code* =
+# OceanConfig::eyeCode, the eye's encodings). Each build's
+# native and wasm binaries are compared with each other, and each build's unit
+# checks run natively and under node.
 #
 # Bisecting a FAIL: the table names the first differing line (step and
 # sections; `chain` alone = the states differed at some step since the last
@@ -114,15 +135,22 @@ build () {  # build LABEL CMD...
     local label=$1; shift
     if "$@" > "$OUT/build_$label.log" 2>&1; then echo "   built $label"; else echo "   BUILD FAILED: $label"; cat "$OUT/build_$label.log"; return 1; fi
 }
-build driver_native g++ $CXXFLAGS tools/ocean_parity_driver.cpp -o "$OUT/opd_native" & P1=$!
-build driver_wasm   em++ $CXXFLAGS $EMFLAGS tools/ocean_parity_driver.cpp -o "$OUT/opd_wasm.js" & P2=$!
-if [ -z "${NO_TESTS:-}" ]; then
-    build tests_native g++ $CXXFLAGS tests/ocean_tests.cpp -o "$OUT/ocean_tests_native" & P3=$!
-    build tests_wasm   em++ $CXXFLAGS $EMFLAGS tests/ocean_tests.cpp -o "$OUT/ocean_tests_wasm.js" & P4=$!
-fi
+VARIANTS="plain"; [ -z "${NO_EYE:-}" ] && VARIANTS="plain eye"
+PIDS=()
+for v in $VARIANTS; do
+    # binaries: plain = opd_native / opd_wasm.js / ocean_tests_*; eye = *_eye
+    if [ $v = eye ]; then F="$CXXFLAGS -DEVO_OCEAN_EYE"; S=_eye; else F="$CXXFLAGS"; S=; fi
+    build driver_native$S g++ $F tools/ocean_parity_driver.cpp -o "$OUT/opd_native$S" & PIDS+=($!)
+    build driver_wasm$S   em++ $F $EMFLAGS tools/ocean_parity_driver.cpp -o "$OUT/opd_wasm$S.js" & PIDS+=($!)
+    if [ -z "${NO_TESTS:-}" ]; then
+        build tests_native$S g++ $F tests/ocean_tests.cpp -o "$OUT/ocean_tests_native$S" & PIDS+=($!)
+        build tests_wasm$S   em++ $F $EMFLAGS tests/ocean_tests.cpp -o "$OUT/ocean_tests_wasm$S.js" & PIDS+=($!)
+    fi
+done
 BUILD_OK=1
-for p in $P1 $P2 ${P3:-} ${P4:-}; do wait "$p" || BUILD_OK=0; done
+for p in "${PIDS[@]}"; do wait "$p" || BUILD_OK=0; done
 [ "$BUILD_OK" = 1 ] || { echo "== BUILD FAILED"; exit 1; }
+sfx () { [[ $1 == eye_* ]] && echo _eye; }   # sfx CASE_NAME -> the build's binary suffix
 
 # ---- the case matrix ---------------------------------------------------------
 # NAME | ARGS (driver arguments; cfg JSON written without spaces; --expect
@@ -197,6 +225,104 @@ add e1_x_shallow_s4 '4 3000 --depth 10 --cfg {"waveSpeed":100,"waveBand":1,"wave
 add e1_x_big_s9   '9 2000 --pop 1500 --w 2560 --h 1440 --cfg {"waveSpeed":12,"waveBand":8,"deepCurrent":true,"currentStrength":60,"toroidal":true,"foodDrift":true,"bodyModel":true,"sizeDrift":true,"sizeFight":true,"mouthGate":true,"predatorCount":6,"predatorEconomy":true,"depthCostScaled":true,"cHold":0.1,"cPress":0.1}' \
                   "E1 everything on, 1500 founders, 2560x1440, toroidal"
 
+# ---- own-frame steering and the food lifetime (plain build; ocean-vision) ----
+# Each asserts with --expect that the branch ran (cover counters printed only
+# when non-zero: steerOwnSteps, foodExpired, agesKept, eye*; see the driver).
+add steer_own_s1  '1 3000 --cfg {"steerFrame":1} --expect steerOwnSteps>0' "own-frame steering (STEER_X right, STEER_Y ahead), defaults"
+add steer_own_rich_toro_s7 "7 3000 --cfg {$RICH,\"toroidal\":true,\"foodDepthMode\":1,\"steerFrame\":1} --expect steerOwnSteps>0" \
+                  "own-frame steering + rich + toroidal + patch depths"
+add steer_own_capture_s17 '17 3000 --capture --cfg {"steerFrame":1,"predatorCount":2,"currentStrength":50} --expect steerOwnSteps>0' \
+                  "own-frame steering, every fish's sensor + action bits hashed"
+add steer_own_live_s21 '21 3000 --cfg {"predatorCount":3} --set steerFrame=1@700 --set steerFrame=0@1500 --set steerFrame=1@2200 --expect steerOwnSteps>0' \
+                  "steerFrame switched on / off / on mid-run (oc_set_param)"
+add steer_own_tri_s9 '9 3000 --cfg {"triangularMotion":true,"bodyModel":true,"reproMaxDistance":16,"reproSoftWidth":5,"pitchMax":1.2,"steerFrame":1} --expect steerOwnSteps=0' \
+                  "triangular motion ignores steerFrame (fish as x_tri_body_s9's)"
+SV='"foodSpawnBase":1,"foodSpawnAmp":0,"foodEnergy":15,"targetFood":800'
+add life_s1       "1 3000 --cfg {\"foodLife\":8,$SV} --expect foodExpired>0" "foodLife 8, sparse valuable food (1 item/step x 15)"
+add life_rich_toro_s7 "7 3000 --cfg {$RICH,\"toroidal\":true,\"foodDepthMode\":1,\"foodLife\":5} --expect foodExpired>0" \
+                  "foodLife 5 + rich (patches + drift) + toroidal"
+add life_live_s21 '21 3000 --cfg {"predatorCount":3} --set foodLife=6@600 --set foodLife=0@1800 --set foodLife=2.5@2400 --expect foodExpired>0 --expect agesKept>0' \
+                  "foodLife switched on / off (ages kept and hashed) / on mid-run (oc_set_param)"
+add steer_life_e1_s5 "5 3000 --cfg {\"waveSpeed\":6,\"deepCurrent\":true,\"currentStrength\":20,\"foodDrift\":true,\"depthCostScaled\":true,\"cHold\":0.05,\"cPress\":0.03,\"steerFrame\":1,\"foodLife\":8,$SV} --expect steerOwnSteps>0 --expect foodExpired>0" \
+                  "E1 waves + deep current + scaled costs with own-frame steering and foodLife 8"
+# ---- the compound-eye build (-DEVO_OCEAN_EYE: 64 sensors, its own planes) ----
+# Every case named eye_* runs in the eye build (the eye on unless it says
+# otherwise; eye_only_* / eye_blind_* = eyeOnly with the eye on / off; eye_code*
+# = eyeCode, the eye's encodings; eye_e1_* = with E1 physics on).
+add eye_off_s1    '1 3000 --expect eyeSteps=0' "eye build, eye off: 64 sensors, the 18 eye inputs read 0"
+add eye_def_s1    '1 3000 --cfg {"eye":1} --expect eyeSteps>0' "eye on, defaults: fish, food in all three loops"
+add eye_def_s999  '999 3000 --cfg {"eye":1} --expect eyeSteps>0' "eye on, another seed"
+add eye_capture_s17 '17 3000 --capture --cfg {"eye":1,"predatorCount":2,"currentStrength":50} --expect eyeLit>0' \
+                  "eye on, every fish's 64 sensor (18 eye) + 13 action bits hashed"
+add eye_rich_s5   "5 3000 --cfg {$RICH,\"eye\":1} --expect eyeSteps>0" "eye on + rich: predators (economy) in the predator scan, topological 7"
+add eye_rich_toro_s7 "7 3000 --cfg {$RICH,\"toroidal\":true,\"foodDepthMode\":1,\"eye\":1} --expect eyeSteps>0" \
+                  "eye on + rich + toroidal (wrapped offsets) + patch depths"
+add eye_x_deep_s8 '8 3000 --depth 2000 --cfg {"pitchMax":0.01,"kBuoy":-5,"vDrag":200,"wallBand":0,"buoyMutation":0.5,"toroidal":true,"cHold":0.5,"cPress":0.3,"eye":1} --expect eyeSteps>0' \
+                  "eye on, D 2000: ambient light underflows toward 0 at depth"
+add eye_x_shallow_s4 '4 3000 --depth 10 --cfg {"pitchMax":1.5,"wallBand":5,"kBuoy":0,"foodDepthMode":1,"foodPatches":3,"foodDepthSpread":0,"eye":1} --expect eyeSteps>0' \
+                  "eye on, D 10: nearly flat, so up/down sectors are rare"
+add eye_tri_body_s9 '9 3000 --cfg {"triangularMotion":true,"bodyModel":true,"reproMaxDistance":16,"reproSoftWidth":5,"pitchMax":1.2,"eye":1} --expect eyeSteps>0' \
+                  "eye on + body model: fish apparent size from heritable bodySize"
+add eye_live_s21  '21 3000 --cfg {"predatorCount":3} --set eye=1@500 --set eye=0@1500 --set eye=1@2200 --expect eyeSteps>0' \
+                  "eye switched on / off / on mid-run (oc_set_param)"
+add eye_big_toro_s9 '9 2000 --pop 1500 --w 2560 --h 1440 --cfg {"toroidal":true,"predatorCount":8,"predatorEconomy":true,"maxNeighbors":7,"currentStrength":60,"foodPatches":6,"foodDrift":true,"foodDepthMode":1,"eye":1} --expect eyeSteps>0' \
+                  "eye on, 1500 founders, 2560x1440, toroidal, economy, topological, currents"
+add eye_long_s42  '42 10000 --every 250 --cfg {"eye":1} --expect eyeSteps>0' "eye on, 10k steps"
+# ---- eye-only mode (OceanConfig::eyeOnly: the 23 labeled senses 0 and skipped) ----
+EXP='"predatorCount":4,"predatorEconomy":true,"predatorCooldown":3,"predatorMetabolism":2,"predatorMeal":10,"predatorReproEnergy":60,"predatorMaxPopulation":6,"predatorMinPopulation":2,"predatorInheritance":true'
+add eye_only_s1   '1 3000 --cfg {"eye":1,"eyeOnly":1} --expect eyeOnlySteps>0 --expect eyeSteps>0' "eye-only: the eye alone, defaults"
+add eye_blind_s1  '1 3000 --cfg {"eyeOnly":1} --expect eyeOnlySteps>0 --expect eyeSteps=0' "blind: eyeOnly with the eye off (own state, pheromones, current)"
+add eye_only_capture_s17 '17 3000 --capture --cfg {"eye":1,"eyeOnly":1,"predatorCount":2,"currentStrength":50} --expect eyeLit>0 --expect labeledLit=0' \
+                  "eye-only, every fish's 64 sensor bits hashed (23 labeled = 0)"
+add eye_only_rich_s5 "5 3000 --cfg {$RICH,\"eye\":1,\"eyeOnly\":1} --expect eyeOnlySteps>0" \
+                  "eye-only + rich: economy predators, topological 7 (no cut in eye-only)"
+add eye_only_rich_toro_s7 "7 3000 --cfg {$RICH,\"toroidal\":true,\"foodDepthMode\":1,\"eye\":1,\"eyeOnly\":1} --expect eyeOnlySteps>0" \
+                  "eye-only + rich + toroidal (wrapped offsets) + patch depths"
+add eye_only_exp_s3 "3 5000 --cfg {$EXP,\"eye\":1,\"eyeOnly\":1} --expect eyeOnlySteps>0" \
+                  "eye-only, the eye experiment's predator economy (meal 10, cap 6, floor 2, inheritance)"
+add eye_blind_exp_toro_s4 "4 3000 --cfg {$EXP,\"toroidal\":true,\"eyeOnly\":1} --expect eyeOnlySteps>0 --expect eyeSteps=0" "blind + the experiment's economy, toroidal"
+add eye_only_live_s21 '21 3000 --cfg {"predatorCount":3,"eye":1} --set eyeOnly=1@500 --set eye=0@1200 --set eyeOnly=0@1800 --set eyeOnly=1@2400 --set eye=1@2600 --expect eyeOnlySteps>0 --expect eyeSteps>0' \
+                  "eyeOnly / eye switched mid-run: labeled+eye -> eye-only -> blind -> labeled -> blind -> eye-only"
+add eye_steer_rich_s5 "5 3000 --cfg {$RICH,\"eye\":1,\"steerFrame\":1} --expect steerOwnSteps>0 --expect eyeSteps>0" "eye + labels + own-frame steering + rich"
+add eye_steer_only_exp_s3 "3 5000 --cfg {$EXP,\"eye\":1,\"eyeOnly\":1,\"steerFrame\":1} --expect steerOwnSteps>0 --expect eyeOnlySteps>0" \
+                  "eye-only + own-frame steering, the eye experiment's economy"
+add eye_steer_blind_exp_toro_s4 "4 3000 --cfg {$EXP,\"toroidal\":true,\"eyeOnly\":1,\"steerFrame\":1} --expect steerOwnSteps>0 --expect eyeSteps=0" \
+                  "blind + own-frame steering + the experiment's economy, toroidal"
+add eye_life_steer_only_s3 "3 5000 --cfg {$EXP,$SV,\"eye\":1,\"eyeOnly\":1,\"steerFrame\":1,\"foodLife\":8} --expect foodExpired>0 --expect steerOwnSteps>0 --expect eyeOnlySteps>0" \
+                  "eye-only + own frame + foodLife 8 + sparse valuable food + the experiment's economy"
+add eye_life_steer_blind_s4 "4 3000 --cfg {$EXP,$SV,\"eyeOnly\":1,\"steerFrame\":1,\"foodLife\":8} --expect foodExpired>0 --expect eyeSteps=0" \
+                  "blind + own frame + foodLife 8 + sparse valuable food"
+# ---- eye encodings (OceanConfig::eyeCode: 1 faded contrast, 2 opponent pairs, 4 summed sectors) ----
+add eye_code1_s1  '1 3000 --cfg {"eye":1,"eyeCode":1} --expect eyeCodeMask=1' "eyeCode 1 (faded contrast), defaults"
+add eye_code2_capture_s17 '17 3000 --capture --cfg {"eye":1,"eyeCode":2,"predatorCount":2,"currentStrength":50} --expect eyeCodeMask=2 --expect eyeLit>0' \
+                  "eyeCode 2 (opponent pairs), every fish's sensor + action bits hashed"
+add eye_code4_capture_s17 '17 3000 --capture --cfg {"eye":1,"eyeCode":4,"predatorCount":2,"currentStrength":50} --expect eyeCodeMask=4 --expect eyeLit>0' \
+                  "eyeCode 4 (summed sectors), every fish's sensor + action bits hashed"
+add eye_code4_rich_toro_s7 "7 3000 --cfg {$RICH,\"toroidal\":true,\"foodDepthMode\":1,\"eye\":1,\"eyeCode\":4} --expect eyeCodeMask=4" \
+                  "summed sectors + rich (economy predators; topological 7: sums before the cut) + toroidal"
+add eye_code7_only_capture_s17 '17 3000 --capture --cfg {"eye":1,"eyeOnly":1,"eyeCode":7,"predatorCount":2,"currentStrength":50} --expect eyeCodeMask=7 --expect eyeLit>0 --expect labeledLit=0' \
+                  "eyeCode 7 (all three) + eye-only, every fish's sensor + action bits hashed"
+add eye_code7_steer_only_exp_s3 "3 5000 --cfg {$EXP,\"eye\":1,\"eyeOnly\":1,\"steerFrame\":1,\"eyeCode\":7} --expect eyeCodeMask=7 --expect steerOwnSteps>0" \
+                  "eyeCode 7 + eye-only + own-frame steering, the eye experiment's economy"
+add eye_code7_life_steer_only_s3 "3 5000 --cfg {$EXP,$SV,\"eye\":1,\"eyeOnly\":1,\"steerFrame\":1,\"foodLife\":8,\"eyeCode\":7} --expect eyeCodeMask=7 --expect foodExpired>0" \
+                  "eyeCode 7 + eye-only + own frame + foodLife 8 + sparse valuable food + the experiment's economy"
+add eye_code7_big_s42 '42 2000 --pop 1500 --cfg {"eye":1,"eyeCode":7} --expect eyeCodeMask=7' \
+                  "eyeCode 7, 1500 founders: long per-sector float sums in visit order"
+add eye_code_live_s21 '21 3000 --cfg {"predatorCount":3,"eye":1} --set eyeCode=4@500 --set eyeCode=7@1000 --set eyeOnly=1@1500 --set eyeCode=2@2000 --set eyeCode=1@2400 --set eyeCode=0@2700 --expect eyeCodeMask=7 --expect eyeOnlySteps>0' \
+                  "eyeCode switched mid-run (oc_set_param): 0 -> 4 -> 7 -> 7 eye-only -> 2 -> 1 -> 0"
+# ---- E1 physics with the eye (each feature as defined alone; ocean_world.hpp
+# "E1 with the eye build's features": food eyeCon follows its depth under E1
+# drift, the eye sees mouth-gated food) ----
+add eye_e1_preset_s42 "42 3000 --cfg ${E1_PRESET%\}},\"eye\":1} --expect eyeE1Steps>0" "the E1 preset (kE1PresetJson) + the eye"
+add eye_e1_capture_s17 '17 3000 --capture --cfg {"waveSpeed":6,"deepCurrent":true,"currentStrength":40,"foodDrift":true,"eye":1,"eyeCode":7} --expect eyeE1Steps>0 --expect eyeLit>0 --expect eyeCodeMask=7' \
+                  "E1 waves + deep current + food drift in depth, eyeCode 7: every sensor bit hashed"
+add eye_e1_size_s9 '9 3000 --cfg {"bodyModel":true,"sizeDrift":true,"sizeFight":true,"mouthGate":true,"kMouth":1.2,"waveSpeed":6,"deepCurrent":true,"currentStrength":30,"foodDrift":true,"eye":1} --expect eyeE1Steps>0' \
+                  "E1 size laws (mouth gate: smell gated, sight not) + the eye"
+add eye_e1_only_steer_life_s3 "3 5000 --cfg {$EXP,$SV,\"waveSpeed\":6,\"deepCurrent\":true,\"currentStrength\":20,\"foodDrift\":true,\"eye\":1,\"eyeOnly\":1,\"steerFrame\":1,\"foodLife\":8} --expect eyeE1Steps>0 --expect eyeOnlySteps>0 --expect steerOwnSteps>0 --expect foodExpired>0" \
+                  "eye-only + own frame + foodLife 8 + E1 waves / deep current + the experiment's economy"
+add eye_e1_live_s21 '21 3000 --cfg {"currentStrength":40,"foodDrift":true,"predatorCount":2,"eye":1} --set waveSpeed=6@500 --set eyeOnly=1@900 --set deepCurrent=1@1200 --set steerFrame=1@1500 --set foodLife=6@1800 --set waveSpeed=0@2400 --set eyeCode=4@2600 --expect eyeE1Steps>0 --expect foodExpired>0 --expect steerOwnSteps>0' \
+                  "E1 and the eye's keys switched live, interleaved (oc_set_param)"
+
 # Configs the page must REFUSE (oc_init / oc_set_param; ocean_tests --accepts
 # must exit 1): every Ocean knob has a finite range, so none of these can run.
 RNAMES=(); RARGS=()
@@ -269,19 +395,54 @@ radd r_minpop_big   '1 10 --cfg {"minPopulation":100001}'
 radd r_live_minpop  '1 10 --set minPopulation=100001@5'
 radd r_predcount_big '1 10 --cfg {"predatorCount":100001}'
 radd r_patches_big  '1 10 --cfg {"foodPatches":100001}'
+# The ocean-vision keys: the int keys (eye, eyeOnly, eyeCode, steerFrame) are
+# whole numbers in int's range, then in range; foodLife in [0, 1e6]. r_eye_*
+# are asked of the eye build's shim, the rest of the plain build's (where eye,
+# eyeOnly and eyeCode must stay 0).
+radd r_steer_frac   '1 10 --cfg {"steerFrame":0.5}'
+radd r_steer_two    '1 10 --cfg {"steerFrame":2}'
+radd r_steer_huge   '1 10 --cfg {"steerFrame":1e300}'
+radd r_steer_dup    '1 10 --cfg {"steerFrame":1,"steerFrame":0.5}'
+radd r_life_neg     '1 10 --cfg {"foodLife":-1}'
+radd r_life_big     '1 10 --cfg {"foodLife":1000001}'
+radd r_life_inf     '1 10 --cfg {"foodLife":1e39}'
+radd r_live_steer   '1 10 --set steerFrame=0.5@5'
+radd r_live_steer2  '1 10 --set steerFrame=2@5'
+radd r_live_life    '1 10 --set foodLife=1e7@5'
+radd r_plain_eye    '1 10 --cfg {"eye":1}'
+radd r_plain_eyeonly '1 10 --cfg {"eyeOnly":1}'
+radd r_plain_eyecode '1 10 --cfg {"eyeCode":1}'
+radd r_plain_live_eye '1 10 --set eye=1@5'
+radd r_eye_frac     '1 10 --cfg {"eye":0.5}'
+radd r_eye_two      '1 10 --cfg {"eye":2}'
+radd r_eye_huge     '1 10 --cfg {"eye":1e300}'
+radd r_eye_dup      '1 10 --cfg {"eye":1,"eye":0.5}'
+radd r_eye_only_frac '1 10 --cfg {"eye":1,"eyeOnly":0.5}'
+radd r_eye_only_two '1 10 --cfg {"eyeOnly":2}'
+radd r_eye_code_frac '1 10 --cfg {"eye":1,"eyeCode":0.5}'
+radd r_eye_code_big '1 10 --cfg {"eye":1,"eyeCode":8}'
+radd r_eye_code_huge '1 10 --cfg {"eye":1,"eyeCode":1e300}'
+radd r_eye_code_neg '1 10 --cfg {"eye":1,"eyeCode":-1}'
+radd r_eye_code_int '1 10 --cfg {"eye":1,"eyeCode":2147483648}'
+radd r_eye_live_frac '1 10 --set eye=0.5@5'
+radd r_eye_live_code '1 10 --set eyeCode=8@5'
+radd r_eye_live_code_frac '1 10 --set eyeCode=2.5@5'
+radd r_eye_radius_sq '1 10 --cfg {"eye":1,"perceptionRadius":1e20}'
 
 run_one () {  # run_one INDEX: native and wasm side by side
-    local i=$1 name=${NAMES[$1]}
+    local i=$1 name=${NAMES[$1]} s
+    s=$(sfx "$name")
     local -a A
     read -r -a A <<< "${ARGS[$i]}"
-    ( "$OUT/opd_native" "${A[@]}" > "$OUT/$name.native.txt" 2> "$OUT/$name.native.log"; echo $? > "$OUT/$name.native.rc" ) &
-    ( $NODE "$OUT/opd_wasm.js" "${A[@]}" > "$OUT/$name.wasm.txt" 2> "$OUT/$name.wasm.log"; echo $? > "$OUT/$name.wasm.rc" ) &
+    ( "$OUT/opd_native$s" "${A[@]}" > "$OUT/$name.native.txt" 2> "$OUT/$name.native.log"; echo $? > "$OUT/$name.native.rc" ) &
+    ( $NODE "$OUT/opd_wasm$s.js" "${A[@]}" > "$OUT/$name.wasm.txt" 2> "$OUT/$name.wasm.log"; echo $? > "$OUT/$name.wasm.rc" ) &
     wait
 }
 
 SEL=()
 for i in "${!NAMES[@]}"; do
     if [ -n "${ONLY:-}" ] && ! [[ ${NAMES[$i]} =~ ${ONLY} ]]; then continue; fi
+    if [ -n "${NO_EYE:-}" ] && [[ ${NAMES[$i]} == eye_* ]]; then continue; fi
     SEL+=("$i")
 done
 # Every case must be a world the page accepts: the real oc_init / oc_set_param
@@ -290,7 +451,7 @@ declare -A REFUSED=()
 if [ -z "${NO_TESTS:-}" ]; then
     for i in "${SEL[@]}"; do
         read -r -a A <<< "${ARGS[$i]}"
-        msg=$("$OUT/ocean_tests_native" --accepts "${A[@]}" 2>&1) || REFUSED[$i]=${msg:-refused}
+        msg=$("$OUT/ocean_tests_native$(sfx "${NAMES[$i]}")" --accepts "${A[@]}" 2>&1) || REFUSED[$i]=${msg:-refused}
     done
     echo "== shim validation (oc_init + oc_set_param): $(( ${#SEL[@]} - ${#REFUSED[@]} )) of ${#SEL[@]} case configs accepted"
 fi
@@ -301,14 +462,16 @@ if [ -z "${NO_TESTS:-}" ] && { [ -z "${ONLY:-}" ] || [ "$OVERWRITE" = 1 ]; }; th
     nref=0; bad=""
     for i in "${!RNAMES[@]}"; do
         read -r -a A <<< "${RARGS[$i]}"
-        if "$OUT/ocean_tests_native" --accepts "${A[@]}" > "$OUT/${RNAMES[$i]}.refusal.txt" 2>&1; then
+        rs=; [[ ${RNAMES[$i]} == r_eye_* ]] && rs=_eye
+        if [ -n "$rs" ] && [ -n "${NO_EYE:-}" ]; then continue; fi
+        if "$OUT/ocean_tests_native$rs" --accepts "${A[@]}" > "$OUT/${RNAMES[$i]}.refusal.txt" 2>&1; then
             bad="$bad ${RNAMES[$i]}"
         else
             nref=$((nref + 1))
         fi
     done
     if [ -z "$bad" ]; then
-        echo "== out-of-range configs: $nref of ${#RNAMES[@]} refused by oc_init / oc_set_param (as they must be)"
+        echo "== out-of-range configs: $nref of ${#RNAMES[@]} refused by oc_init / oc_set_param (as they must be)${NO_EYE:+; r_eye_* skipped (NO_EYE)}"
     else
         echo "== out-of-range configs ACCEPTED (must be refused):$bad"; GUARD_FAILED=1
     fi
@@ -365,7 +528,7 @@ secs_of () { sed -n 's/^# [0-9]* steps, \([0-9.]*\) s.*/\1/p' "$1" 2>/dev/null; 
 
 FAILED=0; NPASS=0
 CHANGED=(); declare -A CHANGE_WHY=()
-printf '\n%-16s %6s %6s %5s %6s %5s %4s %7s %7s  %s\n' CASE SEED STEPS POP BIRTHS FOOD PRED NATIVE WASM RESULT
+printf '\n%-30s %6s %6s %5s %6s %5s %4s %7s %7s  %s\n' CASE SEED STEPS POP BIRTHS FOOD PRED NATIVE WASM RESULT
 for i in "${SEL[@]}"; do
     name=${NAMES[$i]}
     read -r -a A <<< "${ARGS[$i]}"
@@ -411,37 +574,45 @@ for i in "${SEL[@]}"; do
     else
         FAILED=1
     fi
-    printf '%-16s %6s %6s %5s %6s %5s %4s %6ss %6ss  %s\n' "$name" "${A[0]}" "${A[1]}" "$(get pop)" "$(get births)" \
+    printf '%-30s %6s %6s %5s %6s %5s %4s %6ss %6ss  %s\n' "$name" "${A[0]}" "${A[1]}" "$(get pop)" "$(get births)" \
         "$(get food)" "$(get pred)" "$(secs_of "$OUT/$name.native.log")" "$(secs_of "$OUT/$name.wasm.log")" "$res"
 done
 
-# Same build, same arguments, twice: the native driver itself is reproducible.
-if [ ${#SEL[@]} -gt 0 ]; then
-    i=${SEL[0]}; name=${NAMES[$i]}
-    read -r -a A <<< "${ARGS[$i]}"
-    "$OUT/opd_native" "${A[@]}" > "$OUT/$name.native2.txt" 2> /dev/null
-    if cmp -s "$OUT/$name.native.txt" "$OUT/$name.native2.txt"; then
-        echo "repeat: $name native run twice -> identical"
-    else
-        echo "repeat: $name native run twice -> DIFFERENT"; FAILED=1
-    fi
-fi
+# Same build, same arguments, twice: the native driver itself is reproducible
+# (the first selected case of each build).
+for v in $VARIANTS; do
+    for i in "${SEL[@]}"; do
+        name=${NAMES[$i]}
+        [ "$(sfx "$name")" = "$([ $v = eye ] && echo _eye)" ] || continue
+        read -r -a A <<< "${ARGS[$i]}"
+        "$OUT/opd_native$(sfx "$name")" "${A[@]}" > "$OUT/$name.native2.txt" 2> /dev/null
+        if cmp -s "$OUT/$name.native.txt" "$OUT/$name.native2.txt"; then
+            echo "repeat: $name native run twice -> identical"
+        else
+            echo "repeat: $name native run twice -> DIFFERENT"; FAILED=1
+        fi
+        break
+    done
+done
 
 TESTS_OK=1
 if [ -z "${NO_TESTS:-}" ]; then
-    echo
-    echo "== unit checks (tests/ocean_tests.cpp), native"
-    "$OUT/ocean_tests_native" > "$OUT/tests.native.txt" 2>&1; rct=$?
-    cat "$OUT/tests.native.txt"
-    echo "== unit checks, wasm (node)"
-    $NODE "$OUT/ocean_tests_wasm.js" > "$OUT/tests.wasm.txt" 2>&1; rcw=$?
-    tail -1 "$OUT/tests.wasm.txt"
-    if [ $rct != 0 ] || [ $rcw != 0 ]; then TESTS_OK=0; echo "   unit checks FAILED (native rc $rct, wasm rc $rcw)"; fi
-    if cmp -s "$OUT/tests.native.txt" "$OUT/tests.wasm.txt"; then
-        echo "   unit-check output native == wasm (every printed value identical)"
-    else
-        echo "   unit-check output differs native vs wasm:"; diff "$OUT/tests.native.txt" "$OUT/tests.wasm.txt" | head -20; TESTS_OK=0
-    fi
+    for v in $VARIANTS; do
+        S=; [ $v = eye ] && S=_eye
+        echo
+        echo "== unit checks (tests/ocean_tests.cpp), $v build, native"
+        "$OUT/ocean_tests_native$S" > "$OUT/tests$S.native.txt" 2>&1; rct=$?
+        cat "$OUT/tests$S.native.txt"
+        echo "== unit checks, $v build, wasm (node)"
+        $NODE "$OUT/ocean_tests_wasm$S.js" > "$OUT/tests$S.wasm.txt" 2>&1; rcw=$?
+        tail -1 "$OUT/tests$S.wasm.txt"
+        if [ $rct != 0 ] || [ $rcw != 0 ]; then TESTS_OK=0; echo "   unit checks FAILED (native rc $rct, wasm rc $rcw)"; fi
+        if cmp -s "$OUT/tests$S.native.txt" "$OUT/tests$S.wasm.txt"; then
+            echo "   unit-check output native == wasm (every printed value identical)"
+        else
+            echo "   unit-check output differs native vs wasm:"; diff "$OUT/tests$S.native.txt" "$OUT/tests$S.wasm.txt" | head -20; TESTS_OK=0
+        fi
+    done
 fi
 
 echo

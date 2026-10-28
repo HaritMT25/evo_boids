@@ -14,7 +14,9 @@
 // section's hash. Sections are hashed separately so a mismatch says WHAT
 // diverged first:
 //
-//   cfg   every SimConfig and every OceanConfig field, by bit pattern
+//   cfg   every SimConfig and every OceanConfig field, by bit pattern; the
+//         ocean-vision keys (eye, eyeOnly, eyeCode, steerFrame, foodLife) each
+//         as a tagged word only when it is not its default (0)
 //   ctr   frame, world size, D, every WorldCommon counter, nextId_, the
 //         pairing-graph window, the death / birth logs, totalReseeds and the
 //         wave trains' travelled phases
@@ -22,7 +24,10 @@
 //         state, body params, genome gene by gene, the built net's neurons and
 //         flat connections, lastSensors / lastActions, colour) + pos, vel,
 //         lastMoveDir, depth, vz, bodyBuoy and the 6-point body trail
-//   food  every OceanFood: pos, depth, alive, size
+//   food  every OceanFood: pos, depth, alive, size; its age (foodLife) while
+//         foodLife > 0, and a non-zero age (tagged) while it is 0 — ages kept
+//         after foodLife was switched off live matter again if it comes back
+//         on; in the eye build also eyeCon (the contrast the eye sees)
 //   pred  every OceanPredator: every Predator field + depth, pitch
 //   sig   the pheromone grid bytes
 //   cur   the CurrentField's WHOLE state: mode, strength, core, the size it
@@ -43,7 +48,18 @@
 // cfg / ocfg / the world size / the wave phases / the CurrentField's vortices
 // and the frame, rebuilt by OceanWorld::ensureFlow before any read; the flow
 // it gives IS hashed, in cur) and WorldCommon::prof (the wall-clock profiler;
-// cfg.profile itself is hashed).
+// cfg.profile itself is hashed). The eye build's scratch too: hot_'s eyeSize /
+// eyeCon (every fish's look, rewritten by eyePrepare before the per-fish phase
+// whenever the eye is on, and by the fish itself after it moves; unread while
+// the eye is off) and predCon_ (every predator's contrast, rewritten by
+// eyePrepare each step the eye is on); and OceanWorld::oprof (-DEVO_OCEAN_PROF,
+// wall clock). Statistics the step never reads: totalFoodEaten and
+// totalFoodExpired (the harness's coverage counters report them instead).
+//
+// Every word added for the ocean-vision state (the tagged config keys, the
+// food ages, the eye build's eyeCon) is hashed only in states a format-2
+// baseline cannot hold (a key off its default, a non-zero age, the eye
+// build), so the format stays 2 and every earlier baseline is unchanged.
 //
 // Private state is read WITHOUT engine accessors (namespace peek below: a
 // pointer to member taken in an explicit template instantiation, where C++
@@ -68,6 +84,7 @@
 #include <cstring>
 #include <initializer_list>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 #include "ocean/ocean_config.hpp"
@@ -95,6 +112,7 @@ OFP_PEEK(OwPatchDepth, OceanWorld, foodPatchDepth_)
 OFP_PEEK(OwCreatureGrid, OceanWorld, creatureGrid_)
 OFP_PEEK(OwFoodGrid, OceanWorld, foodGrid_)
 OFP_PEEK(OwWaves, OceanWorld, waves_)
+OFP_PEEK(OwHot, OceanWorld, hot_)
 OFP_PEEK(CfMode, CurrentField, mode_)
 OFP_PEEK(CfCenters, CurrentField, centers_)
 OFP_PEEK(CfStrength, CurrentField, strength_)
@@ -141,12 +159,12 @@ constexpr std::size_t fieldCount() {
 #define OFP_FIELDS(T, N) \
     static_assert(detail::fieldCount<T>() == (N), #T " gained or lost a field: hash it in tools/ocean_fingerprint.hpp, then update this count")
 OFP_FIELDS(SimConfig, 71);
-OFP_FIELDS(OceanConfig, 22);
+OFP_FIELDS(OceanConfig, 27);
 OFP_FIELDS(AgentCore, 16 + NUM_SENSES + NUM_ACTIONS + 1);   // 14 scalars + genome + nnet, the two arrays, colour
 OFP_FIELDS(Fish, 1 + 6 + Fish::BODY_LEN);                   // base, pos .. bodyBuoy, body[]
 OFP_FIELDS(Predator, 9);
 OFP_FIELDS(OceanPredator, 3);                               // base, depth, pitch
-OFP_FIELDS(OceanFood, 4);
+OFP_FIELDS(OceanFood, 5 + (kOceanHasEye ? 1 : 0));   // pos, depth, alive, size, age (+ eyeCon)
 OFP_FIELDS(Gene, 5);
 OFP_FIELDS(NeuralNet, 2);
 OFP_FIELDS(NeuralNet::Neuron, 2);
@@ -165,17 +183,28 @@ struct SpatialGrid_ { int w, h, cols, rows; float inv; std::vector<int> start, c
 struct CurrentField_ { CurrentField::Mode m; std::vector<int> vort, centers; float s, core; int w, h; float eps, om, a, t; };
 struct Mt_ { std::uint32_t x[624]; int p; };
 struct WaveTrain_ { double kx, ky, phase, phi; float k, qx, qy, frac; };
-struct FishHot_ { Vec2 pos, vel; float depth; };
+struct FishHot_ {
+    Vec2 pos, vel; float depth;
+#ifdef EVO_OCEAN_EYE
+    float eyeSize, eyeCon;   // scratch (see above)
+#endif
+};
 struct Pending_ { bool wants; Vec2 pos; };
 struct OceanWorld_ : WorldCommon {
     int width, height; float D; OceanConfig ocfg;
     std::vector<Fish> creatures; std::vector<OceanPredator> predators; std::vector<OceanFood> food;
-    SignalGrid signals; long long totalReseeds;
+    SignalGrid signals; long long totalReseeds, totalFoodEaten, totalFoodExpired;   // the last two: statistics
+#ifdef EVO_OCEAN_PROF
+    OceanWorld::OceanProf oprof;   // wall clock
+#endif
     SpatialGrid creatureGrid, foodGrid; std::vector<FishHot_> hot; std::vector<Pending_> pending;
     std::vector<int> neighbors, nearbyFood, nearby, near;
     CurrentField current; std::vector<Vec2> patches; std::vector<float> patchDepth;
     WaveTrain_ waves[OceanWorld::kWaveTrains];
     oceanflow::FlowCache flow;   // scratch (see above)
+#ifdef EVO_OCEAN_EYE
+    std::vector<float> predCon;  // scratch (see above)
+#endif
 };
 }  // namespace mirror
 static_assert(sizeof(SignalGrid) == sizeof(mirror::SignalGrid_), "SignalGrid's members changed: update hashGeometry and mirror::SignalGrid_");
@@ -183,6 +212,10 @@ static_assert(sizeof(SpatialGrid) == sizeof(mirror::SpatialGrid_), "SpatialGrid'
 static_assert(sizeof(CurrentField) == sizeof(mirror::CurrentField_), "CurrentField's members changed: update hashCurrent and mirror::CurrentField_");
 static_assert(sizeof(PortableMT19937) == sizeof(mirror::Mt_) && sizeof(RandomGen) == sizeof(mirror::Mt_),
               "the rng engine's members changed: update hashRng and mirror::Mt_");
+// hot_ is a vector (its size does not show in OceanWorld's): its element is checked on its own.
+static_assert(sizeof(std::remove_cvref_t<decltype(field<peek::OwHot>(std::declval<const OceanWorld&>()))>::value_type) ==
+                  sizeof(mirror::FishHot_),
+              "OceanWorld::FishHot's members changed: list the new one as scratch (or hash it) and update mirror::FishHot_");
 static_assert(sizeof(OceanWorld) == sizeof(mirror::OceanWorld_),
               "OceanWorld's members changed: hash the new state (or list it as scratch) and update mirror::OceanWorld_");
 
@@ -288,13 +321,35 @@ void visitOceanConfig(const OceanConfig& c, V& v) {
     OFP_F(L0); OFP_F(kWater); OFP_B(depthCostScaled); OFP_B(sizeDrift); OFP_B(sizeFight); OFP_B(mouthGate);
     OFP_F(kMouth);
 }
+// The ocean-vision keys (all default 0): dumped and scanned like the rest, but
+// hashed only when not at their default (hashConfig), so a config without them
+// hashes exactly as before they existed.
+template <class V>
+void visitOceanConfigVision(const OceanConfig& c, V& v) {
+    OFP_I(eye); OFP_I(eyeOnly); OFP_I(eyeCode); OFP_I(steerFrame); OFP_F(foodLife);
+}
 #undef OFP_F
 #undef OFP_I
 #undef OFP_B
 
+// A distinct tag word per key, then its value (bit pattern for the float).
+struct VisionTagger {
+    Hasher& h;
+    static std::uint64_t tag(const char* k) {   // FNV-1a of the key's name, high bit set
+        std::uint64_t t = 0xcbf29ce484222325ull;
+        for (const char* p = k; *p; ++p) { t ^= (unsigned char)*p; t *= 0x100000001b3ull; }
+        return t | 0x8000000000000000ull;
+    }
+    void i32(const char* k, int v) { if (v != 0) { h.u64(tag(k)); h.i32(v); } }
+    void f32(const char* k, float v) { if (bits(v) != 0u) { h.u64(tag(k)); h.f32(v); } }   // -0.0 too
+    void b(const char* k, bool v) { if (v) { h.u64(tag(k)); h.b(v); } }
+};
+
 inline void hashConfig(Hasher& h, const SimConfig& c, const OceanConfig& o) {
     visitSimConfig(c, h);
     visitOceanConfig(o, h);
+    VisionTagger t{h};
+    visitOceanConfigVision(o, t);
 }
 
 inline void hashCounters(Hasher& h, const OceanWorld& w) {
@@ -323,10 +378,19 @@ inline void hashCounters(Hasher& h, const OceanWorld& w) {
     for (int i = 0; i < OceanWorld::kWaveTrains; ++i) h.f64(w.wavePhase(i));
 }
 
-inline void hashFood(Hasher& h, const OceanFood& f) {
+// ages: the world's foodLife > 0. Ages count only then; switched off live,
+// they stop but stay (and matter again if it comes back on), so a non-zero age
+// is hashed, tagged, then too. A world that never had foodLife on hashes the
+// bytes it did before ages existed.
+inline void hashFood(Hasher& h, const OceanFood& f, bool ages) {
     h.v2(f.pos);
     h.u64((std::uint64_t)bits(f.depth) | ((std::uint64_t)f.alive << 32));
     h.f32(f.size);
+    if (ages) h.f32(f.age);
+    else if (bits(f.age) != 0u) { h.u64(0x8000000041474521ull); h.f32(f.age); }
+#ifdef EVO_OCEAN_EYE
+    h.f32(f.eyeCon);   // the eye build only (set at every spawn, eye on or off)
+#endif
 }
 
 // A gene in 32 bits: its four bit-fields (1 + 7 + 1 + 7, a uint16_t's worth:
@@ -459,7 +523,8 @@ inline Fingerprint fingerprint(const OceanWorld& w, bool withActivations = true)
       for (const Fish& c : w.creatures) hashFish(h, c, withActivations);
       fp.fish = h.value(); }
     { Hasher h; h.u64(w.food.size());
-      for (const OceanFood& f : w.food) hashFood(h, f);
+      const bool ages = w.ocfg.foodLife > 0.0f;
+      for (const OceanFood& f : w.food) hashFood(h, f, ages);
       fp.food = h.value(); }
     { Hasher h; h.u64(w.predators.size());
       for (const OceanPredator& p : w.predators) hashPredator(h, p);
@@ -501,7 +566,12 @@ inline long countNonFinite(const OceanWorld& w) {
         for (float s : c.lastSensors) f(s);
         for (float a : c.lastActions) f(a);
     }
-    for (const OceanFood& fd : w.food) { f(fd.pos.x); f(fd.pos.y); f(fd.depth); f(fd.size); }
+    for (const OceanFood& fd : w.food) {
+        f(fd.pos.x); f(fd.pos.y); f(fd.depth); f(fd.size); f(fd.age);
+#ifdef EVO_OCEAN_EYE
+        f(fd.eyeCon);
+#endif
+    }
     for (const OceanPredator& p : w.predators)
         for (float v : {p.pos.x, p.pos.y, p.vel.x, p.vel.y, p.digestTimer, p.energy, p.age, p.speedFactor,
                         p.buddingFactor, p.depth, p.pitch})
@@ -509,6 +579,7 @@ inline long countNonFinite(const OceanWorld& w) {
     f(w.D);
     visitSimConfig(w.cfg, nf);
     visitOceanConfig(w.ocfg, nf);
+    visitOceanConfigVision(w.ocfg, nf);
     const CurrentField& cf = field<peek::OwCurrent>(w);
     for (float v : cf.vortexState()) f(v);
     for (const Vec2& c : field<peek::CfCenters>(cf)) { f(c.x); f(c.y); }
@@ -576,6 +647,7 @@ inline void dumpState(const OceanWorld& w, std::FILE* out) {
     visitSimConfig(w.cfg, d);
     std::fprintf(out, "\noceanconfig");
     visitOceanConfig(w.ocfg, d);
+    visitOceanConfigVision(w.ocfg, d);
     std::fprintf(out, "\nwaves");
     for (const auto& t : field<peek::OwWaves>(w)) {
         d.db("kx", t.kx); d.db("ky", t.ky); d.db("phase", t.phase); d.db("phi", t.phi);
@@ -592,6 +664,7 @@ inline void dumpState(const OceanWorld& w, std::FILE* out) {
     d.ll("birthsLogged", w.totalBirthsLogged_); d.ll("reproStride", w.reproStride_);
     d.ull("reproWindow", w.reproWindow_.size()); d.ull("reproWindowNext", w.reproWindowNext_);
     d.ull("deathLog", w.deathLog.size()); d.ull("birthLog", w.birthLog.size());
+    d.ll("foodEaten", w.totalFoodEaten); d.ll("foodExpired", w.totalFoodExpired);   // statistics (not hashed)
     std::fprintf(out, "\ngeometry");
     for (const SpatialGrid* g : {&field<peek::OwCreatureGrid>(w), &field<peek::OwFoodGrid>(w)}) {
         d.ll("gridW", field<peek::SgWidth>(*g)); d.ll("gridH", field<peek::SgHeight>(*g));
@@ -635,6 +708,10 @@ inline void dumpState(const OceanWorld& w, std::FILE* out) {
         const OceanFood& f = w.food[i];
         std::fprintf(out, "food %zu", i);
         d.v2("pos", f.pos); d.fl("depth", f.depth); d.ll("alive", f.alive); d.fl("size", f.size);
+        d.fl("age", f.age);
+#ifdef EVO_OCEAN_EYE
+        d.fl("eyeCon", f.eyeCon);
+#endif
         std::fprintf(out, "\n");
     }
     for (std::size_t i = 0; i < w.predators.size(); ++i) {

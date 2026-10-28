@@ -1,5 +1,8 @@
 #pragma once
 #include <cstdint>
+#if defined(EVO_OCEAN_EYE) && !defined(EVO_WORLD_OCEAN)
+#error "EVO_OCEAN_EYE is a variant of the Ocean build: add -DEVO_WORLD_OCEAN"
+#endif
 
 // ============================================================
 // SENSORS — everything from biosim4 + learning_boids + boid-specific
@@ -80,6 +83,20 @@ enum Sensor : uint8_t {
     NEAREST_FOOD_DZ,        // depth component of the unit vector to the nearest food
     AVG_NEIGHBOR_DZ,        // depth offset toward avg neighbor (cohesion)
     BOUNDARY_DIST_Z,        // distance to the nearer of surface and floor
+#ifdef EVO_OCEAN_EYE
+    // --- Compound eye (the Ocean EYE build only, -DEVO_OCEAN_EYE; OceanConfig::eye) ---
+    // Six sectors in the fish's own level frame, each reporting the NEAREST
+    // object in it (fish, food or predator, told apart only by appearance):
+    // PROX = 1 - d/R, SIZE = s/(s+d) (apparent size, squashed), CON = the
+    // object's brightness minus the ambient light at its depth. All 0 when the
+    // sector is empty or the eye is off. Order = sector * 3 + feature.
+    EYE_AHEAD_PROX,  EYE_AHEAD_SIZE,  EYE_AHEAD_CON,
+    EYE_BEHIND_PROX, EYE_BEHIND_SIZE, EYE_BEHIND_CON,
+    EYE_LEFT_PROX,   EYE_LEFT_SIZE,   EYE_LEFT_CON,
+    EYE_RIGHT_PROX,  EYE_RIGHT_SIZE,  EYE_RIGHT_CON,
+    EYE_UP_PROX,     EYE_UP_SIZE,     EYE_UP_CON,
+    EYE_DOWN_PROX,   EYE_DOWN_SIZE,   EYE_DOWN_CON,
+#endif
 #endif
 
     NUM_SENSES              // <<--- marker

@@ -18,6 +18,11 @@
 // E1 knob defaults OFF, and with all of them off the world is bit-identical to
 // the preview's (oceanE1AtDefaults; the harness's OFF-identity cases).
 //
+// The compound eye (eye, eyeOnly, eyeCode: the eye build -DEVO_OCEAN_EYE
+// only), own-frame steering (steerFrame) and the food lifetime (foodLife)
+// default OFF as well; off, the world is bit-identical to the one before they
+// existed.
+//
 // Every knob has a finite RANGE (oceanConfigError): no accepted config can
 // make the state non-finite. The ranges are wide — every harness case and
 // unit-test world is inside them — but bounded, e.g. kBuoy = -1e37 used to be
@@ -80,7 +85,77 @@ struct OceanConfig {
     bool  sizeFight   = false;
     bool  mouthGate   = false;
     float kMouth      = 2.0f;
+
+    // ---- the compound eye, steering frame, food lifetime (ocean-vision):
+    // every key below defaults OFF too ------------------------------------------
+    // The compound eye (the EYE_* sensors; ocean_world.hpp "compound eye"):
+    // 0 = off, 1 = on. Only the eye build (-DEVO_OCEAN_EYE) has the sensors,
+    // so anywhere else it must stay 0 (oceanConfigError). Off, the eye inputs
+    // read 0 — the same as six empty sectors — and cost nothing per object.
+    int   eye             = 0;
+    // Eye-only mode (the eye build only; 0 = off, 1 = on): the LABELED
+    // exteroceptive senses — the ones the eye replaces: food direction /
+    // distance / density, the predator bearing, the neighbour offsets,
+    // headings, counts and attributes, the long probe — read 0 and are not
+    // computed (ocean::kLabeledSenses, ocean_world.hpp). Own state,
+    // proprioception, pheromones, the current and RANDOM_SENSOR stay. With
+    // eye = 1 the fish see only through the compound eye; with eye = 0
+    // ("blind") they sense nothing outside their own body but the pheromone
+    // column and the current. The pairwise interaction vote's own contact
+    // inputs (kernel::interactionVote) are not senses and are unchanged.
+    int   eyeOnly         = 0;
+    // The compound eye's encoding (the eye build only, like eye): a bitmask,
+    // 0 = the eye as ocean_world.hpp's header describes it (bit-identical to
+    // the build before this key existed). No effect while eye is 0. The 18
+    // EYE_* inputs keep their names; what they report (ocean_world.hpp,
+    // "eyeCode"):
+    //   1 faded contrast: CON = PROX x (b − L(z)), fading to 0 at R
+    //   2 opponent pairs: the LEFT slot reports left + right and the RIGHT
+    //     slot right − left, UP up + down and DOWN down − up, per feature
+    //     (invertible: one wire can steer both ways)
+    //   4 summed sectors: each sector sums over every object in it (squashed
+    //     x / (1 + |x|)) instead of reporting only the nearest
+    int   eyeCode         = 0;
+    // The frame STEER_X / STEER_Y push in (the non-triangular motion model):
+    // 0 = world x / y, Classic's (and NEAREST_FOOD_DX / DY's) frame;
+    // 1 = the fish's own frame: STEER_X along its right axis (the "right" of the
+    //     compound eye and PREDATOR_LR), STEER_Y along its heading. The same push
+    //     turned into body coordinates, so a sense in the fish's frame can turn it
+    //     toward what it senses. The heading is renormalised after the push, so
+    //     STEER_Y alone no longer turns the fish (it only scales STEER_X's turn,
+    //     by up to ±5%): turning is STEER_X's, as under triangular motion (which
+    //     already turns by STEER_X and ignores this).
+    int   steerFrame      = 0;
+    // Food lifetime in seconds (0 = off: food lasts until eaten; range [0, 1e6]).
+    // On, every item is removed foodLife seconds after it appeared, eaten or not
+    // (it sinks out or decays). With a fixed inflow, food the fish do not find is
+    // lost, so how many fish a world can feed depends on how well they search.
+    // The world's first stock gets ages spread evenly over [0, foodLife) so it
+    // does not all vanish at once. No draws.
+    float foodLife        = 0.0f;
 };
+
+// Does this build have the compound eye's sensors?
+#ifdef EVO_OCEAN_EYE
+inline constexpr bool kOceanHasEye = true;
+#else
+inline constexpr bool kOceanHasEye = false;
+#endif
+
+// OceanConfig::eyeCode's bits.
+inline constexpr int kEyeCodeFaded    = 1;   // CON = PROX x (b − L)
+inline constexpr int kEyeCodeOpponent = 2;   // left/right, up/down as sum and difference
+inline constexpr int kEyeCodeSummed   = 4;   // every object in a sector, not the nearest
+inline constexpr int kEyeCodeAll      = kEyeCodeFaded | kEyeCodeOpponent | kEyeCodeSummed;
+inline constexpr bool eyeCodeValid(int code) {
+    return code == 0 || (kOceanHasEye && code > 0 && code <= kEyeCodeAll);
+}
+
+// x is a whole number in int's range (so (int)x is defined and exact). NaN and
+// ±inf fail.
+inline bool isIntValue(double x) {
+    return x >= -2147483648.0 && x <= 2147483647.0 && std::trunc(x) == x;
+}
 
 // True when every E1 knob holds its default (OFF) value, bit for bit. The
 // fingerprint hashes the E1 knobs only when this is false, so a preview config
@@ -137,6 +212,19 @@ inline bool readOceanConfig(const jsonm::Value& o, OceanConfig& c, std::string* 
     c.L0          = o.floatOr("L0", c.L0);
     c.kWater      = o.floatOr("kWater", c.kWater);
     c.kMouth      = o.floatOr("kMouth", c.kMouth);
+    // The eye, steering frame, food lifetime. The int keys (kOceanIntKeys): a
+    // whole number in int's range is read exactly (readOceanJson has already
+    // refused any other number under them); any other number is kept as -1,
+    // which oceanConfigError refuses — never an (int) cast of 0.5 or 1e300.
+    auto readInt = [&](const char* k, int& out) {
+        if (const jsonm::Value* v = o.find(k); v && v->type == jsonm::Value::Type::Number)
+            out = isIntValue(v->num) ? (int)v->num : -1;
+    };
+    readInt("eye", c.eye);
+    readInt("eyeOnly", c.eyeOnly);
+    readInt("eyeCode", c.eyeCode);
+    readInt("steerFrame", c.steerFrame);
+    c.foodLife    = o.floatOr("foodLife", c.foodLife);
     using ocean_cfg_detail::readBool;
     return readBool(o, "deepCurrent", c.deepCurrent, err) &&
            readBool(o, "lightEnabled", c.lightEnabled, err) &&
@@ -179,18 +267,24 @@ inline bool isSimConfigIntKey(const std::string& k) {
     for (const char* i : kSimConfigIntKeys) if (k == i) return true;
     return false;
 }
-// x is a whole number in int's range (so (int)x is defined and exact). NaN and
-// ±inf fail.
-inline bool isIntValue(double x) {
-    return x >= -2147483648.0 && x <= 2147483647.0 && std::trunc(x) == x;
+// The int-typed OceanConfig keys the cfg JSON may carry (readOceanConfig
+// reads each without a raw cast): readOceanJson holds them to the same rule
+// as kSimConfigIntKeys — a whole number in int's range, every occurrence — so
+// {"eye":0.5} or {"eyeCode":1e300} is refused with that message, not stored.
+// (foodDepthMode keeps its own 0 / 1 / -1 read; its ranges, and these keys',
+// are oceanConfigError's.)
+inline constexpr const char* kOceanIntKeys[] = {"foodDepthMode", "eye", "eyeOnly", "eyeCode", "steerFrame"};
+inline bool isOceanIntKey(const std::string& k) {
+    for (const char* i : kOceanIntKeys) if (k == i) return true;
+    return false;
 }
 
 // A flat cfg JSON object (null / empty = nothing to change) into both configs:
 // SimConfig keys through the checkpoint reader, Ocean keys through
 // readOceanConfig. Returns false with `err` set on malformed JSON, an int key
-// whose number is not a whole number in int's range (checked before the
-// reader casts it, every occurrence of the key), or a bool key that is not a
-// bool.
+// (SimConfig's or the Ocean's) whose number is not a whole number in int's
+// range (checked before the reader casts it, every occurrence of the key), or
+// a bool key that is not a bool.
 inline bool readOceanJson(const char* json, SimConfig& sc, OceanConfig& oc, std::string& err) {
     if (!json || !json[0]) return true;
     const std::string wrapped = std::string("{\"config\":") + json + "}";
@@ -198,8 +292,8 @@ inline bool readOceanJson(const char* json, SimConfig& sc, OceanConfig& oc, std:
     if (!jsonm::Parser::parse(wrapped, root, err)) { err = "config parse error: " + err; return false; }
     if (const jsonm::Value* o = root.find("config"); o && o->isObject())
         for (const auto& kv : o->obj)
-            if (kv.second.type == jsonm::Value::Type::Number && isSimConfigIntKey(kv.first) &&
-                !isIntValue(kv.second.num)) {
+            if (kv.second.type == jsonm::Value::Type::Number &&
+                (isSimConfigIntKey(kv.first) || isOceanIntKey(kv.first)) && !isIntValue(kv.second.num)) {
                 char buf[160];
                 std::snprintf(buf, sizeof buf, "%s must be a whole number that fits an int (got %.17g)",
                               kv.first.c_str(), kv.second.num);
@@ -233,6 +327,7 @@ inline std::string oceanConfigError(const OceanConfig& c) {
         {"L0", c.L0, 0.0f, 100.0f},
         {"kWater", c.kWater, 0.0f, 1.0f},
         {"kMouth", c.kMouth, 0.01f, 100.0f},
+        {"foodLife", c.foodLife, 0.0f, 1000000.0f},
     };
     for (const auto& e : r)
         if (!(e.v >= e.lo && e.v <= e.hi)) {   // NaN fails both
@@ -242,6 +337,17 @@ inline std::string oceanConfigError(const OceanConfig& c) {
             return buf;
         }
     if (c.foodDepthMode != 0 && c.foodDepthMode != 1) return "foodDepthMode must be 0 or 1";
+    // The eye's keys exist only in the eye build (-DEVO_OCEAN_EYE); elsewhere
+    // they must stay 0.
+    const char* const noEye = " needs the eye build (-DEVO_OCEAN_EYE); this build has no eye";
+    if (c.eye != 0 && !(kOceanHasEye && c.eye == 1))
+        return kOceanHasEye ? std::string("eye must be 0 or 1") : std::string("eye") + noEye;
+    if (c.eyeOnly != 0 && !(kOceanHasEye && c.eyeOnly == 1))
+        return kOceanHasEye ? std::string("eyeOnly must be 0 or 1") : std::string("eyeOnly") + noEye;
+    if (!eyeCodeValid(c.eyeCode))
+        return kOceanHasEye ? std::string("eyeCode must be 0..7 (bits: 1 faded contrast, 2 opponent pairs, 4 summed sectors)")
+                            : std::string("eyeCode") + noEye;
+    if (c.steerFrame != 0 && c.steerFrame != 1) return "steerFrame must be 0 or 1";
     return "";
 }
 

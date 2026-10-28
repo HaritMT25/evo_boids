@@ -12,8 +12,9 @@
 //     <= genomeMaxLength <= 80 (GENOME_*); speeds other than finite
 //     0 <= minSpeed <= maxSpeed with maxSpeed > 0; a reversed min/max pair is
 //     refused, not swapped as evo_init does; a radius that is not finite and
-//     >= 0, or, toroidal, not < min(width, height) / 2 (the wrapped grid
-//     query's bound; OceanWorld::radiusError); a current knob or
+//     >= 0, whose square is not a finite float (>= ~1.8e19: every radius is
+//     used squared), or, toroidal, not < min(width, height) / 2 (the wrapped
+//     grid query's bound; OceanWorld::radiusError); a current knob or
 //     foodPatchRadius outside the Ocean's ranges (ocean_config.hpp
 //     oceanSimConfigError: currentStrength in [0, 1000], currentEddies in
 //     [0, 100], currentCore in [0, 1e5], currentDrift in [-100, 100],
@@ -26,18 +27,30 @@
 //     minPopulation, predatorCount or foodPatches above 1e5; a width or
 //     height outside [100, 1e5], a population outside [0, 1e5], or neighbour
 //     grids (cell = perceptionRadius) over 2^24 cells (oceanWorldSizeError);
-//     and (readOceanJson) an int-typed key whose JSON number is not a whole
-//     number in int's range, before the shared reader casts it.
+//     and (readOceanJson) an int-typed key — SimConfig's, or the Ocean's
+//     foodDepthMode, eye, eyeOnly, eyeCode, steerFrame — whose JSON number is
+//     not a whole number in int's range, before anything casts it.
 //   * oc_set_param: the Ocean keys kBuoy, pitchMax, vDrag, wallBand,
 //     buoyMutation, cHold, cPress, foodDepthSpread, the E1 keys (waveSpeed,
 //     waveBand, waveGravity, L0, kWater, kMouth, and the on/off keys
 //     deepCurrent, lightEnabled, depthCostScaled, sizeDrift, sizeFight,
-//     mouthGate as 0 / 1), plus every key evo_set_param accepts. pitchMax
-//     must be > 0. The changed config must pass oc_init's checks as stored
-//     (after the float / int conversion), including every Ocean knob's range
-//     (ocean_config.hpp oceanConfigError, oceanSimConfigError). An int key's
-//     value must be a whole number (0.5 is refused, not stored as 0) and goes
-//     to the reader as its exact integer.
+//     mouthGate as 0 / 1), the eye-build keys eye, eyeOnly, eyeCode, the
+//     steering frame steerFrame and the food lifetime foodLife, plus every
+//     key evo_set_param accepts. pitchMax must be > 0. The changed config
+//     must pass oc_init's checks as stored (after the float / int
+//     conversion), including every Ocean knob's range (ocean_config.hpp
+//     oceanConfigError, oceanSimConfigError). An int key's value must be a
+//     whole number (0.5 is refused, not stored as 0) and goes to the reader
+//     as its exact integer.
+//   * eye (OceanConfig::eye, the compound eye) and eyeOnly (the labeled senses
+//     off; with eye 0, "blind") are 0 or 1 in the eye build (-DEVO_OCEAN_EYE)
+//     and must stay 0 in the plain one; oc_has_eye() says which build this is.
+//     eyeCode (the eye's encoding, a bitmask: 1 faded contrast, 2 opponent
+//     pairs, 4 summed sectors) is 0..7 in the eye build and must stay 0 in the
+//     plain one.
+//   * steerFrame (OceanConfig::steerFrame: STEER_X / STEER_Y in world x / y, or
+//     in the fish's own frame) is 0 or 1 in both builds; foodLife (seconds,
+//     0 = off) is in [0, 1e6].
 //   * With no cfgJson the world is the tuned preview (applyOceanDefaults +
 //     OceanConfig defaults, src/ocean/ocean_config.hpp).
 //
@@ -198,15 +211,17 @@ bool configOk(const SimConfig& cfg, const OceanConfig& oc, int width, int height
     };
     for (const auto& f : liveFloats)
         if (!std::isfinite(f.v)) { g_error = std::string(f.name) + " must be finite"; return false; }
-    // Radii: finite, >= 0, and in a toroidal world < min(width, height) / 2.
+    // Radii: finite, >= 0, a finite square, and in a toroidal world
+    // < min(width, height) / 2.
     g_error = OceanWorld::radiusError(cfg, width, height);
     if (!g_error.empty()) return false;
     // The Ocean's ranges for SimConfig keys (ocean_config.hpp
     // oceanSimConfigError): the current's knobs, the food-patch radius.
     g_error = oceanSimConfigError(cfg);
     if (!g_error.empty()) return false;
-    // Every Ocean knob has a finite range (ocean_config.hpp oceanConfigError):
-    // no accepted config can make the state non-finite.
+    // Every Ocean knob has a finite range (ocean_config.hpp oceanConfigError,
+    // incl. eye / eyeOnly / eyeCode / steerFrame / foodLife): no accepted
+    // config can make the state non-finite.
     const std::string oerr = oceanConfigError(oc);
     if (!oerr.empty()) {
         g_error = "ocean config: " + oerr;
@@ -375,6 +390,8 @@ EVO_EXPORT int oc_set_param(const char* name, double value) {
         // E1 (bool keys take 0 / 1)
         "waveSpeed", "waveBand", "waveGravity", "deepCurrent", "lightEnabled", "L0", "kWater",
         "depthCostScaled", "sizeDrift", "sizeFight", "mouthGate", "kMouth",
+        // the eye build's eye / eyeOnly / eyeCode, the steering frame, the food lifetime
+        "eye", "eyeOnly", "eyeCode", "steerFrame", "foodLife",
     };
     static const char* const kOceanBool[] = {
         "deepCurrent", "lightEnabled", "depthCostScaled", "sizeDrift", "sizeFight", "mouthGate",
@@ -388,9 +405,10 @@ EVO_EXPORT int oc_set_param(const char* name, double value) {
     bool live = false;
     for (const char* k : kOcean) if (name && std::strcmp(name, k) == 0) { live = true; break; }
     for (const char* k : kLive)  if (name && std::strcmp(name, k) == 0) { live = true; break; }
-    // The int-typed keys of kLive (maxPopulation, minPopulation, targetFood,
-    // predatorMinPopulation, predatorMaxPopulation): readConfig's int keys.
-    const bool isInt = name && isSimConfigIntKey(name);
+    // The int-typed keys: kLive's (maxPopulation, minPopulation, targetFood,
+    // predatorMinPopulation, predatorMaxPopulation: readConfig's int keys) and
+    // kOcean's (eye, eyeOnly, eyeCode, steerFrame: ocean_config.hpp kOceanIntKeys).
+    const bool isInt = name && (isSimConfigIntKey(name) || isOceanIntKey(name));
     if (!live) {
         g_error = std::string("not a live parameter (change it and restart): ") + (name ? name : "(null)");
         return 0;
@@ -436,3 +454,6 @@ EVO_EXPORT int oc_set_param(const char* name, double value) {
 }
 
 EVO_EXPORT const char* oc_last_error() { return g_error.c_str(); }
+
+// 1 in the eye build (the EYE_* sensors exist; "eye" may be 1), else 0.
+EVO_EXPORT int oc_has_eye() { return kOceanHasEye ? 1 : 0; }

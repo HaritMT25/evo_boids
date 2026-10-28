@@ -197,45 +197,118 @@
     "void main() { vec4 w = modelMatrix * vec4(position, 1.0); vWorld = w.xyz;",
     "  gl_Position = projectionMatrix * viewMatrix * w; }"
   ].join("\n");
-  /* The seabed: sand under deep water. Broad drifts of lighter and darker
-   * sand, gentle ripples (crests ~17 apart, bent by a slow warp, lit on the
-   * side facing the light) and a fine grain; each detail fades out where a
-   * pixel covers many of its periods, so nothing sparkles at a distance. The
-   * water above tints it (uWater), then the caustics and the fog go on top. */
+  /* The seabed: sand under deep water, procedural and non-repeating: every
+   * noise is value noise on a sin-free hash, each octave on its own rotated,
+   * offset lattice, so nothing tiles or lines up. Three octaves of a
+   * four-channel noise (broad L, mid M, small S, with their derivatives) drive:
+   *  - tone: broad soft drifts of lighter and darker sand, a faint drift
+   *    toward grey, a mid-scale mottle and, up close, a fine one
+   *  - ripples: two trains ~50 degrees apart, each domain-warped by all three
+   *    octaves, so crests curve, kink and bunch and their spacing and heading
+   *    wander; each lies only in large patches (flat sand between, a crossing
+   *    where they meet) and is broken into runs; an asymmetric profile with
+   *    sharp crests and broad troughs
+   *  - grains: up close, two jittered layers of round grains of varied size,
+   *    tone and hue, a few dark specks and pale bits
+   *  - light: the ripples' and grains' slopes (exact, from the noise
+   *    derivatives) tilt the normal, lit from above (uLight), so they read as
+   *    relief; troughs a shade darker
+   *  - each detail fades out where a pixel spans a large part of its period
+   *    (fwidth), so nothing aliases into lines far away or at grazing angles;
+   *    far crests soften to bands, and the relief fades with distance (haze)
+   * The water above tints it (uWater), then the caustics (two copies of the
+   * tileable pattern sliding over each other, one rotated, both bent by the
+   * broad noise, so their tiles never line up) and the fog go on top. */
   var FLOOR_FS = [
     FOG_FN,
     "uniform vec2 uHalf; uniform float uTime; uniform float uCausticAmt;",
     "uniform sampler2D uCaustic; uniform vec3 uSand; uniform vec3 uSandDark; uniform vec3 uWater;",
     "uniform vec3 uCausticCol; uniform vec3 uEdge; uniform vec3 uLight;",
     "varying vec3 vWorld;",
-    "float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }",
-    "float noise(vec2 p) { vec2 i = floor(p), f = fract(p); vec2 u = f * f * (3.0 - 2.0 * f);",
-    "  return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), u.x), mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), u.x), u.y); }",
+    /* Dave Hoskins' "Hash without Sine": no patterns at large coordinates */
+    "vec4 hash42(vec2 p) { vec4 p4 = fract(p.xyxy * vec4(0.1031, 0.1030, 0.0973, 0.1099));",
+    "  p4 += dot(p4, p4.wzxy + 33.33); return fract((p4.xxyz + p4.yzzw) * p4.zywx); }",
+    "float hash12(vec2 p) { vec3 p3 = fract(p.xyx * 0.1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }",
+    /* value noise, four independent channels, with each one's derivatives along p.x (gx) and p.y (gy) */
+    "vec4 vnoise4(vec2 p, out vec4 gx, out vec4 gy) {",
+    "  vec2 i = floor(p), f = fract(p), u = f * f * (3.0 - 2.0 * f), du = 6.0 * f * (1.0 - f);",
+    "  vec4 a = hash42(i), b = hash42(i + vec2(1.0, 0.0)), c = hash42(i + vec2(0.0, 1.0)), d = hash42(i + vec2(1.0, 1.0));",
+    "  vec4 k1 = b - a, k2 = c - a, k3 = a - b - c + d;",
+    "  gx = du.x * (k1 + k3 * u.y); gy = du.y * (k2 + k3 * u.x);",
+    "  return a + k1 * u.x + k2 * u.y + k3 * u.x * u.y;",
+    "}",
+    "float vnoise1(vec2 p) { vec2 i = floor(p), f = fract(p), u = f * f * (3.0 - 2.0 * f);",
+    "  return mix(mix(hash12(i), hash12(i + vec2(1.0, 0.0)), u.x), mix(hash12(i + vec2(0.0, 1.0)), hash12(i + vec2(1.0, 1.0)), u.x), u.y); }",
+    /* one layer of grains, q in grain cells: a round grain in each cell at a
+     * random spot (wholly inside it), of random size, tone and hue; returns
+     * (tone, hue, its outward direction x coverage) */
+    "vec4 grains(vec2 q) {",
+    "  vec4 h = hash42(floor(q) + 113.0);",
+    "  vec2 v = fract(q) - 0.35 - 0.3 * h.xy;",
+    "  float r = 0.2 + 0.15 * h.z, m = 1.0 - smoothstep(0.45 * r, r, length(v));",
+    "  float tone = h.w < 0.035 ? -0.42 : (h.w > 0.965 ? 0.3 : (h.w - 0.5) * 0.44);",   /* dark specks, pale bits */
+    "  return vec4(tone, h.z - 0.5, v / r) * m;",
+    "}",
     "void main() {",
     "  vec2 p = vWorld.xz;",
     "  vec2 q = abs(p) - uHalf;",
     "  float dOut = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0);",   /* > 0 outside the tank */
     "  float inside = 1.0 - smoothstep(-40.0, 120.0, dOut);",
     "  float fw = length(fwidth(p));",                                  /* world units per pixel */
-    "  float n = noise(p * 0.016) * 0.6 + noise(p * 0.071) * 0.4;",
-    /* two ripple trains ~35 degrees apart, the main one bent hard by a slow
-     * warp, both only in patches; shaded by their slope toward the light */
-    "  vec2 rd = vec2(0.82, 0.57), rd2 = vec2(0.99, -0.12), L = normalize(uLight.xz);",
-    "  float ph = dot(p, rd) * (6.2831 / 19.0) + noise(p * 0.006) * 14.0 + noise(p * 0.031) * 3.0;",
-    "  float ph2 = dot(p, rd2) * (6.2831 / 13.0) + noise(p * 0.009 + 4.0) * 11.0;",
-    "  ph += 0.4 * sin(ph);",                                           /* a gentle stoss, a steeper lee */
-    "  float rAmt = smoothstep(0.2, 0.8, noise(p * 0.0042 + 7.0)) * (1.0 - smoothstep(1.4, 4.0, fw));",
-    "  float rAmt2 = smoothstep(0.45, 0.9, noise(p * 0.0051 + 2.0)) * (1.0 - smoothstep(1.0, 3.0, fw));",
-    "  float shade = cos(ph) * dot(rd, L) * 0.09 * rAmt + cos(ph2) * dot(rd2, L) * 0.045 * rAmt2;",
-    "  float grain = (hash(floor(p * 1.6)) - 0.5) * 0.18 * (1.0 - smoothstep(0.35, 1.2, fw))",
-    "              + (noise(p * 0.55) - 0.5) * 0.12 * (1.0 - smoothstep(1.0, 3.0, fw))",
-    "              + (noise(p * 0.21 + 3.0) - 0.5) * 0.08 * (1.0 - smoothstep(3.0, 7.0, fw));",
-    "  vec3 sand = mix(uSandDark, uSand, clamp(0.25 + 0.6 * n, 0.0, 1.0)) * (1.0 + shade + grain) * uWater;",
+    "  const mat2 R1 = mat2(0.80, 0.60, -0.60, 0.80), R2 = mat2(0.28, -0.96, 0.96, 0.28), R3 = mat2(-0.53, 0.848, -0.848, -0.53);",
+    "  vec4 lx, ly, mx, my, sx, sy;",
+    "  vec4 L = vnoise4(R1 * p * 0.0024 + vec2(17.3, -41.9), lx, ly);",  /* broad, ~420 across */
+    "  vec4 M = vnoise4(R2 * p * 0.0075 + vec2(-7.1, 23.4), mx, my);",   /* mid, ~130 */
+    "  vec4 S = vnoise4(R3 * p * 0.031 + vec2(5.7, 3.1), sx, sy);",      /* small, ~32 */
+    /* the ripple trains' warps (x: the first, y: the second) and their
+     * gradients: d/dp n(R p f) = f (grad n) R */
+    "  float w1 = 130.0 * L.x + 38.0 * M.x + 7.0 * S.x, w2 = 110.0 * L.y + 32.0 * M.y + 6.0 * S.y;",
+    "  vec2 g1 = 0.312 * (vec2(lx.x, ly.x) * R1) + 0.285 * (vec2(mx.x, my.x) * R2) + 0.217 * (vec2(sx.x, sy.x) * R3);",
+    "  vec2 g2 = 0.264 * (vec2(lx.y, ly.y) * R1) + 0.24 * (vec2(mx.y, my.y) * R2) + 0.186 * (vec2(sx.y, sy.y) * R3);",
+    "  const vec2 D1 = vec2(0.82, 0.57), D2 = vec2(0.11, 0.99);",
+    "  const float K1 = 6.2831 / 17.0, K2 = 6.2831 / 12.5;",           /* crests ~17 and ~12.5 apart */
+    "  float t1 = K1 * (dot(p, D1) + w1), t2 = K2 * (dot(p, D2) + w2);",
+    "  g1 = K1 * (D1 + g1); g2 = K2 * (D2 + g2);",                      /* each phase's gradient */
+    /* ripple fields in broad patches (stronger on lighter sand), flat sand
+     * between; which train in mid patches (both where they meet); crests
+     * broken into runs; gone where a pixel spans much of a period */
+    "  float haze = (1.0 - smoothstep(900.0, 2800.0, length(cameraPosition - vWorld))) * mix(0.3, 1.0, inside);",   /* far off, and beyond the glass, the relief softens */
+    "  float field = smoothstep(0.42, 0.70, 0.72 * L.w + 0.28 * M.x) * (0.4 + 0.6 * smoothstep(0.2, 0.7, M.z)) * haze;",
+    "  float which = smoothstep(0.36, 0.64, M.w);",
+    "  float a1 = field * (1.0 - which) * smoothstep(0.25, 0.65, S.z) * (1.0 - smoothstep(0.3, 1.1, fwidth(t1)));",
+    "  float a2 = field * 0.75 * which * smoothstep(0.25, 0.65, S.w) * (1.0 - smoothstep(0.3, 1.1, fwidth(t2)));",
+    /* the profile in s = t + 0.5 cos t (a long gentle side, a short steep one):
+     * height c^2, c = (1 + cos s) / 2: sharp crests, broad troughs; eased to
+     * c as a period shrinks below ~50 px (all c by ~15 px), so far crests are
+     * soft bands, not thin dark lines */
+    "  float s1 = t1 + 0.5 * cos(t1), c1 = 0.5 + 0.5 * cos(s1), e1 = 1.0 - smoothstep(0.12, 0.45, fwidth(t1));",
+    "  float s2 = t2 + 0.5 * cos(t2), c2 = 0.5 + 0.5 * cos(s2), e2 = 1.0 - smoothstep(0.12, 0.45, fwidth(t2));",
+    "  float hgt = a1 * (mix(c1, c1 * c1, e1) - 0.5 + 0.125 * e1) + a2 * (mix(c2, c2 * c2, e2) - 0.5 + 0.125 * e2);",   /* about its mean */
+    "  vec2 slope = 2.0 * (a1 * mix(0.5, c1, e1) * sin(s1) * (0.5 * sin(t1) - 1.0) * g1",
+    "                    + a2 * mix(0.5, c2, e2) * sin(s2) * (0.5 * sin(t2) - 1.0) * g2);",
+    /* tone: broad drifts, a faint drift toward grey, mottles mid and fine */
+    "  float tone = clamp(0.55 + 1.25 * (0.62 * L.z + 0.38 * M.z - 0.5), 0.0, 1.0);",
+    "  vec3 base = mix(uSandDark, uSand, tone) * mix(vec3(1.0), vec3(0.94, 0.985, 1.02), smoothstep(0.35, 0.85, M.y));",
+    "  float detail = 0.10 * (vnoise1(R2 * p * 0.07 + 31.0) - 0.5) * (1.0 - smoothstep(2.5, 6.0, fw))",
+    "               + 0.08 * (vnoise1(R1 * p * 0.33 - 17.0) - 0.5) * (1.0 - smoothstep(0.5, 1.3, fw));",
+    /* grains, up close only (none once a grain is under ~2 px) */
+    "  float gA = 1.0 - smoothstep(0.08, 0.2, fw);",
+    "  vec4 gr = vec4(0.0);",
+    "  if (gA > 0.0) {",
+    "    vec4 ga = grains(R1 * p * 4.5), gb = grains(R3 * p * 3.1 + 37.0);",
+    "    gr = vec4(ga.xy + gb.xy, ga.zw * R1 + gb.zw * R3) * gA;",
+    "  }",
+    /* light from above on the relief: ripples, grains (domes) */
+    "  slope -= 0.45 * gr.zw;",
+    "  vec3 N = normalize(vec3(-slope.x, 1.0, -slope.y));",
+    "  float lit = max(dot(N, uLight), 0.0) / uLight.y;",               /* 1 on flat sand */
+    "  vec3 sand = base * (1.0 + detail + gr.x) * lit * (1.0 + 0.16 * hgt) * uWater;",
+    "  sand *= vec3(1.0 + 0.06 * gr.y, 1.0, 1.0 - 0.06 * gr.y);",
     "  vec3 col = sand * mix(0.36, 1.0, inside);",                      /* beyond the glass it is unlit */
-    "  vec2 uv = p / 420.0;",
-    "  float c1 = texture2D(uCaustic, uv + vec2(uTime * 0.013, uTime * 0.008)).r;",
-    "  float c2 = texture2D(uCaustic, uv * 1.31 + vec2(-uTime * 0.010, uTime * 0.012)).r;",
-    "  col += uCausticCol * min(c1, c2) * uCausticAmt * (0.25 + 0.75 * inside);",
+    "  vec2 uv = p / 420.0 + (L.xy - 0.5) * 0.2;",
+    "  float cA = texture2D(uCaustic, uv + vec2(uTime * 0.013, uTime * 0.008)).r;",
+    "  float cB = texture2D(uCaustic, R1 * uv * 1.31 + vec2(-uTime * 0.010, uTime * 0.012)).r;",
+    "  col += uCausticCol * min(cA, cB) * uCausticAmt * (0.25 + 0.75 * inside) * (0.55 + 0.45 * lit);",
     "  col += uEdge * (1.0 - smoothstep(0.0, 4.0, abs(dOut))) * 0.22;",       /* where the glass meets the floor */
     "  col = mix(col, uFog, max(fogOf(vWorld), smoothstep(0.0, 1100.0, dOut)));",
     "  gl_FragColor = vec4(col, 1.0);",

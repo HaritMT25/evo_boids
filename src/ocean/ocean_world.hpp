@@ -36,7 +36,8 @@
 //     flowE1(): food (with foodDrift), predators and fish move by dt·U after
 //     their own motion, a fish by min(1, 1/bodySize)·dt·U with sizeDrift;
 //     depth is clamped after, x / y wrap. CURRENT_FWD / LR read flowAt.
-//   * lightAt(d) = L0·exp(−kWater·d): display only (the page's shading).
+//   * lightAt(d) = L0·exp(−kWater·d) (oceanmath::expf, ocean_math.hpp):
+//     display only (the page's shading); not part of the state.
 //   * depthCostScaled: cHold / cPress as multiples of metabolicRate·massFactor.
 //   * sizeFight: kernel::fightOutcome's strengths × bodySize²; mouthGate:
 //     food (OceanFood::size, 1 for now) only if size <= kMouth·bodySize, for
@@ -55,6 +56,7 @@
 #include "../core/world.hpp"   // SignalGrid, MAX_TOPOLOGICAL_NEIGHBORS, and through it the
                                // kernel, WorldCommon, SpatialGrid, CurrentField, Predator
 #include "ocean_config.hpp"
+#include "ocean_math.hpp"
 #include "fish.hpp"
 
 struct OceanFood {
@@ -306,8 +308,11 @@ public:
         return u;
     }
 
-    // Light at depth d (display only in E1): L0·exp(−kWater·d).
-    float lightAt(float d) const { return ocfg.L0 * (evomath::expm1f(-ocfg.kWater * d) + 1.0f); }
+    // Light at depth d (display only in E1): L0·exp(−kWater·d), the exp taken
+    // directly (oceanmath::expf: full relative precision at every depth). It
+    // was L0·(1 + expm1f(−kWater·d)), which keeps only ~6e-8 absolute and is
+    // exactly 0 below kWater·d = 17.3 (e.g. depth 18 at kWater 1).
+    float lightAt(float d) const { return ocfg.L0 * oceanmath::expf(-ocfg.kWater * d); }
 
     // A wave train's travelled phase φ(t) in [0, 2π) (state; 0 until waves run).
     double wavePhase(int i) const { return waves_[i].phase; }

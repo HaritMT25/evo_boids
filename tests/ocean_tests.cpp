@@ -75,7 +75,11 @@
 //   e1_bounds     E1 worlds keep depth in [0, D], every float finite
 //   draws_e1      no E1 feature draws: per-step draws == N + 3·MOVE_RANDOM +
 //                 2·predators with everything on; a birth draws as without
-//   light         lightAt(0) == L0, falls as L0·exp(−kWater·d); the exports
+//   light         lightAt(0) == L0, falls as L0·exp(−kWater·d); at kWater 1
+//                 still > 0 and within 6e-7 relative down to depth 87 (1 +
+//                 expm1f(−x) was 0 from x = 17.3); the exports
+//   exp           oceanmath::expf: ±0 -> 1, NaN / ±inf, beyond the float
+//                 range; within 4 ulp of e^x and monotone on [-87, 88]
 //   ranges        every Ocean knob, and the SimConfig keys the Ocean bounds
 //                 (oceanSimConfigError: the current, foodPatchRadius): its
 //                 range's ends accepted, just outside, inf and the -1e37 hole
@@ -1872,6 +1876,27 @@ void testLight() {
     }
     t.expect(worst < 2e-6, "lightAt off L0·exp(-kWater·d) by %.3g (relative)", worst);
     t.note("L(240) / L0 = %.4f (exp(-1.44) = 0.2369)", w.lightAt(240.0f) / 1.7f);
+    // Deep down (kWater 1, the range's end): 1 + expm1f(-x) was exactly 0 for
+    // x > 17.33; the direct exp keeps relative precision until e^-x leaves
+    // the normal floats (x ~ 87), and falls monotonically.
+    {
+        OceanConfig od = oc;
+        od.kWater = 1.0f;
+        OceanWorld wd;
+        initQuiet(wd, 903, 240.0f, od);
+        t.expect(wd.lightAt(18.0f) > 0.0f && 1.0f + evomath::expm1f(-18.0f) == 0.0f, "lightAt(18) at kWater 1: %.9g",
+                 (double)wd.lightAt(18.0f));
+        double worstDeep = 0.0;
+        float prevL = wd.lightAt(0.0f);
+        for (int k = 1; k <= 87 * 16; ++k) {
+            const float d = (float)k / 16.0f;
+            const float L = wd.lightAt(d);
+            t.expect(L > 0.0f && L <= prevL, "kWater 1: light at depth %g = %.9g (above: %.9g)", (double)d, (double)L, (double)prevL);
+            worstDeep = std::max(worstDeep, std::abs((double)L / (1.7 * std::exp(-(double)d)) - 1.0));
+            prevL = L;
+        }
+        t.expect(worstDeep < 6e-7, "kWater 1: lightAt off L0·exp(-d) by %.3g (relative) down to depth 87", worstDeep);
+    }
 #ifndef OCEAN_TESTS_NO_SHIM
     t.expect(oc_init(902, 1920, 1080, 240.0, 50, R"({"lightEnabled":true,"L0":2.5,"kWater":0.01})") == 1, "oc_init: %s", oc_last_error());
     t.expect(oc_light_enabled() == 1 && oc_light_l0() == 2.5 && oc_light_kwater() == (double)0.01f, "light exports %d %g %g",
@@ -1879,6 +1904,29 @@ void testLight() {
     t.expect(oc_set_param("lightEnabled", 0.0) == 1 && oc_light_enabled() == 0, "lightEnabled 0 via oc_set_param");
     t.expect(oc_init(902, 1920, 1080, 240.0, 50, nullptr) == 1 && oc_light_enabled() == 0, "the default page has light off");
 #endif
+}
+
+// oceanmath::expf (ocean_math.hpp), the light's portable exp: e^x within a few
+// ulp over the whole normal float range, both signs; exact at 0; monotone.
+void testExp() {
+    Test t("exp");
+    t.expect(oceanmath::expf(0.0f) == 1.0f && oceanmath::expf(-0.0f) == 1.0f, "expf(±0) != 1");
+    t.expect(std::isnan(oceanmath::expf(NAN)) && oceanmath::expf(-INFINITY) == 0.0f && oceanmath::expf(INFINITY) == INFINITY,
+             "expf of NaN / ±inf");
+    t.expect(oceanmath::expf(-89.0f) == 0.0f && oceanmath::expf(89.0f) == INFINITY, "expf beyond the float range");
+    double worst = 0.0;
+    float prev = oceanmath::expf(-87.0f);
+    long n = 0;
+    for (int k = -87 * 1000 + 1; k <= 88 * 1000; ++k) {
+        const float x = (float)k / 1000.0f;
+        const float e = oceanmath::expf(x);
+        t.expect(e >= prev, "expf not monotone at %.9g", (double)x);
+        worst = std::max(worst, std::abs((double)e / std::exp((double)x) - 1.0));
+        prev = e;
+        ++n;
+    }
+    t.expect(worst < 4.8e-7, "expf off e^x by %.3g (relative) on [-87, 88]", worst);   // 4 ulp
+    t.note("%ld points on [-87, 88]: within 4 ulp of e^x, monotone", n);
 }
 
 #ifndef OCEAN_TESTS_NO_SHIM
@@ -2357,6 +2405,7 @@ int main(int argc, char** argv) {
     ot::testE1Bounds();
     ot::testDrawsE1();
     ot::testLight();
+    ot::testExp();
 #ifndef OCEAN_TESTS_NO_SHIM
     ot::testRanges();
     ot::testShimInts();

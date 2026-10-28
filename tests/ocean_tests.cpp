@@ -60,7 +60,16 @@
 //   flow_tables   the E1 flow cache (src/ocean/ocean_flow.hpp) vs the exact
 //                 formulas: the eddy current's radial table within 9e-6 ·
 //                 strength per vortex (one vortex, the preset, 8 strong ones;
-//                 before the first advance too, over the world and beyond it)
+//                 before the first advance too, over the world and beyond it);
+//                 each wave train within max(2e-6·waveSpeed, 1e-6·its peak
+//                 speed) per component (five worlds: the preset, a narrow
+//                 band, D 10 / band 1 / speed 100, 100 x 100, D 2000; depths
+//                 at and around the taper joins, surface and floor; phases set
+//                 directly and from the clock; positions beyond the edges);
+//                 exactly 0 at surface and floor; a divergence probe per train
+//                 no worse than the exact field's; live waveSpeed / waveBand
+//                 changes rebuild (direct assignment, as the driver's --set),
+//                 waveGravity does not; off flowE1() the exact path bit for bit
 //   e1_buoyancy   with the non-flow E1 knobs on and wallBand 0, an idle fish
 //                 still settles monotonically at bodyBuoy·D
 //   drift         sizeDrift: one step moves fish of size .5 / 1 / 2 by exactly
@@ -1439,6 +1448,171 @@ void testFlowTables() {
         t.expect(worst <= budget, "%s: max |Δv| %.3g / %.3g / %.3g (before the first advance, steps 400, 800) > budget %.3g",
                  c.name, maxErr[0], maxErr[1], maxErr[2], budget);
         t.note("current %-34s max |Δv| %.3g units/s (budget %.3g; max |v| %.3g)", c.name, worst, budget, maxV);
+    }
+
+    // ---- the waves: the tables vs each train's exact formulas ----
+    // Positions over the world and 2% beyond each edge (the edges themselves
+    // included), depths at the surface / floor, the taper joins b and D − b and
+    // their neighbouring floats, D/2, near both boundaries and uniform, phases
+    // set directly (0, arbitrary, just under 2π) and after real steps.
+    using Fl = OceanWorld::Flow;
+    struct WV { const char* name; int W, H; float D; const char* cfg; float speed; };
+    const WV wv[] = {
+        {"preset: D 240, band 32, speed 6", 1920, 1080, 240.0f, kE1PresetJson, 6.0f},
+        {"2560x1440, band 8, speed 12", 2560, 1440, 240.0f, R"({"waveSpeed":12,"waveBand":8})", 12.0f},
+        {"D 10, band 1, speed 100", 1920, 1080, 10.0f, R"({"waveSpeed":100,"waveBand":1,"waveGravity":10000})", 100.0f},
+        {"100x100, D 600, speed 20", 100, 100, 600.0f, R"({"waveSpeed":20})", 20.0f},
+        {"D 2000, band 300, speed 6", 1920, 1080, 2000.0f, R"({"waveSpeed":6,"waveBand":300})", 6.0f},
+    };
+    for (const WV& v : wv) {
+        OceanWorld w;
+        std::string err;
+        if (!t.expect(ofp::initWorld(w, 1502, v.W, v.H, v.D, 0, v.cfg, err), "%s: %s", v.name, err.c_str())) continue;
+        const float D = w.D, b = std::min(w.ocfg.waveBand, 0.25f * D);
+        const float depths[] = {0.0f, D, b, D - b, 0.5f * D, std::nextafter(b, 0.0f), std::nextafter(b, D), std::nextafter(D - b, 0.0f),
+                                std::nextafter(D - b, D), 1e-3f, 0.1f * b, 0.5f * b, D - 0.5f * b, D - 1e-3f * b, 1.5f * b, D - 1.5f * b};
+        double maxD[3][3] = {}, maxU[3] = {};
+        long n = 0;
+        int boundaryZero = 0, boundaryN = 0;
+        auto& waves = ofp::field<ofp::peek::OwWaves>(w);
+        const double phases[4][3] = {{0.0, 0.0, 0.0}, {1.2345, 5.4321, 3.0}, {6.283185307179586 - 1e-9, 1e-9, 3.141592653589793}, {-1, -1, -1}};
+        for (const auto& ph : phases) {
+            if (ph[0] < 0.0) for (int s = 0; s < 150; ++s) w.update(0.016f);   // the clock's own phases
+            else for (int i = 0; i < OceanWorld::kWaveTrains; ++i) waves[i].phase = ph[i];
+            Lcg g(1503);
+            for (int k = 0; k < 3000; ++k) {
+                Vec2 p = {(float)v.W * (-0.02f + 1.04f * g.unit()), (float)v.H * (-0.02f + 1.04f * g.unit())};
+                if (k < 8) p = {(k & 1) ? (float)v.W : 0.0f, (k & 2) ? (float)v.H : 0.0f};
+                const int nd = (int)(sizeof depths / sizeof depths[0]);
+                for (int j = 0; j < nd + 2; ++j) {
+                    const float d = (j < nd) ? depths[j] : D * g.unit();
+                    for (int i = 0; i < OceanWorld::kWaveTrains; ++i) {
+                        const Fl a = w.waveTrainAt(i, p, d), e = w.waveTrainExactAt(i, p, d);
+                        maxD[i][0] = std::max(maxD[i][0], (double)std::abs(a.x - e.x));
+                        maxD[i][1] = std::max(maxD[i][1], (double)std::abs(a.y - e.y));
+                        maxD[i][2] = std::max(maxD[i][2], (double)std::abs(a.d - e.d));
+                        maxU[i] = std::max(maxU[i], (double)std::max(std::abs(e.x), std::max(std::abs(e.y), std::abs(e.d))));
+                        if (d == 0.0f || d == D) {
+                            ++boundaryN;
+                            boundaryZero += (a.x == 0.0f && a.y == 0.0f && a.d == 0.0f);
+                        }
+                    }
+                    ++n;
+                }
+            }
+        }
+        // Budget per component and train: 2e-6 units/s per unit of waveSpeed,
+        // or 1e-6 of the train's largest speed where a narrow band makes the
+        // horizontal flow large (|H| reaches A·1.5/(b·k)).
+        for (int i = 0; i < OceanWorld::kWaveTrains; ++i) {
+            const double budget = std::max(2e-6 * v.speed, 1e-6 * maxU[i]);
+            const double worst = std::max(maxD[i][0], std::max(maxD[i][1], maxD[i][2]));
+            t.expect(worst <= budget, "%s train %d: max |Δu| x %.3g y %.3g d %.3g > budget %.3g", v.name, i, maxD[i][0], maxD[i][1],
+                     maxD[i][2], budget);
+            t.note("waves %-32s train %d: max |Δu| x %.2e y %.2e d %.2e (budget %.1e, max |u| %.3g)", v.name, i, maxD[i][0],
+                   maxD[i][1], maxD[i][2], budget, maxU[i]);
+        }
+        t.expect(boundaryZero == boundaryN, "%s: the tables' flow at surface / floor not exactly 0 at %d of %d", v.name,
+                 boundaryN - boundaryZero, boundaryN);
+        (void)n;
+    }
+
+    // ---- a discrete divergence probe, each train: tables vs exact ----
+    // Central differences at h = 1/8 and 1/32 over the whole column (bands,
+    // joins and knots included), normalised as in `divergence`. The tables'
+    // field is the curl of a vector potential (V'·T·P horizontally, −V·T·∇P
+    // vertically), divergence-free for the interpolants themselves; what is
+    // left is truncation inside cells and roundoff.
+    {
+        OceanWorld w;
+        std::string err;
+        ofp::initWorld(w, 1504, 1920, 1080, 240.0f, 0, kE1PresetJson, err);
+        for (int s = 0; s < 37; ++s) w.update(0.016f);
+        const float D = w.D;
+        for (float h : {0.125f, 0.03125f}) {
+            for (int i = 0; i < OceanWorld::kWaveTrains; ++i) {
+                double res[2];
+                for (int ex = 0; ex < 2; ++ex) {
+                    Lcg g(1505);
+                    double maxDiv = 0.0, maxSum = 0.0;
+                    for (int k = 0; k < 3000; ++k) {
+                        const Vec2 p = {20.0f + 1880.0f * g.unit(), 20.0f + 1040.0f * g.unit()};
+                        const float d = h + (D - 2.0f * h) * g.unit();
+                        double dv, sa;
+                        if (ex) divergenceAt([&](Vec2 q, float z) { return w.waveTrainExactAt(i, q, z); }, p, d, h, dv, sa);
+                        else    divergenceAt([&](Vec2 q, float z) { return w.waveTrainAt(i, q, z); }, p, d, h, dv, sa);
+                        maxDiv = std::max(maxDiv, std::abs(dv));
+                        maxSum = std::max(maxSum, sa);
+                    }
+                    res[ex] = maxSum > 0.0 ? maxDiv / maxSum : 0.0;
+                }
+                // Near the taper joins (B is C¹) both converge as O(h): at h = 1/8
+                // the exact field's own residual is ~1e-3 there. The tables'
+                // must not be worse than it, and below 1e-3 at h = 1/32.
+                t.expect(res[0] <= 1.5 * res[1] + 2e-5 && (h > 0.1f || res[0] < 1e-3),
+                         "train %d h %g: tables' residual %.3g (exact %.3g)", i, (double)h, res[0], res[1]);
+                t.note("divergence train %d h=%-8g tables %.2e  exact %.2e (normalised, whole column)", i, (double)h, res[0], res[1]);
+            }
+        }
+    }
+
+    // ---- the rebuild rules: live knobs, keys checked inside OceanWorld ----
+    // (A direct config assignment, as the harness driver's --set makes.)
+    {
+        OceanWorld w;
+        std::string err;
+        ofp::initWorld(w, 1506, 1920, 1080, 240.0f, 0, kE1PresetJson, err);
+        for (int s = 0; s < 20; ++s) w.update(0.016f);
+        const Vec2 p0{777.7f, 333.3f};
+        const float d0 = 50.0f;
+        const Fl before = w.flowAt(p0, d0);
+        auto worstVsExact = [&]() {
+            Lcg g(1507);
+            double worst = 0.0, maxU = 0.0;
+            for (int k = 0; k < 2000; ++k) {
+                const Vec2 p = {1920.0f * g.unit(), 1080.0f * g.unit()};
+                const float d = w.D * g.unit();
+                for (int i = 0; i < OceanWorld::kWaveTrains; ++i) {
+                    const Fl a = w.waveTrainAt(i, p, d), e = w.waveTrainExactAt(i, p, d);
+                    worst = std::max(worst, (double)std::max(std::abs(a.x - e.x), std::max(std::abs(a.y - e.y), std::abs(a.d - e.d))));
+                    maxU = std::max(maxU, (double)std::max(std::abs(e.x), std::abs(e.y)));
+                }
+            }
+            return std::max(worst / std::max(maxU, 1e-30), 0.0);
+        };
+        const struct { const char* what; float speed, band; } live[] = {{"waveSpeed 9", 9.0f, 32.0f}, {"waveBand 10", 9.0f, 10.0f},
+                                                                          {"waveSpeed 0.5", 0.5f, 10.0f}};
+        for (const auto& l : live) {
+            w.ocfg.waveSpeed = l.speed;
+            w.ocfg.waveBand = l.band;
+            const double rel = worstVsExact();
+            t.expect(rel < 2e-6, "after %s: tables vs exact %.3g of the largest speed (stale tables?)", l.what, rel);
+        }
+        w.ocfg.waveSpeed = 6.0f;
+        w.ocfg.waveBand = 32.0f;
+        const Fl back = w.flowAt(p0, d0);
+        w.ocfg.waveGravity = 55.0f;   // only the clock reads it
+        const Fl grav = w.flowAt(p0, d0);
+        t.expect(std::memcmp(&back, &before, sizeof back) == 0 && std::memcmp(&grav, &before, sizeof grav) == 0,
+                 "restoring waveSpeed / waveBand (or changing waveGravity) did not give the same flow bits");
+    }
+
+    // ---- dispatch: off flowE1() (sizeDrift alone reaches flowAt) the exact path ----
+    {
+        OceanWorld w;
+        std::string err;
+        ofp::initWorld(w, 1508, 1920, 1080, 240.0f, 0, R"({"currentStrength":40,"sizeDrift":true})", err);
+        for (int s = 0; s < 5; ++s) w.update(0.016f);
+        Lcg g(1509);
+        int same = 0;
+        for (int k = 0; k < 500; ++k) {
+            const Vec2 p = {1920.0f * g.unit(), 1080.0f * g.unit()};
+            const float d = 240.0f * g.unit();
+            const Fl a = w.flowAt(p, d), e = w.flowExactAt(p, d);
+            const Vec2 c = w.currentAt(p), ce = w.currentExactAt(p);
+            same += !w.flowE1() && std::memcmp(&a, &e, sizeof a) == 0 && std::memcmp(&c, &ce, sizeof c) == 0;
+        }
+        t.expect(same == 500, "flowE1() off: flowAt / currentAt differ from the exact formulas at %d of 500 points", 500 - same);
     }
 }
 

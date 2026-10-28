@@ -359,8 +359,8 @@ public:
                                                            : CurrentField::Mode::Eddies;
         current_.init(cmode, w, h, cfg.currentEddies, cfg.currentStrength,
                       cfg.currentCore, cfg.currentDrift, cfg.currentGyreEps);
-        initFlowCache();
         prepareWaves();
+        initFlowCache();
         foodPatches_.clear();
         foodPatchDepth_.clear();
         for (int i = 0; i < cfg.foodPatches; ++i) {
@@ -604,11 +604,16 @@ private:
     }
 
     // ---- the E1 flow cache (ocean_flow.hpp) --------------------------------
-    // Derived scratch: rebuilt from hashed state (cfg / ocfg at init, the
-    // CurrentField's vortices, the frame) by ensureFlow before it is read.
-    // ensureFlow runs once per step (update, after the clocks advance) and in
-    // every public reader, so the shim, the harness driver (which assigns
-    // configs directly) and the tests all get it.
+    // Derived scratch: rebuilt from hashed state (cfg / ocfg / the world size
+    // at init, the CurrentField's vortices, the frame, the live wave knobs
+    // and phases) by ensureFlow before it is read, on bitwise keys: init
+    // clears it; a waveSpeed / waveBand change rebuilds the depth pieces
+    // (the phases are kept); waveGravity only changes the clock. ensureFlow
+    // runs once per step (update, after the clocks advance) and in every
+    // public reader, so the shim, the harness driver (which assigns configs
+    // directly) and the tests all get it; a refused oc_set_param changes no
+    // key.
+    static_assert(kWaveTrains == oceanflow::kTrains, "ocean_flow.hpp's train count");
     mutable oceanflow::FlowCache flow_;
 
     void initFlowCache() {
@@ -625,10 +630,99 @@ private:
             for (std::size_t i = 0; i < flow_.eddies.size(); ++i)
                 flow_.eddies[i].signScale = flow_.vort[i * CurrentField::VORTEX_FLOATS + 2] * scale;
         }
+        // The waves' T = K / |K|² (prepareWaves has set K for this world).
+        for (int i = 0; i < kWaveTrains; ++i) {
+            const WaveTrain& t = waves_[i];
+            const double kk = t.kx * t.kx + t.ky * t.ky;
+            flow_.Tx[i] = (float)(t.kx / kk);
+            flow_.Ty[i] = (float)(t.ky / kk);
+        }
+    }
+
+    static std::uint32_t floatKey(float v) { std::uint32_t u; std::memcpy(&u, &v, 4); return u; }
+
+    // The depth pieces (ocean_flow.hpp) for the current waveSpeed, waveBand, D.
+    void buildDepth() const {
+        oceanflow::FlowCache& c = flow_;
+        c.depthOn = false;
+        const float b = std::min(ocfg.waveBand, 0.25f * D);   // taperAt's
+        const float Dh = 0.5f * D, Dmb = D - b;
+        const float lo[4] = {0.0f, b, Dh, Dmb}, hi[4] = {b, Dh, Dmb, D};
+        float kMax = 0.0f;
+        for (const WaveTrain& t : waves_) kMax = std::max(kMax, t.k);
+        // Cell counts in double, checked before any conversion or allocation.
+        double cells[4], total = 0.0;
+        for (int q = 0; q < 4; ++q) {
+            const double L = (double)hi[q] - (double)lo[q];
+            if (!(L > 0.0)) return;   // a degenerate piece (unvalidated band): the exact formulas
+            const int least = (q == 0 || q == 3) ? oceanflow::kDepthCellsBand : oceanflow::kDepthCellsMin;
+            cells[q] = std::max((double)least, std::ceil((double)kMax * L / oceanflow::kDepthKCell));
+            total += cells[q];
+        }
+        if (!(total <= oceanflow::kDepthCellsMax)) return;   // NaN too
+        for (int q = 0; q < 4; ++q) {
+            oceanflow::DepthPiece& pc = c.piece[q];
+            const int n = (int)cells[q];
+            const double L = (double)hi[q] - (double)lo[q], h = L / (double)n;
+            pc.lo = lo[q];
+            pc.n = n;
+            pc.scale = (double)n / L;
+            pc.dScale = (float)pc.scale;
+            // waveTrainExactAt's own expressions at depth x: H = A e^{−kx} (B − B'/k)
+            // (u_h without cos θ) and V = −A e^{−kx} B; both exactly 0 at the
+            // surface and the floor (no flow through either).
+            auto HV = [&](int i, float x, float& H, float& V) {
+                const WaveTrain& t = waves_[i];
+                const Taper tp = taperAt(x);
+                const float A = t.frac * ocfg.waveSpeed;
+                const float E = 1.0f / (evomath::expm1f(t.k * x) + 1.0f);
+                H = A * E * (tp.B - tp.Bp / t.k);
+                V = -A * E * tp.B;
+                if (x == 0.0f || x == D) { H = 0.0f; V = 0.0f; }
+            };
+            auto at = [&](int j) { return (j == 0) ? lo[q] : (j == n) ? hi[q] : (float)((double)lo[q] + h * (double)j); };
+            pc.cell.resize((std::size_t)n);
+            for (int j = 0; j < n; ++j) {
+                const float d0 = at(j), d1 = at(j + 1);
+                oceanflow::DepthCell& cl = pc.cell[j];
+                for (int i = 0; i < kWaveTrains; ++i) {
+                    const double k = (double)waves_[i].k;
+                    float H0, V0, H1, V1;
+                    HV(i, d0, H0, V0);
+                    HV(i, d1, H1, V1);
+                    // The rise V(d1) − V(d0) = ∫ k·H: from H, never from the two
+                    // rounded V values (see oceanflow::hval).
+                    const double rise = oceanflow::gauss3((double)d0, (double)d1, [&](double x) {
+                        float Hx, Vx;
+                        HV(i, (float)x, Hx, Vx);
+                        return k * (double)Hx;
+                    });
+                    cl.v[i] = V0;
+                    cl.dv[i] = (float)rise;
+                    cl.m0[i] = (float)(h * k * (double)H0);   // V' = k·H, per unit t
+                    cl.m1[i] = (float)(h * k * (double)H1);
+                }
+            }
+        }
+        c.b = b;
+        c.Dh = Dh;
+        c.Dmb = Dmb;
+        c.depthOn = true;
     }
 
     void ensureFlow() const {
         oceanflow::FlowCache& c = flow_;
+        // The waves' depth pieces: rebuilt when waveSpeed, waveBand or D move.
+        {
+            const std::uint32_t ks = floatKey(ocfg.waveSpeed), kb = floatKey(ocfg.waveBand), kd = floatKey(D);
+            if (!c.depthKeyed || ks != c.keySpeed || kb != c.keyBand || kd != c.keyD) {
+                buildDepth();
+                c.depthKeyed = true;
+                c.keySpeed = ks;
+                c.keyBand = kb;
+                c.keyD = kd;
+            }
+        }
         if (c.curOn && (!c.curReady || c.curFrame != frame || c.curAdvKey != c.curAdvanced)) {
             // CurrentField::advance(frame)'s centres (vortexState(): base x, y,
             // sign, ax, ay, fx, fy, px, py), or 0 before the first advance.
@@ -680,16 +774,65 @@ private:
         }
         return U;
     }
-    Flow waveTrainFast(int i, Vec2 p, float d) const { return waveTrainExactAt(i, p, d); }
+    // Every train's V and V' = dV/dd at depth d from the pieces; false = not
+    // from the tables (none built, or d is NaN).
+    bool depthProfiles(float d, float V[kWaveTrains], float Vd[kWaveTrains]) const {
+        const oceanflow::FlowCache& c = flow_;
+        if (!c.depthOn) return false;
+        if (!(d > 0.0f && d < D)) {
+            if (!(d <= 0.0f || d >= D)) return false;   // NaN
+            for (int i = 0; i < kWaveTrains; ++i) { V[i] = 0.0f; Vd[i] = 0.0f; }   // surface, floor, outside
+            return true;
+        }
+        const int q = (d <= c.b) ? 0 : (d <= c.Dh) ? 1 : (d <= c.Dmb) ? 2 : 3;
+        const oceanflow::DepthPiece& pc = c.piece[q];
+        const double s = ((double)d - (double)pc.lo) * pc.scale;   // in [0, n] (rounding aside)
+        if (!(s >= 0.0 && s <= (double)pc.n + 0.5)) return false;
+        int j = (int)s;
+        if (j > pc.n - 1) j = pc.n - 1;
+        const oceanflow::Basis B = oceanflow::basis((float)(s - (double)j));
+        const oceanflow::DepthCell& cl = pc.cell[j];
+        for (int i = 0; i < kWaveTrains; ++i) {
+            V[i] = oceanflow::hval(B, cl.v[i], cl.dv[i], cl.m0[i], cl.m1[i]);
+            Vd[i] = oceanflow::hder(B, cl.dv[i], cl.m0[i], cl.m1[i]) * pc.dScale;
+        }
+        return true;
+    }
+    // The three trains at (p, d) from the tables (ocean_flow.hpp): u_x = T_x V'
+    // cos θ, u_y = T_y V' cos θ, u_d = V sin θ; false = use the exact formulas.
+    bool wavesTable(Vec2 p, float d, Flow u[kWaveTrains]) const {
+        float V[kWaveTrains], Vd[kWaveTrains];
+        if (!depthProfiles(d, V, Vd)) return false;
+        for (int i = 0; i < kWaveTrains; ++i) {
+            const WaveTrain& t = waves_[i];
+            double th = t.kx * (double)p.x + t.ky * (double)p.y - t.phase + t.phi;
+            th -= kTwoPi * std::floor(th / kTwoPi);
+            const float tf = (float)th;
+            const float sn = evomath::sinf(tf), cs = evomath::cosf(tf);
+            u[i].x = (flow_.Tx[i] * Vd[i]) * cs;
+            u[i].y = (flow_.Ty[i] * Vd[i]) * cs;
+            u[i].d = V[i] * sn;
+        }
+        return true;
+    }
+    void wavesExact(Vec2 p, float d, Flow u[kWaveTrains]) const {
+        const Taper tp = taperAt(d);
+        for (int i = 0; i < kWaveTrains; ++i) u[i] = waveTrainExactAt(i, p, d, tp);
+    }
+    Flow waveTrainFast(int i, Vec2 p, float d) const {
+        Flow u[kWaveTrains];
+        if (!wavesTable(p, d, u)) return waveTrainExactAt(i, p, d);
+        return u[i];
+    }
     Flow flowFast(Vec2 p, float d) const {
         Flow U = currentFlowFast(p, d);
         if (wavesOn()) {
-            const Taper tp = taperAt(d);
+            Flow u[kWaveTrains];
+            if (!wavesTable(p, d, u)) wavesExact(p, d, u);
             for (int i = 0; i < kWaveTrains; ++i) {
-                const Flow u = waveTrainExactAt(i, p, d, tp);
-                U.x += u.x;
-                U.y += u.y;
-                U.d += u.d;
+                U.x += u[i].x;
+                U.y += u[i].y;
+                U.d += u[i].d;
             }
         }
         return U;

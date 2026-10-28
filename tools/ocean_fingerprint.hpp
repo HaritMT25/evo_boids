@@ -170,9 +170,14 @@ inline Fingerprint fingerprint(const OceanWorld& w, bool withActivations = true)
       for (const Fish& c : w.creatures) hashFish(h, c, withActivations);
       fp.fish = h.h; }
     { Fnv h; h.u64(w.food.size());
-      const bool ages = w.ocfg.foodLife > 0.0f;   // ages count only then (else always 0)
+      // Ages count while foodLife > 0. Switched off live, the ages stop but stay and
+      // matter again if it is switched back on, so a non-zero age is hashed (tagged)
+      // then too; a world that never had foodLife on hashes the bytes it always did.
+      const bool ages = w.ocfg.foodLife > 0.0f;
       for (const OceanFood& f : w.food) {
-          h.v2(f.pos); h.f32(f.depth); h.b(f.alive); if (ages) h.f32(f.age);
+          h.v2(f.pos); h.f32(f.depth); h.b(f.alive);
+          if (ages) h.f32(f.age);
+          else if (f.age != 0.0f) { h.i32(0x41474521); h.f32(f.age); }
 #ifdef EVO_OCEAN_EYE
           h.f32(f.eyeCon);   // the eye build only (set at every spawn, eye on or off)
 #endif

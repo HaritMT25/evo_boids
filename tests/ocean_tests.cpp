@@ -1140,6 +1140,19 @@ void testFoodLife() {
         for (int s = 0; s < 300; ++s) b.update(dt);
         t.expect(sameEngine(ra, rng), "foodLife changed the draws in 300 steps");
     }
+    // Switched off live, the ages stay (and matter if it comes back on): the
+    // fingerprint must still see them.
+    {
+        OceanWorld w;
+        std::string err;
+        ofp::initWorld(w, 29, 1920, 1080, 240.0f, 0, R"({"foodLife":8,"targetFood":300,"minPopulation":0})", err);
+        for (int s = 0; s < 20; ++s) w.update(dt);
+        w.ocfg.foodLife = 0.0f;
+        OceanWorld z = w;
+        for (OceanFood& f : z.food) f.age = 0.0f;
+        t.expect(ofp::fingerprint(w).food != ofp::fingerprint(z).food,
+                 "foodLife switched off: the kept ages are invisible to the fingerprint");
+    }
 }
 
 std::vector<ofp::Fingerprint> runPrints(unsigned seed, const char* cfg, int pop, int steps, int every) {

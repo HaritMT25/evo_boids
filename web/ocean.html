@@ -138,7 +138,7 @@
 </style>
 </head>
 <body>
-  <canvas id="tank" aria-label="the ocean as a deep 3D tank: drag to move, right-drag or two fingers to turn, scroll or pinch to zoom, click a fish to mark it"></canvas>
+  <canvas id="tank" aria-label="the ocean as a deep 3D tank: drag to move (up and down when looking through the side), right-drag or two fingers to turn (below the horizontal too), scroll or pinch to zoom, E and Q to rise and sink, click a fish to mark it"></canvas>
 
   <div id="hud" class="chip" aria-live="off">
     <h1>evo_boids Ocean <span class="tag" id="h-tag">preview</span></h1>
@@ -162,7 +162,7 @@
   </div>
 
   <div id="keys" class="chip">
-    <span><kbd>space</kbd>pause</span><span><kbd>+</kbd><kbd>-</kbd>speed</span><span><kbd>F</kbd>follow a fish</span><span><kbd>R</kbd>new world</span><span><kbd>shift</kbd><kbd>R</kbd>replay</span><span><kbd>C</kbd>fit view</span><span>drag / scroll: camera</span>
+    <span><kbd>space</kbd>pause</span><span><kbd>+</kbd><kbd>-</kbd>speed</span><span><kbd>F</kbd>follow a fish</span><span><kbd>R</kbd>new world</span><span><kbd>shift</kbd><kbd>R</kbd>replay</span><span><kbd>E</kbd><kbd>Q</kbd>up / down</span><span><kbd>C</kbd>full view</span><span>drag move · right-drag turn · scroll zoom</span>
   </div>
   <div id="btns" class="chip" role="toolbar" aria-label="ocean controls">
     <button id="b-pause" aria-pressed="false" title="Pause (space)">Pause</button>

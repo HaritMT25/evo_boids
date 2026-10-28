@@ -17,8 +17,13 @@
  *      ?mock=1 loads ocean_mock.js from beside the page instead of the engine:
  *      a JS stand-in for page development, not part of web/.
  * Keys: space pause, + / - steps per frame, F follow a random fish (again:
- *       another one), Esc stop following, R reset (replays the same init),
- *       C fit the tank, . one step while paused. Click a fish to mark it.
+ *       another one), Esc stop following, R a new world (new seed), shift+R
+ *       replay this one, C back to the full view, E / Q or PageUp / PageDown
+ *       (held) move the view up / down in depth, . one step while paused.
+ *       Click a fish to mark it. The camera orbits freely, below the
+ *       horizontal too (look up at the surface from the floor).
+ * Pitch: s.vz from oc_creature_vz when the module has it, else estimated
+ *       per fish id from depth change over distance swum (vzEstimate).
  *
  * window.EvoOcean: a small handle for the console and the tests
  *   (state(), set(name, v) -> oc_set_param, module). */
@@ -142,8 +147,46 @@
       preds: new Float32Array(buf, M._oc_predator_data(), pc * 3),
       predDepth: new Float32Array(buf, M._oc_predator_depth(), pc),
       stats: new Float64Array(buf, M._oc_stats(), statsLen),
+      /* the fish's pitch (s.vz, + = sinking, tan of the angle): the engine's
+       * oc_creature_vz when it has one, else estimated (vzEstimate) */
+      vz: HAS_VZ ? new Float32Array(buf, M._oc_creature_vz(), n) : null,
       curActive: false, curGrid: null, curCols: 0, curRows: 0   /* §4 exports no current grid */
     };
+  }
+
+  /* Without oc_creature_vz: each fish's pitch from how its depth changed over
+   * the distance its head swam since the last frame (wrapping), smoothed, and
+   * keyed by id so births and deaths don't shuffle it. Same units as the
+   * engine's vz (depth per unit of horizontal travel). */
+  var HAS_VZ = false;
+  function vzBufs(cap) {
+    return { n: 0, ids: new Float64Array(cap), x: new Float32Array(cap), y: new Float32Array(cap),
+             d: new Float32Array(cap), vz: new Float32Array(cap) };
+  }
+  var estPrev = vzBufs(0), estNext = vzBufs(0);   /* last frame's, and the set being written */
+  function vzEstimate(s, stepped) {
+    var n = s.n, prev = estPrev, at = new Map();
+    for (var j = 0; j < prev.n; j++) at.set(prev.ids[j], j);
+    if (estNext.ids.length < n) estNext = vzBufs(Math.max(256, n * 2));
+    var B = estNext;
+    for (var c = 0; c < n; c++) {
+      var id = s.ids[c], x = s.segs[12 * c], y = s.segs[12 * c + 1], d = s.depth[c], v = 0;
+      var k = at.get(id);
+      if (k !== undefined) {
+        v = prev.vz[k];
+        if (stepped) {
+          var dx = x - prev.x[k], dy = y - prev.y[k];
+          if (dx > W / 2) dx -= W; else if (dx < -W / 2) dx += W;
+          if (dy > H / 2) dy -= H; else if (dy < -H / 2) dy += H;
+          var h = Math.hypot(dx, dy);
+          if (h > 0.05) v += (Math.max(-1.2, Math.min(1.2, (d - prev.d[k]) / h)) - v) * 0.25;
+        }
+      }
+      B.ids[c] = id; B.x[c] = x; B.y[c] = y; B.d[c] = d; B.vz[c] = v;
+    }
+    B.n = n;
+    estNext = estPrev; estPrev = B;   /* B stays intact until the frame after next */
+    return B.vz.subarray(0, n);
   }
 
   /* ---------------- state ---------------- */
@@ -215,6 +258,7 @@
       } catch (err) { /* file:// or a sandboxed frame: the seed is in the HUD */ }
     }
     if (W !== w0 || H !== h0 || D !== d0) scene.setWorld(W, H, D);
+    estPrev.n = 0;   /* ids start over: forget the old fish's pitch */
     rates.reset();
     stepMs = 0;
     dirtyHud = true;
@@ -326,6 +370,11 @@
     lastSteps = steps;
     M._oc_sync();
     var s = snapshot();
+    if (!HAS_VZ) s.vz = vzEstimate(s, steps > 0);
+    /* Q/E, PageDown/PageUp held: the view sinks or rises, the whole depth in ~2 s */
+    var vdir = 0;
+    for (var key in heldDepthKeys) vdir += heldDepthKeys[key];
+    if (vdir) scene.moveView(Math.sign(vdir) * D * 0.55 * dt);
     /* the marked fish, by id; a followed fish that died hands over to another */
     var idx = indexOfId(s, selectedId);
     if (idx < 0 && selectedId !== null) {
@@ -342,10 +391,16 @@
   }
 
   /* ---------------- input ---------------- */
+  /* the keys that move the view in depth, while held: +1 up, -1 down */
+  var DEPTH_KEYS = { e: 1, pageup: 1, q: -1, pagedown: -1 };
+  var heldDepthKeys = {};
   function wireInput() {
+    document.addEventListener("keyup", function (e) { delete heldDepthKeys[String(e.key).toLowerCase()]; });
+    window.addEventListener("blur", function () { heldDepthKeys = {}; });
     document.addEventListener("keydown", function (e) {
       if (e.ctrlKey || e.metaKey || e.altKey) return;
-      var k = e.key;
+      var k = e.key, lk = String(k).toLowerCase();
+      if (DEPTH_KEYS[lk]) { heldDepthKeys[lk] = DEPTH_KEYS[lk]; e.preventDefault(); return; }
       if (k === " " || k === "Spacebar") { setPaused(!paused); e.preventDefault(); }
       else if (k === "+" || k === "=") changeSpeed(1);
       else if (k === "-" || k === "_") changeSpeed(-1);
@@ -408,6 +463,7 @@
     if (missing.length) throw new Error("the module lacks exports: " + missing.join(", "));
     if (!M.wasmMemory && !M.HEAPU8) throw new Error("the module exposes neither wasmMemory nor HEAPU8");
     if (!M._malloc && INIT.cfg) throw new Error("?cfg= needs _malloc/_free exported");
+    HAS_VZ = typeof M._oc_creature_vz === "function";   /* optional: the pitch, else estimated */
     initWorld();
     scene = EvoOceanScene.create(canvas, {
       tankDepth: D,
@@ -423,6 +479,18 @@
     msgEl.hidden = true;
     window.EvoOcean = {
       module: M,
+      scene: scene,
+      /* the steepest diver (largest |vz|) right now: {idx, id, vz, x, y, depth} */
+      steepest: function (sinking) {
+        var s = lastS, best = -1, bv = 0;
+        if (!s || !s.vz) return null;
+        for (var i = 0; i < s.n; i++) {
+          var v = sinking ? s.vz[i] : Math.abs(s.vz[i]);
+          if (v > bv) { bv = v; best = i; }
+        }
+        return best < 0 ? null : { idx: best, id: s.ids[best], vz: s.vz[best], x: s.segs[12 * best], y: s.segs[12 * best + 1],
+                                   x1: s.segs[12 * best + 2], y1: s.segs[12 * best + 3], depth: s.depth[best] };
+      },
       set: function (name, v) {
         if (!M._oc_set_param) return false;
         var ok = withCString(String(name), function (p) { return M._oc_set_param(p, +v); });
@@ -435,6 +503,7 @@
         var lo = Infinity, hi = -Infinity;
         for (var i = 0; i < s.n; i++) { lo = Math.min(lo, s.depth[i]); hi = Math.max(hi, s.depth[i]); }
         return { n: s.n, fc: s.fc, pc: s.pc, W: W, H: H, D: D, paused: paused, speed: speed(), steps: lastSteps,
+                 hasVz: HAS_VZ, view: scene.view(),
                  stepMs: stepMs, fps: fps, following: scene.following(), selectedId: selectedId, selIdx: s.selIdx,
                  stats: Array.prototype.slice.call(s.stats), depthMin: s.n ? lo : 0, depthMax: s.n ? hi : 0 };
       }

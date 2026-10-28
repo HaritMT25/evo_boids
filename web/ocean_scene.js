@@ -9,9 +9,15 @@
  *     the old hash height / fixed heights are used, as in scene3d.js
  *   - opts.tankDepth = D: the floor sits at -(D + 14), the glass box is a full
  *     box (top + bottom rectangles + verticals), marine snow falls the whole D
- *   - the camera looks more from the side (POLAR 1.0, max 1.45) and frames all
- *     eight corners of the box around y = -D/2; following a fish follows its depth
- *   - light fades and shifts blue with depth (fish, shadows, food)
+ *   - the camera looks more from the side (POLAR 1.0) and frames all eight
+ *     corners of the box around y = -D/2; following a fish follows its depth.
+ *     It is free: it orbits below the horizontal (to nearly straight up),
+ *     moves in depth (moveView, and screen-plane panning from the side), and
+ *     clampView keeps it out of the sand and its centre within the water
+ *   - light fades and shifts blue with depth (fish, shadows, food); the floor
+ *     is sand (grain, ripples) under the caustics; seen from below, the
+ *     surface shows Snell's window and a shimmer (SURF_FS)
+ *   - each body pitches by s.vz (+ = sinking, head down), pivoting at the head
  *
  * Every fish is a faceted low-poly body bent along the six spine points the
  * core exports; the floor below catches its shadow and slow caustic light.
@@ -39,8 +45,11 @@
   /* sRGB colours, authored for this scene (no colour management in the shaders) */
   var C = {
     fog: [0.027, 0.122, 0.125],
-    floorIn: [0.11, 0.235, 0.22],
-    floorOut: [0.03, 0.11, 0.115],
+    sand: [0.72, 0.63, 0.48],       /* dry sand, lighter and darker drifts ... */
+    sandDark: [0.56, 0.49, 0.38],
+    water: [0.52, 0.57, 0.57],      /* ... under the deep water's blue-green */
+    surfSky: [0.20, 0.36, 0.38],    /* the surface from below: Snell's window ... */
+    surfMirror: [0.035, 0.085, 0.09], /* ... and the mirrored water around it */
     caustic: [0.70, 0.95, 0.84],
     edge: [0.55, 0.85, 0.78],
     foodCore: [0.93, 1.0, 0.62],
@@ -66,6 +75,7 @@
     "attribute vec4 iA;", "attribute vec4 iB;", "attribute vec4 iC;",
     "attribute vec4 iCol;",   /* rgb, tail-beat phase */
     "attribute vec4 iBody;",  /* radius, height, highlight (1 selected, .5 hover), ember */
+    "attribute vec4 iX;",     /* x: pitch as tan(angle) = vz, + = sinking (head down); yzw spare */
     "uniform vec2 uHalf;", "uniform float uTime;", "uniform float uWag;",
     "vec2 seg(int i) {",
     "  if (i <= 0) return iA.xy; if (i == 1) return iA.zw; if (i == 2) return iB.xy;",
@@ -91,7 +101,13 @@
     "  vec2 side = vec2(-f.y, f.x);",
     "  float wag = sin(uTime * 7.5 + iCol.w * 6.2831 - u * 4.5) * uWag * smoothstep(0.1, 1.3, u) * R * 0.3;",
     "  vec2 p = c + side * (position.y * R + wag);",
-    "  return vec3(p.x - uHalf.x, iBody.y + position.z * R, p.y - uHalf.y);",
+    /* pitch: the head stays at the fish's depth and every point behind it
+     * rises (sinking) or falls (rising) by its distance along the spine times
+     * tan(pitch), so trail, rings and picking (all at the head) stay right and
+     * the shadow follows the tilted body */
+    "  float along = length(c - seg(0)) * (s < 0.0 ? -1.0 : 1.0);",
+    "  float lift = along * clamp(iX.x, -1.2, 1.2);",
+    "  return vec3(p.x - uHalf.x, iBody.y + position.z * R + lift, p.y - uHalf.y);",
     "}"
   ].join("\n");
 
@@ -181,11 +197,16 @@
     "void main() { vec4 w = modelMatrix * vec4(position, 1.0); vWorld = w.xyz;",
     "  gl_Position = projectionMatrix * viewMatrix * w; }"
   ].join("\n");
+  /* The seabed: sand under deep water. Broad drifts of lighter and darker
+   * sand, gentle ripples (crests ~17 apart, bent by a slow warp, lit on the
+   * side facing the light) and a fine grain; each detail fades out where a
+   * pixel covers many of its periods, so nothing sparkles at a distance. The
+   * water above tints it (uWater), then the caustics and the fog go on top. */
   var FLOOR_FS = [
     FOG_FN,
     "uniform vec2 uHalf; uniform float uTime; uniform float uCausticAmt;",
-    "uniform sampler2D uCaustic; uniform vec3 uFloorIn; uniform vec3 uFloorOut;",
-    "uniform vec3 uCausticCol; uniform vec3 uEdge;",
+    "uniform sampler2D uCaustic; uniform vec3 uSand; uniform vec3 uSandDark; uniform vec3 uWater;",
+    "uniform vec3 uCausticCol; uniform vec3 uEdge; uniform vec3 uLight;",
     "varying vec3 vWorld;",
     "float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }",
     "float noise(vec2 p) { vec2 i = floor(p), f = fract(p); vec2 u = f * f * (3.0 - 2.0 * f);",
@@ -195,14 +216,58 @@
     "  vec2 q = abs(p) - uHalf;",
     "  float dOut = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0);",   /* > 0 outside the tank */
     "  float inside = 1.0 - smoothstep(-40.0, 120.0, dOut);",
+    "  float fw = length(fwidth(p));",                                  /* world units per pixel */
     "  float n = noise(p * 0.016) * 0.6 + noise(p * 0.071) * 0.4;",
-    "  vec3 col = mix(uFloorOut, uFloorIn, inside) * (0.82 + 0.34 * n);",
+    /* two ripple trains ~35 degrees apart, the main one bent hard by a slow
+     * warp, both only in patches; shaded by their slope toward the light */
+    "  vec2 rd = vec2(0.82, 0.57), rd2 = vec2(0.99, -0.12), L = normalize(uLight.xz);",
+    "  float ph = dot(p, rd) * (6.2831 / 19.0) + noise(p * 0.006) * 14.0 + noise(p * 0.031) * 3.0;",
+    "  float ph2 = dot(p, rd2) * (6.2831 / 13.0) + noise(p * 0.009 + 4.0) * 11.0;",
+    "  ph += 0.4 * sin(ph);",                                           /* a gentle stoss, a steeper lee */
+    "  float rAmt = smoothstep(0.2, 0.8, noise(p * 0.0042 + 7.0)) * (1.0 - smoothstep(1.4, 4.0, fw));",
+    "  float rAmt2 = smoothstep(0.45, 0.9, noise(p * 0.0051 + 2.0)) * (1.0 - smoothstep(1.0, 3.0, fw));",
+    "  float shade = cos(ph) * dot(rd, L) * 0.09 * rAmt + cos(ph2) * dot(rd2, L) * 0.045 * rAmt2;",
+    "  float grain = (hash(floor(p * 1.6)) - 0.5) * 0.18 * (1.0 - smoothstep(0.35, 1.2, fw))",
+    "              + (noise(p * 0.55) - 0.5) * 0.12 * (1.0 - smoothstep(1.0, 3.0, fw))",
+    "              + (noise(p * 0.21 + 3.0) - 0.5) * 0.08 * (1.0 - smoothstep(3.0, 7.0, fw));",
+    "  vec3 sand = mix(uSandDark, uSand, clamp(0.25 + 0.6 * n, 0.0, 1.0)) * (1.0 + shade + grain) * uWater;",
+    "  vec3 col = sand * mix(0.36, 1.0, inside);",                      /* beyond the glass it is unlit */
     "  vec2 uv = p / 420.0;",
     "  float c1 = texture2D(uCaustic, uv + vec2(uTime * 0.013, uTime * 0.008)).r;",
     "  float c2 = texture2D(uCaustic, uv * 1.31 + vec2(-uTime * 0.010, uTime * 0.012)).r;",
     "  col += uCausticCol * min(c1, c2) * uCausticAmt * (0.25 + 0.75 * inside);",
     "  col += uEdge * (1.0 - smoothstep(0.0, 4.0, abs(dOut))) * 0.22;",       /* where the glass meets the floor */
     "  col = mix(col, uFog, max(fogOf(vWorld), smoothstep(0.0, 1100.0, dOut)));",
+    "  gl_FragColor = vec4(col, 1.0);",
+    "}"
+  ].join("\n");
+
+  /* The surface, seen from below (from above it draws nothing, so the view
+   * into the tank is unchanged). Inside Snell's window — rays within ~49
+   * degrees of straight up — the sky's light comes through, brightest
+   * overhead, with a bright rim at the window's edge; outside it the surface
+   * mirrors the dark water. A shimmer (the caustic pattern, sliding) moves
+   * over both. Additive, so it only ever adds light. */
+  var SURF_FS = [
+    FOG_FN,
+    "uniform vec2 uHalf; uniform float uTime; uniform sampler2D uCaustic;",
+    "uniform vec3 uSky; uniform vec3 uMirror;",
+    "varying vec3 vWorld;",
+    "void main() {",
+    "  if (cameraPosition.y >= vWorld.y) discard;",
+    "  vec3 V = normalize(vWorld - cameraPosition);",                   /* the view ray, looking up */
+    "  float win = smoothstep(0.60, 0.70, V.y);",
+    "  float rim = 1.0 - smoothstep(0.0, 0.035, abs(V.y - 0.66));",
+    "  vec2 uv = vWorld.xz / 150.0;",
+    "  float c1 = texture2D(uCaustic, uv + vec2(uTime * 0.021, -uTime * 0.016)).r;",
+    "  float c2 = texture2D(uCaustic, uv * 0.73 + vec2(-uTime * 0.017, uTime * 0.019)).r;",
+    "  float sh = 0.3 * (c1 + c2) + 0.8 * min(c1, c2);",                /* soft swell plus a bright network */
+    "  vec2 q = abs(vWorld.xz) - uHalf;",
+    "  float inside = 1.0 - smoothstep(0.0, 300.0, length(max(q, 0.0)));",
+    "  vec3 col = uMirror * (0.55 + 0.9 * sh) * (1.0 - win)",
+    "           + uSky * (0.40 + 0.8 * smoothstep(0.72, 1.0, V.y) + 0.75 * sh) * win",
+    "           + uSky * rim * 0.4;",
+    "  col *= (0.45 + 0.55 * inside) * (1.0 - fogOf(vWorld));",
     "  gl_FragColor = vec4(col, 1.0);",
     "}"
   ].join("\n");
@@ -447,8 +512,8 @@
         uHalf: common.uHalf, uTime: common.uTime, uFog: common.uFog, uFogDensity: common.uFogDensity,
         uCaustic: { value: (function () { var t = new THREE.DataTexture(new Uint8Array([0, 0, 0, 255]), 1, 1); t.needsUpdate = true; return t; })() },
         uCausticAmt: { value: 0 },
-        uFloorIn: { value: v3(C.floorIn) }, uFloorOut: { value: v3(C.floorOut) },
-        uCausticCol: { value: v3(C.caustic) }, uEdge: { value: v3(C.edge) }
+        uSand: { value: v3(C.sand) }, uSandDark: { value: v3(C.sandDark) }, uWater: { value: v3(C.water) },
+        uCausticCol: { value: v3(C.caustic) }, uEdge: { value: v3(C.edge) }, uLight: common.uLight
       }
     });
     var floor = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), floorMat);
@@ -456,6 +521,21 @@
     floor.position.y = FLOOR_Y;
     floor.renderOrder = 0;
     scene.add(floor);
+
+    /* the surface, lit from above when seen from below (SURF_FS); it shares
+     * the floor's caustic texture uniform, so it shimmers once that is built */
+    var surfMat = new THREE.ShaderMaterial({
+      vertexShader: FLOOR_VS, fragmentShader: SURF_FS,
+      uniforms: { uHalf: common.uHalf, uTime: common.uTime, uFog: common.uFog, uFogDensity: common.uFogDensity,
+                  uCaustic: floorMat.uniforms.uCaustic, uSky: { value: v3(C.surfSky) }, uMirror: { value: v3(C.surfMirror) } },
+      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide
+    });
+    var surface = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), surfMat);
+    surface.rotation.x = -Math.PI / 2;
+    surface.position.y = 0.5;
+    surface.renderOrder = 7;
+    surface.frustumCulled = false;
+    scene.add(surface);
 
     /* fish + predators: instanced templates sharing one shader */
     var fishUniforms = {
@@ -473,8 +553,9 @@
       transparent: true, depthWrite: true, depthFunc: THREE.LessDepth, side: THREE.DoubleSide
     });
 
-    /* One instanced kind: template + five per-instance attributes. The
-     * geometry is rebuilt (and the old one disposed) only when it has to grow. */
+    /* One instanced kind: template + six per-instance attributes (iX: the
+     * pitch). The geometry is rebuilt (and the old one disposed) only when it
+     * has to grow. */
     function Kind(pred) {
       var tpl = fishTemplate(pred);
       var self = { cap: 0, n: 0, geo: null, mesh: null, shadow: null, attrs: null };
@@ -484,7 +565,7 @@
         g.setAttribute("part", new THREE.BufferAttribute(tpl.part, 1));
         g.setIndex(tpl.idx);
         var at = {};
-        ["iA", "iB", "iC", "iCol", "iBody"].forEach(function (name) {
+        ["iA", "iB", "iC", "iCol", "iBody", "iX"].forEach(function (name) {
           var a = new THREE.InstancedBufferAttribute(new Float32Array(cap * 4), 4);
           a.setUsage(THREE.DynamicDrawUsage);
           g.setAttribute(name, a);
@@ -632,7 +713,8 @@
     function Ring(strength) {
       var m = new THREE.ShaderMaterial({ vertexShader: RING_VS, fragmentShader: RING_FS,
         uniforms: { uCol: { value: v3(C.select) }, uTime: common.uTime, uStrength: { value: strength } },
-        transparent: true, depthWrite: false, blending: THREE.AdditiveBlending });
+        transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+        side: THREE.DoubleSide });   /* seen from below too */
       var mesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), m);
       mesh.rotation.x = -Math.PI / 2;
       mesh.renderOrder = 5;
@@ -647,21 +729,47 @@
     controls.enableDamping = true;
     controls.dampingFactor = 0.09;
     controls.screenSpacePanning = false;
-    controls.maxPolarAngle = 1.45;   /* nearly level: look into the tank through its side */
+    /* A free camera: it may orbit below the horizontal, up to nearly straight
+     * up, so from near the floor you can look up at the surface; clampView
+     * keeps it out of the sand. */
+    controls.maxPolarAngle = Math.PI - 0.08;
     controls.minDistance = 40;
     controls.zoomToCursor = true;
     var MOUSE = { ROTATE: 0, DOLLY: 1, PAN: 2 }, TOUCH = { ROTATE: 0, PAN: 1, DOLLY_ROTATE: 3 };
     var fitDist = 1500, userMoved = false, anim = null;
     var follow = false, onFollow = opts.onFollowChange || function () {};
-    controls.addEventListener("start", function () { userMoved = true; anim = null; });
-    controls.addEventListener("change", clampTarget);
-    function clampTarget() {
-      var t = controls.target, mx = halfW + 80, mz = halfH + 80;
+    var SURF_TOP = 30;   /* the view's centre may rise this far above the surface */
+    /* A drag pans over the sea floor when the camera looks down into the tank,
+     * and in the screen's plane (so up/down moves the view to another depth)
+     * when it looks through the side or up; chosen as each drag starts. */
+    controls.addEventListener("start", function () {
+      userMoved = true; anim = null;
+      controls.screenSpacePanning = controls.getPolarAngle() > 1.2;
+    });
+    controls.addEventListener("change", clampView);
+    /* the view's centre stays near the tank: x/z a little beyond the glass,
+     * y between just above the floor and a bit above the surface; the camera
+     * never goes under the sand (it slides in along its line of sight) */
+    function clampView() {
+      var t = controls.target, cp = camera.position, mx = halfW + 80, mz = halfH + 80;
       var x = Math.max(-mx, Math.min(mx, t.x)), z = Math.max(-mz, Math.min(mz, t.z));
-      if (x !== t.x || z !== t.z) {
-        camera.position.x += x - t.x; camera.position.z += z - t.z;
-        t.x = x; t.z = z;
+      var y = Math.max(FLOOR_Y + 8, Math.min(SURF_TOP, t.y));
+      if (x !== t.x || y !== t.y || z !== t.z) {
+        cp.x += x - t.x; cp.y += y - t.y; cp.z += z - t.z;
+        t.set(x, y, z);
       }
+      var minY = FLOOR_Y + 5;
+      if (cp.y < minY) {
+        var oy = cp.y - t.y, f = oy < -1e-6 ? (minY - t.y) / oy : 1;
+        cp.set(t.x + (cp.x - t.x) * f, minY, t.z + (cp.z - t.z) * f);
+      }
+    }
+    /* move the view (target and camera together) up or down, in sim units */
+    function moveView(dy) {
+      if (follow) { follow = false; setFollowControls(false); onFollow(false); }
+      anim = null; userMoved = true;
+      controls.target.y += dy; camera.position.y += dy;
+      clampView();
     }
     function setFollowControls(on) {
       controls.enablePan = !on;
@@ -759,6 +867,7 @@
       common.uHalf.value.set(halfW, halfH);
       var span = Math.max(w, h) * 6;
       floor.scale.set(span, span, 1);
+      surface.scale.set(span, span, 1);
       placeSnow();
       /* the glass box: the surface rectangle, the one on the floor, and the
        * four vertical edges between them (the verticals a little fainter) */
@@ -790,8 +899,8 @@
       var n = s.n;
       fish.ensure(n);
       var A = fish.attrs.iA.array, B = fish.attrs.iB.array, Cc = fish.attrs.iC.array;
-      var COL = fish.attrs.iCol.array, BODY = fish.attrs.iBody.array;
-      var segs = s.segs, cols = s.colors, body = s.body, ids = s.ids, depth = s.depth;
+      var COL = fish.attrs.iCol.array, BODY = fish.attrs.iBody.array, X = fish.attrs.iX.array;
+      var segs = s.segs, cols = s.colors, body = s.body, ids = s.ids, depth = s.depth, vz = s.vz;
       if (!heights || heights.length < n) heights = new Float32Array(Math.max(n, 2048));
       var xs = SX, ys = SY;
       for (var c = 0; c < n; c++) {
@@ -817,6 +926,9 @@
         BODY[o + 1] = hgt;
         BODY[o + 2] = c === selIdx ? 1 : (c === hovIdx ? 0.5 : 0);
         BODY[o + 3] = 0;
+        /* s.vz: + = sinking, as tan(pitch); absent (or NaN) = level */
+        var t = vz ? vz[c] : 0;
+        X[o] = t === t ? t : 0; X[o + 1] = 0; X[o + 2] = 0; X[o + 3] = 0;
       }
       fish.commit(n);
     }
@@ -828,17 +940,25 @@
       var n = s.pc;
       preds.ensure(n);
       var A = preds.attrs.iA.array, B = preds.attrs.iB.array, Cc = preds.attrs.iC.array;
-      var COL = preds.attrs.iCol.array, BODY = preds.attrs.iBody.array;
+      var COL = preds.attrs.iCol.array, BODY = preds.attrs.iBody.array, X = preds.attrs.iX.array;
       predTrails.length = Math.min(predTrails.length, n);
       var SP = 7;
       for (var i = 0; i < n; i++) {
         var x = s.preds[3 * i], y = s.preds[3 * i + 1], hunting = !(s.preds[3 * i + 2] > 0);
+        var pdep = s.predDepth ? s.predDepth[i] : 0;
         var tr = predTrails[i];
-        if (!tr || Math.hypot(tr[0] - x, tr[1] - y) > 60) tr = predTrails[i] = [x, y, x - 1, y];
-        else if (Math.hypot(tr[0] - x, tr[1] - y) > 1.2) {
-          tr.unshift(x, y);
-          if (tr.length > 40) tr.length = 40;
+        if (!tr || Math.hypot(tr[0] - x, tr[1] - y) > 60) { tr = predTrails[i] = [x, y, x - 1, y]; tr.d = pdep; tr.vz = 0; }
+        else {
+          var mv = Math.hypot(tr[0] - x, tr[1] - y);
+          if (mv > 1.2) {
+            /* its pitch, as for the fish: depth change over distance swum, smoothed */
+            var inst = Math.max(-1.2, Math.min(1.2, (pdep - tr.d) / mv));
+            tr.vz += (inst - tr.vz) * 0.25; tr.d = pdep;
+            tr.unshift(x, y);
+            if (tr.length > 40) tr.length = 40;
+          }
         }
+        X[4 * i] = tr.vz; X[4 * i + 1] = X[4 * i + 2] = X[4 * i + 3] = 0;
         /* points every SP px along the history; straight on past its end */
         var pts = [x, y], acc = 0, want = SP, j = 0;
         var lx = x, ly = y;
@@ -1041,6 +1161,7 @@
         }
       }
       controls.update(dt);
+      clampView();   /* after follow, damping and animation alike */
       /* near/far follow the zoom, so a close-up keeps its depth precision and
        * a far view never clips the tank */
       var cd = camera.position.distanceTo(controls.target);
@@ -1066,7 +1187,7 @@
       snow.visible = quality >= 3 && !reduced;
       if (causticFade < 1 && causticReady) {
         causticFade = Math.min(1, causticFade + dt / 1.4);
-        floorMat.uniforms.uCausticAmt.value = 0.32 * (1 - Math.pow(1 - causticFade, 3));   /* less light reaches a deep floor */
+        floorMat.uniforms.uCausticAmt.value = 0.5 * (1 - Math.pow(1 - causticFade, 3));   /* strong enough to read on the sand */
       }
       renderer.render(scene, camera);
     }
@@ -1129,6 +1250,23 @@
       },
       following: function () { return follow; },
       depth: function () { return TD; },
+      /* the view up (+) or down (-) by dy sim units, kept between just above
+       * the floor and a bit above the surface; stops a follow */
+      moveView: moveView,
+      /* put the camera at pos looking at target (three coords, [x, y, z]) */
+      lookFrom: function (pos, target) {
+        if (follow) { follow = false; setFollowControls(false); onFollow(false); }
+        anim = null; userMoved = true;
+        controls.target.set(target[0], target[1], target[2]);
+        camera.position.set(pos[0], pos[1], pos[2]);
+        clampView();
+        camera.lookAt(controls.target);
+        controls.update();
+      },
+      /* where the camera is: {pos, target, polar}, three coords */
+      view: function () {
+        return { pos: camera.position.toArray(), target: controls.target.toArray(), polar: controls.getPolarAngle() };
+      },
       quality: function () { return quality; },
       setQuality: setQuality,
       /* one step down: fewer pixels, then no shadows. false at the floor */

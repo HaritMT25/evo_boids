@@ -11,6 +11,14 @@
 //   * With no cfgJson the world is the tuned preview (applyOceanDefaults +
 //     OceanConfig defaults, src/ocean/ocean_config.hpp).
 //
+// ADDITIONS beyond §4 (not deviations; the page feature-detects them):
+//   * const float* oc_creature_vz() — N floats, same order as
+//     oc_creature_segments, refreshed by oc_sync: each fish's Fish::vz as the
+//     engine integrates it (depth += vz·speed·dt; + = sinking; |vz| <=
+//     pitchMax). The fish swims horizontally at `speed` along its unit (x, y)
+//     heading and vertically at vz·speed, so its pitch is atan(vz) (+ = nose
+//     down). The current's horizontal drift is not included.
+//
 // Compiled with Emscripten into web/evo_ocean.{js,wasm} by wasm/build_ocean.sh
 // (-DEVO_WORLD_OCEAN, single-threaded). The page (web/ocean.js) drives it:
 // oc_init once, then per frame oc_step(n) -> oc_sync() -> read the buffers.
@@ -42,6 +50,7 @@ std::string g_error;
 
 std::vector<float>   g_segments;   // N*12: 6 spine points x, y  (= evo_creature_segments)
 std::vector<float>   g_depth;      // N
+std::vector<float>   g_vz;         // N: Fish::vz (pitch = atan(vz))
 std::vector<float>   g_bodyParams; // N*2: bodySize, bodyElong  (= evo_body_params)
 std::vector<uint8_t> g_colors;     // N*3: family colour         (= evo_creature_colors)
 std::vector<double>  g_ids;        // N                           (= evo_creature_ids)
@@ -188,6 +197,7 @@ EVO_EXPORT void oc_sync() {
     const size_t n = w.creatures.size();
     g_segments.resize(n * 12);
     g_depth.resize(n);
+    g_vz.resize(n);
     g_bodyParams.resize(n * 2);
     g_colors.resize(n * 3);
     g_ids.resize(n);
@@ -198,6 +208,7 @@ EVO_EXPORT void oc_sync() {
             g_segments[i * 12 + s * 2 + 1] = c.body[s].y;
         }
         g_depth[i] = c.depth;
+        g_vz[i] = c.vz;
         g_bodyParams[i * 2 + 0] = c.bodySize;
         g_bodyParams[i * 2 + 1] = c.bodyElong;
         familyColor(c.lineageId, &g_colors[i * 3]);
@@ -238,6 +249,7 @@ EVO_EXPORT void oc_sync() {
 EVO_EXPORT int oc_creature_count()             { return g_world ? (int)g_world->creatures.size() : 0; }
 EVO_EXPORT const float* oc_creature_segments() { return g_segments.data(); }
 EVO_EXPORT const float* oc_creature_depth()    { return g_depth.data(); }
+EVO_EXPORT const float* oc_creature_vz()       { return g_vz.data(); }   // addition, see top
 EVO_EXPORT const float* oc_body_params()       { return g_bodyParams.data(); }
 EVO_EXPORT const uint8_t* oc_creature_colors() { return g_colors.data(); }
 EVO_EXPORT const double* oc_creature_ids()     { return g_ids.data(); }

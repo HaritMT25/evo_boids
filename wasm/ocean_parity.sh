@@ -146,6 +146,32 @@ add eye_only_exp_s3 "3 5000 --cfg {$EXP,\"eye\":1,\"eyeOnly\":1}" \
 add eye_blind_exp_toro_s4 "4 3000 --cfg {$EXP,\"toroidal\":true,\"eyeOnly\":1}" "blind + the experiment's economy, toroidal"
 add eye_only_live_s21 '21 3000 --cfg {"predatorCount":3,"eye":1} --set eyeOnly=1@500 --set eye=0@1200 --set eyeOnly=0@1800 --set eyeOnly=1@2400 --set eye=1@2600' \
                   "eyeOnly / eye switched mid-run: labeled+eye -> eye-only -> blind -> labeled -> blind -> eye-only"
+# ---- own-frame steering (OceanConfig::steerFrame 1: STEER_X right, STEER_Y ahead) ----
+add steer_own_s1  '1 3000 --cfg {"steerFrame":1}' "own-frame steering, defaults"
+add steer_own_rich_toro_s7 "7 3000 --cfg {$RICH,\"toroidal\":true,\"foodDepthMode\":1,\"steerFrame\":1}" \
+                  "own-frame steering + rich + toroidal + patch depths"
+add steer_own_capture_s17 '17 3000 --capture --cfg {"steerFrame":1,"predatorCount":2,"currentStrength":50}' \
+                  "own-frame steering, every fish's sensor + action bits hashed"
+add steer_own_live_s21 '21 3000 --cfg {"predatorCount":3} --set steerFrame=1@700 --set steerFrame=0@1500 --set steerFrame=1@2200' \
+                  "steerFrame switched on / off / on mid-run (oc_set_param)"
+add steer_own_tri_s9 '9 3000 --cfg {"triangularMotion":true,"bodyModel":true,"reproMaxDistance":16,"reproSoftWidth":5,"pitchMax":1.2,"steerFrame":1}' \
+                  "triangular motion ignores steerFrame (fish as x_tri_body_s9's)"
+add eye_steer_rich_s5 "5 3000 --cfg {$RICH,\"eye\":1,\"steerFrame\":1}" "eye + labels + own-frame steering + rich"
+add eye_steer_only_exp_s3 "3 5000 --cfg {$EXP,\"eye\":1,\"eyeOnly\":1,\"steerFrame\":1}" \
+                  "eye-only + own-frame steering, the eye experiment's economy"
+add eye_steer_blind_exp_toro_s4 "4 3000 --cfg {$EXP,\"toroidal\":true,\"eyeOnly\":1,\"steerFrame\":1}" \
+                  "blind + own-frame steering + the experiment's economy, toroidal"
+# ---- food lifetime (OceanConfig::foodLife: uneaten food removed after foodLife s) ----
+SV='"foodSpawnBase":1,"foodSpawnAmp":0,"foodEnergy":15,"targetFood":800'
+add life_s1       "1 3000 --cfg {\"foodLife\":8,$SV}" "foodLife 8, sparse valuable food (1 item/step x 15)"
+add life_rich_toro_s7 "7 3000 --cfg {$RICH,\"toroidal\":true,\"foodDepthMode\":1,\"foodLife\":5}" \
+                  "foodLife 5 + rich (patches + drift) + toroidal"
+add life_live_s21 '21 3000 --cfg {"predatorCount":3} --set foodLife=6@600 --set foodLife=0@1800 --set foodLife=2.5@2400' \
+                  "foodLife switched on / off / on mid-run (oc_set_param)"
+add eye_life_steer_only_s3 "3 5000 --cfg {$EXP,$SV,\"eye\":1,\"eyeOnly\":1,\"steerFrame\":1,\"foodLife\":8}" \
+                  "eye-only + own frame + foodLife 8 + sparse valuable food + the experiment's economy"
+add eye_life_steer_blind_s4 "4 3000 --cfg {$EXP,$SV,\"eyeOnly\":1,\"steerFrame\":1,\"foodLife\":8}" \
+                  "blind + own frame + foodLife 8 + sparse valuable food"
 
 run_one () {  # run_one INDEX: native and wasm side by side
     local i=$1 name=${NAMES[$1]} s

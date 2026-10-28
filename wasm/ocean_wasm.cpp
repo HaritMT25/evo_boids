@@ -15,12 +15,15 @@
 //     >= 0, or, toroidal, not < min(width, height) / 2 (the wrapped grid
 //     query's bound; OceanWorld::radiusError).
 //   * oc_set_param: the Ocean keys kBuoy, pitchMax, vDrag, wallBand,
-//     buoyMutation, cHold, cPress, foodDepthSpread, eye, eyeOnly, plus every
-//     key evo_set_param accepts. pitchMax must be > 0. The changed config must
-//     pass oc_init's checks as stored (after the float / int conversion).
+//     buoyMutation, cHold, cPress, foodDepthSpread, eye, eyeOnly, steerFrame,
+//     foodLife, plus every key evo_set_param accepts. pitchMax must be > 0. The changed
+//     config must pass oc_init's checks as stored (after the float / int
+//     conversion).
 //   * eye (OceanConfig::eye, the compound eye) and eyeOnly (the labeled senses
 //     off; with eye 0, "blind") are 0 or 1 in the eye build (-DEVO_OCEAN_EYE)
 //     and must stay 0 in the plain one; oc_has_eye() says which build this is.
+//   * steerFrame (OceanConfig::steerFrame: STEER_X / STEER_Y in world x / y, or
+//     in the fish's own frame) is 0 or 1 in both builds.
 //   * With no cfgJson the world is the tuned preview (applyOceanDefaults +
 //     OceanConfig defaults, src/ocean/ocean_config.hpp).
 //
@@ -187,8 +190,10 @@ bool configOk(const SimConfig& cfg, const OceanConfig& oc, int width, int height
                   : (oc.eyeOnly != 0 && !(kOceanHasEye && oc.eyeOnly == 1))
                       ? (kOceanHasEye ? "eyeOnly must be 0 or 1"
                                       : "eyeOnly needs the eye build (-DEVO_OCEAN_EYE); this build has no eye")
+                  : (oc.steerFrame != 0 && oc.steerFrame != 1)
+                      ? "steerFrame must be 0 or 1"
                       : "ocean config: kBuoy, vDrag, wallBand, cHold, cPress must be finite; "
-                        "buoyMutation, vDrag, wallBand, foodDepthSpread >= 0; pitchMax > 0";
+                        "buoyMutation, vDrag, wallBand, foodDepthSpread, foodLife >= 0; pitchMax > 0";
         return false;
     }
     return true;
@@ -336,7 +341,7 @@ EVO_EXPORT int oc_set_param(const char* name, double value) {
     if (!g_world) { g_error = "no world (call oc_init first)"; return 0; }
     static const char* const kOcean[] = {
         "kBuoy", "pitchMax", "vDrag", "wallBand", "buoyMutation", "cHold", "cPress",
-        "foodDepthSpread", "eye", "eyeOnly",
+        "foodDepthSpread", "eye", "eyeOnly", "steerFrame", "foodLife",
     };
     static const char* const kLive[] = {
         "maxPopulation", "minPopulation", "targetFood", "foodSpawnBase", "foodSpawnAmp",
@@ -346,7 +351,7 @@ EVO_EXPORT int oc_set_param(const char* name, double value) {
     };
     static const char* const kLiveInt[] = {   // the int-typed keys of kLive (and kOcean)
         "maxPopulation", "minPopulation", "targetFood", "predatorMinPopulation",
-        "predatorMaxPopulation", "eye", "eyeOnly",
+        "predatorMaxPopulation", "eye", "eyeOnly", "steerFrame",
     };
     bool live = false, isInt = false;
     for (const char* k : kOcean) if (name && std::strcmp(name, k) == 0) { live = true; break; }

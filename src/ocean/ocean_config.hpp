@@ -52,6 +52,23 @@ struct OceanConfig {
     // column and the current. The pairwise interaction vote's own contact
     // inputs (kernel::interactionVote) are not senses and are unchanged.
     int   eyeOnly         = 0;
+    // The frame STEER_X / STEER_Y push in (the non-triangular motion model):
+    // 0 = world x / y, Classic's (and NEAREST_FOOD_DX / DY's) frame;
+    // 1 = the fish's own frame: STEER_X along its right axis (the "right" of the
+    //     compound eye and PREDATOR_LR), STEER_Y along its heading. The same push
+    //     turned into body coordinates, so a sense in the fish's frame can turn it
+    //     toward what it senses. The heading is renormalised after the push, so
+    //     STEER_Y alone no longer turns the fish (it only scales STEER_X's turn,
+    //     by up to ±5%): turning is STEER_X's, as under triangular motion (which
+    //     already turns by STEER_X and ignores this).
+    int   steerFrame      = 0;
+    // Food lifetime in seconds (0 = off: food lasts until eaten). On, every item
+    // is removed foodLife seconds after it appeared, eaten or not (it sinks out
+    // or decays). With a fixed inflow, food the fish do not find is lost, so how
+    // many fish a world can feed depends on how well they search. The world's
+    // first stock gets ages spread evenly over [0, foodLife) so it does not all
+    // vanish at once. No draws.
+    float foodLife        = 0.0f;
 };
 
 // Does this build have the compound eye's sensors?
@@ -77,6 +94,8 @@ inline void readOceanConfig(const jsonm::Value& o, OceanConfig& c) {
     c.foodDepthSpread = o.floatOr("foodDepthSpread", c.foodDepthSpread);
     c.eye             = o.intOr("eye", c.eye);
     c.eyeOnly         = o.intOr("eyeOnly", c.eyeOnly);
+    c.steerFrame      = o.intOr("steerFrame", c.steerFrame);
+    c.foodLife        = o.floatOr("foodLife", c.foodLife);
 }
 
 // The preview's SimConfig starting point (tuned with tools/ocean_probe.cpp).
@@ -108,5 +127,6 @@ inline bool oceanConfigValid(const OceanConfig& c) {
            fin(c.vDrag) && c.vDrag >= 0.0f && fin(c.wallBand) && c.wallBand >= 0.0f &&
            fin(c.cHold) && fin(c.cPress) && fin(c.foodDepthSpread) && c.foodDepthSpread >= 0.0f &&
            (c.eye == 0 || (kOceanHasEye && c.eye == 1)) &&
-           (c.eyeOnly == 0 || (kOceanHasEye && c.eyeOnly == 1));
+           (c.eyeOnly == 0 || (kOceanHasEye && c.eyeOnly == 1)) &&
+           (c.steerFrame == 0 || c.steerFrame == 1) && fin(c.foodLife) && c.foodLife >= 0.0f;
 }

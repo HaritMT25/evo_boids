@@ -83,6 +83,9 @@ inline void hashConfig(Fnv& h, const SimConfig& c, const OceanConfig& o) {
     h.f32(o.depth); h.f32(o.kBuoy); h.f32(o.buoyMutation); h.f32(o.pitchMax); h.f32(o.vDrag);
     h.f32(o.wallBand); h.f32(o.cHold); h.f32(o.cPress); h.i32(o.foodDepthMode);
     h.f32(o.foodDepthSpread);
+    // Hashed only when on, so with steerFrame 0 the bytes are the ones before it existed.
+    if (o.steerFrame != 0) h.i32(0x53460000 | o.steerFrame);
+    if (o.foodLife != 0.0f) { h.i32(0x464c0000); h.f32(o.foodLife); }   // likewise
 #ifdef EVO_OCEAN_EYE
     // The eye build only: the plain build's eye is always 0 and its fingerprints
     // stay those of the build before the eye existed. eyeOnly shares the word
@@ -165,7 +168,8 @@ inline Fingerprint fingerprint(const OceanWorld& w, bool withActivations = true)
       for (const Fish& c : w.creatures) hashFish(h, c, withActivations);
       fp.fish = h.h; }
     { Fnv h; h.u64(w.food.size());
-      for (const OceanFood& f : w.food) { h.v2(f.pos); h.f32(f.depth); h.b(f.alive); }
+      const bool ages = w.ocfg.foodLife > 0.0f;   // ages count only then (else always 0)
+      for (const OceanFood& f : w.food) { h.v2(f.pos); h.f32(f.depth); h.b(f.alive); if (ages) h.f32(f.age); }
       fp.food = h.h; }
     { Fnv h; h.u64(w.predators.size());
       for (const OceanPredator& p : w.predators) hashPredator(h, p);
@@ -200,7 +204,7 @@ inline long countNonFinite(const OceanWorld& w) {
         for (float s : c.lastSensors) chk(s);
         for (float a : c.lastActions) chk(a);
     }
-    for (const OceanFood& f : w.food) { chk(f.pos.x); chk(f.pos.y); chk(f.depth); }
+    for (const OceanFood& f : w.food) { chk(f.pos.x); chk(f.pos.y); chk(f.depth); chk(f.age); }
     for (const OceanPredator& p : w.predators)
         for (float v : {p.pos.x, p.pos.y, p.vel.x, p.vel.y, p.digestTimer, p.energy, p.age, p.speedFactor,
                         p.buddingFactor, p.depth, p.pitch})
@@ -250,6 +254,7 @@ inline void dumpState(const OceanWorld& w, std::FILE* out) {
     d.fl("pitchMax", w.ocfg.pitchMax); d.fl("vDrag", w.ocfg.vDrag); d.fl("wallBand", w.ocfg.wallBand);
     d.fl("cHold", w.ocfg.cHold); d.fl("cPress", w.ocfg.cPress); d.ll("foodDepthMode", w.ocfg.foodDepthMode);
     d.fl("foodDepthSpread", w.ocfg.foodDepthSpread);
+    d.ll("steerFrame", w.ocfg.steerFrame); d.fl("foodLife", w.ocfg.foodLife);
 #ifdef EVO_OCEAN_EYE
     d.ll("eye", w.ocfg.eye);
     d.ll("eyeOnly", w.ocfg.eyeOnly);
@@ -293,7 +298,7 @@ inline void dumpState(const OceanWorld& w, std::FILE* out) {
     for (std::size_t i = 0; i < w.food.size(); ++i) {
         const OceanFood& f = w.food[i];
         std::fprintf(out, "food %zu", i);
-        d.v2("pos", f.pos); d.fl("depth", f.depth); d.ll("alive", f.alive);
+        d.v2("pos", f.pos); d.fl("depth", f.depth); d.ll("alive", f.alive); d.fl("age", f.age);
         std::fprintf(out, "\n");
     }
     for (std::size_t i = 0; i < w.predators.size(); ++i) {

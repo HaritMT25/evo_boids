@@ -9,6 +9,9 @@
 //   B  labeled senses + eye         (eye 1, eyeOnly 0)
 //   C  eye only                     (eye 1, eyeOnly 1)
 //   D  blind                        (eye 0, eyeOnly 1)
+// A digit after the letter sets OceanConfig::steerFrame for that arm (C1 = eye
+// only, STEER_X / STEER_Y in the fish's own frame; A0 = labels, world frame);
+// without one the cfg's steerFrame (default 0) is used.
 //
 //   g++ -O3 -std=c++20 -ffp-contract=off -DEVO_WORLD_OCEAN -DEVO_OCEAN_EYE -I src
 //       tools/ocean_eye_exp.cpp -o ocean_eye_exp
@@ -95,6 +98,7 @@ struct Wiring {
     double eyeAny = 0, eyeDirect = 0, eyeConns = 0, eyeAbsW = 0;   // eye -> move
     double eyeShareNum = 0, sensorConns = 0;                        // eye share of sensor conns
     double eyeVertDirect = 0;   // EYE_UP/DOWN_* -> STEER_Z direct (vertical use)
+    double eyeLRDirect = 0;     // EYE_LEFT/RIGHT_* -> STEER_X direct (horizontal use)
     double foodMatched = 0;     // NEAREST_FOOD_DX->STEER_X | DY->STEER_Y | DZ->STEER_Z, w > 0
     double predMove = 0;        // PREDATOR_* -> move, any path
     double labMove = 0;         // any labeled sense -> move, any path
@@ -106,7 +110,7 @@ struct Wiring {
         reachFrom(nn, [](int s) { return ocean::isEyeSense(s); }, d, a);
         eyeAny += (a & kMoveMask) != 0;
         eyeDirect += (d & kMoveMask) != 0;
-        bool matched = false, vert = false;
+        bool matched = false, vert = false, lr = false;
         for (const auto& fc : nn.flat) {
             const int s = fc.src(), k = fc.sink();
             if (s >= NUM_SENSES) continue;
@@ -118,11 +122,13 @@ struct Wiring {
                 eyeAbsW += std::abs(fc.w());
             }
             if (k == STEER_Z && s >= EYE_UP_PROX && s <= EYE_DOWN_CON) vert = true;
+            if (k == STEER_X && s >= EYE_LEFT_PROX && s <= EYE_RIGHT_CON) lr = true;
             if (fc.weight > 0 && ((s == NEAREST_FOOD_DX && k == STEER_X) || (s == NEAREST_FOOD_DY && k == STEER_Y) ||
                                   (s == NEAREST_FOOD_DZ && k == STEER_Z)))
                 matched = true;
         }
         eyeVertDirect += vert;
+        eyeLRDirect += lr;
         foodMatched += matched;
         reachFrom(nn, [](int s) { return s == PREDATOR_FWD || s == PREDATOR_LR || s == PREDATOR_PROX; }, d, a);
         predMove += (a & kMoveMask) != 0;
@@ -218,15 +224,16 @@ struct Probe {
 };
 
 // One fish's indices, averaged over 8 headings. lat = steer along the body's
-// right axis (world-frame STEER_X/Y projected; triangular motion: STEER_X turns).
-void behaveOne(Probe& pr, const Fish& base, bool triangular, double idx[8]) {
+// right axis (world-frame STEER_X/Y projected; triangular motion or steerFrame 1:
+// STEER_X is already that push).
+void behaveOne(Probe& pr, const Fish& base, bool bodyFrame, double idx[8]) {
     for (int k = 0; k < 8; ++k) idx[k] = 0;
     constexpr int H = 8;
     for (int h = 0; h < H; ++h) {
         const float a = 6.2831853f * (float)h / H + 0.3f;
         const Vec2 hd = {std::cos(a), std::sin(a)};
         const Vec2 rht = {-hd.y, hd.x};
-        auto lat = [&](const float* A) { return triangular ? A[STEER_X] : A[STEER_X] * rht.x + A[STEER_Y] * rht.y; };
+        auto lat = [&](const float* A) { return bodyFrame ? A[STEER_X] : A[STEER_X] * rht.x + A[STEER_Y] * rht.y; };
         auto l1 = [&](const float* A, const float* B) {
             return std::abs(A[STEER_X] - B[STEER_X]) + std::abs(A[STEER_Y] - B[STEER_Y]) +
                    std::abs(A[STEER_Z] - B[STEER_Z]) + std::abs(A[SPEED_ADJUST] - B[SPEED_ADJUST]);
@@ -288,7 +295,7 @@ void behaviouralTest(const OceanWorld& w, const char* arm, unsigned seed, const 
     genRng.seed(seed * 104729u + 3u);
     Behav evo, rnd;
     double idx[8];
-    const bool tri = w.cfg.triangularMotion;
+    const bool tri = w.cfg.triangularMotion || w.ocfg.steerFrame == 1;
     for (const Fish& f0 : w.creatures) {
         if (!f0.alive) continue;
         Fish f = f0;
@@ -402,8 +409,10 @@ int main(int argc, char** argv) {
     if (!arm) { std::fprintf(stderr, "bad --arm (A, B, C or D)\n"); return 2; }
     w.ocfg.eye = arm->eye;
     w.ocfg.eyeOnly = arm->eyeOnly;
+    if (armArg.size() > 1) w.ocfg.steerFrame = armArg[1] - '0';   // "C1": steerFrame 1
     if (!oceanConfigValid(w.ocfg)) { std::fprintf(stderr, "invalid ocean config\n"); return 4; }
-    const char armName[2] = {arm->name, 0};
+    const std::string armStr = armArg.substr(0, 2);
+    const char* armName = armStr.c_str();
 
     std::FILE* csv = std::fopen((out + ".csv").c_str(), "w");
     if (!csv) { std::fprintf(stderr, "cannot write %s.csv\n", out.c_str()); return 3; }
@@ -414,9 +423,9 @@ int main(int argc, char** argv) {
                  "clearance,clearance_norm,speed_mean,reserves_mean,depth_mean,depth_sd,genome_len,ms_per_step,"
                  "us_per_fish_step,eye_any,eye_direct,eye_conns,eye_absw,eye_share,eye_vert,food_matched,pred_move,"
                  "lab_move,rnd_eye_any,rnd_eye_direct,rnd_eye_conns,rnd_eye_absw,rnd_eye_share,rnd_eye_vert,"
-                 "rnd_food_matched,rnd_pred_move,rnd_lab_move\n");
-    std::printf("arm %c (eye %d, eyeOnly %d) seed %u steps %ld cfg %s\n", arm->name, arm->eye, arm->eyeOnly, seed,
-                steps, cfgJson ? cfgJson : "{}");
+                 "rnd_food_matched,rnd_pred_move,rnd_lab_move,eye_lr,rnd_eye_lr,steer_frame\n");
+    std::printf("arm %s (eye %d, eyeOnly %d, steerFrame %d) seed %u steps %ld cfg %s\n", armName, arm->eye,
+                arm->eyeOnly, w.ocfg.steerFrame, seed, steps, cfgJson ? cfgJson : "{}");
 
     RandomGen wiringRng;
     wiringRng.seed(seed * 2654435761u + 11u);
@@ -458,10 +467,11 @@ int main(int argc, char** argv) {
         scoreWiring(w, wiringRng, we, wr);
         const double fe = we.fish > 0 ? we.fish : 1, fr = wr.fish > 0 ? wr.fish : 1;
         std::fprintf(csv,
-                     "%c,%u,%ld,%zu,%.2f,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%zu,%.1f,%zu,%.3f,%lld,%lld,%lld,%lld,"
+                     "%s,%u,%ld,%zu,%.2f,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%zu,%.1f,%zu,%.3f,%lld,%lld,%lld,%lld,"
                      "%.6f,%.6f,%.4f,%.4f,%.5f,%.1f,%.4f,%.2f,%.3f,%.2f,%.2f,%.2f,%.4f,%.4f,"
-                     "%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f\n",
-                     arm->name, seed, s, w.creatures.size(), popMean, w.totalBirths, births, w.totalReseeds, reseeds,
+                     "%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,"
+                     "%.4f,%.4f,%d\n",
+                     armName, seed, s, w.creatures.size(), popMean, w.totalBirths, births, w.totalReseeds, reseeds,
                      dPred, dStarve, dAge, eaten, w.food.size(), foodMean, w.predators.size(), predMean,
                      w.totalPredatorBirths, pBirths, w.totalPredatorReseeds, w.totalPredatorDeathsStarvation,
                      eatPerFish, popMean > 0 ? dPred / (popMean * simSecs) : 0.0, births / simSecs,
@@ -473,11 +483,12 @@ int main(int argc, char** argv) {
                      we.foodMatched / fe, we.predMove / fe, we.labMove / fe,
                      wr.eyeAny / fr, wr.eyeDirect / fr, wr.eyeConns / fr, wr.eyeAbsW / fr,
                      wr.sensorConns > 0 ? wr.eyeShareNum / wr.sensorConns : 0.0, wr.eyeVertDirect / fr,
-                     wr.foodMatched / fr, wr.predMove / fr, wr.labMove / fr);
+                     wr.foodMatched / fr, wr.predMove / fr, wr.labMove / fr, we.eyeLRDirect / fe,
+                     wr.eyeLRDirect / fr, w.ocfg.steerFrame);
         std::fflush(csv);
-        std::printf("arm %c seed %u step %ld pop %zu births %lld reseeds %lld pred %zu eat/fish/s %.3f pred/fish/s %.4f"
+        std::printf("arm %s seed %u step %ld pop %zu births %lld reseeds %lld pred %zu eat/fish/s %.3f pred/fish/s %.4f"
                     " clr_norm %.2f %.3f ms/step\n",
-                    arm->name, seed, s, w.creatures.size(), w.totalBirths, w.totalReseeds, w.predators.size(),
+                    armName, seed, s, w.creatures.size(), w.totalBirths, w.totalReseeds, w.predators.size(),
                     eatPerFish, popMean > 0 ? dPred / (popMean * simSecs) : 0.0, sweep > 0 ? clearance / sweep : 0.0,
                     1e3 * secsWall / n);
         std::fflush(stdout);

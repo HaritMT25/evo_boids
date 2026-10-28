@@ -11,6 +11,10 @@
 //                 with kBuoy = 0 it holds its depth exactly
 //   steer_z       STEER_Z moves a fish down (+) / up (−); a LOC_Z -> STEER_Z wire
 //                 drives it; the action's value is tanh of the wire
+//   steer_frame   steerFrame 1: STEER_X turns every heading right (+) / left (−)
+//                 by the same angle, STEER_Y does not turn; steerFrame 0 pulls
+//                 toward world +x / +y; triangular motion ignores it; (eye build)
+//                 an EYE_RIGHT / EYE_LEFT -> STEER_X wire turns toward the food
 //   sensors       LOC_Z, OWN_VEL_Z, BOUNDARY_DIST_Z equal their defining
 //                 expressions; NEAREST_FOOD_DZ / AVG_NEIGHBOR_DZ in range; the
 //                 food direction is a unit vector; every sensor finite
@@ -19,6 +23,8 @@
 //                 off = 0; in range; no side effects
 //   eye_only      (eye build) eyeOnly: the 23 labeled inputs 0, every other
 //                 input bit-identical to the labeled run's; blind likewise
+//   food_life     foodLife: an item goes on the step its age reaches foodLife;
+//                 off, none do; the first stock's ages spread; draws unchanged
 //   reproducible  same seed twice -> identical fingerprints; another seed and a
 //                 1-ulp change in any section change the hash
 //   reset         oc_init / oc_reset (the shim, wasm/ocean_wasm.cpp) replay
@@ -288,6 +294,175 @@ void testSteerZ() {
     t.expect(L.depth < 190.0f && L.lastActions[STEER_Z] < 0.0f,
              "LOC_Z -> STEER_Z (-) did not raise the fish: depth %.4f action %.6f", L.depth, L.lastActions[STEER_Z]);
     t.note("after 60 steps: dive %.2f, idle %.2f, rise %.2f, LOC_Z-wired %.2f (from 200)", D.depth, I.depth, U.depth, L.depth);
+}
+
+// OceanConfig::steerFrame: 0 = STEER_X / STEER_Y push along world x / y, 1 = along
+// the fish's right axis / heading.
+void testSteerFrame() {
+    Test t("steer_frame");
+    {
+        OceanConfig oc;
+        t.expect(oceanConfigValid(oc) && oc.steerFrame == 0, "default steerFrame %d (or refused)", oc.steerFrame);
+        oc.steerFrame = 1;
+        t.expect(oceanConfigValid(oc), "steerFrame 1 refused");
+        oc.steerFrame = 2;
+        t.expect(!oceanConfigValid(oc), "steerFrame 2 accepted");
+        oc.steerFrame = -1;
+        t.expect(!oceanConfigValid(oc), "steerFrame -1 accepted");
+    }
+    const float kPi = 3.14159265f;
+    auto angle = [](Vec2 v) { return std::atan2(v.y, v.x); };
+    auto turned = [&](Vec2 a, Vec2 b) {   // signed heading change a -> b, + = toward a's right
+        float d = angle(b) - angle(a);
+        if (d > kPi) d -= 2.0f * kPi;
+        if (d < -kPi) d += 2.0f * kPi;
+        return d;
+    };
+    // One world per frame: fish at 8 headings wired neuron 0 -> STEER_X (+), at 8
+    // wired -> STEER_X (−), at 8 wired -> STEER_Y (+), plus an unwired one.
+    auto build = [&](OceanWorld& w, int frame) {
+        OceanConfig oc;
+        oc.kBuoy = 0.0f;
+        oc.wallBand = 0.0f;
+        oc.steerFrame = frame;
+        initQuiet(w, 23, 240.0f, oc, /*capture*/ true);
+        for (int set = 0; set < 3; ++set)
+            for (int h = 0; h < 8; ++h) {
+                const Gene g = (set == 2) ? mkGene(false, 0, STEER_Y, kStrong)
+                                          : mkGene(false, 0, STEER_X, set == 0 ? kStrong : -kStrong);
+                const int k = addFish(w, {150.0f + 200.0f * h, 200.0f + 300.0f * set}, 120.0f, {g}, 0.5f);
+                const float a = 2.0f * kPi * (float)h / 8.0f + 0.2f;
+                Fish& f = w.creatures[k];
+                f.vel = {std::cos(a), std::sin(a)};
+                f.lastMoveDir = f.vel;
+                f.responsiveness = 1.0f;
+            }
+        addFish(w, {960.0f, 1000.0f}, 120.0f, {}, 0.5f);
+    };
+    OceanWorld own, wld;
+    build(own, 1);
+    build(wld, 0);
+    const int N = (int)own.creatures.size();
+    std::vector<Vec2> h0(N), w0(N);
+    for (int i = 0; i < N; ++i) { h0[i] = own.creatures[i].vel; w0[i] = wld.creatures[i].vel; }
+    own.update(0.016f);
+    wld.update(0.016f);
+    // Own frame: STEER_X (+) turns every heading right by the same angle, (−) left by
+    // the same angle; STEER_Y (along the heading) does not turn it.
+    const float ref = turned(h0[0], own.creatures[0].vel);
+    t.expect(ref > 0.03f && ref < 0.06f, "own frame: STEER_X (+) turned %.6f rad in one step (expected ~0.046)", ref);
+    for (int h = 0; h < 8; ++h) {
+        const float r = turned(h0[h], own.creatures[h].vel);
+        const float l = turned(h0[8 + h], own.creatures[8 + h].vel);
+        const float y = turned(h0[16 + h], own.creatures[16 + h].vel);
+        t.expect(std::abs(r - ref) < 1e-5f, "own frame, heading %d: STEER_X (+) turned %.7f, heading 0 turned %.7f", h, r, ref);
+        t.expect(std::abs(l + ref) < 1e-5f, "own frame, heading %d: STEER_X (-) turned %.7f, expected %.7f", h, l, -ref);
+        t.expect(std::abs(y) < 1e-6f, "own frame, heading %d: STEER_Y (ahead) turned the fish %.9f", h, y);
+        // The eye's and PREDATOR_LR's right is (-fwd.y, fwd.x): the new heading leans that way.
+        const Vec2 rht = {-h0[h].y, h0[h].x};
+        const Vec2 v = own.creatures[h].vel;
+        t.expect(v.x * rht.x + v.y * rht.y > 0.0f, "own frame, heading %d: STEER_X (+) did not lean toward (-fwd.y, fwd.x)", h);
+    }
+    t.expect(own.creatures[N - 1].vel.x == h0[N - 1].x && own.creatures[N - 1].vel.y == h0[N - 1].y,
+             "own frame: the unwired fish turned");
+    // World frame (Classic): STEER_X (+) pulls every heading toward +x, STEER_Y (+)
+    // toward +y; the angle depends on the heading.
+    float wmin = 1e9f, wmax = -1e9f;
+    for (int h = 0; h < 8; ++h) {
+        const Vec2 a = w0[h], b = wld.creatures[h].vel, c = w0[16 + h], d = wld.creatures[16 + h].vel;
+        t.expect(b.x > a.x, "world frame, heading %d: STEER_X (+) did not pull toward +x (%.6f -> %.6f)", h, a.x, b.x);
+        t.expect(d.y > c.y, "world frame, heading %d: STEER_Y (+) did not pull toward +y (%.6f -> %.6f)", h, c.y, d.y);
+        const float r = std::abs(turned(a, b));
+        wmin = std::min(wmin, r); wmax = std::max(wmax, r);
+    }
+    t.expect(wmax - wmin > 0.01f, "world frame: STEER_X turned every heading alike (%.6f..%.6f)", wmin, wmax);
+    // A STEER_X (+) fish in its own frame circles: after 200 steps it has turned
+    // right every step (no reversal).
+    {
+        bool allRight = true;
+        for (int s = 0; s < 200; ++s) {
+            const Vec2 a = own.creatures[3].vel;
+            own.update(0.016f);
+            allRight &= turned(a, own.creatures[3].vel) > 0.0f;
+        }
+        t.expect(allRight, "own frame: a STEER_X (+) fish did not turn right on every step");
+    }
+    t.note("one step: own frame %.5f rad for every heading (STEER_Y 0); world frame %.5f..%.5f by heading", ref, wmin, wmax);
+
+    // Triangular motion already turns by STEER_X in the fish's frame and ignores
+    // steerFrame: the same fish, the same state, step for step.
+    {
+        OceanWorld a, b;
+        for (OceanWorld* w : {&a, &b}) {
+            OceanConfig oc;
+            oc.steerFrame = (w == &b) ? 1 : 0;
+            initQuiet(*w, 24, 240.0f, oc);
+            w->cfg.triangularMotion = true;
+            for (int i = 0; i < 12; ++i)
+                addFish(*w, {100.0f + 140.0f * i, 300.0f + 40.0f * i}, 20.0f * i,
+                        {mkGene(false, 0, STEER_X, (i % 2) ? kStrong : -kStrong),
+                         mkGene(false, 0, MOVE_FORWARD, (i % 3) * 8000 - 8000)}, 0.5f);
+        }
+        // Each world steps on its own copy of the rng (initQuiet seeded both alike),
+        // so a draw difference shows as different engines.
+        RandomGen ra = rng, rb = rng;
+        bool same = true, sameDraws = true;
+        for (int s = 0; s < 300 && same && sameDraws; ++s) {
+            rng = ra; a.update(0.016f); ra = rng;
+            rng = rb; b.update(0.016f); rb = rng;
+            const ofp::Fingerprint fa = ofp::fingerprint(a), fb = ofp::fingerprint(b);
+            same = fa.fish == fb.fish && fa.ctr == fb.ctr;
+            sameDraws = sameEngine(ra, rb);
+        }
+        t.expect(same, "triangular motion: steerFrame 1 changed the fish");
+        t.expect(sameDraws, "triangular motion: steerFrame 1 changed the draws");
+    }
+#ifdef EVO_OCEAN_EYE
+    // The compound eye and the own-frame push agree on "right": an EYE_RIGHT_PROX ->
+    // STEER_X (+) wire turns a fish toward food on its right, and EYE_LEFT_PROX ->
+    // STEER_X (−) toward food on its left; with steerFrame 0 the same wires do not.
+    {
+        int toward[2][2] = {};   // [frame][side]
+        for (int frame = 0; frame < 2; ++frame)
+            for (int side = 0; side < 2; ++side)
+                for (int h = 0; h < 8; ++h) {
+                    OceanConfig oc;
+                    oc.kBuoy = 0.0f;
+                    oc.wallBand = 0.0f;
+                    oc.eye = 1;
+                    oc.steerFrame = frame;
+                    OceanWorld w;
+                    initQuiet(w, 25, 240.0f, oc);
+                    const Gene g = side ? mkGene(true, EYE_RIGHT_PROX, STEER_X, kStrong)
+                                        : mkGene(true, EYE_LEFT_PROX, STEER_X, -kStrong);
+                    const int k = addFish(w, {960.0f, 540.0f}, 120.0f, {g}, 0.5f);
+                    const float a = 2.0f * kPi * (float)h / 8.0f + 0.2f;
+                    Fish& f = w.creatures[k];
+                    f.vel = {std::cos(a), std::sin(a)};
+                    f.lastMoveDir = f.vel;
+                    f.responsiveness = 1.0f;
+                    const Vec2 rht = {-f.vel.y, f.vel.x};
+                    const float sgn = side ? 1.0f : -1.0f;
+                    OceanFood fd;
+                    fd.pos = {960.0f + sgn * 60.0f * rht.x, 540.0f + sgn * 60.0f * rht.y};
+                    fd.depth = 120.0f;
+                    fd.eyeCon = ocean::eyeContrast(ocean::kEyeFoodBright, fd.depth);
+                    w.food.push_back(fd);
+                    const Vec2 v0 = f.vel;
+                    for (int s = 0; s < 3; ++s) w.update(0.016f);
+                    const float tr = turned(v0, w.creatures[k].vel);
+                    toward[frame][side] += (sgn * tr > 0.01f);
+                }
+        t.expect(toward[1][0] == 8 && toward[1][1] == 8,
+                 "own frame: the eye-wired fish turned toward food on the left %d/8, right %d/8", toward[1][0],
+                 toward[1][1]);
+        t.expect(toward[0][0] < 8 || toward[0][1] < 8,
+                 "world frame: the same wires turned toward the food at every heading (left %d/8, right %d/8)",
+                 toward[0][0], toward[0][1]);
+        t.note("eye -> STEER_X toward food: own frame left %d/8 right %d/8; world frame left %d/8 right %d/8",
+               toward[1][0], toward[1][1], toward[0][0], toward[0][1]);
+    }
+#endif
 }
 
 void testSensors() {
@@ -622,6 +797,96 @@ void testEye() {
 void testEyeOnly() {}
 #endif
 
+// OceanConfig::foodLife: uneaten food is removed foodLife seconds after it appeared.
+void testFoodLife() {
+    Test t("food_life");
+    {
+        OceanConfig oc;
+        t.expect(oceanConfigValid(oc) && oc.foodLife == 0.0f, "default foodLife %g (or refused)", oc.foodLife);
+        oc.foodLife = 7.5f;
+        t.expect(oceanConfigValid(oc), "foodLife 7.5 refused");
+        oc.foodLife = -1.0f;
+        t.expect(!oceanConfigValid(oc), "foodLife -1 accepted");
+        oc.foodLife = std::numeric_limits<float>::infinity();
+        t.expect(!oceanConfigValid(oc), "foodLife inf accepted");
+    }
+    // Hand-placed items in a quiet world (no fish, no spawn): with foodLife 1 each one
+    // goes on the first step its age reaches 1 — an item placed at age a lasts
+    // ceil((1 - a) / dt) steps, within one step of float rounding; off, nothing goes.
+    const float dt = 0.016f;
+    for (int on = 0; on < 2; ++on) {
+        OceanConfig oc;
+        oc.foodLife = on ? 1.0f : 0.0f;
+        OceanWorld w;
+        initQuiet(w, 26, 240.0f, oc);
+        const float ages[] = {0.0f, 0.25f, 0.5f, 0.9f, 0.99f};
+        for (float a : ages) {
+            OceanFood f;
+            f.pos = {300.0f + 1000.0f * a, 500.0f};
+            f.depth = 120.0f;
+            f.age = a;
+            w.food.push_back(f);
+        }
+        int goneAt[5] = {-1, -1, -1, -1, -1};
+        for (int s = 1; s <= 100; ++s) {
+            std::vector<float> xs;
+            for (const OceanFood& f : w.food) xs.push_back(f.pos.x);
+            w.update(dt);
+            for (int k = 0; k < 5; ++k) {
+                const float x = 300.0f + 1000.0f * ages[k];
+                const bool here = std::any_of(w.food.begin(), w.food.end(), [&](const OceanFood& f) { return f.pos.x == x; });
+                if (!here && goneAt[k] < 0) goneAt[k] = s;
+            }
+        }
+        for (int k = 0; k < 5; ++k) {
+            if (!on) { t.expect(goneAt[k] < 0, "foodLife 0: item %d vanished at step %d", k, goneAt[k]); continue; }
+            const int expect = (int)std::ceil((1.0f - ages[k]) / dt);
+            t.expect(goneAt[k] >= expect - 1 && goneAt[k] <= expect + 1, "foodLife 1: item aged %.2f went at step %d, expected ~%d",
+                     ages[k], goneAt[k], expect);
+        }
+        if (on) t.expect(w.totalFoodExpired == 5, "totalFoodExpired %lld, expected 5", w.totalFoodExpired);
+        else    for (const OceanFood& f : w.food) t.expect(f.age == ages[&f - w.food.data()], "foodLife 0: an age changed");
+    }
+    // The first stock's ages are spread over [0, foodLife); spawned items start at 0.
+    {
+        OceanWorld w;
+        std::string err;
+        t.expect(ofp::initWorld(w, 27, 1920, 1080, 240.0f, 0,
+                                R"({"foodLife":8,"targetFood":2000,"foodSpawnBase":3,"foodSpawnAmp":0,"minPopulation":0})", err),
+                 "init refused: %s", err.c_str());
+        bool spread = w.food.size() == 2000;
+        for (std::size_t i = 0; i < w.food.size(); ++i)
+            spread &= w.food[i].age == 8.0f * ((float)i / 2000.0f);
+        t.expect(spread, "initial ages not spread evenly over [0, 8)");
+        w.update(dt);
+        t.expect(w.food.back().age == 0.0f, "a newly spawned item's age is %g", w.food.back().age);
+        // Steady state with no fish: 3 items a step, each lasting 8 / 0.016 = 500 steps
+        // (one more if the float ages fall just short): a stock of 1500..1503, the
+        // whole first stock expired.
+        for (int s = 0; s < 2000; ++s) w.update(dt);
+        t.note("no fish, foodLife 8, 3 items/step: stock %zu after 2001 steps, %lld expired", w.food.size(),
+               w.totalFoodExpired);
+        t.expect(w.food.size() >= 1500 && w.food.size() <= 1503, "stock %zu, expected 1500..1503", w.food.size());
+        t.expect(w.totalFoodExpired >= 2000, "only %lld expired (the first stock alone is 2000)", w.totalFoodExpired);
+    }
+    // Draws do not depend on foodLife (spawn cap not reached).
+    {
+        OceanWorld a, b;
+        std::string err;
+        ofp::initWorld(a, 28, 1920, 1080, 240.0f, 0, R"({"targetFood":10000,"minPopulation":0})", err);
+        ofp::initWorld(b, 28, 1920, 1080, 240.0f, 0, R"({"targetFood":10000,"minPopulation":0,"foodLife":2})", err);
+        // initWorld seeds the global rng; run a then b from the same post-init state.
+        RandomGen r0;
+        r0.seed(99);
+        rng = r0;
+        for (int s = 0; s < 300; ++s) a.update(dt);
+        const RandomGen ra = rng;
+        rng = r0;
+        for (int s = 0; s < 300; ++s) b.update(dt);
+        t.expect(sameEngine(ra, rng), "foodLife changed the draws in 300 steps");
+    }
+}
+
 std::vector<ofp::Fingerprint> runPrints(unsigned seed, const char* cfg, int pop, int steps, int every) {
     std::vector<ofp::Fingerprint> out;
     OceanWorld w;
@@ -837,6 +1102,7 @@ void testDrawsMotion() {
     add("D 10", [](OceanConfig&) {}, 10.0f);
     add("D 3000", [](OceanConfig&) {}, 3000.0f);
     add("triangular (no MOVE_RANDOM)", [](OceanConfig&) {}, 240.0f, true);
+    add("steerFrame 1", [](OceanConfig& o) { o.steerFrame = 1; });
     for (const V& v : vs) {
         OceanWorld w;
         initQuiet(w, 61, v.D, v.oc);
@@ -1051,10 +1317,12 @@ int main(int argc, char** argv) {
     ot::testBounds();
     ot::testBuoyancy();
     ot::testSteerZ();
+    ot::testSteerFrame();
     ot::testSensors();
     ot::testCaptureNeutral();
     ot::testEye();
     ot::testEyeOnly();
+    ot::testFoodLife();
     ot::testReproducible();
 #ifndef OCEAN_TESTS_NO_SHIM
     ot::testReset();

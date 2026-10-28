@@ -8,11 +8,15 @@
 // depend on geometry is the kernel's (kernel.hpp) and WorldCommon's, called the
 // way World calls it; what is here is what depth changes:
 //
-//   * fish move horizontally exactly as Classic's creatures, then vertically:
+//   * fish move horizontally exactly as Classic's creatures (OceanConfig::
+//     steerFrame 1 turns STEER_X / STEER_Y into the fish's own frame: right,
+//     ahead), then vertically:
 //       vz += steerZ·3·dt + kBuoy·(bodyBuoy·D − depth)/D·dt (+ MOVE_RANDOM's
 //       third draw, + a soft push inside wallBand of surface / floor);
 //       vz −= vz·vDrag·dt; |vz| ≤ pitchMax; depth += vz·speed·dt
 //   * depth costs (OceanConfig cHold / cPress) after kernel::stepMetabolism
+//   * optional food lifetime (OceanConfig::foodLife): uneaten food is removed
+//     foodLife seconds after it appeared
 //   * eating, interaction, sensing and the predators' capture use 3-D
 //     distance: the SpatialGrid is still on (x, y), its candidates are
 //     filtered by 3-D distance (a shallow sea: candidates per query stay
@@ -96,6 +100,7 @@ struct OceanFood {
     Vec2  pos;
     float depth = 0.0f;
     bool  alive = true;
+    float age   = 0.0f;    // seconds since it appeared (counted only with OceanConfig::foodLife > 0)
 #ifdef EVO_OCEAN_EYE
     float eyeCon = 0.0f;   // what the eye sees: glow − ambient light at its depth
                            // (set at spawn; food never changes depth)
@@ -224,6 +229,7 @@ public:
     long long totalReseeds = 0;             // founders the minPopulation floor added (not births)
     long long totalFoodEaten = 0;           // food items eaten by fish (a statistic: not
                                             // part of the fingerprint, changes nothing)
+    long long totalFoodExpired = 0;         // food items that reached foodLife uneaten (likewise)
 
     static constexpr float LONGPROBE_DIST = 200.0f;
     static constexpr float LONGPROBE_RADIUS = 30.0f;   // the probe's horizontal reach
@@ -300,8 +306,13 @@ public:
 
         food.clear();
         for (int i = 0; i < cfg.targetFood; ++i) spawnFood();
+        if (ocfg.foodLife > 0.0f) {   // the first stock's ages spread over [0, foodLife)
+            const float n = (float)food.size();
+            for (std::size_t i = 0; i < food.size(); ++i) food[i].age = ocfg.foodLife * ((float)i / n);
+        }
         totalReseeds = 0;
         totalFoodEaten = 0;
+        totalFoodExpired = 0;
     }
 
     void spawnFood() {
@@ -352,6 +363,14 @@ public:
                 f.pos.x += v.x * dt;  f.pos.y += v.y * dt;
                 if (f.pos.x < 0) f.pos.x += width;  else if (f.pos.x >= width)  f.pos.x -= width;
                 if (f.pos.y < 0) f.pos.y += height; else if (f.pos.y >= height) f.pos.y -= height;
+            }
+        }
+
+        if (ocfg.foodLife > 0.0f) {   // food older than foodLife is gone, eaten or not
+            for (auto& f : food) {
+                if (!f.alive) continue;
+                f.age += dt;
+                if (f.age >= ocfg.foodLife) { f.alive = false; ++totalFoodExpired; }
             }
         }
 
@@ -659,8 +678,15 @@ private:
             float moveRnd = actions[MOVE_RANDOM] * resp;
             float speedAdj = actions[SPEED_ADJUST] * resp;
 
-            c.vel.x += steerX * 3.0f * dt;
-            c.vel.y += steerY * 3.0f * dt;
+            if (ocfg.steerFrame == 1) {   // the fish's own frame: x = right, y = ahead
+                const Vec2 f0 = c.forward();
+                const Vec2 r0 = {-f0.y, f0.x};
+                c.vel.x += (r0.x * steerX + f0.x * steerY) * 3.0f * dt;
+                c.vel.y += (r0.y * steerX + f0.y * steerY) * 3.0f * dt;
+            } else {
+                c.vel.x += steerX * 3.0f * dt;
+                c.vel.y += steerY * 3.0f * dt;
+            }
             auto fwd = c.forward();
             c.vel.x += fwd.x * moveFwd * 2.0f * dt;
             c.vel.y += fwd.y * moveFwd * 2.0f * dt;

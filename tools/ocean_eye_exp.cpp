@@ -46,7 +46,8 @@
 //
 // Behavioural test (--behav, at the end): every live fish's genome, frozen
 // (fresh network state), alone in a quiet eye-only world (no labels: the fish
-// can only SEE), level at mid-depth, for 8 headings x {nothing, one food item
+// can only SEE; still water: no current, no E1 flow, no food lifetime), level
+// at mid-depth, for 8 headings (vendored cosf / sinf) x {nothing, one food item
 // 50 away in each of the 6 sectors, one predator 60 away in each sector}; the
 // scene is held fixed for 3 steps (so sensor -> hidden -> action paths act) and
 // the 3rd step's actions are read. The same for a random genome of the same
@@ -347,7 +348,7 @@ void behaveOne(Probe& pr, const Fish& base, bool bodyFrame, double idx[kBehavIdx
     constexpr int H = 8;
     for (int h = 0; h < H; ++h) {
         const float a = 6.2831853f * (float)h / H + 0.3f;
-        const Vec2 hd = {std::cos(a), std::sin(a)};
+        const Vec2 hd = {evomath::cosf(a), evomath::sinf(a)};   // vendored (musl), not the host libm
         const Vec2 rht = {-hd.y, hd.x};
         auto lat = [&](const float* A) { return bodyFrame ? A[STEER_X] : A[STEER_X] * rht.x + A[STEER_Y] * rht.y; };
         auto l1 = [&](const float* A, const float* B) {
@@ -427,6 +428,12 @@ void behaviouralTest(const OceanWorld& w, const char* arm, unsigned seed, const 
     tmpl.cfg.currentStrength = 0; tmpl.cfg.foodPatches = 0; tmpl.cfg.foodDrift = false;
     tmpl.cfg.captureActivations = true;
     tmpl.ocfg = w.ocfg;
+    // Still water: no food lifetime (a held item must not age out before it is
+    // seen, whatever the run's foodLife) and no E1 flow (waves / a deep current
+    // would keep the CURRENT_* inputs live although currentStrength is 0).
+    tmpl.ocfg.foodLife = 0.0f;
+    tmpl.ocfg.waveSpeed = 0.0f;
+    tmpl.ocfg.deepCurrent = false;
     tmpl.ocfg.eye = 1;
     tmpl.ocfg.eyeOnly = 1;
     tmpl.ocfg.eyeCode &= ~(kEyeCodeNoFish | kEyeCodeNoFood);   // the full eye (see the header)

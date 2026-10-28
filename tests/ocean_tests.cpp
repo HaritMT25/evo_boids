@@ -26,7 +26,8 @@
 //   food_life     foodLife: an item goes on the step its age reaches foodLife;
 //                 off, none do; the first stock's ages spread; draws unchanged
 //   reproducible  same seed twice -> identical fingerprints; another seed and a
-//                 1-ulp change in any section change the hash
+//                 1-ulp change in any section change the hash (eye build: also a
+//                 food item's eyeCon, which countNonFinite checks too)
 //   radii         every radius must be finite, >= 0 and have a finite float
 //                 square (oc_init refuses 1e20, accepts the largest float below
 //                 2^64); (eye build) at that perceptionRadius every input is finite
@@ -936,6 +937,12 @@ void testReproducible() {
     { const float keep = w.creatures[3].bodyBuoy; bump(w.creatures[3].bodyBuoy); only("fish bodyBuoy", &ofp::Fingerprint::fish); w.creatures[3].bodyBuoy = keep; }
     { const float keep = w.creatures[5].body[4].y; bump(w.creatures[5].body[4].y); only("fish body trail", &ofp::Fingerprint::fish); w.creatures[5].body[4].y = keep; }
     { const float keep = w.food[11].depth; bump(w.food[11].depth); only("food depth", &ofp::Fingerprint::food); w.food[11].depth = keep; }
+#ifdef EVO_OCEAN_EYE
+    { const float keep = w.food[12].eyeCon; bump(w.food[12].eyeCon); only("food eyeCon", &ofp::Fingerprint::food); w.food[12].eyeCon = keep; }
+    { long nf = ofp::countNonFinite(w); const float keep = w.food[13].eyeCon;
+      w.food[13].eyeCon = std::numeric_limits<float>::infinity();
+      t.expect(ofp::countNonFinite(w) == nf + 1, "a non-finite food eyeCon is not counted"); w.food[13].eyeCon = keep; }
+#endif
     { const float keep = w.predators[1].pitch; bump(w.predators[1].pitch); only("predator pitch", &ofp::Fingerprint::pred); w.predators[1].pitch = keep; }
     { const float keep = w.ocfg.vDrag; bump(w.ocfg.vDrag); only("ocean config", &ofp::Fingerprint::cfg); w.ocfg.vDrag = keep; }
     { const auto keep = w.nextId_; w.nextId_++; only("nextId_", &ofp::Fingerprint::ctr); w.nextId_ = keep; }

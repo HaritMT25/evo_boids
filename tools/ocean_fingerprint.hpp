@@ -18,7 +18,8 @@
 //         state, body params, genome gene by gene, the built net's neurons and
 //         flat connections, lastSensors / lastActions, colour) + pos, vel,
 //         lastMoveDir, depth, vz, bodyBuoy and the 6-point body trail
-//   food  every OceanFood: pos, depth, alive
+//   food  every OceanFood: pos, depth, alive (+ age with foodLife on; + eyeCon,
+//         what the eye sees, in the eye build)
 //   pred  every OceanPredator: Predator fields + depth, pitch
 //   sig   the pheromone grid bytes
 //   cur   the current field sampled on a fixed 8 x 5 lattice (its vortices
@@ -169,7 +170,12 @@ inline Fingerprint fingerprint(const OceanWorld& w, bool withActivations = true)
       fp.fish = h.h; }
     { Fnv h; h.u64(w.food.size());
       const bool ages = w.ocfg.foodLife > 0.0f;   // ages count only then (else always 0)
-      for (const OceanFood& f : w.food) { h.v2(f.pos); h.f32(f.depth); h.b(f.alive); if (ages) h.f32(f.age); }
+      for (const OceanFood& f : w.food) {
+          h.v2(f.pos); h.f32(f.depth); h.b(f.alive); if (ages) h.f32(f.age);
+#ifdef EVO_OCEAN_EYE
+          h.f32(f.eyeCon);   // the eye build only (set at every spawn, eye on or off)
+#endif
+      }
       fp.food = h.h; }
     { Fnv h; h.u64(w.predators.size());
       for (const OceanPredator& p : w.predators) hashPredator(h, p);
@@ -204,7 +210,12 @@ inline long countNonFinite(const OceanWorld& w) {
         for (float s : c.lastSensors) chk(s);
         for (float a : c.lastActions) chk(a);
     }
-    for (const OceanFood& f : w.food) { chk(f.pos.x); chk(f.pos.y); chk(f.depth); chk(f.age); }
+    for (const OceanFood& f : w.food) {
+        chk(f.pos.x); chk(f.pos.y); chk(f.depth); chk(f.age);
+#ifdef EVO_OCEAN_EYE
+        chk(f.eyeCon);
+#endif
+    }
     for (const OceanPredator& p : w.predators)
         for (float v : {p.pos.x, p.pos.y, p.vel.x, p.vel.y, p.digestTimer, p.energy, p.age, p.speedFactor,
                         p.buddingFactor, p.depth, p.pitch})
@@ -299,6 +310,9 @@ inline void dumpState(const OceanWorld& w, std::FILE* out) {
         const OceanFood& f = w.food[i];
         std::fprintf(out, "food %zu", i);
         d.v2("pos", f.pos); d.fl("depth", f.depth); d.ll("alive", f.alive); d.fl("age", f.age);
+#ifdef EVO_OCEAN_EYE
+        d.fl("eyeCon", f.eyeCon);
+#endif
         std::fprintf(out, "\n");
     }
     for (std::size_t i = 0; i < w.predators.size(); ++i) {

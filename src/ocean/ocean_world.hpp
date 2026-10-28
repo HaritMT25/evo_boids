@@ -535,6 +535,7 @@ public:
         ensureFlow();
         return eddyVelocity(p);
     }
+    Vec2 currentExactAt(Vec2 p) const { return current_.velocityAt(p); }   // CurrentField's own (tests)
 
     // Mean and SD of the live fish's depth, and the fraction per depth eighth
     // (surface first). Read-only.
@@ -649,14 +650,19 @@ private:
         }
     }
 
-    // CurrentField::velocityAt (Mode::Eddies), term for term.
+    // CurrentField::velocityAt (Mode::Eddies) with e^{−u} from the radial
+    // table (ocean_flow.hpp): same vortex order, prefactor, raw differences
+    // and accumulation; a vortex at u >= 16 adds nothing.
     Vec2 eddyVelocity(Vec2 p) const {
         Vec2 v{0.0f, 0.0f};
         const float inv2c2 = flow_.inv2c2;
+        const float* E = oceanflow::radialTable().E;
         for (const oceanflow::Eddy& e : flow_.eddies) {
             const float dx = p.x - e.cx;
             const float dy = p.y - e.cy;
-            const float f = e.signScale * std::exp(-(dx * dx + dy * dy) * inv2c2);
+            float g;
+            if (!oceanflow::radial(E, (dx * dx + dy * dy) * inv2c2, g)) continue;
+            const float f = e.signScale * g;
             v.x += f * (-dy);
             v.y += f * dx;
         }

@@ -57,6 +57,10 @@
 //                 exactly zero normal flow at surface and floor; flowAt (one
 //                 shared depth taper per call) == the current + each train's
 //                 own waveTrainAt, bit for bit
+//   flow_tables   the E1 flow cache (src/ocean/ocean_flow.hpp) vs the exact
+//                 formulas: the eddy current's radial table within 9e-6 ·
+//                 strength per vortex (one vortex, the preset, 8 strong ones;
+//                 before the first advance too, over the world and beyond it)
 //   e1_buoyancy   with the non-flow E1 knobs on and wallBand 0, an idle fish
 //                 still settles monotonically at bodyBuoy·D
 //   drift         sizeDrift: one step moves fish of size .5 / 1 / 2 by exactly
@@ -1398,6 +1402,46 @@ void testDivergence() {
     t.expect(sameBits == nPts, "flowAt != current + the trains one by one at %d of %d points", nPts - sameBits, nPts);
 }
 
+// The E1 flow cache (src/ocean/ocean_flow.hpp) against the exact formulas.
+void testFlowTables() {
+    Test t("flow_tables");
+    // ---- the eddy current: the radial table vs CurrentField::velocityAt ----
+    // Per vortex, |Δv| <= 9e-6 · strength units/s (interpolation <= 7.63e-6·S
+    // at u = 1/2, the endpoint shift / cutoff <= 1.05e-6·S at u = 16); the
+    // budget is that times the vortex count (triangle inequality). Samples
+    // cover the world and 200 beyond each edge (raw differences, no image).
+    struct C { const char* name; const char* cfg; float strength; int eddies; };
+    const C cs[] = {
+        {"one vortex, preset strength 5", R"({"deepCurrent":true,"currentStrength":5,"currentEddies":1})", 5.0f, 1},
+        {"the preset (5 vortices)", kE1PresetJson, 5.0f, 5},
+        {"8 vortices, strength 120, core 60", R"({"deepCurrent":true,"currentStrength":120,"currentEddies":8,"currentCore":60})",
+         120.0f, 8},
+    };
+    for (const C& c : cs) {
+        OceanWorld w;
+        std::string err;
+        if (!t.expect(ofp::initWorld(w, 1501, 1920, 1080, 240.0f, 0, c.cfg, err), "%s: %s", c.name, err.c_str())) continue;
+        // Phase 0 is before the first advance: the centres are 0 there
+        // (CurrentField's own), then placed by each step's advance.
+        double maxErr[3] = {0.0, 0.0, 0.0}, maxV = 0.0;
+        for (int phase = 0; phase < 3; ++phase) {
+            if (phase > 0) for (int s = 0; s < 400; ++s) w.update(0.016f);
+            Lcg g(77 + phase);
+            for (int k = 0; k < 100000; ++k) {
+                const Vec2 p = {-200.0f + 2320.0f * g.unit(), -200.0f + 1480.0f * g.unit()};
+                const Vec2 a = w.currentAt(p), e = w.currentExactAt(p);
+                maxErr[phase] = std::max(maxErr[phase], (double)std::max(std::abs(a.x - e.x), std::abs(a.y - e.y)));
+                maxV = std::max(maxV, (double)std::max(std::abs(e.x), std::abs(e.y)));
+            }
+        }
+        const double budget = 9e-6 * c.strength * c.eddies;
+        const double worst = std::max(maxErr[0], std::max(maxErr[1], maxErr[2]));
+        t.expect(worst <= budget, "%s: max |Δv| %.3g / %.3g / %.3g (before the first advance, steps 400, 800) > budget %.3g",
+                 c.name, maxErr[0], maxErr[1], maxErr[2], budget);
+        t.note("current %-34s max |Δv| %.3g units/s (budget %.3g; max |v| %.3g)", c.name, worst, budget, maxV);
+    }
+}
+
 void testE1Buoyancy() {
     Test t("e1_buoyancy");
     OceanConfig oc;   // kBuoy 1, vDrag 2, pitchMax 0.5; no walls; flow off (no waves, no current)
@@ -2396,6 +2440,7 @@ int main(int argc, char** argv) {
     ot::testDrawsFood();
     // E1 physics
     ot::testDivergence();
+    ot::testFlowTables();
     ot::testE1Buoyancy();
     ot::testDrift();
     ot::testCosts();

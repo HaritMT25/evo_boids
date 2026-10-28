@@ -17,3 +17,6 @@ the change that moved them. Each rewrite is logged below (newest last).
 2026-10-28T02:41Z  engine 3ef944c  format=2  g++ 13 / 6.0.4 (fe5be6afdff43ad58860d821fcc8572a23f92d19)
   reason: initial baseline: engine at 3ef944c (unchanged), harness format 2 (full state every step, coverage expectations)
   wrote: def_s1 def_s42 def_s999 def_s31415 pred_s7 econ_s42 rich_s5 eddies_s11 gyre_toro_s13 rich_toro_s7 x_steep_s3 x_deep_s8 x_shallow_s4 x_osc_s6 x_tri_body_s9 live_s21 capture_s17 big_s42 big_toro_s9 long_s42 pred_age_s23 gate_s29 cap_s31 fast_logs_s41 toro_bud_s43 e1_waves_s3 e1_deep_s5 e1_gyre_s13 e1_costs_s8 e1_size_s9 e1_preset_s42 e1_preset_long e1_live_s21 e1_capture_s17 e1_x_shallow_s4 e1_x_big_s9
+2026-10-28T12:12Z  engine 02ed986 + 2 uncommitted engine path(s)  format=2  g++ 13 / 6.0.4 (fe5be6afdff43ad58860d821fcc8572a23f92d19)
+  reason: E1 flow step 2 (flow_lut_codex.md): the eddy current on the E1 path takes e^-u from a 2048-interval linear radial table (portable expm1f nodes, endpoint subtracted, cutoff u = 16) instead of std::exp; CurrentField and the OFF path untouched. Moves only the E1 cases with eddies (per-vortex flow change <= ~8.7e-6 x strength units/s)
+  wrote: e1_deep_s5 e1_size_s9 e1_preset_s42 e1_preset_long e1_live_s21 e1_capture_s17 e1_x_shallow_s4 e1_x_big_s9

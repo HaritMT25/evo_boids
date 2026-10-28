@@ -39,7 +39,8 @@ THE SOFTWARE.
 ### musl libc — MIT
 
 Portions of `src/core/portable_math.hpp` (`tanhf`, `sinf`, `cosf`, `atanf`,
-`atan2f`, `expm1f` and their kernels) are taken from musl, as bundled with
+`atan2f`, `expm1f`, `expf`, `logf`, double `tanh` and `expm1`, their kernels,
+tables and error-handling helpers) are taken from musl, as bundled with
 Emscripten, so native and WebAssembly builds compute bit-identical results.
 
 ```
@@ -65,11 +66,23 @@ TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
+### Arm optimized-routines — MIT
+
+musl's `expf`, `logf` and their tables (`exp2f_data.c`, `logf_data.c`), used
+above, come from Arm's optimized-routines and carry the notice below, under
+the MIT License (the same terms as the musl text above).
+
+```
+Copyright (c) 2017-2018, Arm Limited.
+SPDX-License-Identifier: MIT
+```
+
 ### FreeBSD / Sun Microsystems fdlibm
 
-musl's single-precision math functions above derive from FreeBSD's
-`s_sinf.c`, `s_cosf.c`, `s_atanf.c`, `e_atan2f.c`, `s_expm1f.c`,
-`e_rem_pio2f.c`, `k_rem_pio2.c`, `k_sinf.c` and `k_cosf.c`, which carry:
+musl's `sinf`, `cosf`, `atanf`, `atan2f`, `expm1f` and `expm1` above derive
+from FreeBSD's `s_sinf.c`, `s_cosf.c`, `s_atanf.c`, `e_atan2f.c`,
+`s_expm1f.c`, `s_expm1.c`, `e_rem_pio2f.c`, `k_rem_pio2.c`, `k_sinf.c` and
+`k_cosf.c`, which carry:
 
 ```
 Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.

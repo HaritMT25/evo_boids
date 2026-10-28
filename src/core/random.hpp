@@ -154,12 +154,12 @@ inline thread_local RandomGen rng;
 // Portable standard normal from raw engine draws (Box–Muller, second value
 // discarded). std::normal_distribution is implementation-defined and returns
 // different values under libstdc++ vs libc++. Uses only IEEE-exact ops plus
-// logf (bit-identical in glibc and musl, probe-verified) and the vendored
-// cosf. Used for the fixed-seed cluster-projection planes; the colour and
-// SimHash planes are frozen constants instead (see plane_data.hpp).
+// the vendored logf and cosf (portable_math.hpp). Used for the fixed-seed
+// cluster-projection planes; the colour and SimHash planes are frozen
+// constants instead (see plane_data.hpp).
 inline float portableGaussian(std::mt19937& g) {
     const float u1 = (float)((g() >> 8) + 1u) * 0x1p-24f;  // (0, 1]
     const float u2 = (float)(g() >> 8) * 0x1p-24f;         // [0, 1)
-    const float r  = std::sqrt(-2.0f * std::log(u1));
+    const float r  = std::sqrt(-2.0f * evomath::logf(u1));
     return r * evomath::cosf(6.2831853f * u2);
 }

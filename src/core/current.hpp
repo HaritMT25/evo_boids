@@ -147,7 +147,7 @@ public:
         for (size_t i = 0; i < centers_.size(); ++i) {
             const float dx = p.x - centers_[i].x;
             const float dy = p.y - centers_[i].y;
-            const float f  = vortices_[i].sign * scale * std::exp(-(dx*dx+dy*dy)*inv2c2);
+            const float f  = vortices_[i].sign * scale * evomath::expf(-(dx*dx+dy*dy)*inv2c2);
             v.x += f*(-dy); v.y += f*dx;
         }
         return v;

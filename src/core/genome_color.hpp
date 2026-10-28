@@ -5,6 +5,7 @@
 #include <vector>
 #include "connectivity.hpp"
 #include "color.hpp"
+#include "portable_math.hpp"
 #ifdef EVO_WORLD_OCEAN
 #include "../ocean/plane_data_ocean.hpp"   // Ocean's sensor list => its own STATS_DIM
 #else
@@ -45,7 +46,7 @@ inline Color genomeColor(const Genome& genome) {
     // near-linear so the mapping stays smooth; raise toward ~0.1 for more vivid.
     constexpr float K = 0.06f;
     auto chan = [](double v) {
-        return static_cast<int>(std::lround(137.5 + 97.5 * std::tanh(K * v)));
+        return static_cast<int>(std::lround(137.5 + 97.5 * evomath::tanh(K * v)));
     };
     return Color(chan(proj[0]), chan(proj[1]), chan(proj[2]));
 }

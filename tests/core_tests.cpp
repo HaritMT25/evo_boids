@@ -362,6 +362,49 @@ static void test_exact_shortcuts() {
             if (floatBits(out[i]) != floatBits(evomath::tanhf(in[i]))) ++differ;
         CHECK(differ == 0);
     }
+
+    // --- vendored expf / logf / tanh == musl. The fingerprints were taken
+    //     from musl's own expf/logf/tanh (std:: under emsdk 6.0.4), so this
+    //     pins the vendored copies (code and tables) to musl on every build:
+    //     FNV-1a 64 over expf and logf of every 509th float bit pattern (NaN
+    //     canonical) and over tanh of 65536 doubles spread over [2^-32, 64).
+    //     The two named inputs are where glibc's FMA expf (its default on
+    //     FMA/AVX2 CPUs) is 1 ulp off musl — the whole reason for vendoring.
+    //     (All 2^32 floats agreed too, when this was written.) ---
+    {
+        auto mix = [](std::uint64_t& h, std::uint64_t v, int n) {
+            for (int b = 0; b < n; ++b) { h ^= (v >> (8 * b)) & 0xffu; h *= 0x100000001b3ull; }
+        };
+        auto canon = [](float f) {
+            const std::uint32_t u = floatBits(f);
+            return ((u & 0x7fffffffu) > 0x7f800000u) ? 0x7fc00000u : u;
+        };
+        std::uint64_t he = 1469598103934665603ull, hl = he, ht = he;
+        for (std::uint64_t b = 0; b < (std::uint64_t{1} << 32); b += 509) {
+            const std::uint32_t u = static_cast<std::uint32_t>(b);
+            float f;
+            std::memcpy(&f, &u, sizeof f);
+            mix(he, canon(evomath::expf(f)), 4);
+            mix(hl, canon(evomath::logf(f)), 4);
+        }
+        const std::uint64_t lo = 0x3df0000000000000ull, hi = 0x4050000000000000ull,
+                            step = ((hi - lo) / 65536) | 1;
+        for (std::uint64_t i = 0; i < 65536; ++i) {
+            const std::uint64_t u = (lo + i * step) | ((i & 1) << 63);
+            double d, t;
+            std::memcpy(&d, &u, sizeof d);
+            t = evomath::tanh(d);
+            std::uint64_t ut;
+            std::memcpy(&ut, &t, sizeof ut);
+            mix(ht, ut, 8);
+        }
+        CHECK(he == 0xea8351dba6b74039ull);
+        CHECK(hl == 0xb7e03d5adf9e01cdull);
+        CHECK(ht == 0xf143dc73794db1f7ull);
+        auto bitsF = [](std::uint32_t u) { float f; std::memcpy(&f, &u, sizeof f); return f; };
+        CHECK(floatBits(evomath::expf(bitsF(0xc27c65d9u))) == 0x11fa2992u);  // -0x1.f8cbb2p+5
+        CHECK(floatBits(evomath::expf(bitsF(0x4202422fu))) == 0x56fc9f1bu);  //  0x1.04845ep+5
+    }
 }
 
 // ---------------------------------------------------------------

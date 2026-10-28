@@ -5,25 +5,45 @@
 #include <cmath>
 
 // ============================================================
-// Portable float transcendentals for cross-toolchain bit-exactness.
+// Portable transcendentals for cross-toolchain, cross-CPU bit-exactness.
 //
-// The sim's dynamics call tanh/sin/cos/atan2 on floats. glibc (native
-// builds) and musl (Emscripten/wasm builds) implement these with different
-// algorithms, and none of them are correctly-rounded, so the two libms
-// disagree by 1 ulp on some inputs — enough to diverge a chaotic system.
-// Measured 2026-07-25 (glibc 2.39 vs emsdk 6.0.4): tanhf, sinf, cosf,
-// atan2f and expm1f differ; expf, logf and sqrtf are bit-identical (and
-// sqrt is IEEE-exact everywhere), so those stay on the standard library.
+// The sim calls tanh/sin/cos/atan2/exp/log. glibc (native builds) and musl
+// (Emscripten/wasm builds) implement these with different algorithms, and
+// none of them are correctly-rounded, so the two libms disagree by an ulp
+// on some inputs — enough to diverge a chaotic system. Measured 2026-07-25
+// (glibc 2.39 vs emsdk 6.0.4): tanhf, sinf, cosf, atan2f and expm1f differ.
+//
+// expf and logf looked bit-identical then, but only on one CPU's code path:
+// glibc picks expf/logf at load time (an ifunc), an FMA build on CPUs with
+// FMA/AVX2 and a generic one otherwise, so a native run depended on the CPU
+// it ran on. musl runs the same Arm optimized-routines code without FMA,
+// i.e. glibc's generic path. Measured 2026-10-28, glibc 2.39 on an FMA/AVX2
+// CPU: expf(-0x1.f8cbb2p+5) = 0x11fa2993 with default dispatch, 0x11fa2992
+// with GLIBC_TUNABLES=glibc.cpu.hwcaps=-AVX2_Usable,-FMA_Usable,-AVX2,-FMA
+// and in musl. Over all 2^32 inputs the FMA expf differs from musl on
+// exactly two (0x4202422f and 0xc27c65d9, 1 ulp each); logf on none. Double
+// tanh (the genome colour) differs between glibc and musl by up to 3 ulp on
+// about half of all inputs in [0.25, 1), 27% of real colour arguments, and
+// glibc's own result there also depends on the dispatch. sqrt is IEEE-exact
+// everywhere and stays on the library.
 //
 // The fix: both builds compile THIS source instead of calling libm. The
-// implementations are musl's (fdlibm lineage, taken verbatim from the
-// musl copy bundled with emsdk), which are pure IEEE float/double
-// arithmetic — with -ffp-contract=off they evaluate identically on every
-// IEEE-754 target. Switching native code from glibc to these shifted
-// trajectories once at v0.18.0 (a numerical-lineage break, same framing
-// as -ffp-contract=off in 0.16.0); see the research log.
+// implementations are musl's (fdlibm and Arm optimized-routines lineage,
+// taken verbatim from the musl copy bundled with emsdk 6.0.4), which are
+// pure IEEE float/double arithmetic — with -ffp-contract=off they evaluate
+// identically on every IEEE-754 target and CPU. Vendored at v0.18.0: tanhf,
+// sinf, cosf, atanf, atan2f, expm1f (switching native code from glibc to
+// these shifted trajectories once — a numerical-lineage break, same framing
+// as -ffp-contract=off in 0.16.0; see the research log). Vendored
+// 2026-10-28: expf, logf and double tanh (with its double expm1). Being
+// musl's own code they leave every wasm result exactly as it was; natively
+// they equal glibc's generic path, so native results no longer depend on
+// the CPU. Checked over all 2^32 floats (expf, logf: native == wasm ==
+// musl == glibc generic) and on 2.4e8 stratified doubles plus every
+// branch threshold and real colour inputs (tanh: native == wasm == musl).
 //
-// musl licence: MIT. Original notices preserved below.
+// Licences: musl MIT, Arm optimized-routines MIT, fdlibm (Sun) as noted.
+// Original notices preserved below; see THIRD_PARTY_NOTICES.md.
 // ============================================================
 
 static_assert(FLT_EVAL_METHOD == 0,
@@ -821,6 +841,411 @@ inline float atan2f(float y, float x)
     default: /* case 3 */
         return (z-pi_lo) - pi;     /* atan(-,-) */
     }
+}
+
+// ============================================================
+// expf, logf (origin: Arm optimized-routines, via musl) and double tanh,
+// expm1 (via musl; expm1 from FreeBSD s_expm1.c). Taken verbatim from the
+// musl bundled with emsdk 6.0.4 (src/math/expf.c, exp2f_data.{c,h}, logf.c,
+// logf_data.{c,h}, tanh.c, expm1.c and the helpers in src/internal/libm.h /
+// src/math/__math_*.c), configured as musl builds them for wasm32:
+// TOINT_INTRINSICS 0 (generic arch), WANT_ROUNDING 1, double_t == double.
+// ============================================================
+namespace detail {
+
+inline uint64_t doubleBits(double x) { uint64_t u; std::memcpy(&u, &x, 8); return u; }
+inline double bitsDouble(uint64_t u) { double x; std::memcpy(&x, &u, 8); return x; }
+
+// musl's error-handling helpers (src/math/__math_xflowf.c, __math_oflowf.c,
+// __math_uflowf.c, __math_divzerof.c, __math_invalidf.c). The values are
+// computed exactly as there; what is dropped is errno (musl's math does not
+// set it either) and fp_barrierf, which only keeps the compiler from folding
+// the operation away so that the FP exception flag gets raised — the sim
+// never reads FP flags.
+inline float mathXflowf(uint32_t sign, float y) { return (sign ? -y : y) * y; }
+inline float mathOflowf(uint32_t sign) { return mathXflowf(sign, 0x1p97f); }   // +-inf
+inline float mathUflowf(uint32_t sign) { return mathXflowf(sign, 0x1p-95f); }  // +-0
+inline float mathDivzerof(uint32_t sign) { return (sign ? -1.0f : 1.0f) / 0.0f; }
+inline float mathInvalidf(float x) { return (x - x) / (x - x); }
+
+// ---- exp2f_data (origin: Arm optimized-routines, via musl) ----
+/*
+ * Shared data between expf, exp2f and powf.
+ *
+ * Copyright (c) 2017-2018, Arm Limited.
+ * SPDX-License-Identifier: MIT
+ */
+namespace exp2f_data {
+constexpr int EXP2F_TABLE_BITS = 5;
+constexpr int EXP2F_POLY_ORDER = 3;
+constexpr int N = 1 << EXP2F_TABLE_BITS;
+struct Data {
+    uint64_t tab[1 << EXP2F_TABLE_BITS];
+    double shift_scaled;
+    double poly[EXP2F_POLY_ORDER];
+    double shift;
+    double invln2_scaled;
+    double poly_scaled[EXP2F_POLY_ORDER];
+};
+inline constexpr Data data = {
+  /* tab[i] = uint(2^(i/N)) - (i << 52-BITS)
+     used for computing 2^(k/N) for an int |k| < 150 N as
+     double(tab[k%N] + (k << 52-BITS)) */
+  .tab = {
+0x3ff0000000000000, 0x3fefd9b0d3158574, 0x3fefb5586cf9890f, 0x3fef9301d0125b51,
+0x3fef72b83c7d517b, 0x3fef54873168b9aa, 0x3fef387a6e756238, 0x3fef1e9df51fdee1,
+0x3fef06fe0a31b715, 0x3feef1a7373aa9cb, 0x3feedea64c123422, 0x3feece086061892d,
+0x3feebfdad5362a27, 0x3feeb42b569d4f82, 0x3feeab07dd485429, 0x3feea47eb03a5585,
+0x3feea09e667f3bcd, 0x3fee9f75e8ec5f74, 0x3feea11473eb0187, 0x3feea589994cce13,
+0x3feeace5422aa0db, 0x3feeb737b0cdc5e5, 0x3feec49182a3f090, 0x3feed503b23e255d,
+0x3feee89f995ad3ad, 0x3feeff76f2fb5e47, 0x3fef199bdd85529c, 0x3fef3720dcef9069,
+0x3fef5818dcfba487, 0x3fef7c97337b9b5f, 0x3fefa4afa2a490da, 0x3fefd0765b6e4540,
+  },
+  .shift_scaled = 0x1.8p+52 / N,
+  .poly = {
+  0x1.c6af84b912394p-5, 0x1.ebfce50fac4f3p-3, 0x1.62e42ff0c52d6p-1,
+  },
+  .shift = 0x1.8p+52,
+  .invln2_scaled = 0x1.71547652b82fep+0 * N,
+  .poly_scaled = {
+  0x1.c6af84b912394p-5/N/N/N, 0x1.ebfce50fac4f3p-3/N/N, 0x1.62e42ff0c52d6p-1/N,
+  },
+};
+} // namespace exp2f_data
+
+// ---- logf_data (origin: Arm optimized-routines, via musl) ----
+/*
+ * Data definition for logf.
+ *
+ * Copyright (c) 2017-2018, Arm Limited.
+ * SPDX-License-Identifier: MIT
+ */
+namespace logf_data {
+constexpr int LOGF_TABLE_BITS = 4;
+constexpr int LOGF_POLY_ORDER = 4;
+struct Data {
+    struct {
+        double invc, logc;
+    } tab[1 << LOGF_TABLE_BITS];
+    double ln2;
+    double poly[LOGF_POLY_ORDER - 1]; /* First order coefficient is 1.  */
+};
+inline constexpr Data data = {
+  .tab = {
+  { 0x1.661ec79f8f3bep+0, -0x1.57bf7808caadep-2 },
+  { 0x1.571ed4aaf883dp+0, -0x1.2bef0a7c06ddbp-2 },
+  { 0x1.49539f0f010bp+0, -0x1.01eae7f513a67p-2 },
+  { 0x1.3c995b0b80385p+0, -0x1.b31d8a68224e9p-3 },
+  { 0x1.30d190c8864a5p+0, -0x1.6574f0ac07758p-3 },
+  { 0x1.25e227b0b8eap+0, -0x1.1aa2bc79c81p-3 },
+  { 0x1.1bb4a4a1a343fp+0, -0x1.a4e76ce8c0e5ep-4 },
+  { 0x1.12358f08ae5bap+0, -0x1.1973c5a611cccp-4 },
+  { 0x1.0953f419900a7p+0, -0x1.252f438e10c1ep-5 },
+  { 0x1p+0, 0x0p+0 },
+  { 0x1.e608cfd9a47acp-1, 0x1.aa5aa5df25984p-5 },
+  { 0x1.ca4b31f026aap-1, 0x1.c5e53aa362eb4p-4 },
+  { 0x1.b2036576afce6p-1, 0x1.526e57720db08p-3 },
+  { 0x1.9c2d163a1aa2dp-1, 0x1.bc2860d22477p-3 },
+  { 0x1.886e6037841edp-1, 0x1.1058bc8a07ee1p-2 },
+  { 0x1.767dcf5534862p-1, 0x1.4043057b6ee09p-2 },
+  },
+  .ln2 = 0x1.62e42fefa39efp-1,
+  .poly = {
+  -0x1.00ea348b88334p-2, 0x1.5575b0be00b6ap-2, -0x1.ffffef20a4123p-2,
+  }
+};
+} // namespace logf_data
+
+// ---- expm1 (origin: FreeBSD s_expm1.c, via musl) ----
+/*
+ * ====================================================
+ * Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.
+ *
+ * Developed at SunPro, a Sun Microsystems, Inc. business.
+ * Permission to use, copy, modify, and distribute this
+ * software is freely granted, provided that this notice
+ * is preserved.
+ * ====================================================
+ */
+/* expm1(x)
+ * Returns exp(x)-1, the exponential of x minus 1.
+ * (Method, special cases and accuracy: see the long comment in musl's
+ *  src/math/expm1.c, identical to FreeBSD's.)
+ */
+inline double expm1_impl(double x)
+{
+    static const double
+    o_threshold = 7.09782712893383973096e+02, /* 0x40862E42, 0xFEFA39EF */
+    ln2_hi      = 6.93147180369123816490e-01, /* 0x3fe62e42, 0xfee00000 */
+    ln2_lo      = 1.90821492927058770002e-10, /* 0x3dea39ef, 0x35793c76 */
+    invln2      = 1.44269504088896338700e+00, /* 0x3ff71547, 0x652b82fe */
+    /* Scaled Q's: Qn_here = 2**n * Qn_above, for R(2*z) where z = hxs = x*x/2: */
+    Q1 = -3.33333333333331316428e-02, /* BFA11111 111110F4 */
+    Q2 =  1.58730158725481460165e-03, /* 3F5A01A0 19FE5585 */
+    Q3 = -7.93650757867487942473e-05, /* BF14CE19 9EAADBB7 */
+    Q4 =  4.00821782732936239552e-06, /* 3ED0CFCA 86E65239 */
+    Q5 = -2.01099218183624371326e-07; /* BE8AFDB7 6E09C32D */
+
+    double y, hi, lo, c = 0, t, e, hxs, hfx, r1, twopk;
+    union { double f; uint64_t i; } u = {x};
+    uint32_t hx = u.i>>32 & 0x7fffffff;
+    int k, sign = u.i>>63;
+
+    /* filter out huge and non-finite argument */
+    if (hx >= 0x4043687A) {  /* if |x|>=56*ln2 */
+        if (std::isnan(x))
+            return x;
+        if (sign)
+            return -1;
+        if (x > o_threshold) {
+            x *= 0x1p1023;
+            return x;
+        }
+    }
+
+    /* argument reduction */
+    if (hx > 0x3fd62e42) {  /* if  |x| > 0.5 ln2 */
+        if (hx < 0x3FF0A2B2) {  /* and |x| < 1.5 ln2 */
+            if (!sign) {
+                hi = x - ln2_hi;
+                lo = ln2_lo;
+                k =  1;
+            } else {
+                hi = x + ln2_hi;
+                lo = -ln2_lo;
+                k = -1;
+            }
+        } else {
+            k  = invln2*x + (sign ? -0.5 : 0.5);
+            t  = k;
+            hi = x - t*ln2_hi;  /* t*ln2_hi is exact here */
+            lo = t*ln2_lo;
+        }
+        x = hi-lo;
+        c = (hi-x)-lo;
+    } else if (hx < 0x3c900000) {  /* |x| < 2**-54, return x */
+        if (hx < 0x00100000)
+            forceEval((float)x);
+        return x;
+    } else
+        k = 0;
+
+    /* x is now in primary range */
+    hfx = 0.5*x;
+    hxs = x*hfx;
+    r1 = 1.0+hxs*(Q1+hxs*(Q2+hxs*(Q3+hxs*(Q4+hxs*Q5))));
+    t  = 3.0-r1*hfx;
+    e  = hxs*((r1-t)/(6.0 - x*t));
+    if (k == 0)   /* c is 0 */
+        return x - (x*e-hxs);
+    e  = x*(e-c) - c;
+    e -= hxs;
+    /* exp(x) ~ 2^k (x_reduced - e + 1) */
+    if (k == -1)
+        return 0.5*(x-e) - 0.5;
+    if (k == 1) {
+        if (x < -0.25)
+            return -2.0*(e-(x+0.5));
+        return 1.0+2.0*(x-e);
+    }
+    u.i = (uint64_t)(0x3ff + k)<<52;  /* 2^k */
+    twopk = u.f;
+    if (k < 0 || k > 56) {  /* suffice to return exp(x)-1 */
+        y = x - e + 1.0;
+        if (k == 1024)
+            y = y*2.0*0x1p1023;
+        else
+            y = y*twopk;
+        return y - 1.0;
+    }
+    u.i = (uint64_t)(0x3ff - k)<<52;  /* 2^-k */
+    if (k < 20)
+        y = (x-e+(1-u.f))*twopk;
+    else
+        y = (x-(e+u.f)+1)*twopk;
+    return y;
+}
+
+} // namespace detail
+
+// ---- expf (origin: Arm optimized-routines, via musl) ----
+/*
+ * Single-precision e^x function.
+ *
+ * Copyright (c) 2017-2018, Arm Limited.
+ * SPDX-License-Identifier: MIT
+ */
+/*
+EXP2F_TABLE_BITS = 5
+EXP2F_POLY_ORDER = 3
+
+ULP error: 0.502 (nearest rounding.)
+Relative error: 1.69 * 2^-34 in [-ln2/64, ln2/64] (before rounding.)
+Wrong count: 170635 (all nearest rounding wrong results with fma.)
+Non-nearest ULP error: 1 (rounded ULP error)
+*/
+inline float expf(float x)
+{
+    constexpr int EXP2F_TABLE_BITS = detail::exp2f_data::EXP2F_TABLE_BITS;
+    constexpr int N = detail::exp2f_data::N;
+    const double InvLn2N = detail::exp2f_data::data.invln2_scaled;
+    const uint64_t* const T = detail::exp2f_data::data.tab;
+    const double* const C = detail::exp2f_data::data.poly_scaled;
+    const double SHIFT = detail::exp2f_data::data.shift;
+    auto top12 = [](float v) -> uint32_t { return detail::floatBits(v) >> 20; };
+
+    uint32_t abstop;
+    uint64_t ki, t;
+    double kd, xd, z, r, r2, y, s;
+
+    xd = (double)x;
+    abstop = top12(x) & 0x7ff;
+    if (detail::predictFalse(abstop >= top12(88.0f))) {
+        /* |x| >= 88 or x is nan.  */
+        if (detail::floatBits(x) == detail::floatBits(-INFINITY))
+            return 0.0f;
+        if (abstop >= top12(INFINITY))
+            return x + x;
+        if (x > 0x1.62e42ep6f) /* x > log(0x1p128) ~= 88.72 */
+            return detail::mathOflowf(0);
+        if (x < -0x1.9fe368p6f) /* x < log(0x1p-150) ~= -103.97 */
+            return detail::mathUflowf(0);
+    }
+
+    /* x*N/Ln2 = k + r with r in [-1/2, 1/2] and int k.  */
+    z = InvLn2N * xd;
+
+    /* Round and convert z to int, the result is in [-150*N, 128*N] and
+       ideally ties-to-even rule is used, otherwise the magnitude of r
+       can be bigger which gives larger approximation error.
+       (musl's !TOINT_INTRINSICS path, the one its wasm32 build takes.)  */
+    kd = z + SHIFT;   /* eval_as_double */
+    ki = detail::doubleBits(kd);
+    kd -= SHIFT;
+    r = z - kd;
+
+    /* exp(x) = 2^(k/N) * 2^(r/N) ~= s * (C0*r^3 + C1*r^2 + C2*r + 1) */
+    t = T[ki % N];
+    t += ki << (52 - EXP2F_TABLE_BITS);
+    s = detail::bitsDouble(t);
+    z = C[0] * r + C[1];
+    r2 = r * r;
+    y = C[2] * r + 1;
+    y = z * r2 + y;
+    y = y * s;
+    return (float)y;  /* eval_as_float */
+}
+
+// ---- logf (origin: Arm optimized-routines, via musl) ----
+/*
+ * Single-precision log function.
+ *
+ * Copyright (c) 2017-2018, Arm Limited.
+ * SPDX-License-Identifier: MIT
+ */
+/*
+LOGF_TABLE_BITS = 4
+LOGF_POLY_ORDER = 4
+
+ULP error: 0.818 (nearest rounding.)
+Relative error: 1.957 * 2^-26 (before rounding.)
+*/
+inline float logf(float x)
+{
+    constexpr int LOGF_TABLE_BITS = detail::logf_data::LOGF_TABLE_BITS;
+    constexpr int N = 1 << LOGF_TABLE_BITS;
+    constexpr uint32_t OFF = 0x3f330000;
+    const auto& T = detail::logf_data::data.tab;
+    const double* const A = detail::logf_data::data.poly;
+    const double Ln2 = detail::logf_data::data.ln2;
+
+    double z, r, r2, y, y0, invc, logc;
+    uint32_t ix, iz, tmp;
+    int k, i;
+
+    ix = detail::floatBits(x);
+    /* Fix sign of zero with downward rounding when x==1.  */
+    if (/* WANT_ROUNDING (1 in musl) && */ detail::predictFalse(ix == 0x3f800000))
+        return 0;
+    if (detail::predictFalse(ix - 0x00800000 >= 0x7f800000 - 0x00800000)) {
+        /* x < 0x1p-126 or inf or nan.  */
+        if (ix * 2 == 0)
+            return detail::mathDivzerof(1);
+        if (ix == 0x7f800000) /* log(inf) == inf.  */
+            return x;
+        if ((ix & 0x80000000) || ix * 2 >= 0xff000000)
+            return detail::mathInvalidf(x);
+        /* x is subnormal, normalize it.  */
+        ix = detail::floatBits(x * 0x1p23f);
+        ix -= 23 << 23;
+    }
+
+    /* x = 2^k z; where z is in range [OFF,2*OFF] and exact.
+       The range is split into N subintervals.
+       The ith subinterval contains z and c is near its center.  */
+    tmp = ix - OFF;
+    i = (tmp >> (23 - LOGF_TABLE_BITS)) % N;
+    k = (int32_t)tmp >> 23; /* arithmetic shift */
+    iz = ix - (tmp & 0xff800000);
+    invc = T[i].invc;
+    logc = T[i].logc;
+    z = (double)detail::bitsFloat(iz);
+
+    /* log(x) = log1p(z/c-1) + log(c) + k*Ln2 */
+    r = z * invc - 1;
+    y0 = logc + (double)k * Ln2;
+
+    /* Pipelined polynomial evaluation to approximate log1p(r).  */
+    r2 = r * r;
+    y = A[1] * r + A[2];
+    y = A[0] * r2 + y;
+    y = y * r2 + (y0 + r);
+    return (float)y;  /* eval_as_float */
+}
+
+// ---- tanh, double (via musl) ----
+/* tanh(x) = (exp(x) - exp(-x))/(exp(x) + exp(-x))
+ *         = (exp(2*x) - 1)/(exp(2*x) - 1 + 2)
+ *         = (1 - exp(-2*x))/(exp(-2*x) - 1 + 2)
+ */
+inline double tanh(double x)
+{
+    union {double f; uint64_t i;} u = {x};
+    uint32_t w;
+    int sign;
+    double t;
+
+    /* x = |x| */
+    sign = u.i >> 63;
+    u.i &= (uint64_t)-1/2;
+    x = u.f;
+    w = u.i >> 32;
+
+    if (w > 0x3fe193ea) {
+        /* |x| > log(3)/2 ~= 0.5493 or nan */
+        if (w > 0x40340000) {
+            /* |x| > 20 or nan */
+            /* note: this branch avoids raising overflow */
+            t = 1 - 0/x;
+        } else {
+            t = detail::expm1_impl(2*x);
+            t = 1 - 2/(t+2);
+        }
+    } else if (w > 0x3fd058ae) {
+        /* |x| > log(5/3)/2 ~= 0.2554 */
+        t = detail::expm1_impl(2*x);
+        t = t/(t+2);
+    } else if (w >= 0x00100000) {
+        /* |x| >= 0x1p-1022, up to 2ulp error in [0.1,0.2554] */
+        t = detail::expm1_impl(-2*x);
+        t = -t/(t+2);
+    } else {
+        /* |x| is subnormal */
+        /* note: the branch above would not raise underflow in [0x1p-1023,0x1p-1022) */
+        detail::forceEval((float)x);
+        t = x;
+    }
+    return sign ? -t : t;
 }
 
 } // namespace evomath

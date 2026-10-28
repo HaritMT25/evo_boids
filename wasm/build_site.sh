@@ -2,26 +2,30 @@
 # build_site.sh — assemble the static demo site in dist/ for Vercel.
 #
 #   dist/index.html            no-cache; references everything below by hash
+#   dist/ocean.html            the 3-D Ocean preview (web/ocean.html: its own
+#                              engine web/evo_ocean.{js,wasm}, single-threaded),
+#                              no-cache, the same hashed references
 #   dist/assets/NAME.HASH.EXT  every script, wasm and image, content-hashed,
 #                              served with a one-year immutable cache
 #   dist/vercel.json           headers: COOP/COEP (cross-origin isolation for
 #                              the threaded module), wasm MIME, caching
 #
 # Static output only: no build step on Vercel, no serverless functions.
-# Does NOT compile anything — build both modules first:
+# Does NOT compile anything — build the modules first:
 #   source ~/emsdk/emsdk_env.sh
-#   cmake --preset wasm-st && cmake --build --preset wasm-st
-#   cmake --preset wasm-mt && cmake --build --preset wasm-mt
+#   bash wasm/build_wasm.sh      # Classic: the wasm-st and wasm-mt presets
+#   bash wasm/build_ocean.sh     # the Ocean: web/evo_ocean.{js,wasm}
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-OUT=dist
+OUT=${SITE_DIR:-dist}   # SITE_DIR=/tmp/x: build elsewhere (a check), not into dist/
 SRC=(web/evo_boids.js web/evo_boids.wasm web/evo_boids_mt.js web/evo_boids_mt.wasm
      web/loader.js web/gl_renderer.js web/randomizer.js web/renderer.js web/guide.js
      web/dash_data.js web/charts.js web/dashboard.js web/scene3d.js web/vendor/three.bundle.min.js
-     web/worker.js img/rocks.jpg web/index.html web/vercel.json)
+     web/worker.js img/rocks.jpg web/index.html web/vercel.json
+     web/evo_ocean.js web/evo_ocean.wasm web/ocean.js web/ocean_scene.js web/ocean.html)
 for f in "${SRC[@]}"; do
-    [ -f "$f" ] || { echo "missing $f — build the wasm-st and wasm-mt presets first" >&2; exit 1; }
+    [ -f "$f" ] || { echo "missing $f — build the modules first (wasm/build_wasm.sh, wasm/build_ocean.sh)" >&2; exit 1; }
 done
 
 # Clear the previous build but keep dist/.vercel: that is the Vercel project
@@ -48,6 +52,9 @@ GUIDE=$(publish web/guide.js);        DDATA=$(publish web/dash_data.js)
 CHARTS=$(publish web/charts.js);      DASH=$(publish web/dashboard.js)
 WORKER=$(publish web/worker.js);      BG=$(publish img/rocks.jpg)
 SCENE=$(publish web/scene3d.js);      THREE=$(publish web/vendor/three.bundle.min.js)
+# the Ocean page (it shares the three.js bundle)
+OC=$(publish web/evo_ocean.js);       OC_WASM=$(publish web/evo_ocean.wasm)
+OCJS=$(publish web/ocean.js);         OCSCENE=$(publish web/ocean_scene.js)
 
 # Rewrite the EVO_ASSETS block and the <script src> tags. Fails loudly if
 # index.html no longer has the shape this expects.
@@ -73,6 +80,25 @@ out, n9 = re.subn(r'<script src="dashboard\.js"></script>', '<script src="$DASH"
 out, n10 = re.subn(r'<script src="scene3d\.js"></script>', '<script src="$SCENE"></script>', out, count=1)
 counts = (n1, n2, n3, n4, n5, n6, n7, n8, n9, n10)
 assert counts == (1,) * 10, ("index.html changed shape", counts)
+open(sys.argv[1], "w").write(out)
+PY
+
+# The Ocean page: its EVO_ASSETS block and its two <script src> tags. ocean.js
+# loads the engine (ocean / oceanWasm) and ocean_scene.js the three bundle
+# from these. (mock: ?mock=1's stand-in, never published.)
+python3 - "$OUT/ocean.html" <<PY
+import re, sys
+src = open("web/ocean.html").read()
+assets = '''window.EVO_ASSETS = {
+      ocean: "$OC", oceanWasm: "$OC_WASM",
+      mock: "ocean_mock.js",
+      three: "$THREE"
+    };'''
+out, n1 = re.subn(r'window\.EVO_ASSETS = \{.*?\};', lambda m: assets, src, count=1, flags=re.S)
+out, n2 = re.subn(r'<script src="ocean_scene\.js"></script>', '<script src="$OCSCENE"></script>', out, count=1)
+out, n3 = re.subn(r'<script src="ocean\.js"></script>', '<script src="$OCJS"></script>', out, count=1)
+counts = (n1, n2, n3)
+assert counts == (1,) * 3, ("ocean.html changed shape", counts)
 open(sys.argv[1], "w").write(out)
 PY
 

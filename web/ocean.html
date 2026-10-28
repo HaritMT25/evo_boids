@@ -10,7 +10,10 @@
 <!-- The Ocean preview (PLAN_ocean_preview.md): its own page, because
      renderer.js calls the Classic exports unconditionally. web/ocean.js runs
      the world (web/evo_ocean.{js,wasm}, factory createEvoOcean) and builds the
-     tank's snapshot itself; web/ocean_scene.js is the deep tank. Not deployed. -->
+     tank's snapshot itself; web/ocean_scene.js is the deep tank. Published
+     beside the Classic page by wasm/build_site.sh (dist/ocean.html, hashed
+     assets); single-threaded, so it needs no cross-origin isolation, and the
+     site's COOP / COEP headers do not get in its way (same-origin assets). -->
 <style>
   :root {
     color-scheme: dark;

@@ -14,6 +14,11 @@
  * URL: ?seed=42 &pop=300 &w=1920 &h=1080 (1080 x 1920 on a portrait screen)
  *      &depth=240 &cfg={"key":value,...}
  *      (SimConfig + OceanConfig keys, as oc_init takes them) &speed=1
+ *      &e1=1: the E1 physics preset (waves, deep currents, light, depth costs;
+ *      the module's oc_e1_preset()), with any &cfg keys on top. Without it the
+ *      page is the preview it always was (every E1 knob off).
+ *      With the engine's light field on (oc_light_enabled), the tank shades
+ *      depth by its L(d) = L0·exp(−kWater·d) (EvoOceanScene setLight).
  *      ?mock=1 loads ocean_mock.js from beside the page instead of the engine:
  *      a JS stand-in for page development, not part of web/.
  * Keys: space pause, + / - steps per frame, F follow a random fish (again:
@@ -31,6 +36,7 @@
   var A = window.EVO_ASSETS;
   var P = new URLSearchParams(location.search);
   var MOCK = P.get("mock") === "1";
+  var E1 = P.get("e1") === "1";        /* the E1 physics preset under &cfg */
   var DT = 0.016;                      /* oc_step's fixed step */
   var SPEEDS = [1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64];
   var STEP_BUDGET_MS = 11;             /* of a 16.7 ms frame: what stepping may take */
@@ -118,9 +124,24 @@
   function lastError() { return M._oc_last_error ? cString(M._oc_last_error()) : "(no oc_last_error)"; }
 
   var W = 0, H = 0, D = 0, statsLen = 0;
+  var LIGHT = { on: false, L0: 1, k: 0 };   /* the engine's light field (E1; optional exports) */
+  function readLight() {
+    var on = typeof M._oc_light_enabled === "function" && !!M._oc_light_enabled();
+    LIGHT = { on: on, L0: on ? M._oc_light_l0() : 1, k: on ? M._oc_light_kwater() : 0 };
+    if (scene) scene.setLight(LIGHT);
+  }
   function readWorld() {
     W = M._oc_width(); H = M._oc_height(); D = M._oc_depth_max();
     statsLen = M._oc_stats_len();
+    readLight();
+  }
+  /* ?e1=1: the module's preset JSON with the page's &cfg keys on top (both flat
+   * objects). A &cfg that is not JSON goes through as it is, so oc_init says why. */
+  function e1Config(userCfg) {
+    var preset = cString(M._oc_e1_preset());
+    if (!userCfg) return preset;
+    try { return JSON.stringify(Object.assign(JSON.parse(preset), JSON.parse(userCfg))); }
+    catch (e) { return userCfg; }
   }
   function initWorld() {
     var ok = withCString(INIT.cfg, function (ptr) {
@@ -447,7 +468,7 @@
   }
 
   /* ---------------- start ---------------- */
-  el("h-tag").textContent = MOCK ? "mock engine" : "preview";
+  el("h-tag").textContent = MOCK ? "mock engine" : E1 ? "preview · E1" : "preview";
   if (MOCK) el("h-tag").classList.add("mock");
   buildHist();
   say(MOCK ? "Starting the ocean (mock engine)…" : "Starting the ocean…");
@@ -464,6 +485,10 @@
     if (!M.wasmMemory && !M.HEAPU8) throw new Error("the module exposes neither wasmMemory nor HEAPU8");
     if (!M._malloc && INIT.cfg) throw new Error("?cfg= needs _malloc/_free exported");
     HAS_VZ = typeof M._oc_creature_vz === "function";   /* optional: the pitch, else estimated */
+    if (E1) {
+      if (typeof M._oc_e1_preset !== "function") throw new Error("?e1=1 needs oc_e1_preset: rebuild web/evo_ocean (wasm/build_ocean.sh)");
+      INIT.cfg = e1Config(INIT.cfg);
+    }
     initWorld();
     scene = EvoOceanScene.create(canvas, {
       tankDepth: D,
@@ -473,6 +498,7 @@
     });
     if (!scene) throw new Error("WebGL2 is unavailable, and the Ocean preview has only the 3D tank");
     scene.setWorld(W, H, D);
+    scene.setLight(LIGHT);
     labelHist();
     wireInput();
     placeInsets();
@@ -495,6 +521,7 @@
         if (!M._oc_set_param) return false;
         var ok = withCString(String(name), function (p) { return M._oc_set_param(p, +v); });
         if (!ok) console.warn("oc_set_param(" + name + "): " + lastError());
+        readLight();   /* lightEnabled / L0 / kWater are live */
         return !!ok;
       },
       state: function () {
@@ -503,7 +530,7 @@
         var lo = Infinity, hi = -Infinity;
         for (var i = 0; i < s.n; i++) { lo = Math.min(lo, s.depth[i]); hi = Math.max(hi, s.depth[i]); }
         return { n: s.n, fc: s.fc, pc: s.pc, W: W, H: H, D: D, paused: paused, speed: speed(), steps: lastSteps,
-                 hasVz: HAS_VZ, view: scene.view(),
+                 hasVz: HAS_VZ, view: scene.view(), e1: E1, cfg: INIT.cfg, light: LIGHT,
                  stepMs: stepMs, fps: fps, following: scene.following(), selectedId: selectedId, selIdx: s.selIdx,
                  stats: Array.prototype.slice.call(s.stats), depthMin: s.n ? lo : 0, depthMax: s.n ? hi : 0 };
       }

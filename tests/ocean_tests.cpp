@@ -29,6 +29,35 @@
 //                 buoyMutation incl. 0, bodyBuoy, depth), predators (wander,
 //                 bud, floor refill, across depth / pitch / D), food spawn
 //                 (across foodDepthMode / spread)
+// E1 physics (the E1 design §6):
+//   divergence    central-difference div of each wave train, their sum, the
+//                 depth-weighted current and the whole flow: normalised
+//                 residual < 1e-3, shrinking with h (bulk and boundary bands);
+//                 exactly zero normal flow at surface and floor
+//   e1_buoyancy   with the non-flow E1 knobs on and wallBand 0, an idle fish
+//                 still settles monotonically at bodyBuoy·D
+//   drift         sizeDrift: one step moves fish of size .5 / 1 / 2 by exactly
+//                 1 / 1 / .5 of dt·flow at their spot; over 200 steps the big
+//                 one has drifted about half as far; off: all alike
+//   costs         depthCostScaled: neutral / surface / deep fixtures equal
+//                 dt·M·(cHold·H + cPress·P) bit for bit, ∝ bodySize, timers and
+//                 gene / move costs untouched; the preview formula unchanged
+//   fight         the scaled overload: (1, 1) == the Classic fight bit for bit
+//                 (rng too), known draws, ties go to c2, L² decides most fights
+//   mouth         mouthGate: food below / equal to kMouth·L is eaten, above
+//                 is not, and is not smelled either
+//   e1_neutral    knobs that must not change a run (light, wave shape with no
+//                 waves, scaled costs at 0, mouth / fight / drift at size 1)
+//                 leave every dynamic hash identical, step by step
+//   e1_bounds     E1 worlds keep depth in [0, D], every float finite
+//   draws_e1      no E1 feature draws: per-step draws == N + 3·MOVE_RANDOM +
+//                 2·predators with everything on; a birth draws as without
+//   light         lightAt(0) == L0, falls as L0·exp(−kWater·d); the exports
+//   ranges        every Ocean knob: its range's ends accepted, just outside,
+//                 inf and the -1e37 hole refused (oc_init, oc_set_param); a
+//                 run at each end stays finite; bool / mode keys strict
+//   e1_hash       a wave-phase or E1-knob ulp changes only its own section
+//   preset        kE1PresetJson is accepted and is what it says
 //
 // `ocean_tests --accepts SEED STEPS [driver args]` instead asks the shim
 // whether it would accept one ocean_parity_driver case (see acceptsMain).
@@ -40,6 +69,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <set>
 #include <utility>
 #include <string>
@@ -112,9 +142,10 @@ constexpr int kStrong = 32767;   // neuron 0 (0.5) x 4.0 = 2.0 -> tanh 0.964
 // No food, no spawn, no reseed floor, no predators, no current, no hunger, no
 // old age: only what a test adds moves the rng or the state.
 void initQuiet(OceanWorld& w, unsigned seed, float D, const OceanConfig& oc, bool capture = false,
-               bool toroidal = false) {
+               bool toroidal = false, float currentStrength = 0.0f) {
     SimConfig sc;
     applyOceanDefaults(sc);
+    if (currentStrength > 0.0f) sc.currentStrength = currentStrength;   // eddies (draws at init only)
     sc.minPopulation = 0;
     sc.targetFood = 0;
     sc.foodSpawnBase = 0.0f;
@@ -738,6 +769,724 @@ void testDrawsFood() {
     }
 }
 
+// ============================================================================
+// E1 physics
+// ============================================================================
+
+// A tiny local generator for probe points (the engine's rng stays untouched).
+struct Lcg {
+    std::uint32_t s;
+    explicit Lcg(std::uint32_t x) : s(x) {}
+    float unit() { s = s * 1664525u + 1013904223u; return (float)(s >> 8) * (1.0f / 16777216.0f); }
+};
+
+// Central-difference divergence of one flow field at (p, d), step h.
+template <class F>
+void divergenceAt(F&& f, Vec2 p, float d, float h, double& div, double& sumAbs) {
+    const OceanWorld::Flow xp = f(Vec2{p.x + h, p.y}, d), xm = f(Vec2{p.x - h, p.y}, d);
+    const OceanWorld::Flow yp = f(Vec2{p.x, p.y + h}, d), ym = f(Vec2{p.x, p.y - h}, d);
+    const OceanWorld::Flow dp = f(p, d + h), dm = f(p, d - h);
+    const double ax = ((double)xp.x - (double)xm.x) / (2.0 * h);
+    const double ay = ((double)yp.y - (double)ym.y) / (2.0 * h);
+    const double ad = ((double)dp.d - (double)dm.d) / (2.0 * h);
+    div = ax + ay + ad;
+    sumAbs = std::abs(ax) + std::abs(ay) + std::abs(ad);
+}
+
+void testDivergence() {
+    Test t("divergence");
+    OceanConfig oc;
+    oc.waveSpeed = 6.0f;
+    oc.deepCurrent = true;
+    OceanWorld w;
+    initQuiet(w, 301, 240.0f, oc, false, false, /*current*/ 40.0f);
+    for (int s = 0; s < 37; ++s) w.update(0.016f);   // the clocks run: phases != 0
+    const float D = w.D, b = std::min(oc.waveBand, 0.25f * D);
+    using Fl = OceanWorld::Flow;
+    struct Field { const char* name; std::function<Fl(Vec2, float)> f; };
+    const std::vector<Field> fields = {
+        {"train0", [&](Vec2 p, float d) { return w.waveTrainAt(0, p, d); }},
+        {"train1", [&](Vec2 p, float d) { return w.waveTrainAt(1, p, d); }},
+        {"train2", [&](Vec2 p, float d) { return w.waveTrainAt(2, p, d); }},
+        {"waves", [&](Vec2 p, float d) {
+             Fl u;
+             for (int i = 0; i < OceanWorld::kWaveTrains; ++i) {
+                 const Fl v = w.waveTrainAt(i, p, d);
+                 u.x += v.x; u.y += v.y; u.d += v.d;
+             }
+             return u; }},
+        {"deepcur", [&](Vec2 p, float d) { return w.currentFlowAt(p, d); }},
+        {"flow", [&](Vec2 p, float d) { return w.flowAt(p, d); }},
+    };
+    // Probe sets: the bulk (clear of the taper's band edges, where S is only
+    // C¹ and the difference converges as O(h)) and the two boundary bands.
+    struct Set { const char* name; float lo, hi; };
+    const Set sets[] = {{"bulk", b + 4.0f, D - b - 4.0f}, {"top", 2.5f, b + 4.0f}, {"floor", D - b - 4.0f, D - 2.5f}};
+    const float hs[] = {2.0f, 1.0f, 0.5f, 0.25f, 0.125f, 0.0625f, 0.03125f, 0.015625f};
+    constexpr int NH = 8;
+    for (const Set& st : sets) {
+        Lcg g(1234);
+        std::vector<std::pair<Vec2, float>> probes;
+        for (int k = 0; k < 300; ++k)
+            probes.push_back({Vec2{20.0f + 1880.0f * g.unit(), 20.0f + 1040.0f * g.unit()}, st.lo + (st.hi - st.lo) * g.unit()});
+        for (const Field& fd : fields) {
+            double res[NH];
+            for (int hi = 0; hi < NH; ++hi) {
+                double maxDiv = 0.0, maxSum = 0.0;
+                for (const auto& pr : probes) {
+                    double dv, sa;
+                    divergenceAt(fd.f, pr.first, pr.second, hs[hi], dv, sa);
+                    maxDiv = std::max(maxDiv, std::abs(dv));
+                    maxSum = std::max(maxSum, sa);
+                }
+                res[hi] = maxSum > 0.0 ? maxDiv / maxSum : 0.0;
+            }
+            // The best residual over h must be < 1e-3 and come from shrinking h
+            // (truncation error falling before float noise takes over).
+            int best = 0;
+            for (int hi = 1; hi < NH; ++hi) if (res[hi] < res[best]) best = hi;
+            const bool bulk = (st.name[0] == 'b');
+            t.expect(res[best] < 1e-3, "%s %s: best normalised residual %.3g (h %g)", st.name, fd.name, res[best], hs[best]);
+            if (bulk) t.expect(res[1] < 1e-3, "%s %s: residual %.3g at h = 1", st.name, fd.name, res[1]);
+            t.expect(res[best] <= res[0] || res[0] < 1e-6, "%s %s: no convergence (h 2: %.3g, best %.3g)", st.name, fd.name, res[0], res[best]);
+            if (fd.name[0] == 'f' || fd.name[0] == 'w')
+                t.note("%-5s %-7s residual h=2 %.1e  h=1 %.1e  h=1/4 %.1e  h=1/16 %.1e  h=1/32 %.1e", st.name, fd.name,
+                       res[0], res[1], res[3], res[5], res[6]);
+        }
+    }
+    // No flow through the surface or the floor: exactly zero normal component.
+    Lcg g(99);
+    int zeroN = 0, stillSurface = 0;
+    for (int k = 0; k < 500; ++k) {
+        const Vec2 p = {1920.0f * g.unit(), 1080.0f * g.unit()};
+        const Fl s = w.flowAt(p, 0.0f), f = w.flowAt(p, D);
+        bool ok = s.d == 0.0f && f.d == 0.0f;
+        for (int i = 0; i < OceanWorld::kWaveTrains; ++i)
+            ok &= w.waveTrainAt(i, p, 0.0f).d == 0.0f && w.waveTrainAt(i, p, D).d == 0.0f;
+        zeroN += ok;
+        // the deep current is still at the surface and full from mid-depth
+        const Fl c0 = w.currentFlowAt(p, 0.0f), cm = w.currentFlowAt(p, 0.5f * D + 3.0f);
+        const Vec2 c = w.currentAt(p);
+        stillSurface += (c0.x == 0.0f && c0.y == 0.0f && cm.x == c.x && cm.y == c.y && cm.d == 0.0f);
+    }
+    t.expect(zeroN == 500, "normal flow at surface / floor not exactly 0 at %d of 500 points", 500 - zeroN);
+    t.expect(stillSurface == 500, "deep current: f(0) = 0, f(>= D/2) = 1 failed at %d points", 500 - stillSurface);
+}
+
+void testE1Buoyancy() {
+    Test t("e1_buoyancy");
+    OceanConfig oc;   // kBuoy 1, vDrag 2, pitchMax 0.5; no walls; flow off (no waves, no current)
+    oc.wallBand = 0.0f;
+    oc.lightEnabled = true;
+    oc.depthCostScaled = true;
+    oc.cHold = 0.05f;
+    oc.cPress = 0.03f;
+    oc.sizeDrift = true;
+    oc.sizeFight = true;
+    oc.mouthGate = true;
+    OceanWorld w;
+    initQuiet(w, 311, 240.0f, oc);
+    struct F { int idx; float target; };
+    const F fs[] = {
+        {addFish(w, {300, 300}, 24.0f, {}, 0.5f), 120.0f},
+        {addFish(w, {900, 700}, 216.0f, {}, 0.5f), 120.0f},
+        {addFish(w, {1500, 500}, 192.0f, {}, 0.2f), 48.0f},
+        {addFish(w, {600, 200}, 100.0f, {}, 0.0f), 0.0f},     // neutral AT the surface
+        {addFish(w, {1200, 900}, 100.0f, {}, 1.0f), 240.0f},  // neutral ON the floor
+    };
+    constexpr int NF = 5;
+    float off[NF];
+    for (int k = 0; k < NF; ++k) off[k] = w.creatures[fs[k].idx].depth - fs[k].target;
+    for (int s = 1; s <= 3000; ++s) {
+        w.update(0.016f);
+        if (!t.expect(w.creatures.size() == (size_t)NF, "step %d: %zu fish", s, w.creatures.size())) return;
+        for (int k = 0; k < NF; ++k) {
+            const float o = w.creatures[fs[k].idx].depth - fs[k].target;
+            t.expect(std::abs(o) <= std::abs(off[k]), "fish %d step %d: |offset| grew %.9g -> %.9g", k, s, off[k], o);
+            t.expect(o == 0.0f || (o > 0.0f) == (off[k] > 0.0f) || off[k] == 0.0f, "fish %d step %d: overshot", k, s);
+            off[k] = o;
+        }
+    }
+    for (int k = 0; k < NF; ++k) t.expect(std::abs(off[k]) < 0.5f, "fish %d still %.4f from bodyBuoy·D", k, off[k]);
+    t.note("offsets after 3000 steps: %.4f %.4f %.4f %.4f %.4f", off[0], off[1], off[2], off[3], off[4]);
+}
+
+void testDrift() {
+    Test t("drift");
+    const float sizes[3] = {0.5f, 1.0f, 2.0f};
+    for (bool sized : {true, false}) {
+        OceanConfig oc;
+        oc.waveSpeed = 6.0f;
+        oc.deepCurrent = true;
+        oc.sizeDrift = sized;
+        oc.kBuoy = 0.0f;
+        oc.wallBand = 0.0f;
+        OceanWorld w;
+        initQuiet(w, 401, 240.0f, oc, false, false, /*current*/ 60.0f);
+        w.cfg.minSpeed = 0.0f;   // no swimming: the flow is all that moves them
+        for (int s = 0; s < 20; ++s) w.update(0.016f);
+        struct P { Vec2 pos; float d; int idx[3]; };
+        std::vector<P> ps;
+        Lcg g(7);
+        for (int k = 0; k < 24; ++k) {
+            P p;
+            p.pos = {100.0f + 1700.0f * g.unit(), 100.0f + 880.0f * g.unit()};
+            p.d = 40.0f + 180.0f * g.unit();
+            for (int j = 0; j < 3; ++j) {
+                p.idx[j] = addFish(w, p.pos, p.d, {}, p.d / 240.0f);
+                w.creatures[p.idx[j]].bodySize = sizes[j];
+                w.creatures[p.idx[j]].speed = 0.0f;
+            }
+            ps.push_back(p);
+        }
+        w.update(0.016f);
+        double sumRatio = 0.0;
+        int nRatio = 0;
+        for (const P& p : ps) {
+            const OceanWorld::Flow U = w.flowAt(p.pos, p.d);   // the flow this step sampled
+            for (int j = 0; j < 3; ++j) {
+                const Fish& f = w.creatures[p.idx[j]];
+                const float wgt = sized ? std::min(1.0f, 1.0f / sizes[j]) : 1.0f;
+                const float ex = OceanWorld::wrapCoord(p.pos.x + wgt * U.x * 0.016f, 1920.0f);
+                const float ey = OceanWorld::wrapCoord(p.pos.y + wgt * U.y * 0.016f, 1080.0f);
+                const float ed = std::clamp(p.d + wgt * U.d * 0.016f, 0.0f, 240.0f);
+                t.expect(f.pos.x == ex && f.pos.y == ey && f.depth == ed,
+                         "sized %d size %g: moved to (%.9g, %.9g, %.9g), expected (%.9g, %.9g, %.9g)", sized, sizes[j],
+                         f.pos.x, f.pos.y, f.depth, ex, ey, ed);
+            }
+            const Fish &a = w.creatures[p.idx[0]], &m = w.creatures[p.idx[1]], &z = w.creatures[p.idx[2]];
+            t.expect(a.pos.x == m.pos.x && a.pos.y == m.pos.y && a.depth == m.depth, "size .5 and 1 drifted differently");
+            const double dm = std::hypot((double)m.pos.x - p.pos.x, (double)m.pos.y - p.pos.y);
+            const double dz = std::hypot((double)z.pos.x - p.pos.x, (double)z.pos.y - p.pos.y);
+            if (dm > 1e-3) { sumRatio += dz / dm; ++nRatio; }
+        }
+        const double r1 = nRatio ? sumRatio / nRatio : 0.0;
+        if (sized) t.expect(std::abs(r1 - 0.5) < 0.01, "one step: size-2 / size-1 drift %.4f, expected 0.5", r1);
+        else       t.expect(std::abs(r1 - 1.0) < 1e-6, "sizeDrift off: size-2 / size-1 drift %.4f, expected 1", r1);
+        // 200 more steps: how far each has been carried.
+        for (int s = 0; s < 200; ++s) w.update(0.016f);
+        double far[3] = {0, 0, 0};
+        for (const P& p : ps)
+            for (int j = 0; j < 3; ++j) {
+                const Fish& f = w.creatures[p.idx[j]];
+                far[j] += std::hypot((double)w.wrapDx(f.pos.x - p.pos.x), (double)w.wrapDy(f.pos.y - p.pos.y));
+            }
+        const double r200 = far[2] / far[1];
+        if (sized) t.expect(far[0] == far[1] && r200 > 0.35 && r200 < 0.65, "200 steps: drift .5 / 1 / 2 = %.1f / %.1f / %.1f", far[0], far[1], far[2]);
+        else       t.expect(far[0] == far[1] && far[1] == far[2], "sizeDrift off, 200 steps: %.1f / %.1f / %.1f", far[0], far[1], far[2]);
+        t.note("sizeDrift %s: one step ratio (2 : 1) %.4f; 200 steps mean drift .5 / 1 / 2 = %.1f / %.1f / %.1f",
+               sized ? "on " : "off", r1, far[0] / ps.size(), far[1] / ps.size(), far[2] / ps.size());
+    }
+}
+
+void testCosts() {
+    Test t("costs");
+    const float dt = 0.016f, D = 240.0f, bb = 0.4f;
+    const float depths[3] = {96.0f, 0.0f, 240.0f};   // neutral (0.4·D), surface, floor
+    const char* where[3] = {"neutral", "surface", "deep"};
+    float costL1[3] = {0, 0, 0};
+    for (bool scaled : {true, false}) {
+        for (float L : {1.0f, 2.0f}) {
+            Fish after[2][3];
+            for (int on = 0; on < 2; ++on) {
+                OceanConfig oc;
+                oc.kBuoy = 0.0f;
+                oc.wallBand = 0.0f;
+                oc.depthCostScaled = scaled;
+                oc.cHold = on ? 0.05f : 0.0f;
+                oc.cPress = on ? 0.03f : 0.0f;
+                OceanWorld w;
+                initQuiet(w, 501, D, oc);
+                w.cfg.metabolicRate = 1.5f;
+                w.cfg.geneCost = 0.01f;
+                w.cfg.moveCost = 7e-5f;
+                const std::vector<Gene> g = {mkGene(false, 0, INTERACT_IGNORE, 1000), mkGene(false, 1, INTERACT_IGNORE, 900),
+                                             mkGene(false, 2, INTERACT_IGNORE, 800)};
+                for (int k = 0; k < 3; ++k) {
+                    const int i = addFish(w, {300.0f + 600.0f * k, 500.0f}, depths[k], g, bb);
+                    w.creatures[i].bodySize = L;
+                    w.creatures[i].speed = 40.0f;
+                    w.creatures[i].foodReserves = 20.0f;
+                }
+                w.update(dt);
+                for (int k = 0; k < 3; ++k) after[on][k] = w.creatures[k];
+            }
+            for (int k = 0; k < 3; ++k) {
+                const Fish &base = after[0][k], &c = after[1][k];
+                t.expect(c.depth == depths[k] && base.depth == depths[k], "fixture %s moved in depth", where[k]);
+                const float H = std::abs(c.depth - c.bodyBuoy * D) / D, P = c.depth / D;
+                float expect;
+                if (scaled) {
+                    const float M = 1.5f * L;   // metabolicRate · massFactor (= bodySize)
+                    expect = base.foodReserves - dt * M * (0.05f * H + 0.03f * P);
+                } else {
+                    expect = base.foodReserves - dt * (0.05f * std::abs(c.depth - c.bodyBuoy * D) / D + 0.03f * c.depth / D);
+                }
+                t.expect(c.foodReserves == expect, "%s %s L %g: reserves %.9g, expected %.9g", scaled ? "scaled" : "preview",
+                         where[k], L, c.foodReserves, expect);
+                t.expect(c.age == base.age && c.reproTimer == base.reproTimer && c.interactTimer == base.interactTimer,
+                         "%s: timers changed by the depth cost", where[k]);
+                if (scaled) {
+                    const float cost = dt * (1.5f * L) * (0.05f * H + 0.03f * P);
+                    if (L == 1.0f) costL1[k] = cost;
+                    else t.expect(cost == 2.0f * costL1[k], "%s: cost at L 2 %.9g != 2 x L 1 %.9g", where[k], cost, costL1[k]);
+                }
+            }
+            // where H or P is 0, that term is absent: neutral pays pressure only, the surface holding only
+            t.expect(std::abs(after[1][0].depth - bb * D) == 0.0f && after[1][1].depth == 0.0f, "fixture depths");
+        }
+    }
+    t.note("scaled, L 1: neutral %.3g, surface %.3g, deep %.3g energy/step (gene + move costs apart, x2 at L 2)",
+           costL1[0], costL1[1], costL1[2]);
+}
+
+void testFight() {
+    Test t("fight");
+    auto curve = [](float age) { return (age < 30.0f) ? age / 30.0f : 1.0f - (age - 30.0f) / 90.0f; };
+    Lcg g(31);
+    rng.seed(601);
+    // (1, 1) is the Classic two-argument fight, bit for bit, rng included.
+    int same = 0;
+    for (int k = 0; k < 300; ++k) {
+        Fish a1, b1;
+        a1.age = 150.0f * g.unit(); b1.age = 150.0f * g.unit();
+        a1.foodReserves = 40.0f * g.unit(); b1.foodReserves = 40.0f * g.unit();
+        Fish a2 = a1, b2 = b1;
+        const RandomGen r0 = rng;
+        kernel::fightOutcome(a1, b1);
+        const RandomGen r1 = rng;
+        rng = r0;
+        kernel::fightOutcome(a2, b2, 1.0f, 1.0f);
+        same += (ofp::bits(a1.foodReserves) == ofp::bits(a2.foodReserves) &&
+                 ofp::bits(b1.foodReserves) == ofp::bits(b2.foodReserves) && sameEngine(r1, rng) &&
+                 drawsBetween(r0, rng, 10) == 2);
+    }
+    t.expect(same == 300, "unit scales differ from the two-argument fight in %d of 300", 300 - same);
+    // Known draws: the winner follows curve·L²·u, two draws, ±15.
+    const float Ls[] = {0.5f, 0.8f, 1.0f, 1.3f, 2.0f};
+    int known = 0, bigWins = 0, bigFights = 0;
+    for (int k = 0; k < 500; ++k) {
+        Fish a, b;
+        a.age = 10.0f + 90.0f * g.unit(); b.age = 10.0f + 90.0f * g.unit();
+        a.foodReserves = 30.0f; b.foodReserves = 30.0f;
+        const float La = Ls[k % 5], Lb = Ls[(k / 5) % 5];
+        const float sa = La * La, sb = Lb * Lb;
+        RandomGen r = rng;
+        const float u1 = r.unit(), u2 = r.unit();
+        float s1 = curve(a.age), s2 = curve(b.age);
+        if (sa != 1.0f) s1 *= sa;
+        if (sb != 1.0f) s2 *= sb;
+        s1 *= u1; s2 *= u2;
+        const bool aWins = s1 > s2;
+        kernel::fightOutcome(a, b, sa, sb);
+        known += (sameEngine(r, rng) && a.foodReserves == (aWins ? 45.0f : 15.0f) && b.foodReserves == (aWins ? 15.0f : 45.0f));
+        if (La == 2.0f && Lb == 0.5f) { ++bigFights; bigWins += aWins; }
+    }
+    t.expect(known == 500, "known-draw fixtures: %d of 500 as predicted", known);
+    // Size 2 vs .5 (strength x16 before the draws): P(win) = 1 − 1/(2r) for
+    // r = 16·curve ratio, ~0.95 over ages 10-100.
+    for (int k = 0; k < 400; ++k) {
+        Fish a, b;
+        a.age = 10.0f + 90.0f * g.unit(); b.age = 10.0f + 90.0f * g.unit();
+        a.foodReserves = b.foodReserves = 30.0f;
+        kernel::fightOutcome(a, b, 4.0f, 0.25f);
+        ++bigFights;
+        bigWins += (a.foodReserves > 30.0f);
+    }
+    t.expect(bigWins * 100 >= bigFights * 88, "size 2 vs .5 won only %d of %d", bigWins, bigFights);
+    // Ties (both strengths 0: ages 0 and 120) go to c2, scaled or not.
+    for (int k = 0; k < 4; ++k) {
+        Fish a, b;
+        a.age = (k & 1) ? 120.0f : 0.0f; b.age = (k & 2) ? 120.0f : 0.0f;
+        a.foodReserves = b.foodReserves = 30.0f;
+        Fish a2 = a, b2 = b;
+        kernel::fightOutcome(a, b);
+        kernel::fightOutcome(a2, b2, 4.0f, 0.25f);
+        t.expect(a.foodReserves == 15.0f && b.foodReserves == 45.0f && a2.foodReserves == 15.0f && b2.foodReserves == 45.0f,
+                 "tie (ages %g, %g): c2 must win", a.age, b.age);
+    }
+    t.note("size 2 vs size .5: the big fish won %d of %d fights", bigWins, bigFights);
+}
+
+void testMouth() {
+    Test t("mouth");
+    struct V { float L, kMouth, below, equal, above; };
+    const V vs[] = {{1.0f, 2.0f, 1.9f, 2.0f, 2.1f}, {0.5f, 3.0f, 1.4f, 1.5f, 1.6f}, {2.0f, 0.75f, 1.4f, 1.5f, 1.6f}};
+    for (const V& v : vs) {
+        for (bool gate : {true, false}) {
+            OceanConfig oc;
+            oc.mouthGate = gate;
+            oc.kMouth = v.kMouth;
+            oc.kBuoy = 0.0f;
+            oc.wallBand = 0.0f;
+            OceanWorld w;
+            initQuiet(w, 701, 240.0f, oc, /*capture*/ true);
+            w.cfg.minSpeed = 0.0f;
+            const int i = addFish(w, {500, 500}, 100.0f, {}, 100.0f / 240.0f);
+            w.creatures[i].bodySize = v.L;
+            w.creatures[i].speed = 0.0f;
+            w.creatures[i].foodReserves = 50.0f;
+            const float sz[3] = {v.below, v.equal, v.above};
+            const Vec2 at[3] = {{505, 500}, {500, 505}, {500, 500}};
+            const float az[3] = {100.0f, 100.0f, 105.0f};
+            for (int k = 0; k < 3; ++k) {
+                OceanFood f;
+                f.pos = at[k]; f.depth = az[k]; f.size = sz[k];
+                w.food.push_back(f);
+            }
+            w.update(0.016f);
+            const Fish& c = w.creatures[i];
+            if (gate) {
+                t.expect(w.food.size() == 1 && w.food[0].size == v.above,
+                         "L %g kMouth %g: %zu food left (expected only the size-%g one)", v.L, v.kMouth, w.food.size(), v.above);
+                t.expect(c.foodReserves == 60.0f, "L %g: reserves %.9g, expected 50 + 2 x 5", v.L, c.foodReserves);
+            } else {
+                t.expect(w.food.empty() && c.foodReserves == 65.0f, "gate off: %zu food left, reserves %.9g", w.food.size(),
+                         c.foodReserves);
+            }
+            // Smell: a lone too-big particle is no food to this fish.
+            OceanWorld w2;
+            initQuiet(w2, 702, 240.0f, oc, true);
+            w2.cfg.minSpeed = 0.0f;
+            const int j = addFish(w2, {500, 500}, 100.0f, {}, 100.0f / 240.0f);
+            w2.creatures[j].bodySize = v.L;
+            w2.creatures[j].speed = 0.0f;
+            OceanFood big;
+            big.pos = {530, 500}; big.depth = 100.0f; big.size = v.above;   // 30 away: smelled, out of reach
+            w2.food.push_back(big);
+            w2.update(0.016f);
+            const float* S = w2.creatures[j].lastSensors;
+            if (gate) t.expect(S[FOOD_DENSITY] == 0.0f && S[NEAREST_FOOD_DIST] == 1.0f && w2.food.size() == 1,
+                               "gated food smelled: density %.6g dist %.6g", S[FOOD_DENSITY], S[NEAREST_FOOD_DIST]);
+            else t.expect(S[FOOD_DENSITY] > 0.0f && S[NEAREST_FOOD_DIST] < 0.31f, "gate off: food not smelled");
+        }
+    }
+}
+
+// Fingerprints every 100 steps of a world built from cfg (the harness's way).
+std::vector<ofp::Fingerprint> runPrintsCfg(unsigned seed, const std::string& cfg, int pop, int steps) {
+    std::vector<ofp::Fingerprint> out;
+    OceanWorld w;
+    std::string err;
+    if (!ofp::initWorld(w, seed, 1920, 1080, 240.0f, pop, cfg.c_str(), err)) return out;
+    out.push_back(ofp::fingerprint(w));
+    for (int s = 1; s <= steps; ++s) {
+        w.update(0.016f);
+        if (s % 100 == 0) out.push_back(ofp::fingerprint(w));
+    }
+    return out;
+}
+
+void testE1Neutral() {
+    Test t("e1_neutral");
+    // Each variant adds keys that must not change the run: their dynamics
+    // hashes (all but cfg) equal the base's at every print.
+    struct Base { const char* name; std::string cfg; std::vector<std::pair<const char*, const char*>> vars; };
+    const std::string rich = R"("currentStrength":60,"foodDrift":true,"foodPatches":4,"predatorCount":3,"predatorEconomy":true,"maxNeighbors":7)";
+    const std::vector<Base> bases = {
+        {"bodyModel", rich + R"(,"bodyModel":true)", {
+            {"light", R"("lightEnabled":true,"L0":3,"kWater":0.02)"},
+            {"wave shape, no waves", R"("waveBand":8,"waveGravity":55)"},
+            {"scaled costs at 0", R"("depthCostScaled":true)"},
+            {"mouthGate kMouth 2 (size 1 <= 2 x .5)", R"("mouthGate":true,"kMouth":2)"},
+        }},
+        {"size 1", rich, {
+            {"sizeFight", R"("sizeFight":true)"},
+            {"sizeDrift (legacy current through the E1 path)", R"("sizeDrift":true)"},
+            {"all neutral knobs", R"("sizeFight":true,"sizeDrift":true,"mouthGate":true,"lightEnabled":true,"depthCostScaled":true,"waveBand":5)"},
+        }},
+    };
+    int variants = 0;
+    for (const Base& b : bases) {
+        const auto ref = runPrintsCfg(91, "{" + b.cfg + "}", 250, 800);
+        t.expect(ref.size() == 9, "%s: base run failed", b.name);
+        for (const auto& v : b.vars) {
+            const auto got = runPrintsCfg(91, "{" + b.cfg + "," + v.second + "}", 250, 800);
+            ++variants;
+            if (!t.expect(got.size() == ref.size(), "%s / %s: run failed", b.name, v.first)) continue;
+            int diff = -1;
+            for (size_t i = 0; i < got.size() && diff < 0; ++i) if (!sameDynamics(got[i], ref[i])) diff = (int)i;
+            t.expect(diff < 0, "%s / %s: dynamics differ from print %d (step %d)", b.name, v.first, diff, diff * 100);
+            t.expect(got[0].cfg != ref[0].cfg, "%s / %s: the cfg hash missed the E1 keys", b.name, v.first);
+        }
+    }
+    t.note("%d variants x 800 steps: every dynamics hash equal to the base's", variants);
+}
+
+void testE1Bounds() {
+    Test t("e1_bounds");
+    struct V { const char* name; unsigned seed; float D; const char* cfg; };
+    const V vs[] = {
+        {"preset", 1, 240.0f, kE1PresetJson},
+        {"strong waves + deep eddies + sizes", 2, 240.0f,
+         R"({"waveSpeed":40,"waveBand":6,"deepCurrent":true,"currentStrength":120,"foodDrift":true,"bodyModel":true,"sizeDrift":true,"sizeFight":true,"mouthGate":true,"kMouth":1.5,"predatorCount":4,"predatorEconomy":true,"predatorMinPopulation":2})"},
+        {"shallow, max waves", 3, 10.0f,
+         R"({"waveSpeed":100,"waveBand":1,"waveGravity":10000,"deepCurrent":true,"currentStrength":80,"foodDrift":true,"predatorCount":3})"},
+        {"gyre, toroidal, costs", 4, 600.0f,
+         R"({"waveSpeed":12,"deepCurrent":true,"currentStrength":50,"currentMode":1,"toroidal":true,"foodDrift":true,"depthCostScaled":true,"cHold":0.5,"cPress":0.5,"foodDepthMode":1,"foodPatches":4})"},
+    };
+    long fishSteps = 0, foodMoved = 0;
+    for (const V& v : vs) {
+        OceanWorld w;
+        std::string err;
+        if (!t.expect(ofp::initWorld(w, v.seed, 1920, 1080, v.D, 300, v.cfg, err), "%s: %s", v.name, err.c_str())) continue;
+        for (int s = 1; s <= 1200; ++s) {
+            std::vector<float> fz;
+            for (const OceanFood& f : w.food) fz.push_back(f.depth);
+            w.update(0.016f);
+            for (const Fish& c : w.creatures) {
+                ++fishSteps;
+                t.expect(c.depth >= 0.0f && c.depth <= w.D && c.pos.x >= 0.0f && c.pos.x < 1920.0f && c.pos.y >= 0.0f &&
+                             c.pos.y < 1080.0f, "%s step %d: fish at (%.9g, %.9g, %.9g)", v.name, s, c.pos.x, c.pos.y, c.depth);
+            }
+            for (size_t k = 0; k < w.food.size(); ++k) {
+                const OceanFood& f = w.food[k];
+                t.expect(f.depth >= 0.0f && f.depth <= w.D && f.pos.x >= 0.0f && f.pos.x < 1920.0f && f.pos.y >= 0.0f &&
+                             f.pos.y < 1080.0f, "%s step %d: food at (%.9g, %.9g, %.9g)", v.name, s, f.pos.x, f.pos.y, f.depth);
+            }
+            for (const OceanPredator& p : w.predators)
+                t.expect(p.depth >= 0.0f && p.depth <= w.D, "%s step %d: predator depth %.9g", v.name, s, p.depth);
+            if (s % 100 == 0) t.expect(ofp::countNonFinite(w) == 0, "%s step %d: non-finite state", v.name, s);
+            if (s == 1) for (size_t k = 0; k < fz.size() && k < w.food.size(); ++k) foodMoved += (w.food[k].depth != fz[k]);
+        }
+    }
+    t.note("%zu E1 worlds x 1200 steps, %ld fish-steps in bounds; food drifting in depth: %ld", sizeof vs / sizeof vs[0],
+           fishSteps, foodMoved);
+    t.expect(foodMoved > 0, "the flow never moved food in depth");
+}
+
+void testDrawsE1() {
+    Test t("draws_e1");
+    OceanConfig oc;
+    oc.waveSpeed = 8.0f;
+    oc.deepCurrent = true;
+    oc.sizeDrift = true;
+    oc.sizeFight = true;
+    oc.mouthGate = true;
+    oc.kMouth = 0.7f;
+    oc.depthCostScaled = true;
+    oc.cHold = 0.3f;
+    oc.cPress = 0.2f;
+    oc.lightEnabled = true;
+    OceanWorld w;
+    initQuiet(w, 801, 240.0f, oc, false, false, /*current*/ 50.0f);
+    w.cfg.foodDrift = true;
+    w.cfg.predatorCount = 4;
+    w.cfg.predatorPerception = 0.0f;      // blind: they always wander (two draws each), never chase
+    w.cfg.predatorCaptureRadius = 0.0f;
+    int nRandom = 0;
+    for (int i = 0; i < 40; ++i) {
+        std::vector<Gene> g;
+        if (i % 3 != 2) g.push_back(mkGene(false, 0, STEER_Z, (i % 3 == 0) ? kStrong : -kStrong));
+        const bool rnd = (i % 2 == 0);
+        if (rnd) g.push_back(mkGene(false, 0, MOVE_RANDOM, kStrong));
+        const int k = addFish(w, {120.0f + 240.0f * (i % 8), 100.0f + 216.0f * (i / 8)}, 240.0f * (float)(i % 9) / 8.0f, g,
+                              (float)(i % 3) * 0.5f);
+        w.creatures[k].responsiveness = 1.0f;
+        w.creatures[k].bodySize = 0.5f + 0.25f * (float)(i % 7);
+        nRandom += rnd;
+    }
+    for (int i = 0; i < 4; ++i) {
+        OceanPredator p;
+        p.pos = {200.0f + 450.0f * i, 900.0f};
+        p.depth = 60.0f * i;
+        p.energy = 30.0f;
+        w.predators.push_back(p);
+    }
+    Lcg g(5);
+    for (int i = 0; i < 300; ++i) {   // food the flow carries (and some fish eat)
+        OceanFood f;
+        f.pos = {1920.0f * g.unit(), 1080.0f * g.unit()};
+        f.depth = 240.0f * g.unit();
+        w.food.push_back(f);
+    }
+    const long N = (long)w.creatures.size();
+    const long expected = N + 3L * nRandom + 2L * 4;   // RANDOM_SENSOR, MOVE_RANDOM x3, predator wander x2
+    int bad = 0;
+    for (int s = 1; s <= 150; ++s) {
+        const RandomGen before = rng;
+        w.update(0.016f);
+        const long d = drawsBetween(before, rng, 10000);
+        bad += !t.expect(d == expected && (long)w.creatures.size() == N, "step %d: %ld draws, expected %ld (pop %zu)", s, d,
+                         expected, w.creatures.size());
+    }
+    // A birth with every E1 knob on draws exactly what it draws without.
+    for (unsigned seed : {211u, 212u}) {
+        long draws[2] = {-1, -1};
+        for (int on = 0; on < 2; ++on) {
+            OceanConfig o = on ? oc : OceanConfig{};
+            OceanWorld wb;
+            initQuiet(wb, seed, 240.0f, o, false, false, 30.0f);
+            const std::vector<Gene> gg = {mkGene(false, 0, INTERACT_REPRODUCE, kStrong)};
+            const int i1 = addFish(wb, {960, 540}, 100.0f, gg, 0.4f), i2 = addFish(wb, {961, 541}, 110.0f, gg, 0.5f);
+            for (int i : {i1, i2}) {
+                Fish& f = wb.creatures[i];
+                f.age = 10.0f; f.foodReserves = 100.0f; f.reproTimer = 0.0f; f.interactTimer = 0.0f;
+            }
+            const RandomGen before = rng;
+            wb.update(0.016f);
+            draws[on] = (wb.creatures.size() == 3) ? drawsBetween(before, rng) : -1;
+        }
+        t.expect(draws[0] > 0 && draws[0] == draws[1], "seed %u: birth step draws %ld (off) vs %ld (E1 on)", seed, draws[0], draws[1]);
+    }
+    t.note("150 steps with every E1 feature on: %ld draws/step == N + 3 x MOVE_RANDOM + 2 x predators", expected);
+}
+
+void testLight() {
+    Test t("light");
+    OceanConfig oc;
+    oc.lightEnabled = true;
+    oc.L0 = 1.7f;
+    oc.kWater = 0.006f;
+    OceanWorld w;
+    initQuiet(w, 901, 240.0f, oc);
+    t.expect(w.lightAt(0.0f) == 1.7f, "lightAt(0) %.9g != L0", w.lightAt(0.0f));
+    float prev = w.lightAt(0.0f);
+    double worst = 0.0;
+    for (int k = 1; k <= 240; ++k) {
+        const float L = w.lightAt((float)k);
+        t.expect(L < prev && L > 0.0f, "light not falling at depth %d", k);
+        worst = std::max(worst, std::abs((double)L - 1.7 * std::exp(-0.006 * k)) / 1.7);
+        prev = L;
+    }
+    t.expect(worst < 2e-6, "lightAt off L0·exp(-kWater·d) by %.3g (relative)", worst);
+    t.note("L(240) / L0 = %.4f (exp(-1.44) = 0.2369)", w.lightAt(240.0f) / 1.7f);
+#ifndef OCEAN_TESTS_NO_SHIM
+    t.expect(oc_init(902, 1920, 1080, 240.0, 50, R"({"lightEnabled":true,"L0":2.5,"kWater":0.01})") == 1, "oc_init: %s", oc_last_error());
+    t.expect(oc_light_enabled() == 1 && oc_light_l0() == 2.5 && oc_light_kwater() == (double)0.01f, "light exports %d %g %g",
+             oc_light_enabled(), oc_light_l0(), oc_light_kwater());
+    t.expect(oc_set_param("lightEnabled", 0.0) == 1 && oc_light_enabled() == 0, "lightEnabled 0 via oc_set_param");
+    t.expect(oc_init(902, 1920, 1080, 240.0, 50, nullptr) == 1 && oc_light_enabled() == 0, "the default page has light off");
+#endif
+}
+
+#ifndef OCEAN_TESTS_NO_SHIM
+void testRanges() {
+    Test t("ranges");
+    struct K { const char* key; double lo, hi; const char* with; };
+    const K ks[] = {
+        {"kBuoy", -1000, 1000, ""}, {"buoyMutation", 0, 1, ""}, {"pitchMax", 0.001, 100, ""},
+        {"vDrag", 0, 10000, ""}, {"wallBand", 0, 100000, ""},
+        {"cHold", 0, 100, R"("depthCostScaled":true,)"}, {"cPress", 0, 100, ""},
+        {"foodDepthSpread", 0, 1e6, R"("foodDepthMode":1,"foodPatches":3,)"},
+        {"waveSpeed", 0, 100, R"("deepCurrent":true,"currentStrength":80,"foodDrift":true,)"},
+        {"waveBand", 1, 100000, R"("waveSpeed":100,)"}, {"waveGravity", 0.01, 10000, R"("waveSpeed":100,)"},
+        {"L0", 0, 100, R"("lightEnabled":true,)"}, {"kWater", 0, 1, R"("lightEnabled":true,)"},
+        {"kMouth", 0.01, 100, R"("mouthGate":true,"bodyModel":true,)"},
+    };
+    auto cfgOf = [](const K& k, double v) {
+        char num[40];
+        std::snprintf(num, sizeof num, "%.9g", v);
+        return std::string("{") + k.with + R"("predatorCount":2,")" + k.key + "\":" + num + "}";
+    };
+    int accepted = 0, refused = 0, runs = 0;
+    for (const K& k : ks) {
+        for (double v : {k.lo, k.hi}) {
+            const std::string c = cfgOf(k, v);
+            if (!t.expect(oc_init(1001, 1920, 1080, 240.0, 100, c.c_str()) == 1, "%s refused: %s", c.c_str(), oc_last_error())) continue;
+            ++accepted;
+            oc_step(300);
+            ++runs;
+            t.expect(ofp::countNonFinite(*g_world) == 0, "%s: non-finite state after 300 steps", c.c_str());
+            for (const Fish& f : g_world->creatures)
+                if (!t.expect(f.depth >= 0.0f && f.depth <= g_world->D, "%s: depth %.9g", c.c_str(), f.depth)) break;
+        }
+        const double below = k.lo - std::max(1e-6, 1e-3 * std::abs(k.lo)), above = k.hi + std::max(1e-6, 1e-3 * std::abs(k.hi));
+        for (double v : {below, above, 1e39, -1e39}) {
+            const std::string c = cfgOf(k, v);
+            refused += t.expect(oc_init(1001, 1920, 1080, 240.0, 100, c.c_str()) == 0, "%s accepted", c.c_str());
+        }
+    }
+    // The hole the harness found, and the bool / mode keys.
+    for (const char* c : {R"({"kBuoy":-1e37})", R"({"kBuoy":1e37})", R"({"vDrag":1e30})", R"({"pitchMax":1e-9})",
+                          R"({"deepCurrent":2})", R"({"sizeDrift":"yes"})", R"({"mouthGate":0.5})", R"({"foodDepthMode":2})",
+                          R"({"foodDepthMode":0.5})", R"({"foodDepthMode":1e300})", R"({"waveBand":0})"})
+        refused += t.expect(oc_init(1002, 1920, 1080, 240.0, 100, c) == 0, "%s accepted", c);
+    for (const char* c : {R"({"deepCurrent":1,"sizeDrift":true,"mouthGate":0,"foodDepthMode":1})"})
+        accepted += t.expect(oc_init(1002, 1920, 1080, 240.0, 100, c) == 1, "%s refused: %s", c, oc_last_error());
+    // The sea's depth (oc_init's argument): [10, 100000].
+    refused += t.expect(oc_init(1003, 1920, 1080, 100001.0, 50, nullptr) == 0, "depth 100001 accepted");
+    accepted += t.expect(oc_init(1003, 1920, 1080, 100000.0, 50, nullptr) == 1, "depth 100000 refused: %s", oc_last_error());
+    // Live: refused as stored, the world unchanged.
+    t.expect(oc_init(1004, 1920, 1080, 240.0, 100, nullptr) == 1, "oc_init");
+    const ofp::Fingerprint before = ofp::fingerprint(*g_world);
+    struct S { const char* k; double v; };
+    for (const S& s : {S{"kBuoy", 1e37}, S{"kBuoy", 1000.5}, S{"waveSpeed", 101}, S{"waveBand", 0.5}, S{"mouthGate", 0.5},
+                       S{"deepCurrent", 2}, S{"kWater", 1.5}, S{"cHold", 1e9}, S{"pitchMax", 1e-5}})
+        refused += t.expect(oc_set_param(s.k, s.v) == 0, "oc_set_param(%s, %g) accepted", s.k, s.v);
+    t.expect(ofp::fingerprint(*g_world) == before, "a refused oc_set_param changed the world");
+    for (const S& s : {S{"kBuoy", 1000}, S{"waveSpeed", 100}, S{"waveBand", 1}, S{"mouthGate", 1}, S{"deepCurrent", 1},
+                       S{"kWater", 1}, S{"cHold", 100}, S{"sizeFight", 0}})
+        accepted += t.expect(oc_set_param(s.k, s.v) == 1, "oc_set_param(%s, %g) refused: %s", s.k, s.v, oc_last_error());
+    oc_step(300);
+    t.expect(ofp::countNonFinite(*g_world) == 0, "live extremes: non-finite state");
+    // The flow's extreme corners: the smallest / largest world, waves at their limits.
+    for (int big = 0; big < 2; ++big) {
+        const char* c = R"({"waveSpeed":100,"waveBand":1,"waveGravity":10000,"deepCurrent":true,"currentStrength":80,"foodDrift":true,"predatorCount":2})";
+        const int W = big ? 20000 : 100;
+        if (!t.expect(oc_init(1005, W, W, big ? 100000.0 : 10.0, 60, c) == 1, "corner %d: %s", big, oc_last_error())) continue;
+        oc_step(200);
+        ++runs;
+        t.expect(ofp::countNonFinite(*g_world) == 0, "corner world %dx%d: non-finite state", W, W);
+        for (const OceanFood& f : g_world->food)
+            if (!t.expect(f.pos.x >= 0.0f && f.pos.x < (float)W && f.pos.y >= 0.0f && f.pos.y < (float)W, "corner %d: food off the map", big)) break;
+    }
+    t.note("%d configs accepted, %d refused; %d runs at range ends, all finite", accepted, refused, runs);
+}
+#endif
+
+void testE1Hash() {
+    Test t("e1_hash");
+    OceanWorld w;
+    std::string err;
+    ofp::initWorld(w, 1101, 1920, 1080, 240.0f, 150, R"({"waveSpeed":5,"deepCurrent":true,"currentStrength":30,"predatorCount":2})", err);
+    for (int s = 0; s < 40; ++s) w.update(0.016f);
+    const ofp::Fingerprint base = ofp::fingerprint(w);
+    t.expect(w.waveClockStarted(), "the wave clock did not run");
+    auto only = [&](const char* what, std::uint64_t ofp::Fingerprint::*field) {
+        const ofp::Fingerprint p = ofp::fingerprint(w);
+        bool othersSame = true;
+        for (auto f : {&ofp::Fingerprint::cfg, &ofp::Fingerprint::ctr, &ofp::Fingerprint::fish, &ofp::Fingerprint::food,
+                       &ofp::Fingerprint::pred, &ofp::Fingerprint::sig, &ofp::Fingerprint::rng})
+            if (f != field) othersSame &= (p.*f == base.*f);
+        t.expect(p.*field != base.*field && othersSame, "a 1-ulp change in %s: hash %s", what,
+                 p.*field == base.*field ? "unchanged" : "changed other sections too");
+    };
+    // An E1 knob that does not move the flow (light): cfg only.
+    { const float keep = w.ocfg.kWater; w.ocfg.kWater = std::nextafter(keep, 1.0f); only("kWater", &ofp::Fingerprint::cfg); w.ocfg.kWater = keep; }
+    { const bool keep = w.ocfg.mouthGate; w.ocfg.mouthGate = !keep; only("mouthGate", &ofp::Fingerprint::cfg); w.ocfg.mouthGate = keep; }
+    { const float keep = w.food[3].size; w.food[3].size = 1.5f; only("food size", &ofp::Fingerprint::food); w.food[3].size = keep; }
+    t.expect(ofp::fingerprint(w) == base, "restoring did not restore the hash");
+    // The wave clock is in ctr (and moves the sampled flow in cur).
+    OceanWorld w2;
+    ofp::initWorld(w2, 1101, 1920, 1080, 240.0f, 150, R"({"waveSpeed":5,"deepCurrent":true,"currentStrength":30,"predatorCount":2})", err);
+    for (int s = 0; s < 40; ++s) w2.update(0.016f);
+    t.expect(ofp::fingerprint(w2) == base, "same world twice differs");
+    // An OFF world never hashes E1: a fresh preview world == its own print (no 0xE1 tails).
+    OceanWorld w3;
+    ofp::initWorld(w3, 1102, 1920, 1080, 240.0f, 100, nullptr, err);
+    for (int s = 0; s < 30; ++s) w3.update(0.016f);
+    t.expect(!w3.waveClockStarted() && !w3.flowE1() && oceanE1AtDefaults(w3.ocfg), "a preview world has E1 state");
+}
+
+#ifndef OCEAN_TESTS_NO_SHIM
+void testPreset() {
+    Test t("preset");
+    SimConfig sc;
+    applyOceanDefaults(sc);
+    OceanConfig oc;
+    std::string err;
+    t.expect(readOceanJson(kE1PresetJson, sc, oc, err), "kE1PresetJson: %s", err.c_str());
+    t.expect(oc.waveSpeed > 0.0f && oc.deepCurrent && oc.lightEnabled && oc.depthCostScaled && sc.currentStrength > 0.0f &&
+             sc.foodDrift, "the preset does not turn on waves, deep currents, light and scaled costs");
+    t.expect(std::strcmp(oc_e1_preset(), kE1PresetJson) == 0, "oc_e1_preset() is not kE1PresetJson");
+    t.expect(oc_init(1201, 1920, 1080, 240.0, 300, kE1PresetJson) == 1, "oc_init refused the preset: %s", oc_last_error());
+    oc_step(500);
+    t.expect(ofp::countNonFinite(*g_world) == 0 && g_world->flowE1() && g_world->waveClockStarted(), "preset world");
+    t.note("kE1PresetJson = %s", kE1PresetJson);
+}
+#endif
+
 #ifndef OCEAN_TESTS_NO_SHIM
 // ocean_tests --accepts SEED STEPS [ocean_parity_driver args]: would the page
 // accept this harness case? oc_init with the case's world and cfg JSON, then
@@ -801,6 +1550,24 @@ int main(int argc, char** argv) {
     ot::testDrawsBirth();
     ot::testDrawsPredators();
     ot::testDrawsFood();
+    // E1 physics
+    ot::testDivergence();
+    ot::testE1Buoyancy();
+    ot::testDrift();
+    ot::testCosts();
+    ot::testFight();
+    ot::testMouth();
+    ot::testE1Neutral();
+    ot::testE1Bounds();
+    ot::testDrawsE1();
+    ot::testLight();
+#ifndef OCEAN_TESTS_NO_SHIM
+    ot::testRanges();
+#endif
+    ot::testE1Hash();
+#ifndef OCEAN_TESTS_NO_SHIM
+    ot::testPreset();
+#endif
     std::printf("OCEAN TESTS: %d passed, %d failed\n", ot::g_passed, ot::g_failed);
     return ot::g_failed ? 1 : 0;
 }

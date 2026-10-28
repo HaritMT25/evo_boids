@@ -15,9 +15,13 @@
 //     >= 0, or, toroidal, not < min(width, height) / 2 (the wrapped grid
 //     query's bound; OceanWorld::radiusError).
 //   * oc_set_param: the Ocean keys kBuoy, pitchMax, vDrag, wallBand,
-//     buoyMutation, cHold, cPress, foodDepthSpread, plus every key
-//     evo_set_param accepts. pitchMax must be > 0. The changed config must
-//     pass oc_init's checks as stored (after the float / int conversion).
+//     buoyMutation, cHold, cPress, foodDepthSpread, the E1 keys (waveSpeed,
+//     waveBand, waveGravity, L0, kWater, kMouth, and the on/off keys
+//     deepCurrent, lightEnabled, depthCostScaled, sizeDrift, sizeFight,
+//     mouthGate as 0 / 1), plus every key evo_set_param accepts. pitchMax
+//     must be > 0. The changed config must pass oc_init's checks as stored
+//     (after the float / int conversion), including every Ocean knob's range
+//     (ocean_config.hpp oceanConfigError).
 //   * With no cfgJson the world is the tuned preview (applyOceanDefaults +
 //     OceanConfig defaults, src/ocean/ocean_config.hpp).
 //
@@ -28,6 +32,10 @@
 //     pitchMax). The fish swims horizontally at `speed` along its unit (x, y)
 //     heading and vertically at vz·speed, so its pitch is atan(vz) (+ = nose
 //     down). The current's horizontal drift is not included.
+//   * E1: int oc_light_enabled(), double oc_light_l0(), double
+//     oc_light_kwater() — the light field L(d) = L0·exp(−kWater·d) the page
+//     shades depth with when enabled; const char* oc_e1_preset() — the E1
+//     preset cfg JSON (the page merges it under ?cfg= for ?e1=1).
 //
 // Compiled with Emscripten into web/evo_ocean.{js,wasm} by wasm/build_ocean.sh
 // (-DEVO_WORLD_OCEAN, single-threaded). The page (web/ocean.js) drives it:
@@ -177,9 +185,11 @@ bool configOk(const SimConfig& cfg, const OceanConfig& oc, int width, int height
     // Radii: finite, >= 0, and in a toroidal world < min(width, height) / 2.
     g_error = OceanWorld::radiusError(cfg, width, height);
     if (!g_error.empty()) return false;
-    if (!oceanConfigValid(oc)) {
-        g_error = "ocean config: kBuoy, vDrag, wallBand, cHold, cPress must be finite; "
-                  "buoyMutation, vDrag, wallBand, foodDepthSpread >= 0; pitchMax > 0";
+    // Every Ocean knob has a finite range (ocean_config.hpp oceanConfigError):
+    // no accepted config can make the state non-finite.
+    const std::string oerr = oceanConfigError(oc);
+    if (!oerr.empty()) {
+        g_error = "ocean config: " + oerr;
         return false;
     }
     return true;
@@ -315,6 +325,12 @@ EVO_EXPORT int oc_stats_len()                  { return kStatsLen; }
 EVO_EXPORT int oc_width()                      { return g_world ? g_world->width : 0; }
 EVO_EXPORT int oc_height()                     { return g_world ? g_world->height : 0; }
 EVO_EXPORT double oc_depth_max()               { return g_world ? (double)g_world->D : 0.0; }
+// E1 light (display only): on/off, L0 and kWater of L(d) = L0·exp(−kWater·d).
+EVO_EXPORT int oc_light_enabled()              { return (g_world && g_world->ocfg.lightEnabled) ? 1 : 0; }
+EVO_EXPORT double oc_light_l0()                { return g_world ? (double)g_world->ocfg.L0 : 0.0; }
+EVO_EXPORT double oc_light_kwater()            { return g_world ? (double)g_world->ocfg.kWater : 0.0; }
+// The E1 preset's cfg JSON (ocean_config.hpp kE1PresetJson): the page's ?e1=1.
+EVO_EXPORT const char* oc_e1_preset()          { return kE1PresetJson; }
 
 // Change one parameter of the running world: the Ocean knobs listed at the
 // top, or any key evo_set_param accepts (read fresh every step). Values must
@@ -328,6 +344,12 @@ EVO_EXPORT int oc_set_param(const char* name, double value) {
     static const char* const kOcean[] = {
         "kBuoy", "pitchMax", "vDrag", "wallBand", "buoyMutation", "cHold", "cPress",
         "foodDepthSpread",
+        // E1 (bool keys take 0 / 1)
+        "waveSpeed", "waveBand", "waveGravity", "deepCurrent", "lightEnabled", "L0", "kWater",
+        "depthCostScaled", "sizeDrift", "sizeFight", "mouthGate", "kMouth",
+    };
+    static const char* const kOceanBool[] = {
+        "deepCurrent", "lightEnabled", "depthCostScaled", "sizeDrift", "sizeFight", "mouthGate",
     };
     static const char* const kLive[] = {
         "maxPopulation", "minPopulation", "targetFood", "foodSpawnBase", "foodSpawnAmp",
@@ -359,6 +381,11 @@ EVO_EXPORT int oc_set_param(const char* name, double value) {
         g_error = "pitchMax must be > 0";
         return 0;
     }
+    for (const char* k : kOceanBool)
+        if (std::strcmp(name, k) == 0 && value != 0.0 && value != 1.0) {
+            g_error = std::string(name) + " is on / off: 0 or 1";
+            return 0;
+        }
     char num[40];
     std::snprintf(num, sizeof num, "%.9g", value);
     const std::string json = std::string("{\"") + name + "\":" + num + "}";

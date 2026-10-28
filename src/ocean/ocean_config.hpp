@@ -11,7 +11,21 @@
 // the food stock grows; the spawn rate is unchanged). The shim and the probe
 // both call it before reading any JSON, so the page gets the tuned world
 // without passing anything.
+//
+// E1 physics (PLAN_ecosystem §4, §5.1-5.2; the reviewed E1 design): waves,
+// depth-weighted deep currents, the light field (display only), depth costs
+// as multiples of metabolism, and the size laws (drift, fights, mouth). Every
+// E1 knob defaults OFF, and with all of them off the world is bit-identical to
+// the preview's (oceanE1AtDefaults; the harness's OFF-identity cases).
+//
+// Every knob has a finite RANGE (oceanConfigError): no accepted config can
+// make the state non-finite. The ranges are wide — every harness case and
+// unit-test world is inside them — but bounded, e.g. kBuoy = -1e37 used to be
+// accepted and overflowed vz to inf - inf = NaN within 50 steps.
 // ----------------------------------------------------------------------------
+#include <cmath>
+#include <cstdio>
+#include <cstring>
 #include <string>
 #include "../core/config.hpp"
 #include "../core/json_min.hpp"
@@ -27,8 +41,14 @@ struct OceanConfig {
     float pitchMax     = 0.5f;    // |vz| ceiling (vz is a pitch: depth rate = vz·speed)
     float vDrag        = 2.0f;    // vertical drag, 1/s
     float wallBand     = 12.0f;   // soft push within this distance of surface / floor
-    float cHold        = 0.0f;    // energy/s per unit |depth − bodyBuoy·D| / D
-    float cPress       = 0.0f;    // energy/s per unit depth / D (pressure)
+    // Depth costs, after kernel::stepMetabolism, evaluated only when one is != 0.
+    // H = |depth − bodyBuoy·D| / D (off neutral), P = depth / D (pressure).
+    //   depthCostScaled false (the preview's): energy/s per unit H / P
+    //   depthCostScaled true  (E1): dimensionless multiples of the fish's own
+    //     metabolism M = metabolicRate·massFactor (bodySize):
+    //     foodReserves −= dt·M·(cHold·H + cPress·P)
+    float cHold        = 0.0f;
+    float cPress       = 0.0f;
     // Where food appears in depth:
     //   0 = uniform over [0, D]
     //   1 = per patch: every food patch (SimConfig::foodPatches > 0) gets its own
@@ -36,13 +56,67 @@ struct OceanConfig {
     //       there are no patches)
     int   foodDepthMode   = 0;
     float foodDepthSpread = 30.0f;
+
+    // ---- E1 physics: every knob below defaults OFF -------------------------
+    // Waves: three fixed deep-water trains, modes (6,0) (2,3) (4,−2) over the
+    // world, amplitude fractions .5/.3/.2 of waveSpeed, phases 0/1/2 rad, ω =
+    // sqrt(waveGravity·k); tapered to zero normal flow at surface and floor
+    // over b = min(waveBand, D/4). No randomness.
+    float waveSpeed   = 0.0f;     // orbital speed scale, units/s (0 = no waves)
+    float waveBand    = 32.0f;    // taper band (units)
+    float waveGravity = 20.0f;    // dispersion constant (ω² = g·k)
+    // The current (SimConfig current*) as a deep current: horizontal flow ×
+    // f(d) = smoothstep(2d/D): still at the surface, full from mid-depth down.
+    bool  deepCurrent = false;
+    // Light (display only in E1: the page's depth shading). L(d) = L0·exp(−kWater·d).
+    bool  lightEnabled = false;
+    float L0          = 1.0f;
+    float kWater      = 0.006f;   // 1/unit
+    bool  depthCostScaled = false;  // see cHold / cPress
+    // Size laws (L = bodySize): the flow moves a fish by min(1, 1/L) of itself;
+    // fight strength × L²; a fish eats food only if food.size <= kMouth·L.
+    bool  sizeDrift   = false;
+    bool  sizeFight   = false;
+    bool  mouthGate   = false;
+    float kMouth      = 2.0f;
 };
+
+// True when every E1 knob holds its default (OFF) value, bit for bit. The
+// fingerprint hashes the E1 knobs only when this is false, so a preview config
+// hashes exactly as it did before E1.
+inline bool oceanE1AtDefaults(const OceanConfig& c) {
+    const OceanConfig d;
+    auto same = [](float a, float b) { return std::memcmp(&a, &b, sizeof a) == 0; };
+    return same(c.waveSpeed, d.waveSpeed) && same(c.waveBand, d.waveBand) &&
+           same(c.waveGravity, d.waveGravity) && c.deepCurrent == d.deepCurrent &&
+           c.lightEnabled == d.lightEnabled && same(c.L0, d.L0) && same(c.kWater, d.kWater) &&
+           c.depthCostScaled == d.depthCostScaled && c.sizeDrift == d.sizeDrift &&
+           c.sizeFight == d.sizeFight && c.mouthGate == d.mouthGate && same(c.kMouth, d.kMouth);
+}
+
+namespace ocean_cfg_detail {
+// A bool key: true / false, or the numbers 0 / 1 (oc_set_param's "%.9g" text).
+// Anything else under the key is an error. Absent = unchanged.
+inline bool readBool(const jsonm::Value& o, const char* k, bool& out, std::string* err) {
+    const jsonm::Value* v = o.find(k);
+    if (!v) return true;
+    if (v->type == jsonm::Value::Type::Bool) { out = v->b; return true; }
+    if (v->type == jsonm::Value::Type::Number && (v->num == 0.0 || v->num == 1.0)) {
+        out = (v->num == 1.0);
+        return true;
+    }
+    if (err) *err = std::string(k) + " must be true / false (or 0 / 1)";
+    return false;
+}
+}  // namespace ocean_cfg_detail
 
 // Every key defaults to the value already in `c` (the checkpoint reader's rule).
 // `o` is the flat config object itself, not a {"config": ...} wrapper. "depth"
-// is not read: oc_init's argument sets it.
-inline void readOceanConfig(const jsonm::Value& o, OceanConfig& c) {
-    if (!o.isObject()) return;
+// is not read: oc_init's argument sets it. Returns false (err set) when a bool
+// key holds something other than true / false / 0 / 1; ranges are
+// oceanConfigError's.
+inline bool readOceanConfig(const jsonm::Value& o, OceanConfig& c, std::string* err = nullptr) {
+    if (!o.isObject()) return true;
     c.kBuoy           = o.floatOr("kBuoy", c.kBuoy);
     c.buoyMutation    = o.floatOr("buoyMutation", c.buoyMutation);
     c.pitchMax        = o.floatOr("pitchMax", c.pitchMax);
@@ -50,8 +124,25 @@ inline void readOceanConfig(const jsonm::Value& o, OceanConfig& c) {
     c.wallBand        = o.floatOr("wallBand", c.wallBand);
     c.cHold           = o.floatOr("cHold", c.cHold);
     c.cPress          = o.floatOr("cPress", c.cPress);
-    c.foodDepthMode   = o.intOr("foodDepthMode", c.foodDepthMode);
+    // Only 0 and 1 are modes; any other number is kept as -1, which the
+    // validator refuses (an (int) cast of 1e300 would be undefined).
+    if (const jsonm::Value* v = o.find("foodDepthMode"); v && v->type == jsonm::Value::Type::Number)
+        c.foodDepthMode = (v->num == 0.0) ? 0 : (v->num == 1.0) ? 1 : -1;
     c.foodDepthSpread = o.floatOr("foodDepthSpread", c.foodDepthSpread);
+    // E1
+    c.waveSpeed   = o.floatOr("waveSpeed", c.waveSpeed);
+    c.waveBand    = o.floatOr("waveBand", c.waveBand);
+    c.waveGravity = o.floatOr("waveGravity", c.waveGravity);
+    c.L0          = o.floatOr("L0", c.L0);
+    c.kWater      = o.floatOr("kWater", c.kWater);
+    c.kMouth      = o.floatOr("kMouth", c.kMouth);
+    using ocean_cfg_detail::readBool;
+    return readBool(o, "deepCurrent", c.deepCurrent, err) &&
+           readBool(o, "lightEnabled", c.lightEnabled, err) &&
+           readBool(o, "depthCostScaled", c.depthCostScaled, err) &&
+           readBool(o, "sizeDrift", c.sizeDrift, err) &&
+           readBool(o, "sizeFight", c.sizeFight, err) &&
+           readBool(o, "mouthGate", c.mouthGate, err);
 }
 
 // The preview's SimConfig starting point (tuned with tools/ocean_probe.cpp).
@@ -62,24 +153,61 @@ inline void applyOceanDefaults(SimConfig& c) {
     c.targetFood       = 2400;
 }
 
+// The E1 preset (tools/ocean_probe.cpp tuning, see the E1 report): waves, deep
+// currents, light and depth costs on top of the preview defaults. A flat cfg
+// JSON like any other; the page applies it with ?e1=1 (oc_e1_preset), the
+// probe with --e1, and wasm/ocean_parity.sh runs it as a case (its copy is
+// checked against this text).
+inline constexpr const char* kE1PresetJson =
+    R"({"waveSpeed":6,"deepCurrent":true,"currentStrength":5,"foodDrift":true,"lightEnabled":true,"depthCostScaled":true,"cHold":0.05,"cPress":0.03})";
+
 // A flat cfg JSON object (null / empty = nothing to change) into both configs:
 // SimConfig keys through the checkpoint reader, Ocean keys through
-// readOceanConfig. Returns false with `err` set on malformed JSON.
+// readOceanConfig. Returns false with `err` set on malformed JSON or a bool
+// key that is not a bool.
 inline bool readOceanJson(const char* json, SimConfig& sc, OceanConfig& oc, std::string& err) {
     if (!json || !json[0]) return true;
     const std::string wrapped = std::string("{\"config\":") + json + "}";
     jsonm::Value root;
     if (!jsonm::Parser::parse(wrapped, root, err)) { err = "config parse error: " + err; return false; }
     checkpoint::readConfig(root, sc);
-    if (const jsonm::Value* o = root.find("config")) readOceanConfig(*o, oc);
+    if (const jsonm::Value* o = root.find("config"))
+        if (!readOceanConfig(*o, oc, &err)) return false;
     return true;
 }
 
-// True when every knob is usable (finite, and >= 0 where a sign makes no sense).
-inline bool oceanConfigValid(const OceanConfig& c) {
-    auto fin = [](float v) { return v == v && v - v == 0.0f; };  // finite, NaN-safe
-    return fin(c.depth) && c.depth > 0.0f && fin(c.kBuoy) && fin(c.buoyMutation) &&
-           c.buoyMutation >= 0.0f && fin(c.pitchMax) && c.pitchMax > 0.0f &&
-           fin(c.vDrag) && c.vDrag >= 0.0f && fin(c.wallBand) && c.wallBand >= 0.0f &&
-           fin(c.cHold) && fin(c.cPress) && fin(c.foodDepthSpread) && c.foodDepthSpread >= 0.0f;
+// "" when every knob is inside its range, else which one is not and why. The
+// ranges keep every product the step forms finite: e.g. kBuoy·(bodyBuoy·D −
+// depth) ≤ 1e3·D, vz·vDrag·dt ≤ (pitchMax + 16)·1e4·dt before the clamp, the
+// wave flow ≤ waveSpeed·(1 + 1.5/(b·k)) with b ≥ 1.
+inline std::string oceanConfigError(const OceanConfig& c) {
+    const struct { const char* name; float v, lo, hi; } r[] = {
+        {"depth", c.depth, 10.0f, 100000.0f},
+        {"kBuoy", c.kBuoy, -1000.0f, 1000.0f},
+        {"buoyMutation", c.buoyMutation, 0.0f, 1.0f},
+        {"pitchMax", c.pitchMax, 0.001f, 100.0f},
+        {"vDrag", c.vDrag, 0.0f, 10000.0f},
+        {"wallBand", c.wallBand, 0.0f, 100000.0f},
+        {"cHold", c.cHold, 0.0f, 100.0f},
+        {"cPress", c.cPress, 0.0f, 100.0f},
+        {"foodDepthSpread", c.foodDepthSpread, 0.0f, 1000000.0f},
+        {"waveSpeed", c.waveSpeed, 0.0f, 100.0f},
+        {"waveBand", c.waveBand, 1.0f, 100000.0f},
+        {"waveGravity", c.waveGravity, 0.01f, 10000.0f},
+        {"L0", c.L0, 0.0f, 100.0f},
+        {"kWater", c.kWater, 0.0f, 1.0f},
+        {"kMouth", c.kMouth, 0.01f, 100.0f},
+    };
+    for (const auto& e : r)
+        if (!(e.v >= e.lo && e.v <= e.hi)) {   // NaN fails both
+            char buf[160];
+            std::snprintf(buf, sizeof buf, "%s must be in [%g, %g] (got %g)", e.name, (double)e.lo,
+                          (double)e.hi, (double)e.v);
+            return buf;
+        }
+    if (c.foodDepthMode != 0 && c.foodDepthMode != 1) return "foodDepthMode must be 0 or 1";
+    return "";
 }
+
+// True when every knob is usable (oceanConfigError is empty).
+inline bool oceanConfigValid(const OceanConfig& c) { return oceanConfigError(c).empty(); }

@@ -25,6 +25,11 @@
 //         are private; the samples pin them and the frame's centres)
 //   rng   the global engine's full state text (624 words + position)
 //
+// E1 additions are hashed only when they are off their defaults (the E1 knobs
+// in cfg, the wave clock in ctr, a food size != 1 in food, the 3-D flow
+// sampled at three depths in cur while flowE1()), so every preview world
+// hashes exactly as it did before E1.
+//
 // Not hashed: the world's private scratch (spatial grids, hot_ / pending_
 // arrays — rebuilt from the hashed state every step) and the food-patch
 // centres (private, fixed after init; every food spawn depends on them, so a
@@ -83,6 +88,14 @@ inline void hashConfig(Fnv& h, const SimConfig& c, const OceanConfig& o) {
     h.f32(o.depth); h.f32(o.kBuoy); h.f32(o.buoyMutation); h.f32(o.pitchMax); h.f32(o.vDrag);
     h.f32(o.wallBand); h.f32(o.cHold); h.f32(o.cPress); h.i32(o.foodDepthMode);
     h.f32(o.foodDepthSpread);
+    // E1 knobs: only when one is off its default, so a preview config hashes
+    // exactly as before E1 (the OFF-identity cases compare against those prints).
+    if (!oceanE1AtDefaults(o)) {
+        h.byte(0xE1);
+        h.f32(o.waveSpeed); h.f32(o.waveBand); h.f32(o.waveGravity); h.b(o.deepCurrent);
+        h.b(o.lightEnabled); h.f32(o.L0); h.f32(o.kWater); h.b(o.depthCostScaled);
+        h.b(o.sizeDrift); h.b(o.sizeFight); h.b(o.mouthGate); h.f32(o.kMouth);
+    }
 }
 
 inline void hashCounters(Fnv& h, const OceanWorld& w) {
@@ -108,6 +121,28 @@ inline void hashCounters(Fnv& h, const OceanWorld& w) {
         h.i64(r.index); h.u64(r.parent1); h.u64(r.parent2); h.u64(r.lineage1); h.u64(r.lineage2);
         h.u64(r.frame);
     }
+    // E1 wave clock (each train's travelled phase): only once it has run.
+    if (w.waveClockStarted()) {
+        h.byte(0xE1);
+        for (int i = 0; i < OceanWorld::kWaveTrains; ++i) h.f64(w.wavePhase(i));
+    }
+}
+
+// E1: food size enters the hash only when it is not the default 1.
+inline void hashFood(Fnv& h, const OceanFood& f) {
+    h.v2(f.pos); h.f32(f.depth); h.b(f.alive);
+    if (bits(f.size) != bits(1.0f)) { h.byte(0x5A); h.f32(f.size); }
+}
+
+// The E1 flow sampled on the current's lattice at three depths (only while
+// flowE1(): its trains are fixed by the world size, its clock is in ctr).
+template <class F>
+inline void forFlowSamples(const OceanWorld& w, F&& f) {
+    for (float frac : {0.1f, 0.5f, 0.9f})
+        for (int j = 0; j < 5; ++j)
+            for (int i = 0; i < 8; ++i)
+                f(Vec2{((float)i + 0.5f) * (float)w.width / 8.0f, ((float)j + 0.5f) * (float)w.height / 5.0f},
+                  frac * w.D);
 }
 
 // withActivations = false leaves lastSensors / lastActions out (the dynamics
@@ -159,7 +194,7 @@ inline Fingerprint fingerprint(const OceanWorld& w, bool withActivations = true)
       for (const Fish& c : w.creatures) hashFish(h, c, withActivations);
       fp.fish = h.h; }
     { Fnv h; h.u64(w.food.size());
-      for (const OceanFood& f : w.food) { h.v2(f.pos); h.f32(f.depth); h.b(f.alive); }
+      for (const OceanFood& f : w.food) hashFood(h, f);
       fp.food = h.h; }
     { Fnv h; h.u64(w.predators.size());
       for (const OceanPredator& p : w.predators) hashPredator(h, p);
@@ -169,6 +204,13 @@ inline Fingerprint fingerprint(const OceanWorld& w, bool withActivations = true)
       fp.sig = h.h; }
     { Fnv h; h.b(w.currentActive());
       if (w.currentActive()) forCurrentLattice(w, [&](Vec2 p) { h.v2(w.currentAt(p)); });
+      if (w.flowE1()) {
+          h.byte(0xE1);
+          forFlowSamples(w, [&](Vec2 p, float d) {
+              const OceanWorld::Flow U = w.flowAt(p, d);
+              h.f32(U.x); h.f32(U.y); h.f32(U.d);
+          });
+      }
       fp.cur = h.h; }
     { Fnv h; h.str(rng.state()); fp.rng = h.h; }
     Fnv a;
@@ -194,7 +236,8 @@ inline long countNonFinite(const OceanWorld& w) {
         for (float s : c.lastSensors) chk(s);
         for (float a : c.lastActions) chk(a);
     }
-    for (const OceanFood& f : w.food) { chk(f.pos.x); chk(f.pos.y); chk(f.depth); }
+    for (const OceanFood& f : w.food) { chk(f.pos.x); chk(f.pos.y); chk(f.depth); chk(f.size); }
+    for (int i = 0; i < OceanWorld::kWaveTrains; ++i) n += !std::isfinite(w.wavePhase(i));
     for (const OceanPredator& p : w.predators)
         for (float v : {p.pos.x, p.pos.y, p.vel.x, p.vel.y, p.digestTimer, p.energy, p.age, p.speedFactor,
                         p.buddingFactor, p.depth, p.pitch})
@@ -244,6 +287,13 @@ inline void dumpState(const OceanWorld& w, std::FILE* out) {
     d.fl("pitchMax", w.ocfg.pitchMax); d.fl("vDrag", w.ocfg.vDrag); d.fl("wallBand", w.ocfg.wallBand);
     d.fl("cHold", w.ocfg.cHold); d.fl("cPress", w.ocfg.cPress); d.ll("foodDepthMode", w.ocfg.foodDepthMode);
     d.fl("foodDepthSpread", w.ocfg.foodDepthSpread);
+    std::fprintf(out, "\ne1");
+    d.fl("waveSpeed", w.ocfg.waveSpeed); d.fl("waveBand", w.ocfg.waveBand); d.fl("waveGravity", w.ocfg.waveGravity);
+    d.ll("deepCurrent", w.ocfg.deepCurrent); d.ll("lightEnabled", w.ocfg.lightEnabled);
+    d.fl("L0", w.ocfg.L0); d.fl("kWater", w.ocfg.kWater); d.ll("depthCostScaled", w.ocfg.depthCostScaled);
+    d.ll("sizeDrift", w.ocfg.sizeDrift); d.ll("sizeFight", w.ocfg.sizeFight); d.ll("mouthGate", w.ocfg.mouthGate);
+    d.fl("kMouth", w.ocfg.kMouth);
+    for (int i = 0; i < OceanWorld::kWaveTrains; ++i) std::fprintf(out, " phase%d=%.17g", i, w.wavePhase(i));
     std::fprintf(out, "\ncounters");
     d.ll("births", w.births); d.ll("deaths", w.deaths); d.ll("totalBirths", w.totalBirths);
     d.ll("totalDeaths", w.totalDeaths); d.ll("grace", w.totalGraceBirths); d.ll("soft", w.totalSoftBirths);
@@ -283,7 +333,7 @@ inline void dumpState(const OceanWorld& w, std::FILE* out) {
     for (std::size_t i = 0; i < w.food.size(); ++i) {
         const OceanFood& f = w.food[i];
         std::fprintf(out, "food %zu", i);
-        d.v2("pos", f.pos); d.fl("depth", f.depth); d.ll("alive", f.alive);
+        d.v2("pos", f.pos); d.fl("depth", f.depth); d.ll("alive", f.alive); d.fl("size", f.size);
         std::fprintf(out, "\n");
     }
     for (std::size_t i = 0; i < w.predators.size(); ++i) {
@@ -335,7 +385,8 @@ inline bool buildConfigs(const char* cfgJson, float depth, SimConfig& sc, OceanC
     if (!readOceanJson(cfgJson, sc, oc, err)) return false;
     clampConfigLikeShim(sc);
     oc.depth = depth;
-    if (!oceanConfigValid(oc)) { err = "invalid ocean config"; return false; }
+    err = oceanConfigError(oc);
+    if (!err.empty()) { err = "invalid ocean config: " + err; return false; }
     return true;
 }
 

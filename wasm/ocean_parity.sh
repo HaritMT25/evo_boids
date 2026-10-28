@@ -12,6 +12,12 @@
 # A case also FAILS if its state ever holds a non-finite float, even when both
 # builds agree on it: wasm leaves a NaN's bits to the host CPU.
 #
+# E1 physics: the cases before the e1_* block run with every E1 knob at its
+# default (OFF) and must keep their pre-E1 fingerprints; the e1_* cases turn
+# the features on. The r_* list holds configs outside the Ocean knobs' ranges:
+# each must be REFUSED by oc_init / oc_set_param. The harness's copy of the E1
+# preset is checked against kE1PresetJson (src/ocean/ocean_config.hpp).
+#
 # Direct compiler calls only: CMakeLists.txt / CMakePresets.json (Classic's
 # build) are untouched. Prereq: em++ on PATH, or ~/emsdk/emsdk_env.sh.
 #
@@ -96,6 +102,56 @@ add big_s42       '42 2000 --pop 1500'        "1500 founders, defaults"
 add big_toro_s9   '9 2000 --pop 1500 --w 2560 --h 1440 --cfg {"toroidal":true,"predatorCount":8,"predatorEconomy":true,"maxNeighbors":7,"currentStrength":60,"foodPatches":6,"foodDrift":true,"foodDepthMode":1}' \
                   "1500 founders, 2560x1440, toroidal, economy, topological, currents"
 add long_s42      '42 10000 --every 250'      "10k steps, defaults"
+# ---- E1 physics, features ON (the cases above are the OFF identity: every E1
+# knob at its default, fingerprints unchanged from before E1) ----
+# E1_PRESET must equal kE1PresetJson in src/ocean/ocean_config.hpp (checked below).
+E1_PRESET='{"waveSpeed":6,"deepCurrent":true,"currentStrength":5,"foodDrift":true,"lightEnabled":true,"depthCostScaled":true,"cHold":0.05,"cPress":0.03}'
+add e1_waves_s3   '3 3000 --cfg {"waveSpeed":8,"foodDrift":true,"predatorCount":3}' \
+                  "E1 waves alone: three trains move food, fish, predators in 3-D"
+add e1_deep_s5    '5 3000 --cfg {"deepCurrent":true,"currentStrength":60,"foodDrift":true,"foodPatches":4,"foodDepthMode":1,"predatorCount":4,"predatorEconomy":true,"predatorMinPopulation":2}' \
+                  "E1 deep current (eddies x f(d)), patch depths, economy"
+add e1_gyre_s13   '13 3000 --cfg {"deepCurrent":true,"waveSpeed":5,"currentStrength":40,"currentMode":1,"toroidal":true,"foodDrift":true,"maxNeighbors":7}' \
+                  "E1 deep double gyre + waves, toroidal, topological"
+add e1_costs_s8   '8 3000 --cfg {"depthCostScaled":true,"cHold":0.3,"cPress":0.2,"bodyModel":true,"waveSpeed":4}' \
+                  "E1 depth costs x metabolicRate·massFactor, body model"
+add e1_size_s9    '9 3000 --cfg {"bodyModel":true,"sizeDrift":true,"sizeFight":true,"mouthGate":true,"kMouth":1.2,"waveSpeed":6,"deepCurrent":true,"currentStrength":30,"foodDrift":true}' \
+                  "E1 size laws: drift min(1,1/L), fights x L², mouth gate (L < .83 starve-gated)"
+add e1_preset_s42 "42 3000 --cfg $E1_PRESET"  "E1 preset (kE1PresetJson, the page's ?e1=1)"
+add e1_preset_long "7 10000 --every 250 --cfg $E1_PRESET" "E1 preset, 10k steps"
+add e1_live_s21   '21 3000 --cfg {"currentStrength":40,"foodDrift":true,"predatorCount":2} --set waveSpeed=6@500 --set deepCurrent=1@800 --set sizeDrift=1@1200 --set depthCostScaled=1@1500 --set cHold=0.05@1500 --set waveGravity=40@2000 --set waveSpeed=0@2500 --set mouthGate=1@2600 --set kMouth=0.6@2600' \
+                  "E1 knobs switched live (oc_set_param), waves stopped again (clock kept)"
+add e1_capture_s17 '17 3000 --capture --cfg {"waveSpeed":6,"deepCurrent":true,"currentStrength":40,"foodDrift":true}' \
+                  "E1: sensors (CURRENT_FWD/LR read the 3-D flow) hashed every 100 steps"
+add e1_x_shallow_s4 '4 3000 --depth 10 --cfg {"waveSpeed":100,"waveBand":1,"waveGravity":10000,"deepCurrent":true,"currentStrength":80,"foodDrift":true,"predatorCount":3}' \
+                  "E1 extreme: D 10, waves at every range end (speed 100, band 1, g 10^4)"
+add e1_x_big_s9   '9 2000 --pop 1500 --w 2560 --h 1440 --cfg {"waveSpeed":12,"waveBand":8,"deepCurrent":true,"currentStrength":60,"toroidal":true,"foodDrift":true,"bodyModel":true,"sizeDrift":true,"sizeFight":true,"mouthGate":true,"predatorCount":6,"predatorEconomy":true,"depthCostScaled":true,"cHold":0.1,"cPress":0.1}' \
+                  "E1 everything on, 1500 founders, 2560x1440, toroidal"
+
+# Configs the page must REFUSE (oc_init / oc_set_param; ocean_tests --accepts
+# must exit 1): every Ocean knob has a finite range, so none of these can run.
+RNAMES=(); RARGS=()
+radd () { RNAMES+=("$1"); RARGS+=("$2"); }
+radd r_kbuoy_hole   '1 10 --cfg {"kBuoy":-1e37}'
+radd r_kbuoy_big    '1 10 --cfg {"kBuoy":1001}'
+radd r_vdrag        '1 10 --cfg {"vDrag":1e30}'
+radd r_pitch_tiny   '1 10 --cfg {"pitchMax":1e-9}'
+radd r_wallband     '1 10 --cfg {"wallBand":1e9}'
+radd r_buoymut      '1 10 --cfg {"buoyMutation":1.5}'
+radd r_chold_neg    '1 10 --cfg {"cHold":-0.5}'
+radd r_spread       '1 10 --cfg {"foodDepthSpread":1e30}'
+radd r_mode         '1 10 --cfg {"foodDepthMode":2}'
+radd r_wave_speed   '1 10 --cfg {"waveSpeed":1e6}'
+radd r_wave_band    '1 10 --cfg {"waveSpeed":6,"waveBand":0}'
+radd r_wave_g       '1 10 --cfg {"waveGravity":0}'
+radd r_kwater       '1 10 --cfg {"kWater":-0.1}'
+radd r_l0           '1 10 --cfg {"L0":1e39}'
+radd r_kmouth       '1 10 --cfg {"kMouth":0}'
+radd r_bool         '1 10 --cfg {"deepCurrent":2}'
+radd r_depth        '1 10 --depth 1e6'
+radd r_live_kbuoy   '1 10 --set kBuoy=1e37@5'
+radd r_live_wave    '1 10 --set waveSpeed=500@5'
+radd r_live_bool    '1 10 --set mouthGate=0.5@5'
+radd r_live_band    '1 10 --set waveBand=0.5@5'
 
 run_one () {  # run_one INDEX: native and wasm side by side
     local i=$1 name=${NAMES[$1]}
@@ -121,6 +177,30 @@ if [ -z "${NO_TESTS:-}" ]; then
     done
     echo "== shim validation (oc_init + oc_set_param): $(( ${#SEL[@]} - ${#REFUSED[@]} )) of ${#SEL[@]} case configs accepted"
 fi
+# The configs that must be refused, and the preset's copy above vs the source.
+GUARD_FAILED=0
+if [ -z "${NO_TESTS:-}" ] && [ -z "${ONLY:-}" ]; then
+    nref=0; bad=""
+    for i in "${!RNAMES[@]}"; do
+        read -r -a A <<< "${RARGS[$i]}"
+        if "$OUT/ocean_tests_native" --accepts "${A[@]}" > "$OUT/${RNAMES[$i]}.refusal.txt" 2>&1; then
+            bad="$bad ${RNAMES[$i]}"
+        else
+            nref=$((nref + 1))
+        fi
+    done
+    if [ -z "$bad" ]; then
+        echo "== out-of-range configs: $nref of ${#RNAMES[@]} refused by oc_init / oc_set_param (as they must be)"
+    else
+        echo "== out-of-range configs ACCEPTED (must be refused):$bad"; GUARD_FAILED=1
+    fi
+fi
+SRC_PRESET=$(sed -n 's/^ *R"(\(.*\))";$/\1/p' src/ocean/ocean_config.hpp | head -1)
+if [ "$SRC_PRESET" = "$E1_PRESET" ]; then
+    echo "== E1 preset: the harness's copy == kE1PresetJson"
+else
+    echo "== E1 preset DRIFT: harness '$E1_PRESET' vs ocean_config.hpp '$SRC_PRESET'"; GUARD_FAILED=1
+fi
 echo "== running ${#SEL[@]} case(s), $JOBS at a time (native and wasm side by side) in $OUT"
 for i in "${SEL[@]}"; do
     while [ "$(jobs -rp | wc -l)" -ge "$JOBS" ]; do wait -n; done
@@ -141,7 +221,7 @@ first_diff () {
 secs_of () { sed -n 's/^# [0-9]* steps, \([0-9.]*\) s.*/\1/p' "$1" 2>/dev/null; }
 
 FAILED=0
-printf '\n%-14s %6s %6s %5s %6s %5s %4s %7s %7s  %s\n' CASE SEED STEPS POP BIRTHS FOOD PRED NATIVE WASM RESULT
+printf '\n%-16s %6s %6s %5s %6s %5s %4s %7s %7s  %s\n' CASE SEED STEPS POP BIRTHS FOOD PRED NATIVE WASM RESULT
 for i in "${SEL[@]}"; do
     name=${NAMES[$i]}
     read -r -a A <<< "${ARGS[$i]}"
@@ -169,7 +249,7 @@ for i in "${SEL[@]}"; do
     else
         res="FAIL  $(first_diff "$n" "$w")"; FAILED=1
     fi
-    printf '%-14s %6s %6s %5s %6s %5s %4s %6ss %6ss  %s\n' "$name" "${A[0]}" "${A[1]}" "$(get pop)" "$(get births)" \
+    printf '%-16s %6s %6s %5s %6s %5s %4s %6ss %6ss  %s\n' "$name" "${A[0]}" "${A[1]}" "$(get pop)" "$(get births)" \
         "$(get food)" "$(get pred)" "$(secs_of "$OUT/$name.native.log")" "$(secs_of "$OUT/$name.wasm.log")" "$res"
 done
 
@@ -204,9 +284,10 @@ fi
 
 echo
 echo "== $(( $(date +%s) - T0 )) s total"
-if [ "$FAILED" = 1 ] || [ "$TESTS_OK" = 0 ]; then
+if [ "$FAILED" = 1 ] || [ "$TESTS_OK" = 0 ] || [ "$GUARD_FAILED" = 1 ]; then
     [ "$FAILED" = 1 ] && echo "== OCEAN PARITY FAILED: bisect with --trace, then --dump-step/--dump on both builds"
     [ "$TESTS_OK" = 0 ] && echo "== OCEAN UNIT CHECKS FAILED"
+    [ "$GUARD_FAILED" = 1 ] && echo "== OCEAN CONFIG GUARDS FAILED (a bad config accepted, or the E1 preset copy drifted)"
     exit 1
 fi
 echo "== ALL OCEAN PARITY CASES PASS: native == wasm, bit for bit; unit checks pass in both builds"

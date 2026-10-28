@@ -27,6 +27,21 @@
 //
 // Reused unchanged: SignalGrid (a column: the pheromone layer has no depth),
 // CurrentField (horizontal), SpatialGrid, Predator (+ depth, pitch).
+//
+// E1 physics (OceanConfig, every knob OFF by default; OFF = the preview's
+// arithmetic, bit for bit — each old block is kept as the fallback branch):
+//   * flowAt(p, d): a 3-D, divergence-free flow = the current (× f(d) =
+//     smoothstep(2d/D) when deepCurrent) + three tapered deep-water wave
+//     trains (waveSpeed > 0). It replaces the horizontal current wherever
+//     flowE1(): food (with foodDrift), predators and fish move by dt·U after
+//     their own motion, a fish by min(1, 1/bodySize)·dt·U with sizeDrift;
+//     depth is clamped after, x / y wrap. CURRENT_FWD / LR read flowAt.
+//   * lightAt(d) = L0·exp(−kWater·d): display only (the page's shading).
+//   * depthCostScaled: cHold / cPress as multiples of metabolicRate·massFactor.
+//   * sizeFight: kernel::fightOutcome's strengths × bodySize²; mouthGate:
+//     food (OceanFood::size, 1 for now) only if size <= kMouth·bodySize, for
+//     eating and for the smell sensors alike.
+// No E1 feature draws from the rng.
 // ----------------------------------------------------------------------------
 #ifndef EVO_WORLD_OCEAN
 #error "ocean_world.hpp needs the Ocean sensor list: compile with -DEVO_WORLD_OCEAN"
@@ -46,6 +61,8 @@ struct OceanFood {
     Vec2  pos;
     float depth = 0.0f;
     bool  alive = true;
+    float size  = 1.0f;   // E1: what mouthGate compares with kMouth·bodySize (always 1
+                          // until E2 sizes the particles)
 };
 
 struct OceanPredator : Predator {
@@ -168,6 +185,93 @@ public:
     }
     float clampDepth(float z) const { return std::clamp(z, 0.0f, D); }
 
+    // ---- E1: flow and light ------------------------------------------------
+    struct Flow { float x = 0.0f, y = 0.0f, d = 0.0f; };   // d: + = sinking
+
+    static constexpr int kWaveTrains = 3;
+    bool wavesOn() const { return ocfg.waveSpeed > 0.0f; }
+    // The 3-D flow replaces the preview's horizontal current (food, predators,
+    // fish, the CURRENT sensors). Off: the preview's blocks run unchanged.
+    bool flowE1() const { return wavesOn() || ocfg.deepCurrent; }
+
+    // smoothstep S(r) = 3r² − 2r³ on r clamped to [0, 1], and dS/dr.
+    static float smooth01(float r) {
+        r = std::clamp(r, 0.0f, 1.0f);
+        return r * r * (3.0f - 2.0f * r);
+    }
+    static float smooth01d(float r) {
+        r = std::clamp(r, 0.0f, 1.0f);
+        return 6.0f * r * (1.0f - r);
+    }
+
+    // The flow at (p, depth d), units/s. Divergence-free:
+    //  * the current C(p) (CurrentField, 2-D, from streamfunctions), times
+    //    f(d) = S(2d/D) with deepCurrent (∇·(f C) = f ∇·C = 0), else times 1;
+    //  * per wave train (K = 2π(m/W, n/H), k = |K|, q = K/k, θ = K·p − φ(t) + φ0):
+    //    ψ = (A/k) e^{−kd} B(d) cos θ, B = S(d/b)·S((D−d)/b), b = min(waveBand, D/4);
+    //    (u_x, u_y) = q·A e^{−kd} (B − B'/k) cos θ,  u_d = −A e^{−kd} B sin θ.
+    //    B and B' vanish at surface and floor: no flow through either.
+    // θ is formed and reduced to [0, 2π) in double (exact IEEE ops), then the
+    // portable float sin / cos / expm1: the same bits native and wasm.
+    Flow flowAt(Vec2 p, float d) const {
+        Flow U = currentFlowAt(p, d);
+        if (wavesOn()) {
+            for (int i = 0; i < kWaveTrains; ++i) {
+                const Flow u = waveTrainAt(i, p, d);
+                U.x += u.x;
+                U.y += u.y;
+                U.d += u.d;
+            }
+        }
+        return U;
+    }
+
+    // flowAt's parts (public for the divergence probes in tests/ocean_tests.cpp).
+    // The current, weighted by f(d) with deepCurrent; no vertical part.
+    Flow currentFlowAt(Vec2 p, float d) const {
+        Flow U;
+        if (current_.active()) {
+            const Vec2 c = current_.velocityAt(p);
+            const float f = ocfg.deepCurrent ? smooth01(2.0f * d / D) : 1.0f;
+            U.x = f * c.x;
+            U.y = f * c.y;
+        }
+        return U;
+    }
+    // Wave train i alone (whatever waveSpeed is; 0 gives zero flow).
+    Flow waveTrainAt(int i, Vec2 p, float d) const {
+        const WaveTrain& t = waves_[i];
+        const float b = std::min(ocfg.waveBand, 0.25f * D);
+        const float r1 = d / b, r2 = (D - d) / b;
+        const float s1 = smooth01(r1), s2 = smooth01(r2);
+        const float B = s1 * s2;
+        const float Bp = (smooth01d(r1) * s2 - s1 * smooth01d(r2)) / b;
+        const float A = t.frac * ocfg.waveSpeed;
+        // e^{−kd} as 1 / e^{kd}: full relative precision at depth, where
+        // expm1f(−kd) + 1 would keep only ~1e-7 absolute (e^{kd} = inf -> 0).
+        const float E = 1.0f / (evomath::expm1f(t.k * d) + 1.0f);
+        double th = t.kx * (double)p.x + t.ky * (double)p.y - t.phase + t.phi;
+        th -= kTwoPi * std::floor(th / kTwoPi);
+        const float tf = (float)th;
+        const float sn = evomath::sinf(tf), cs = evomath::cosf(tf);
+        const float uh = A * E * (B - Bp / t.k) * cs;
+        Flow u;
+        u.x = t.qx * uh;
+        u.y = t.qy * uh;
+        u.d = -A * E * B * sn;
+        return u;
+    }
+
+    // Light at depth d (display only in E1): L0·exp(−kWater·d).
+    float lightAt(float d) const { return ocfg.L0 * (evomath::expm1f(-ocfg.kWater * d) + 1.0f); }
+
+    // A wave train's travelled phase φ(t) in [0, 2π) (state; 0 until waves run).
+    double wavePhase(int i) const { return waves_[i].phase; }
+    bool waveClockStarted() const {
+        for (const WaveTrain& t : waves_) if (t.phase != 0.0) return true;
+        return false;
+    }
+
     // Set cfg and ocfg first (ocfg.depth is overwritten by `depth`).
     void init(int w, int h, float depth, int numCreatures) {
         width = w;
@@ -182,6 +286,7 @@ public:
                                                            : CurrentField::Mode::Eddies;
         current_.init(cmode, w, h, cfg.currentEddies, cfg.currentStrength,
                       cfg.currentCore, cfg.currentDrift, cfg.currentGyreEps);
+        prepareWaves();
         foodPatches_.clear();
         foodPatchDepth_.clear();
         for (int i = 0; i < cfg.foodPatches; ++i) {
@@ -234,8 +339,20 @@ public:
         deaths = 0;
 
         current_.advance(frame);
+        if (wavesOn()) advanceWaves(dt);   // the wave clock runs only while waves are on
 
-        if (cfg.foodDrift && current_.active()) {
+        if (flowE1()) {
+            // E1: food rides the 3-D flow (depth too), sampled where it is.
+            if (cfg.foodDrift) {
+                for (auto& f : food) {
+                    if (!f.alive) continue;
+                    const Flow U = flowAt(f.pos, f.depth);
+                    f.pos.x = wrapCoord(f.pos.x + U.x * dt, (float)width);
+                    f.pos.y = wrapCoord(f.pos.y + U.y * dt, (float)height);
+                    f.depth = clampDepth(f.depth + U.d * dt);
+                }
+            }
+        } else if (cfg.foodDrift && current_.active()) {
             for (auto& f : food) {
                 if (!f.alive) continue;
                 Vec2 v = current_.velocityAt(f.pos);
@@ -294,6 +411,7 @@ public:
                 OceanFood& f = food[fi];
                 if (!f.alive) continue;
                 if (dist2(c.pos, c.depth, f.pos, f.depth) > pr2) continue;
+                if (ocfg.mouthGate && f.size > ocfg.kMouth * c.bodySize) continue;   // E1: too big to swallow
                 f.alive = false;
                 c.foodReserves += cfg.foodEnergy;
             }
@@ -367,6 +485,40 @@ private:
     CurrentField current_;
     std::vector<Vec2> foodPatches_;
     std::vector<float> foodPatchDepth_;   // foodDepthMode 1: one depth per patch
+
+    // E1 wave trains: fixed modes over the world (no draws). kx, ky = K
+    // (double, for θ); k, q = |K|, K/|K|; phase = the travelled ∫ω dt, kept in
+    // [0, 2π) (the only wave state that changes); ω = sqrt(waveGravity·k) is
+    // read fresh each step, so a live waveGravity change is smooth.
+    static constexpr double kTwoPi = 6.283185307179586;
+    struct WaveTrain {
+        double kx = 0.0, ky = 0.0, phase = 0.0, phi = 0.0;
+        float k = 1.0f, qx = 1.0f, qy = 0.0f, frac = 0.0f;
+    };
+    WaveTrain waves_[kWaveTrains];
+
+    void prepareWaves() {
+        static const int kModes[kWaveTrains][2] = {{6, 0}, {2, 3}, {4, -2}};
+        static const float kFrac[kWaveTrains] = {0.5f, 0.3f, 0.2f};
+        for (int i = 0; i < kWaveTrains; ++i) {
+            WaveTrain& t = waves_[i];
+            t.kx = kTwoPi * kModes[i][0] / (double)width;
+            t.ky = kTwoPi * kModes[i][1] / (double)height;
+            const double k = std::sqrt(t.kx * t.kx + t.ky * t.ky);
+            t.k = (float)k;
+            t.qx = (float)(t.kx / k);
+            t.qy = (float)(t.ky / k);
+            t.frac = kFrac[i];
+            t.phi = (double)i;   // 0, 1, 2 rad
+            t.phase = 0.0;
+        }
+    }
+    void advanceWaves(float dt) {
+        for (WaveTrain& t : waves_) {
+            t.phase += std::sqrt((double)ocfg.waveGravity * (double)t.k) * (double)dt;
+            while (t.phase >= kTwoPi) t.phase -= kTwoPi;
+        }
+    }
 
     // Squared 3-D distance; (x, y) by minimum image when the senses wrap.
     float dist2(Vec2 a, float za, Vec2 b, float zb) const {
@@ -477,7 +629,17 @@ private:
             c.vz = vz;
         }
 
-        if (current_.active()) {
+        if (flowE1() || ocfg.sizeDrift) {
+            // E1: carried by the 3-D flow where the fish now is; with sizeDrift
+            // a big fish by less (drag / mass ∝ 1/L). Not swimming: no speed,
+            // no move cost. Depth clamped after (the walls' vz response above
+            // stays as it was).
+            const Flow U = flowAt(c.pos, c.depth);
+            const float w = ocfg.sizeDrift ? std::min(1.0f, 1.0f / c.bodySize) : 1.0f;
+            c.pos.x = wrapCoord(c.pos.x + w * U.x * dt, (float)width);
+            c.pos.y = wrapCoord(c.pos.y + w * U.y * dt, (float)height);
+            c.depth = clampDepth(c.depth + w * U.d * dt);
+        } else if (current_.active()) {
             Vec2 cur = current_.velocityAt(c.pos);
             c.pos.x += cur.x * dt;
             c.pos.y += cur.y * dt;
@@ -493,9 +655,19 @@ private:
         kernel::stepInternalState(c, actions, dt);
         kernel::stepMetabolism(c, cfg, dt);
         // Depth costs (0 by default): holding off neutral depth, and pressure.
-        if (ocfg.cHold != 0.0f || ocfg.cPress != 0.0f)
-            c.foodReserves -= dt * (ocfg.cHold * std::abs(c.depth - c.bodyBuoy * D) / D
-                                    + ocfg.cPress * c.depth / D);
+        if (ocfg.cHold != 0.0f || ocfg.cPress != 0.0f) {
+            if (ocfg.depthCostScaled) {
+                // E1: dimensionless multiples of this fish's metabolism.
+                const float H = std::abs(c.depth - c.bodyBuoy * D) / D;
+                const float P = c.depth / D;
+                const float M = cfg.metabolicRate * massFactor(c);
+                c.foodReserves -= dt * M * (ocfg.cHold * H + ocfg.cPress * P);
+            } else {
+                // The preview's: energy/s per unit H / P.
+                c.foodReserves -= dt * (ocfg.cHold * std::abs(c.depth - c.bodyBuoy * D) / D
+                                        + ocfg.cPress * c.depth / D);
+            }
+        }
 
         if (actions[EMIT_SIGNAL0] > 0.0f) pending_[i] = {true, c.pos};
     }
@@ -533,7 +705,10 @@ private:
             break;
         }
         case kernel::Interaction::Fight:
-            kernel::fightOutcome(c1, c2);
+            if (ocfg.sizeFight)   // E1: strength ∝ L² (same two draws)
+                kernel::fightOutcome(c1, c2, c1.bodySize * c1.bodySize, c2.bodySize * c2.bodySize);
+            else
+                kernel::fightOutcome(c1, c2);
             break;
         default: break;
         }
@@ -674,6 +849,7 @@ private:
             const float dz = food[fi].depth - c.depth;
             const float d2 = dx * dx + dy * dy + dz * dz;
             if (d2 > R2) return;
+            if (ocfg.mouthGate && food[fi].size > ocfg.kMouth * c.bodySize) return;   // E1: not food for me
             ++foodCount;
             const float dist = std::sqrt(d2);
             if (dist < foodDist) {
@@ -694,7 +870,12 @@ private:
         sensors[SIGNAL0] = signals.read(c.pos);
         sensors[SIGNAL0_FWD] = signals.readInDir(c.pos, fwd) - signals.readInDir(c.pos, {-fwd.x, -fwd.y});
         sensors[SIGNAL0_LR] = signals.readInDir(c.pos, rht) - signals.readInDir(c.pos, {-rht.x, -rht.y});
-        if (current_.active()) {
+        if (flowE1()) {
+            // E1: the water's horizontal flow here (deep current × f(d) + waves).
+            const Flow U = flowAt(c.pos, c.depth);
+            sensors[CURRENT_FWD] = evomath::tanhf((U.x * fwd.x + U.y * fwd.y) / 100.0f);
+            sensors[CURRENT_LR]  = evomath::tanhf((U.x * rht.x + U.y * rht.y) / 100.0f);
+        } else if (current_.active()) {
             Vec2 cur = current_.velocityAt(c.pos);
             sensors[CURRENT_FWD] = evomath::tanhf((cur.x * fwd.x + cur.y * fwd.y) / 100.0f);
             sensors[CURRENT_LR]  = evomath::tanhf((cur.x * rht.x + cur.y * rht.y) / 100.0f);
@@ -803,7 +984,13 @@ private:
             p.depth += vr * speed * dt;
             if (p.depth < 0.0f) { p.depth = 0.0f; p.pitch = std::abs(p.pitch); }
             else if (p.depth > D) { p.depth = D; p.pitch = -std::abs(p.pitch); }
-            if (current_.active()) {
+            if (flowE1()) {
+                // E1: carried by the 3-D flow (weight 1), depth clamped after.
+                const Flow U = flowAt(p.pos, p.depth);
+                p.pos.x = wrapCoord(p.pos.x + U.x * dt, (float)width);
+                p.pos.y = wrapCoord(p.pos.y + U.y * dt, (float)height);
+                p.depth = clampDepth(p.depth + U.d * dt);
+            } else if (current_.active()) {
                 const Vec2 cur = current_.velocityAt(p.pos);
                 p.pos.x += cur.x * dt;
                 p.pos.y += cur.y * dt;

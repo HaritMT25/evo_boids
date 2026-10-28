@@ -16,7 +16,9 @@
  *     clampView keeps it out of the sand and its centre within the water
  *   - light fades and shifts blue with depth (fish, shadows, food); the floor
  *     is sand (grain, ripples) under the caustics; seen from below, the
- *     surface shows Snell's window and a shimmer (SURF_FS)
+ *     surface shows Snell's window and a shimmer (SURF_FS). setLight({on, L0,
+ *     k}) (E1: the engine's light field) makes the fish / food fall-off the
+ *     engine's L(d) = L0·exp(−k·d); off, the preview's linear depth / D
  *   - each body pitches by s.vz (+ = sinking, head down), pivoting at the head
  *
  * Every fish is a faceted low-poly body bent along the six spine points the
@@ -127,13 +129,29 @@
   ].join("\n");
 
   /* Light under water: dimmer and bluer with depth (0 at the surface, 1 at
-   * the tank's floor depth D), shared by the fish, their shadows and the food. */
+   * the tank's floor depth D), shared by the fish, their shadows and the food.
+   * With the engine's light field on (E1: oc_light_enabled, setLight), the
+   * fall-off is the engine's L(d) = L0·exp(−kWater·d) instead: brightness
+   * L(d) and a blue shift of 1 − exp(−kWater·d); off, the preview's branch. */
   var DEPTH_FN = [
     "uniform float uDepth;",
+    "uniform float uLightOn; uniform float uL0; uniform float uKWater;",
     "float depthOf(float y) { return clamp(-y / uDepth, 0.0, 1.0); }",
+    /* how far into the dark a point is: depth / D, or 1 − L(d)/L0 with light on */
+    "float shadeOf(float y) {",
+    "  if (uLightOn < 0.5) return depthOf(y);",
+    "  return clamp(1.0 - exp(-uKWater * max(-y, 0.0)), 0.0, 1.0);",
+    "}",
     "vec3 underwater(vec3 col, float dz) {",
     "  col *= mix(vec3(1.0), vec3(0.28, 0.50, 0.90), dz) * (1.0 - 0.42 * dz);",
     "  return col + vec3(0.0, 0.02, 0.055) * dz;",
+    "}",
+    "vec3 underwaterAt(vec3 col, float y) {",
+    "  if (uLightOn < 0.5) return underwater(col, depthOf(y));",
+    "  float t = shadeOf(y);",
+    "  float L = uL0 * exp(-uKWater * max(-y, 0.0));",          /* the engine's lightAt(d) */
+    "  col *= mix(vec3(1.0), vec3(0.28, 0.50, 0.90), t) * clamp(L, 0.05, 1.6);",
+    "  return col + vec3(0.0, 0.02, 0.055) * t;",
     "}"
   ].join("\n");
 
@@ -158,7 +176,7 @@
     "  vec3 col = base * (amb + diff * vec3(1.0, 0.96, 0.86) * 0.92);",
     "  float rim = pow(1.0 - max(dot(N, V), 0.0), 3.0);",
     "  col += rim * mix(base, vec3(0.6, 1.0, 0.92), 0.55) * 0.35;",
-    "  col = underwater(col, depthOf(vWorld.y));",
+    "  col = underwaterAt(col, vWorld.y);",
     "  vec3 ember = vec3(1.0, 0.38, 0.16) * (0.8 + 0.2 * sin(uTime * 6.0));",
     "  if (vPart > 1.5) {",                                                            /* eyes */
     "    col = vEmber > 0.5 ? ember * 1.2 : vec3(0.02, 0.03, 0.03);",
@@ -354,7 +372,7 @@
     "void main() {",
     "  vec4 mv = viewMatrix * vec4(position, 1.0);",
     "  gl_Position = projectionMatrix * mv;",
-    "  vDz = depthOf(position.y);",
+    "  vDz = shadeOf(position.y);",
     "  vTw = (0.78 + 0.22 * sin(uTime * 2.3 + seed * 6.2831)) * (1.0 - 0.3 * vDz);",
     "  gl_PointSize = max(2.0, uSize * uPx / -mv.z);",
     "}"
@@ -575,7 +593,9 @@
       uFogDensity: { value: 0.0003 },
       uLight: { value: v3(LIGHT) },
       uDepth: { value: TD },
-      uFloorY: { value: FLOOR_Y }
+      uFloorY: { value: FLOOR_Y },
+      /* the engine's light field (setLight); off = the preview's depth shading */
+      uLightOn: { value: 0 }, uL0: { value: 1 }, uKWater: { value: 0 }
     };
 
     /* floor */
@@ -614,7 +634,7 @@
     var fishUniforms = {
       uHalf: common.uHalf, uTime: common.uTime, uFog: common.uFog, uFogDensity: common.uFogDensity,
       uLight: common.uLight, uWag: { value: reduced ? 0 : 1 }, uSelect: { value: v3(C.select) },
-      uDepth: common.uDepth
+      uDepth: common.uDepth, uLightOn: common.uLightOn, uL0: common.uL0, uKWater: common.uKWater
     };
     var fishMat = new THREE.ShaderMaterial({ vertexShader: FISH_VS, fragmentShader: FISH_FS,
                                              uniforms: fishUniforms, side: THREE.DoubleSide });
@@ -688,6 +708,7 @@
     var foodMat = new THREE.ShaderMaterial({
       vertexShader: FOOD_VS, fragmentShader: FOOD_FS,
       uniforms: { uPx: { value: 500 }, uTime: common.uTime, uSize: { value: 11 }, uDepth: common.uDepth,
+                  uLightOn: common.uLightOn, uL0: common.uL0, uKWater: common.uKWater,
                   uCore: { value: v3(C.foodCore) }, uGlow: { value: v3(C.foodGlow) } },
       transparent: true, depthWrite: false, blending: THREE.AdditiveBlending
     });
@@ -1285,9 +1306,20 @@
     resize();
     setWorld(W, H);
 
+    /* the engine's light field {on, L0, k} (oc_light_*): with on, the fish /
+     * food depth shading follows L(d) = L0·exp(−k·d); off = the preview's */
+    function setLight(l) {
+      var on = !!(l && l.on);
+      common.uLightOn.value = on ? 1 : 0;
+      common.uL0.value = on && isFinite(l.L0) ? +l.L0 : 1;
+      common.uKWater.value = on && isFinite(l.k) ? +l.k : 0;
+    }
+
     return {
       renderer: "three.js (WebGL2)",
       setWorld: setWorld,
+      setLight: setLight,
+      light: function () { return { on: common.uLightOn.value > 0.5, L0: common.uL0.value, k: common.uKWater.value }; },
       resize: resize,
       render: render,
       resetView: function (animated) { resetView(animated); },

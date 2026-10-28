@@ -210,6 +210,28 @@ inline void fightOutcome(AgentCore& c1, AgentCore& c2) {
     }
 }
 
+// The same fight with each side's strength scaled (the Ocean world's size law
+// passes bodySize²): scale1 / scale2 multiply after the age curve and before
+// the draws, each only when it is not exactly 1.0f, so (c1, c2, 1, 1) is the
+// two-argument fight bit for bit. The draws, their order, ties and the ±15 do
+// not change. A separate overload, not default arguments: defaults changed the
+// Classic wasm's bytes (45 bytes, same behaviour), this leaves them alone.
+inline void fightOutcome(AgentCore& c1, AgentCore& c2, float scale1, float scale2) {
+    float str1 = (c1.age < 30.0f) ? c1.age / 30.0f : 1.0f - (c1.age - 30.0f) / 90.0f;
+    float str2 = (c2.age < 30.0f) ? c2.age / 30.0f : 1.0f - (c2.age - 30.0f) / 90.0f;
+    if (scale1 != 1.0f) str1 *= scale1;
+    if (scale2 != 1.0f) str2 *= scale2;
+    str1 *= rng.unit();
+    str2 *= rng.unit();
+    if (str1 > str2) {
+        c1.foodReserves += 15.0f;
+        c2.foodReserves -= 15.0f;
+    } else {
+        c2.foodReserves += 15.0f;
+        c1.foodReserves -= 15.0f;
+    }
+}
+
 // Is this creature inside its founder grace window (cfg.reproGracePeriod)?
 // A founder is a creature whose lineage starts at itself, which is exactly
 // lineageId == id: both spawn sites (init and the --min-pop reseed floor)

@@ -5,7 +5,8 @@
 //
 //   g++ -O3 -std=c++20 -ffp-contract=off -DEVO_WORLD_OCEAN -I src tools/ocean_probe.cpp -o ocean_probe
 //   ./ocean_probe --seed 1 --steps 30000 [--w 1920 --h 1080 --depth 240 --pop 300]
-//                 [--every 5000] [--cfg '{"kBuoy":0.3,"foodPatches":6}']
+//                 [--every 5000] [--e1] [--cfg '{"kBuoy":0.3,"foodPatches":6}']
+//   --e1: the E1 preset (ocean_config.hpp kE1PresetJson) first, --cfg on top.
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -27,10 +28,13 @@ void report(const OceanWorld& w, double secs) {
     }
     const double n = (double)w.creatures.size();
     const double bm = n ? bs / n : 0, bsd = n ? std::sqrt(std::max(0.0, bs2 / n - bm * bm)) : 0;
+    double fz = 0;
+    for (const OceanFood& f : w.food) fz += f.depth;
     std::printf("f=%6llu pop=%4zu food=%5zu pred=%2zu births=%7lld deaths=%7lld reseeds=%5lld"
-                " | z %5.1f±%5.1f buoy %.2f±%.2f |vz| %.3f off %5.1f | hist",
+                " | z %5.1f±%5.1f buoy %.2f±%.2f |vz| %.3f off %5.1f foodz %5.1f | hist",
                 w.frame, w.creatures.size(), w.food.size(), w.predators.size(), w.totalBirths,
-                w.totalDeaths, w.totalReseeds, mean, sd, bm, bsd, n ? avz / n : 0.0, n ? off / n : 0.0);
+                w.totalDeaths, w.totalReseeds, mean, sd, bm, bsd, n ? avz / n : 0.0, n ? off / n : 0.0,
+                w.food.empty() ? 0.0 : fz / (double)w.food.size());
     for (double h : hist) std::printf(" %4.1f", 100.0 * h);
     std::printf(" | %.0f st/s\n", secs > 0 ? (double)w.frame / secs : 0.0);
 }
@@ -43,9 +47,11 @@ int main(int argc, char** argv) {
     int W = 1920, H = 1080, pop = 300;
     double depth = 240.0;
     const char* cfgJson = nullptr;
+    bool e1 = false;
     for (int i = 1; i < argc; ++i) {
         auto is = [&](const char* k) { return std::strcmp(argv[i], k) == 0 && i + 1 < argc; };
-        if (is("--seed")) seed = (unsigned)std::strtoul(argv[++i], nullptr, 10);
+        if (!std::strcmp(argv[i], "--e1")) e1 = true;
+        else if (is("--seed")) seed = (unsigned)std::strtoul(argv[++i], nullptr, 10);
         else if (is("--steps")) steps = std::strtol(argv[++i], nullptr, 10);
         else if (is("--every")) every = std::strtol(argv[++i], nullptr, 10);
         else if (is("--w")) W = std::atoi(argv[++i]);
@@ -60,16 +66,17 @@ int main(int argc, char** argv) {
     applyOceanDefaults(sc);
     OceanConfig oc;
     std::string err;
+    if (e1 && !readOceanJson(kE1PresetJson, sc, oc, err)) { std::fprintf(stderr, "%s\n", err.c_str()); return 2; }
     if (!readOceanJson(cfgJson, sc, oc, err)) { std::fprintf(stderr, "%s\n", err.c_str()); return 2; }
     oc.depth = (float)depth;
-    if (!oceanConfigValid(oc)) { std::fprintf(stderr, "bad ocean config\n"); return 2; }
+    if (!oceanConfigValid(oc)) { std::fprintf(stderr, "bad ocean config: %s\n", oceanConfigError(oc).c_str()); return 2; }
 
     rng.seed(seed);
     OceanWorld w;
     w.cfg = sc;
     w.ocfg = oc;
     w.init(W, H, (float)depth, pop);
-    std::printf("seed=%u %dx%dx%.0f pop=%d cfg=%s\n", seed, W, H, depth, pop, cfgJson ? cfgJson : "{}");
+    std::printf("seed=%u %dx%dx%.0f pop=%d e1=%d cfg=%s\n", seed, W, H, depth, pop, (int)e1, cfgJson ? cfgJson : "{}");
 
     const auto t0 = std::chrono::steady_clock::now();
     auto secs = [&] { return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(); };

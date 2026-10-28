@@ -127,6 +127,15 @@
 //                 refused (oc_init, oc_set_param); a run at each end stays
 //                 finite; bool / mode keys strict
 //   e1_hash       a wave-phase or E1-knob ulp changes only its own section
+//   lazy_waves    the wave modes are prepared only once the waves are on
+//                 (never by a waves-off step or flow reader, a deep current
+//                 alone included; an unprepared train gives zero flow); off
+//                 at init and switched on directly before the first step ==
+//                 on at init, every section after 200 steps (geo before: the
+//                 first flow read prepares the same modes); on live at step
+//                 100 (the step prepares them), off again keeps the modes and
+//                 the stopped clock; a reused world re-initialised with the
+//                 waves off is unprepared again
 //   preset        kE1PresetJson is accepted and is what it says
 //   wrap          OceanWorld::wrapCoord (constant time) == the loops it
 //                 replaced, bit for bit, at every edge of [-span, 2·span) and
@@ -3412,6 +3421,99 @@ void testE1Hash() {
     t.expect(!w3.waveClockStarted() && !w3.flowE1() && oceanE1AtDefaults(w3.ocfg), "a preview world has E1 state");
 }
 
+// Lazy wave preparation (OceanWorld::prepareWaves; harness format 3): the
+// modes are set only once the waves are on, and preparing late is the same as
+// preparing at init for everything but the geo hash of the steps before.
+void testLazyWaves() {
+    Test t("lazy_waves");
+    namespace pk = ofp::peek;
+    std::string err;
+    auto unprepared = [](const OceanWorld& w) {
+        for (const auto& tr : ofp::field<pk::OwWaves>(w))
+            if (!(tr.frac == 0.0f && tr.kx == 0.0 && tr.ky == 0.0 && tr.phi == 0.0 && tr.phase == 0.0)) return false;
+        return true;
+    };
+    auto sameModes = [](const OceanWorld& a, const OceanWorld& b) {   // bit for bit, phase aside
+        for (int i = 0; i < OceanWorld::kWaveTrains; ++i) {
+            const auto& x = ofp::field<pk::OwWaves>(a)[i];
+            const auto& y = ofp::field<pk::OwWaves>(b)[i];
+            if (ofp::bits64(x.kx) != ofp::bits64(y.kx) || ofp::bits64(x.ky) != ofp::bits64(y.ky) ||
+                ofp::bits64(x.phi) != ofp::bits64(y.phi) || ofp::bits(x.k) != ofp::bits(y.k) ||
+                ofp::bits(x.qx) != ofp::bits(y.qx) || ofp::bits(x.qy) != ofp::bits(y.qy) ||
+                ofp::bits(x.frac) != ofp::bits(y.frac) || x.frac == 0.0f)
+                return false;
+        }
+        return true;
+    };
+    auto allButGeo = [](const ofp::Fingerprint& a, const ofp::Fingerprint& b) {
+        for (auto s : ofp::kSections)
+            if (s != &ofp::Fingerprint::geo && a.*s != b.*s) return false;
+        return true;
+    };
+    // Waves off (the preview; a deep current alone, flowE1 on): never prepared,
+    // whatever the step or the flow readers evaluate.
+    for (const char* cfg : {(const char*)nullptr, R"({"deepCurrent":true,"currentStrength":30,"foodDrift":true})"}) {
+        OceanWorld w;
+        ofp::initWorld(w, 1701, 1920, 1080, 240.0f, 100, cfg, err);
+        t.expect(unprepared(w), "%s: waves prepared at init with the waves off", cfg ? cfg : "preview");
+        const std::uint64_t geo0 = ofp::fingerprint(w).geo;
+        for (int s = 0; s < 40; ++s) w.update(0.016f);
+        (void)w.flowAt({100.0f, 200.0f}, 50.0f);
+        (void)w.flowExactAt({100.0f, 200.0f}, 50.0f);
+        for (int i = 0; i < OceanWorld::kWaveTrains; ++i) {
+            const OceanWorld::Flow u = w.waveTrainAt(i, {300.0f, 400.0f}, 60.0f);
+            t.expect(u.x == 0.0f && u.y == 0.0f && u.d == 0.0f, "an unprepared train gives flow");
+        }
+        t.expect(unprepared(w) && ofp::fingerprint(w).geo == geo0, "%s: waves prepared without being on",
+                 cfg ? cfg : "preview");
+    }
+    // Eager (waves on at init) vs lazy (off at init, switched on directly
+    // before the first step, as the driver's --set waveSpeed=6@0): the same
+    // state before the step but for geo, and every section equal after it.
+    const char* on = R"({"waveSpeed":6,"deepCurrent":true,"currentStrength":30,"foodDrift":true,"predatorCount":2})";
+    const char* off = R"({"waveSpeed":0,"deepCurrent":true,"currentStrength":30,"foodDrift":true,"predatorCount":2})";
+    OceanWorld a;
+    ofp::initWorld(a, 1702, 1920, 1080, 240.0f, 150, on, err);
+    t.expect(!unprepared(a), "waves on at init: not prepared");
+    const ofp::Fingerprint a0 = ofp::fingerprint(a);
+    for (int s = 0; s < 200; ++s) a.update(0.016f);
+    const ofp::Fingerprint a1 = ofp::fingerprint(a);
+    OceanWorld b;
+    ofp::initWorld(b, 1702, 1920, 1080, 240.0f, 150, off, err);
+    b.ocfg.waveSpeed = 6.0f;
+    t.expect(unprepared(b), "switched on directly: prepared before anything read the flow");
+    const ofp::Fingerprint b0 = ofp::fingerprint(b);   // hashCurrent reads flowAt (cur) before geo is hashed
+    t.expect(allButGeo(a0, b0), "lazy vs eager at init: a section other than geo differs");
+    t.expect(sameModes(a, b), "the first flow read did not prepare the modes the eager world has");
+    t.expect(a0.geo == b0.geo, "lazy vs eager: geo differs once prepared (the fingerprint read the flow)");
+    for (int s = 0; s < 200; ++s) b.update(0.016f);
+    t.expect(ofp::fingerprint(b) == a1, "lazy vs eager after 200 steps: the states differ");
+    // Switched on live at step 100 (the step prepares them; no reader first),
+    // then off: prepared once, the modes and the stopped clock kept.
+    OceanWorld c;
+    ofp::initWorld(c, 1703, 1920, 1080, 240.0f, 100, off, err);
+    for (int s = 0; s < 100; ++s) c.update(0.016f);
+    t.expect(unprepared(c), "off for 100 steps: prepared");
+    c.ocfg.waveSpeed = 6.0f;
+    c.update(0.016f);
+    t.expect(sameModes(a, c) && c.waveClockStarted(), "switched on live: the step did not prepare and run them");
+    for (int s = 0; s < 49; ++s) c.update(0.016f);
+    double ph[OceanWorld::kWaveTrains];
+    for (int i = 0; i < OceanWorld::kWaveTrains; ++i) ph[i] = c.wavePhase(i);
+    c.ocfg.waveSpeed = 0.0f;
+    for (int s = 0; s < 50; ++s) c.update(0.016f);
+    bool kept = sameModes(a, c);
+    for (int i = 0; i < OceanWorld::kWaveTrains; ++i) kept &= c.wavePhase(i) == ph[i];
+    t.expect(kept, "switched off: the modes or the stopped clock were not kept");
+    // A reused world re-initialised with the waves off is unprepared again
+    // (its geo == a fresh world's).
+    OceanWorld fresh;
+    ofp::initWorld(fresh, 1704, 1920, 1080, 240.0f, 80, nullptr, err);
+    const std::uint64_t freshGeo = ofp::fingerprint(fresh).geo;
+    ofp::initWorld(a, 1704, 1920, 1080, 240.0f, 80, nullptr, err);
+    t.expect(unprepared(a) && ofp::fingerprint(a).geo == freshGeo, "a reused world kept its prepared waves");
+}
+
 // The loops OceanWorld::wrapCoord replaced (capped: n counts the passes).
 float wrapLoops(float v, float span, long& n) {
     n = 0;
@@ -4046,6 +4148,7 @@ int main(int argc, char** argv) {
     ot::testShimInts();
 #endif
     ot::testE1Hash();
+    ot::testLazyWaves();
 #ifndef OCEAN_TESTS_NO_SHIM
     ot::testPreset();
 #endif

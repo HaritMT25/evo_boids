@@ -39,7 +39,9 @@
 //   geo   persistent geometry: both SpatialGrids (width, height, cols, rows,
 //         1 / cell size), the SignalGrid (world size, cell size, cols, rows,
 //         seam period, toroidal flag, byte count), the food-patch centres and
-//         per-patch depths, the wave trains' fixed modes
+//         per-patch depths, the wave trains' fixed modes (format 3: prepared
+//         lazily, the first time the waves are on; a world whose waves were
+//         never on hashes the unprepared defaults)
 //   rng   the global engine: its 624 words and its position
 //
 // Not hashed, by design: scratch the step rebuilds from hashed state before
@@ -59,7 +61,13 @@
 // Every word added for the ocean-vision state (the tagged config keys, the
 // food ages, the eye build's eyeCon) is hashed only in states a format-2
 // baseline cannot hold (a key off its default, a non-zero age, the eye
-// build), so the format stays 2 and every earlier baseline is unchanged.
+// build), so those additions kept the format at 2.
+//
+// Format 3 (2026-10-28): the engine prepares the wave modes lazily
+// (ocean_world.hpp, prepareWaves), so in a world whose waves are off at init
+// the geo section hashes the unprepared modes until the waves are first on —
+// a change in what a format-2 baseline holds, hence the bump. Nothing else
+// moved: every other section, of every case, is what format 2 recorded.
 //
 // Private state is read WITHOUT engine accessors (namespace peek below: a
 // pointer to member taken in an explicit template instantiation, where C++
@@ -92,7 +100,7 @@
 
 namespace ofp {
 
-inline constexpr int kFormatVersion = 2;
+inline constexpr int kFormatVersion = 3;
 
 // ---- private engine state, read without an accessor -------------------------
 namespace peek {

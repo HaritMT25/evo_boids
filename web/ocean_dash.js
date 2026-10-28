@@ -155,7 +155,15 @@
       { id: "preds", title: "Predators", draw: C.lines, when: function () { return view.f.pred; },
         needs: "Shows up when the world has predators (Settings → Predators).",
         cap: "Hunters alive. With their economy on they breed when well fed and starve when not.",
-        data: function () { return { t: view.t, series: [line("predators", su(1), S[7])] }; } }
+        data: function () { return { t: view.t, series: [line("predators", su(1), S[7])] }; } },
+      /* Classic's two phase portraits (web/dashboard.js), over the same columns */
+      { id: "phase", title: "The boom-and-bust loop", draw: C.phase,
+        cap: "Fish against food, one point per moment, the bright end now. Going round a loop is the cycle: food piles up, fish boom and eat it down, fish crash, food recovers.",
+        data: function () { return { x: st(0), y: su(0), t: view.t, xName: "fish", yName: "food", color: S[2] }; } },
+      { id: "phase2", title: "Hunters and fish", draw: C.phase, when: function () { return view.f.pred; },
+        needs: "Shows up when the world has predators (Settings → Predators).",
+        cap: "Fish against predators, the bright end now. With the predator economy on, a loop is the classic predator–prey cycle: hunters boom after the fish, then starve.",
+        data: function () { return { x: st(0), y: su(1), t: view.t, xName: "fish", yName: "predators", color: S[7] }; } }
     ] },
     { id: "depth", name: "Depth", cards: [
       { id: "where", title: "Where the fish swim", wide: true, tall: true, draw: C.stack,

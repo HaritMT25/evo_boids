@@ -190,6 +190,29 @@
   #lightbtn[aria-pressed="true"] { background: var(--beam-soft); color: var(--beam); }
   body.sheet-open #dock { transform: translateX(-50%) translateY(140%); opacity: 0; pointer-events: none; }
 
+  /* ---------- the keys: a legend beside the dock (a wide screen with a mouse) ---------- */
+  #keys {
+    position: fixed; z-index: var(--z-hud);
+    left: 12px; bottom: var(--dock-b);
+    max-width: calc(50vw - 235px - 24px);
+    padding: 7px 38px 7px 12px; border-radius: var(--r-md);
+    font-size: 12px; line-height: 1.8; color: var(--ink-3);
+    display: none;
+  }
+  #keys kbd {
+    display: inline-block; min-width: 1.6em; margin-right: 2px; padding: 0 4px;
+    border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px;
+    background: var(--surface-2); color: var(--ink); text-align: center;
+    font: 11px/1.45 var(--mono);
+  }
+  #keys .k { display: inline-block; white-space: nowrap; margin-right: 12px; }   /* lines break between keys only */
+  #keys .x { position: absolute; top: 3px; right: 3px; width: 30px; height: 30px; }
+  #keys .x svg.i { width: 16px; height: 16px; }
+  @media (min-width: 1100px) and (min-height: 561px) and (pointer: fine) {
+    body.keys-on #keys { display: block; }
+    body.keys-on.sheet-open #keys { display: none; }
+  }
+
   /* ---------- fit-to-screen and toasts ---------- */
   #fitbtn {
     position: fixed; z-index: var(--z-hud);
@@ -610,7 +633,7 @@
     <symbol id="i-light" viewBox="0 0 24 24"><path d="M8.5 3.5h7l-1.2 5.2 .9 1.8v9a1 1 0 0 1-1 1h-4.4a1 1 0 0 1-1-1v-9l.9-1.8-1.2-5.2Z"/><path d="M10.2 13.5h3.6"/><path d="M4.5 4.5 6 6M19.5 4.5 18 6M3 9.5h2M19 9.5h2"/></symbol>
   </svg>
 
-  <canvas id="tank" aria-label="the ocean as a deep 3D tank: drag to move (up and down when looking through the side), right-drag or two fingers to turn, scroll or pinch to zoom, E and Q to rise and sink, click or tap a fish to inspect it"></canvas>
+  <canvas id="tank" aria-label="the ocean as a deep 3D tank: drag to move (up and down when looking through the side), right-drag or two fingers to turn, scroll or pinch to zoom, W A S D to move, Q and E down and up, click or tap a fish to inspect it"></canvas>
 
   <header id="topbar">
     <button id="readout" class="chip-surface" aria-expanded="false" aria-controls="statpanel" title="live numbers: tap for details">
@@ -635,6 +658,12 @@
   </div>
   <button id="fitbtn" class="btn chip-surface" hidden><svg class="i"><use href="#i-frame"/></svg>Fit the world to this screen</button>
   <div id="toasts" aria-live="polite"></div>
+  <div id="keys" class="chip-surface" role="note" aria-label="keyboard shortcuts">
+    <button id="keysclose" class="icon-btn x" title="Hide the keys (? shows them again)" aria-label="hide the keys"><svg class="i"><use href="#i-close"/></svg></button>
+    <div id="keysmove"></div>
+    <div><span class="k"><kbd>F</kbd> follow a fish</span><span class="k"><kbd>L</kbd> flashlight</span><span class="k"><kbd>C</kbd> fit the view</span><span class="k"><kbd>Esc</kbd> let go</span></div>
+    <div><span class="k"><kbd>Space</kbd> pause</span><span class="k"><kbd>+</kbd><kbd>−</kbd> speed</span><span class="k"><kbd>R</kbd> new world</span><span class="k"><kbd>?</kbd> these keys</span></div>
+  </div>
 
   <section id="fishcard" class="chip-surface" hidden aria-label="the selected fish">
     <div class="fc-head">

@@ -36,8 +36,12 @@
  * Keys: space pause, + / - (or arrows) steps per frame, F follow (the selected
  *       fish, else a random one; again: another), Esc close / stop following
  *       / let go, R a new world (new seed), shift+R replay this one, C fit the
- *       view, L the flashlight, E / Q or PageUp / PageDown (held) move the view
- *       up / down in depth, . one step while paused.
+ *       view, L the flashlight, . one step while paused, ? the keys legend.
+ *       The camera, held (scene.setMove; by key position, never while a field
+ *       has the focus): W / S forward / back along the view, A / D left /
+ *       right, E / Q or PageUp / PageDown up / down, Shift faster. Following a
+ *       fish they stay in the follow: W / S closer / farther, A / D circle it,
+ *       E / Q raise / lower the camera around it.
  *
  * window.EvoOcean: a small handle for the console and the tests. */
 (function () {
@@ -722,9 +726,35 @@
     el("followbtn").setAttribute("aria-pressed", on ? "true" : "false");
     el("followbtn").title = on ? "Stop following (F or Esc)" : "Follow this fish (F)";
     if (!on) wantFollow = false;
-    if (on) toast(coarseMQ.matches ? "Following. Drag to circle around it." : "Following. Drag to circle around it; Esc stops.");
+    if (on) toast(coarseMQ.matches ? "Following. Drag to circle around it."
+                                   : "Following. Drag or A / D to circle it, W / S to come closer or back off; Esc stops.");
+    updateKeysLegend(on);
     updateLight();
   }
+
+  /* ---- the keys legend (a wide screen with a mouse; ocean.html #keys) ----
+   * Shown until hidden with its × or ?, remembered. Its first line is what
+   * W A S D do now: fly the camera, or move it around the followed fish. */
+  var keysShown = store("evo_boids.ocean.keys") !== "0";
+  function setKeysShown(on) {
+    keysShown = !!on;
+    document.body.classList.toggle("keys-on", keysShown);
+    store("evo_boids.ocean.keys", keysShown ? "1" : "0");
+  }
+  function updateKeysLegend(following) {
+    setHtml("keysmove", following
+      ? "<span class='k'><kbd>W</kbd><kbd>S</kbd> closer / farther</span><span class='k'><kbd>A</kbd><kbd>D</kbd> circle the fish</span>" +
+        "<span class='k'><kbd>Q</kbd><kbd>E</kbd> lower / higher</span>"
+      : "<span class='k'><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> move</span><span class='k'><kbd>Q</kbd><kbd>E</kbd> down / up</span>" +
+        "<span class='k'><kbd>Shift</kbd> faster</span>");
+  }
+  document.body.classList.toggle("keys-on", keysShown);
+  updateKeysLegend(false);
+  el("keysclose").addEventListener("click", function () {
+    setKeysShown(false);
+    toast("Keys hidden: ? shows them again.");
+    this.blur();
+  });
 
   /* ---- the flashlight (drawing only; scene.setFlashlight) ----
    * While following: on unless "Flashlight while following" is off. Else:
@@ -1215,9 +1245,9 @@
     var s = snapshot();
     if (turboState === "live") takeSample(s.stats);
     if (!HAS_VZ) s.vz = vzEstimate(s, steps > 0);
-    var vdir = 0;
-    for (var key in heldDepthKeys) vdir += heldDepthKeys[key];
-    if (vdir) scene.moveView(Math.sign(vdir) * D * 0.55 * dt);
+    var ax = { f: 0, r: 0, u: 0 };
+    for (var key in heldMoveKeys) ax[heldMoveKeys[key][0]] += heldMoveKeys[key][1];
+    scene.setMove(ax.f, ax.r, ax.u, shiftHeld);
     /* the selected fish, by id; a followed fish that died hands over to another */
     var idx = turboState === "live" ? indexOfId(s, selectedId) : -1;
     if (idx < 0 && selectedId !== null && turboState === "live") {
@@ -1235,15 +1265,33 @@
   }
 
   /* ---------------- input ---------------- */
-  var DEPTH_KEYS = { e: 1, pageup: 1, q: -1, pagedown: -1 };
-  var heldDepthKeys = {};
+  /* The camera's movement keys, held (scene.setMove): W A S D by their place
+   * on the keyboard (e.code: the same four keys on any layout), Q / E and
+   * PageDown / PageUp down / up, Shift faster. [axis, sign]: f forward, r
+   * right, u up. Never while typing in a field. */
+  var MOVE_CODES = { KeyW: ["f", 1], KeyS: ["f", -1], KeyD: ["r", 1], KeyA: ["r", -1], KeyE: ["u", 1], KeyQ: ["u", -1] };
+  var MOVE_KEYS = { pageup: ["u", 1], pagedown: ["u", -1] };
+  var heldMoveKeys = {}, shiftHeld = false;
+  function releaseMoveKeys() { heldMoveKeys = {}; shiftHeld = false; }
+  /* a focused field takes the keys: the text inputs, selects, text areas and
+   * editable text (the settings' number fields among them) */
+  function typingIn(t) {
+    if (!t || !t.tagName) return false;
+    return t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || !!t.isContentEditable;
+  }
   var escHandledElsewhere = false;
   window.addEventListener("keydown", function (e) {
     if (e.key === "Escape") escHandledElsewhere = !!(dash() && dash().isOpen()) || !!document.getElementById("guide");
   }, true);
   function wireInput() {
-    document.addEventListener("keyup", function (e) { delete heldDepthKeys[String(e.key).toLowerCase()]; });
-    window.addEventListener("blur", function () { heldDepthKeys = {}; });
+    document.addEventListener("keyup", function (e) {
+      delete heldMoveKeys["c:" + e.code];
+      delete heldMoveKeys["k:" + String(e.key).toLowerCase()];
+      if (e.key === "Shift") shiftHeld = false;
+    });
+    window.addEventListener("blur", releaseMoveKeys);
+    document.addEventListener("visibilitychange", function () { if (document.hidden) releaseMoveKeys(); });
+    document.addEventListener("focusin", function (e) { if (typingIn(e.target)) releaseMoveKeys(); });
     window.addEventListener("keydown", function (e) {
       if (e.key === "Escape") {
         if (drawerEl.classList.contains("open")) setDrawer(false);
@@ -1253,10 +1301,20 @@
         return;
       }
       var t = e.target;
-      if (t && (t.tagName === "INPUT" || t.tagName === "BUTTON" || t.tagName === "SELECT" || t.tagName === "TEXTAREA")) return;
+      if (typingIn(t)) return;
+      if (e.key === "Shift") { shiftHeld = true; return; }
       if (e.ctrlKey || e.metaKey || e.altKey) return;
       var k = e.key, lk = String(k).toLowerCase();
-      if (DEPTH_KEYS[lk]) { heldDepthKeys[lk] = DEPTH_KEYS[lk]; e.preventDefault(); return; }
+      /* the camera's movement: also with a button focused (letters don't press it) */
+      var mv = MOVE_CODES[e.code], mk = mv ? "c:" + e.code : null;
+      if (!mv && MOVE_KEYS[lk]) { mv = MOVE_KEYS[lk]; mk = "k:" + lk; }
+      if (mv) {
+        heldMoveKeys[mk] = mv; shiftHeld = e.shiftKey;
+        e.preventDefault();
+        return;
+      }
+      if (k === "?") { setKeysShown(!keysShown); return; }
+      if (t && t.tagName === "BUTTON") return;   /* Space / Enter belong to the button */
       /* the view: always */
       if (lk === "c") { wantFollow = false; scene.resetView(true); return; }
       if (lk === "l") { toggleLight(); return; }
@@ -1506,7 +1564,9 @@
             return "Glowing specks are food, each family has its own colour, and the dark fish with glowing eyes are " +
                    "predators. Light fades and turns blue with depth. " +
                    (h.touch() ? "Drag to move, pinch to zoom, twist with two fingers to turn (below the horizon too)."
-                              : "Drag to move, scroll to zoom, right-drag to turn (below the horizon too); E and Q rise and sink.");
+                              : "Drag to move, scroll to zoom, right-drag to turn (below the horizon too). Or fly: " +
+                                "<kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> move where you look, <kbd>Q</kbd> " +
+                                "<kbd>E</kbd> go down and up, <kbd>Shift</kbd> faster.");
           } },
         { drawer: false, title: "A fish's brain", fish: true,
           enter: function () {
@@ -1518,7 +1578,9 @@
           body: function () {
             return tap() + " any fish to see its energy, age, speed, depth, the depth it floats at and its pitch, and " +
                    "its brain, live: senses on one side, actions on the other (steer z is the depth one). " +
-                   "<b>Follow</b> (F) keeps the camera on it, with a flashlight that shows its true colours.";
+                   "<b>Follow</b> (F) keeps the camera on it, with a flashlight that shows its true colours" +
+                   (h.touch() ? "." : "; then W and S come closer or back off, A and D circle it, Q and E lower or " +
+                                      "raise the camera, and the follow stays on.");
           } },
         { drawer: false, title: "Live numbers",
           target: function () { return h.rectOf("#readout"); },
@@ -1528,9 +1590,11 @@
           } },
         { desktopOnly: true, drawer: false, title: "Keyboard",
           body: function () {
-            return "<kbd>Space</kbd> pause · <kbd>↑</kbd> <kbd>↓</kbd> speed · <kbd>F</kbd> follow · <kbd>L</kbd> " +
-                   "flashlight · <kbd>C</kbd> fit the view · <kbd>E</kbd> <kbd>Q</kbd> rise and sink · <kbd>R</kbd> a " +
-                   "new world (<kbd>Shift</kbd> <kbd>R</kbd> replays this one). Try one now; the tour waits.";
+            return "<kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> fly · <kbd>Q</kbd> <kbd>E</kbd> down and up · " +
+                   "<kbd>Space</kbd> pause · <kbd>↑</kbd> <kbd>↓</kbd> speed · <kbd>F</kbd> follow · <kbd>L</kbd> " +
+                   "flashlight · <kbd>C</kbd> fit the view · <kbd>R</kbd> a new world (<kbd>Shift</kbd> <kbd>R</kbd> " +
+                   "replays this one) · <kbd>?</kbd> the keys beside the dock. Try one now; the tour waits. " +
+                   "(<kbd>Esc</kbd> closes things, and this tour.)";
           } },
         { drawer: false, title: "Playback",
           target: function () { return h.rectOf("#dock"); },

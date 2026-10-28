@@ -13,7 +13,10 @@
  *     corners of the box around y = -D/2; following a fish follows its depth.
  *     It is free: it orbits below the horizontal (to nearly straight up),
  *     moves in depth (moveView, and screen-plane panning from the side), and
- *     clampView keeps it out of the sand and its centre within the water
+ *     clampView keeps it out of the sand and its centre within the water.
+ *     setMove (the page's W A S D, Q / E, Shift) flies it smoothly; while
+ *     following a fish the same keys dolly, circle and raise the camera
+ *     around the fish and the follow stays on (stepFly)
  *   - light fades and shifts blue with depth (fish, shadows, food); the floor
  *     is sand (grain, ripples) under the caustics; seen from below, the
  *     surface shows Snell's window and a shimmer (SURF_FS). setLight({on, L0,
@@ -920,6 +923,72 @@
       controls.touches.ONE = on ? TOUCH.ROTATE : TOUCH.PAN;
     }
 
+    /* ---- keyboard flight (the page's W A S D, Q / E; setMove) ----
+     * moveIn: the held keys as axes in -1..1: f forward (W) / back (S), r right
+     * (D) / left (A), u up (E) / down (Q); boost = Shift (2.5x).
+     * Free camera: the camera and the point it orbits move together, W / S
+     * along the line of sight, A / D sideways (level), Q / E straight up and
+     * down, so clampView keeps the view at the tank exactly as for a drag.
+     * Following a fish: W / S dolly toward / away from it (40 units up to the
+     * whole-tank distance), A / D circle it, Q / E lower / raise the camera
+     * around it; the follow stays on. Velocities ease in and out (time
+     * constant 0.12 s), per frame time, so a held key glides instead of jumping.
+     * Speed: a share of the tank's size, less near what the camera looks at. */
+    var moveIn = { f: 0, r: 0, u: 0, boost: false };
+    var flyVel = new THREE.Vector3(), flyWant = new THREE.Vector3();
+    var flyFwd = new THREE.Vector3(), flyRight = new THREE.Vector3(), flyOff = new THREE.Vector3();
+    var orbitVel = { az: 0, pol: 0, dolly: 0 };
+    var FLY = { span: 0.22, near: 0.15, depth: 0.6, az: 1.3, pol: 0.8, dolly: 1.2, boost: 2.5, tIn: 0.12, tOut: 0.12 };
+    function flyLevel() {
+      var r = camera.position.distanceTo(controls.target);
+      return Math.max(FLY.near, Math.min(1, r / Math.max(1, fitDist)));
+    }
+    function stepFly(dt) {
+      if (!(dt > 0)) return;
+      var m = moveIn, any = !!(m.f || m.r || m.u), boost = m.boost ? FLY.boost : 1;
+      var k = 1 - Math.exp(-dt / (any ? FLY.tIn : FLY.tOut));
+      var t = controls.target, cp = camera.position;
+      if (follow) {
+        flyVel.set(0, 0, 0);
+        orbitVel.az += (m.r * FLY.az * boost - orbitVel.az) * k;
+        orbitVel.pol += (-m.u * FLY.pol * boost - orbitVel.pol) * k;
+        orbitVel.dolly += (-m.f * FLY.dolly * boost - orbitVel.dolly) * k;
+        if (!any && Math.abs(orbitVel.az) + Math.abs(orbitVel.pol) + Math.abs(orbitVel.dolly) < 1e-3) {
+          orbitVel.az = orbitVel.pol = orbitVel.dolly = 0;
+          return;
+        }
+        if (m.f) followDive = false;   /* the keys take over from the first close-up */
+        flyOff.copy(cp).sub(t);
+        var r = flyOff.length();
+        if (!(r > 1e-6)) return;
+        var theta = Math.atan2(flyOff.x, flyOff.z) + orbitVel.az * dt;
+        var phi = Math.acos(Math.max(-1, Math.min(1, flyOff.y / r))) + orbitVel.pol * dt;
+        phi = Math.max(0.05, Math.min(controls.maxPolarAngle, phi));
+        r = Math.max(controls.minDistance, Math.min(Math.max(controls.minDistance, fitDist), r * Math.exp(orbitVel.dolly * dt)));
+        cp.set(t.x + r * Math.sin(phi) * Math.sin(theta), t.y + r * Math.cos(phi), t.z + r * Math.sin(phi) * Math.cos(theta));
+        anim = null; userMoved = true;
+        return;
+      }
+      orbitVel.az = orbitVel.pol = orbitVel.dolly = 0;
+      flyWant.set(0, 0, 0);
+      if (m.f || m.r) {
+        camera.getWorldDirection(flyFwd);
+        flyRight.setFromMatrixColumn(camera.matrixWorld, 0);
+        flyRight.y = 0;
+        if (flyRight.lengthSq() > 1e-8) flyRight.normalize();
+        flyWant.addScaledVector(flyFwd, m.f).addScaledVector(flyRight, m.r);
+        if (flyWant.lengthSq() > 1) flyWant.normalize();
+        flyWant.multiplyScalar(Math.max(W, H) * FLY.span * flyLevel() * boost);
+      }
+      flyWant.y += m.u * TD * FLY.depth * boost;
+      flyVel.lerp(flyWant, k);
+      if (!any && flyVel.lengthSq() < 1) { flyVel.set(0, 0, 0); return; }   /* below 1 unit / s: stopped */
+      t.addScaledVector(flyVel, dt);
+      cp.addScaledVector(flyVel, dt);
+      anim = null; userMoved = true;
+      clampView();
+    }
+
     function dir() { return new THREE.Vector3(0, Math.cos(POLAR), Math.sin(POLAR)); }
     function applyViewOffset() {
       var vw = Math.max(1, cw - insets.left - insets.right), vh = Math.max(1, ch - insets.top - insets.bottom);
@@ -1303,6 +1372,7 @@
           else followDive = false;
         }
       }
+      stepFly(dt);   /* the held W A S D / Q E keys */
       controls.update(dt);
       clampView();   /* after follow, damping and animation alike */
       /* near/far follow the zoom, so a close-up keeps its depth precision and
@@ -1434,6 +1504,19 @@
       /* the view up (+) or down (-) by dy sim units, kept between just above
        * the floor and a bit above the surface; stops a follow */
       moveView: moveView,
+      /* the held movement keys (stepFly): f forward / back, r right / left,
+       * u up / down, each -1..1; boost (Shift) 2.5x. Free camera: fly; while
+       * following: dolly (f), circle (r) and raise / lower (u) around the fish */
+      setMove: function (f, r, u, boost) {
+        function ax(v) { v = +v || 0; return v > 1 ? 1 : v < -1 ? -1 : v; }
+        moveIn.f = ax(f); moveIn.r = ax(r); moveIn.u = ax(u); moveIn.boost = !!boost;
+      },
+      /* the flight's state, for the tests: speeds now (free: units / s;
+       * following: rad / s, rad / s, 1 / s) */
+      motion: function () {
+        return { vel: flyVel.toArray(), orbit: { az: orbitVel.az, pol: orbitVel.pol, dolly: orbitVel.dolly },
+                 dist: camera.position.distanceTo(controls.target), fitDist: fitDist };
+      },
       /* put the camera at pos looking at target (three coords, [x, y, z]) */
       lookFrom: function (pos, target) {
         if (follow) { follow = false; setFollowControls(false); onFollow(false); }

@@ -38,8 +38,12 @@
 //   rng   the global engine: its 624 words and its position
 //
 // Not hashed, by design: scratch the step rebuilds from hashed state before
-// reading it (the grids' entries, hot_, pending_, the neighbour vectors) and
-// WorldCommon::prof (the wall-clock profiler; cfg.profile itself is hashed).
+// reading it (the grids' entries, hot_, pending_, the neighbour vectors, the
+// E1 flow cache flow_ — src/ocean/ocean_flow.hpp: tables and keys derived from
+// cfg / ocfg / the world size / the wave phases / the CurrentField's vortices
+// and the frame, rebuilt by OceanWorld::ensureFlow before any read; the flow
+// it gives IS hashed, in cur) and WorldCommon::prof (the wall-clock profiler;
+// cfg.profile itself is hashed).
 //
 // Private state is read WITHOUT engine accessors (namespace peek below: a
 // pointer to member taken in an explicit template instantiation, where C++
@@ -171,6 +175,7 @@ struct OceanWorld_ : WorldCommon {
     std::vector<int> neighbors, nearbyFood, nearby, near;
     CurrentField current; std::vector<Vec2> patches; std::vector<float> patchDepth;
     WaveTrain_ waves[OceanWorld::kWaveTrains];
+    oceanflow::FlowCache flow;   // scratch (see above)
 };
 }  // namespace mirror
 static_assert(sizeof(SignalGrid) == sizeof(mirror::SignalGrid_), "SignalGrid's members changed: update hashGeometry and mirror::SignalGrid_");

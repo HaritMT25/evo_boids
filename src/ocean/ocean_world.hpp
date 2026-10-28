@@ -36,6 +36,7 @@
 //     flowE1(): food (with foodDrift), predators and fish move by dt·U after
 //     their own motion, a fish by min(1, 1/bodySize)·dt·U with sizeDrift;
 //     depth is clamped after, x / y wrap. CURRENT_FWD / LR read flowAt.
+//     While flowE1() it is evaluated from a derived cache (ocean_flow.hpp).
 //   * lightAt(d) = L0·exp(−kWater·d) (oceanmath::expf, ocean_math.hpp):
 //     display only (the page's shading); not part of the state.
 //   * depthCostScaled: cHold / cPress as multiples of metabolicRate·massFactor.
@@ -56,6 +57,7 @@
 #include "../core/world.hpp"   // SignalGrid, MAX_TOPOLOGICAL_NEIGHBORS, and through it the
                                // kernel, WorldCommon, SpatialGrid, CurrentField, Predator
 #include "ocean_config.hpp"
+#include "ocean_flow.hpp"
 #include "ocean_math.hpp"
 #include "fish.hpp"
 
@@ -249,13 +251,25 @@ public:
     // portable float sin / cos / expm1: the same bits native and wasm.
     // The depth taper B(d), B'(d) depends on d alone, so it is formed once per
     // call and shared by the three trains (the same expressions as
-    // waveTrainAt(i, p, d): the same bits).
+    // waveTrainExactAt(i, p, d): the same bits).
+    //
+    // Evaluation (ocean_flow.hpp): while flowE1() the flow comes from the E1
+    // cache (flowFast) — the eddy current from the Ocean's own copy of the
+    // vortices; off (sizeDrift alone reaches flowAt then) the exact formulas
+    // above (flowExactAt), the preview's arithmetic. The public readers below
+    // (flowAt, currentFlowAt, waveTrainAt, currentAt) give the field the step
+    // actually uses; the *Exact* ones are the formulas, for the tests.
     Flow flowAt(Vec2 p, float d) const {
-        Flow U = currentFlowAt(p, d);
+        if (!flowE1()) return flowExactAt(p, d);
+        ensureFlow();
+        return flowFast(p, d);
+    }
+    Flow flowExactAt(Vec2 p, float d) const {
+        Flow U = currentFlowExactAt(p, d);
         if (wavesOn()) {
             const Taper tp = taperAt(d);
             for (int i = 0; i < kWaveTrains; ++i) {
-                const Flow u = waveTrainAt(i, p, d, tp);
+                const Flow u = waveTrainExactAt(i, p, d, tp);
                 U.x += u.x;
                 U.y += u.y;
                 U.d += u.d;
@@ -267,6 +281,11 @@ public:
     // flowAt's parts (public for the divergence probes in tests/ocean_tests.cpp).
     // The current, weighted by f(d) with deepCurrent; no vertical part.
     Flow currentFlowAt(Vec2 p, float d) const {
+        if (!flowE1()) return currentFlowExactAt(p, d);
+        ensureFlow();
+        return currentFlowFast(p, d);
+    }
+    Flow currentFlowExactAt(Vec2 p, float d) const {
         Flow U;
         if (current_.active()) {
             const Vec2 c = current_.velocityAt(p);
@@ -288,8 +307,13 @@ public:
         return tp;
     }
     // Wave train i alone (whatever waveSpeed is; 0 gives zero flow).
-    Flow waveTrainAt(int i, Vec2 p, float d) const { return waveTrainAt(i, p, d, taperAt(d)); }
-    Flow waveTrainAt(int i, Vec2 p, float d, const Taper& tp) const {
+    Flow waveTrainAt(int i, Vec2 p, float d) const {
+        if (!flowE1()) return waveTrainExactAt(i, p, d);
+        ensureFlow();
+        return waveTrainFast(i, p, d);
+    }
+    Flow waveTrainExactAt(int i, Vec2 p, float d) const { return waveTrainExactAt(i, p, d, taperAt(d)); }
+    Flow waveTrainExactAt(int i, Vec2 p, float d, const Taper& tp) const {
         const WaveTrain& t = waves_[i];
         const float B = tp.B, Bp = tp.Bp;
         const float A = t.frac * ocfg.waveSpeed;
@@ -335,6 +359,7 @@ public:
                                                            : CurrentField::Mode::Eddies;
         current_.init(cmode, w, h, cfg.currentEddies, cfg.currentStrength,
                       cfg.currentCore, cfg.currentDrift, cfg.currentGyreEps);
+        initFlowCache();
         prepareWaves();
         foodPatches_.clear();
         foodPatchDepth_.clear();
@@ -388,14 +413,16 @@ public:
         deaths = 0;
 
         current_.advance(frame);
+        flow_.curAdvanced = true;
         if (wavesOn()) advanceWaves(dt);   // the wave clock runs only while waves are on
 
         if (flowE1()) {
+            ensureFlow();   // the E1 cache, for this frame / phase / config (read by every flowFast below)
             // E1: food rides the 3-D flow (depth too), sampled where it is.
             if (cfg.foodDrift) {
                 for (auto& f : food) {
                     if (!f.alive) continue;
-                    const Flow U = flowAt(f.pos, f.depth);
+                    const Flow U = flowFast(f.pos, f.depth);
                     f.pos.x = wrapCoord(f.pos.x + U.x * dt, (float)width);
                     f.pos.y = wrapCoord(f.pos.y + U.y * dt, (float)height);
                     f.depth = clampDepth(f.depth + U.d * dt);
@@ -501,7 +528,13 @@ public:
     }
 
     bool currentActive() const { return current_.active(); }
-    Vec2 currentAt(Vec2 p) const { return current_.velocityAt(p); }
+    // The 2-D current the step uses: while flowE1() with eddies, the Ocean's
+    // evaluator (ocean_flow.hpp); otherwise CurrentField's own.
+    Vec2 currentAt(Vec2 p) const {
+        if (!flowE1() || !flow_.curOn) return current_.velocityAt(p);
+        ensureFlow();
+        return eddyVelocity(p);
+    }
 
     // Mean and SD of the live fish's depth, and the fraction per depth eighth
     // (surface first). Read-only.
@@ -568,6 +601,96 @@ private:
             while (t.phase >= kTwoPi) t.phase -= kTwoPi;
         }
     }
+
+    // ---- the E1 flow cache (ocean_flow.hpp) --------------------------------
+    // Derived scratch: rebuilt from hashed state (cfg / ocfg at init, the
+    // CurrentField's vortices, the frame) by ensureFlow before it is read.
+    // ensureFlow runs once per step (update, after the clocks advance) and in
+    // every public reader, so the shim, the harness driver (which assigns
+    // configs directly) and the tests all get it.
+    mutable oceanflow::FlowCache flow_;
+
+    void initFlowCache() {
+        flow_ = oceanflow::FlowCache{};
+        // CurrentField::init's own: eddies unless mode 1, nothing at strength <= 0,
+        // core_ = max(core, 1); velocityAt's inv2c2 and scale.
+        if (cfg.currentMode != 1 && cfg.currentStrength > 0.0f) {
+            flow_.curOn = true;
+            const float core = (cfg.currentCore > 1.0f) ? cfg.currentCore : 1.0f;
+            flow_.inv2c2 = 1.0f / (2.0f * core * core);
+            const float scale = cfg.currentStrength / core * 1.6487212707f;
+            flow_.vort = current_.vortexState();
+            flow_.eddies.resize(flow_.vort.size() / CurrentField::VORTEX_FLOATS);
+            for (std::size_t i = 0; i < flow_.eddies.size(); ++i)
+                flow_.eddies[i].signScale = flow_.vort[i * CurrentField::VORTEX_FLOATS + 2] * scale;
+        }
+    }
+
+    void ensureFlow() const {
+        oceanflow::FlowCache& c = flow_;
+        if (c.curOn && (!c.curReady || c.curFrame != frame || c.curAdvKey != c.curAdvanced)) {
+            // CurrentField::advance(frame)'s centres (vortexState(): base x, y,
+            // sign, ax, ay, fx, fy, px, py), or 0 before the first advance.
+            const float t = (float)frame;
+            for (std::size_t i = 0; i < c.eddies.size(); ++i) {
+                const float* v = &c.vort[i * CurrentField::VORTEX_FLOATS];
+                oceanflow::Eddy& e = c.eddies[i];
+                if (c.curAdvanced) {
+                    e.cx = v[0] + v[3] * evomath::sinf(v[5] * t + v[7]);
+                    e.cy = v[1] + v[4] * evomath::sinf(v[6] * t + v[8]);
+                } else {
+                    e.cx = 0.0f;
+                    e.cy = 0.0f;
+                }
+            }
+            c.curReady = true;
+            c.curFrame = frame;
+            c.curAdvKey = c.curAdvanced;
+        }
+    }
+
+    // CurrentField::velocityAt (Mode::Eddies), term for term.
+    Vec2 eddyVelocity(Vec2 p) const {
+        Vec2 v{0.0f, 0.0f};
+        const float inv2c2 = flow_.inv2c2;
+        for (const oceanflow::Eddy& e : flow_.eddies) {
+            const float dx = p.x - e.cx;
+            const float dy = p.y - e.cy;
+            const float f = e.signScale * std::exp(-(dx * dx + dy * dy) * inv2c2);
+            v.x += f * (-dy);
+            v.y += f * dx;
+        }
+        return v;
+    }
+
+    // The E1 flow from the cache (flowE1(), ensureFlow() done).
+    Flow currentFlowFast(Vec2 p, float d) const {
+        Flow U;
+        if (current_.active()) {
+            const Vec2 c = flow_.curOn ? eddyVelocity(p) : current_.velocityAt(p);
+            const float f = ocfg.deepCurrent ? smooth01(2.0f * d / D) : 1.0f;
+            U.x = f * c.x;
+            U.y = f * c.y;
+        }
+        return U;
+    }
+    Flow waveTrainFast(int i, Vec2 p, float d) const { return waveTrainExactAt(i, p, d); }
+    Flow flowFast(Vec2 p, float d) const {
+        Flow U = currentFlowFast(p, d);
+        if (wavesOn()) {
+            const Taper tp = taperAt(d);
+            for (int i = 0; i < kWaveTrains; ++i) {
+                const Flow u = waveTrainExactAt(i, p, d, tp);
+                U.x += u.x;
+                U.y += u.y;
+                U.d += u.d;
+            }
+        }
+        return U;
+    }
+    // What the step's fish read: the E1 cache while flowE1(), else the exact
+    // formulas (sizeDrift alone: the preview's current, unweighted).
+    Flow flowStep(Vec2 p, float d) const { return flowE1() ? flowFast(p, d) : flowExactAt(p, d); }
 
     // Squared 3-D distance; (x, y) by minimum image when the senses wrap.
     float dist2(Vec2 a, float za, Vec2 b, float zb) const {
@@ -683,7 +806,7 @@ private:
             // a big fish by less (drag / mass ∝ 1/L). Not swimming: no speed,
             // no move cost. Depth clamped after (the walls' vz response above
             // stays as it was).
-            const Flow U = flowAt(c.pos, c.depth);
+            const Flow U = flowStep(c.pos, c.depth);
             const float w = ocfg.sizeDrift ? std::min(1.0f, 1.0f / c.bodySize) : 1.0f;
             c.pos.x = wrapCoord(c.pos.x + w * U.x * dt, (float)width);
             c.pos.y = wrapCoord(c.pos.y + w * U.y * dt, (float)height);
@@ -922,7 +1045,7 @@ private:
         sensors[SIGNAL0_LR] = signals.readInDir(c.pos, rht) - signals.readInDir(c.pos, {-rht.x, -rht.y});
         if (flowE1()) {
             // E1: the water's horizontal flow here (deep current × f(d) + waves).
-            const Flow U = flowAt(c.pos, c.depth);
+            const Flow U = flowFast(c.pos, c.depth);
             sensors[CURRENT_FWD] = evomath::tanhf((U.x * fwd.x + U.y * fwd.y) / 100.0f);
             sensors[CURRENT_LR]  = evomath::tanhf((U.x * rht.x + U.y * rht.y) / 100.0f);
         } else if (current_.active()) {
@@ -1036,7 +1159,7 @@ private:
             else if (p.depth > D) { p.depth = D; p.pitch = -std::abs(p.pitch); }
             if (flowE1()) {
                 // E1: carried by the 3-D flow (weight 1), depth clamped after.
-                const Flow U = flowAt(p.pos, p.depth);
+                const Flow U = flowFast(p.pos, p.depth);
                 p.pos.x = wrapCoord(p.pos.x + U.x * dt, (float)width);
                 p.pos.y = wrapCoord(p.pos.y + U.y * dt, (float)height);
                 p.depth = clampDepth(p.depth + U.d * dt);

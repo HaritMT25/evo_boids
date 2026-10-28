@@ -94,6 +94,10 @@
 //                 no worse than the exact field's; live waveSpeed / waveBand
 //                 changes rebuild (direct assignment, as the driver's --set),
 //                 waveGravity does not; off flowE1() the exact path bit for bit
+//   flow_lanes    the wave tables' 4-lane vector evaluator (SSE2 / SIMD128) ==
+//                 a scalar lane-by-lane evaluation of the same cache, bit for
+//                 bit, per train and summed, at cells, joins, ends, beyond the
+//                 world (fallbacks) and over the depth-cell cap
 //   e1_buoyancy   with the non-flow E1 knobs on and wallBand 0, an idle fish
 //                 still settles monotonically at bodyBuoy·D
 //   drift         sizeDrift: one step moves fish of size .5 / 1 / 2 by exactly
@@ -3836,6 +3840,160 @@ int acceptsMain(int argc, char** argv) {
 
 }  // namespace ot
 
+// The E1 cache's private state, for flow_lanes (an explicit instantiation
+// waives access checking, as ofp::peek does).
+namespace ofp::peek {
+struct OwFlowT { friend constexpr auto member(OwFlowT) noexcept; };
+template struct Expose<OwFlowT, &OceanWorld::flow_>;
+}  // namespace ofp::peek
+
+namespace ot {
+// The wave tables' vector evaluator (OceanWorld::wavesTable: the three trains
+// in the lanes of a GCC 4-float vector — SSE2 natively, SIMD128 under wasm)
+// against an independent SCALAR evaluation of the same cells: the same cache
+// (FlowCache: depth pieces, rotated y factors, T) read lane by lane, scalar
+// oceanflow::basis / hval / hder in the documented operation order, and the
+// same fallbacks (no pieces, d not finite, x / y beyond one span: the exact
+// formulas). Every train's (u_x, u_y, u_d) and flowAt's sum (the current, then
+// the trains in order) must match BIT FOR BIT — at random points, at every
+// depth join (b, D/2, D − b) and its neighbouring floats, at cell boundaries,
+// at the surface / floor and beyond, at x / y = 0, the span, just inside,
+// one add / subtract out and far out, with the phases at 0, set, and from the
+// clock, in five worlds (one over the depth-cell cap: the fallback). Runs in
+// both builds, so the harness's native == wasm comparison of this output
+// covers SIMD128 too.
+void testFlowLanes() {
+    Test t("flow_lanes");
+    using Fl = OceanWorld::Flow;
+    using namespace oceanflow;
+    struct WV { const char* name; int W, H; float D; const char* cfg; };
+    const WV wv[] = {
+        {"preset", 1920, 1080, 240.0f, kE1PresetJson},
+        {"band 1.01", 1920, 1080, 240.0f, R"({"waveSpeed":6,"waveBand":1.01,"deepCurrent":true,"currentStrength":20})"},
+        {"D 10.37 band 1.7", 1920, 1080, 10.37f, R"({"waveSpeed":50,"waveBand":1.7,"waveGravity":5000})"},
+        {"2560x1440 D 777.7", 2560, 1440, 777.7f, R"({"waveSpeed":9,"waveBand":13.3,"deepCurrent":true,"currentStrength":60,"currentMode":1})"},
+        {"100x100 D 2000 (over the cell cap)", 100, 100, 2000.0f, R"({"waveSpeed":20})"},
+    };
+    long compared = 0, mismatched = 0, fallbacks = 0, tabled = 0;
+    std::string firstBad;
+    auto same = [](float a, float b) { std::uint32_t x, y; std::memcpy(&x, &a, 4); std::memcpy(&y, &b, 4); return x == y; };
+    for (const WV& v : wv) {
+        OceanWorld w;
+        std::string err;
+        if (!t.expect(ofp::initWorld(w, 1601, v.W, v.H, v.D, 0, v.cfg, err), "%s: %s", v.name, err.c_str())) continue;
+        auto& waves = ofp::field<ofp::peek::OwWaves>(w);
+        const float D = w.D, b = std::min(w.ocfg.waveBand, 0.25f * D);
+        const double phases[3][3] = {{0.0, 0.0, 0.0}, {1.2345, 5.4321, 3.0}, {-1, -1, -1}};
+        for (const auto& ph : phases) {
+            if (ph[0] < 0.0) for (int s = 0; s < 60; ++s) w.update(0.016f);
+            else for (int i = 0; i < OceanWorld::kWaveTrains; ++i) waves[i].phase = ph[i];
+            (void)w.flowAt({1.0f, 1.0f}, 1.0f);   // ensureFlow for this phase
+            const FlowCache& c = ofp::field<ofp::peek::OwFlowT>(w);
+            // The scalar reference for train i (false: the exact formulas).
+            auto scalarTrain = [&](int i, Vec2 p, float d, Fl& u) -> bool {
+                if (!c.depthOn) return false;
+                float V, Vd;
+                if (!(d > 0.0f && d < D)) {
+                    if (!(d <= 0.0f || d >= D)) return false;   // NaN
+                    V = 0.0f;
+                    Vd = 0.0f;
+                } else {
+                    const int q = (d <= c.b) ? 0 : (d <= c.Dh) ? 1 : (d <= c.Dmb) ? 2 : 3;
+                    const DepthPiece& pc = c.piece[q];
+                    const double s = ((double)d - (double)pc.lo) * pc.scale;
+                    if (!(s >= 0.0 && s <= (double)pc.n + 0.5)) return false;
+                    int j = (int)s;
+                    if (j > pc.n - 1) j = pc.n - 1;
+                    const Basis B = basis((float)(s - (double)j));
+                    const DepthCell& cl = pc.cell[j];
+                    V = hval(B, cl.v[i], cl.dv[i], cl.m0[i], cl.m1[i]);
+                    Vd = hder(B, cl.dv[i], cl.m0[i], cl.m1[i]) * pc.dScale;
+                }
+                auto coord = [](float x, double scale, int N, int& ix, float& tx) {
+                    double s = (double)x * scale;
+                    if (s < 0.0) s += (double)N;
+                    if (s >= (double)N) s -= (double)N;
+                    if (!(s >= 0.0 && s < (double)N)) return false;
+                    ix = (int)s;
+                    tx = (float)(s - (double)ix);
+                    return true;
+                };
+                int ix, iy;
+                float tx, ty;
+                if (!coord(p.x, c.xScale, kXCells, ix, tx) || !coord(p.y, c.yScale, kYCells, iy, ty)) return false;
+                const TrigCell X = getLane(xTable().cell[ix], i), Y = getLane(c.yRot[iy], i);
+                const Basis bx = basis(tx), by = basis(ty);
+                const float cx = hval(bx, X.c, X.dc, X.mc0, X.mc1), sx = hval(bx, X.s, X.ds, X.ms0, X.ms1);
+                const float cxd = hder(bx, X.dc, X.mc0, X.mc1), sxd = hder(bx, X.ds, X.ms0, X.ms1);
+                const float cy = hval(by, Y.c, Y.dc, Y.mc0, Y.mc1), sy = hval(by, Y.s, Y.ds, Y.ms0, Y.ms1);
+                const float cyd = hder(by, Y.dc, Y.mc0, Y.mc1), syd = hder(by, Y.ds, Y.ms0, Y.ms1);
+                const float P = cx * cy - sx * sy;
+                const float gradT = c.TxS[i] * (cxd * cy - sxd * sy) + c.TyS[i] * (cx * cyd - sx * syd);
+                u.x = (c.Tx[i] * Vd) * P;
+                u.y = (c.Ty[i] * Vd) * P;
+                u.d = (-V) * gradT;
+                return true;
+            };
+            auto check = [&](Vec2 p, float d) {
+                Fl sum = w.currentFlowAt(p, d);
+                for (int i = 0; i < OceanWorld::kWaveTrains; ++i) {
+                    Fl r;
+                    if (scalarTrain(i, p, d, r)) ++tabled;
+                    else { r = w.waveTrainExactAt(i, p, d); ++fallbacks; }
+                    const Fl a = w.waveTrainAt(i, p, d);
+                    ++compared;
+                    if (!(same(a.x, r.x) && same(a.y, r.y) && same(a.d, r.d))) {
+                        if (mismatched++ == 0) {
+                            char buf[300];
+                            std::snprintf(buf, sizeof buf, "%s train %d at (%.9g, %.9g, %.9g): vector (%a, %a, %a) scalar (%a, %a, %a)",
+                                          v.name, i, (double)p.x, (double)p.y, (double)d, a.x, a.y, a.d, r.x, r.y, r.d);
+                            firstBad = buf;
+                        }
+                    }
+                    sum.x += r.x;
+                    sum.y += r.y;
+                    sum.d += r.d;
+                }
+                const Fl f = w.flowAt(p, d);
+                ++compared;
+                if (!(same(f.x, sum.x) && same(f.y, sum.y) && same(f.d, sum.d)) && mismatched++ == 0)
+                    firstBad = std::string(v.name) + ": flowAt != the current + the scalar trains";
+            };
+            // depths: joins and their neighbours, piece / cell boundaries, ends, beyond, NaN, random
+            std::vector<float> ds = {0.0f, D, -1.0f, D + 1.0f, std::nextafter(0.0f, 1.0f), std::nextafter(D, 0.0f),
+                                     std::numeric_limits<float>::quiet_NaN()};
+            for (float j : {b, 0.5f * D, D - b})
+                for (float x : {j, std::nextafter(j, 0.0f), std::nextafter(j, D), std::nextafter(std::nextafter(j, D), D)})
+                    ds.push_back(x);
+            if (c.depthOn)
+                for (int q = 0; q < 4; ++q) {
+                    const DepthPiece& pc = c.piece[q];
+                    for (int k = 0; k <= pc.n; k += std::max(1, pc.n / 9)) {
+                        const float x = (float)((double)pc.lo + (double)k / pc.scale);
+                        ds.push_back(x);
+                        ds.push_back(std::nextafter(x, D));
+                    }
+                }
+            const float W = (float)v.W, H = (float)v.H;
+            std::vector<Vec2> ps = {{0.0f, 0.0f}, {W, H}, {std::nextafter(W, 0.0f), std::nextafter(H, 0.0f)},
+                                    {-0.5f, H + 0.5f}, {W + 0.5f, -0.5f}, {-3.0f * W, 0.5f * H}, {0.5f * W, 4.0f * H},
+                                    {std::nextafter(0.0f, -1.0f), std::nextafter(0.0f, 1.0f)}};
+            Lcg g(1602);
+            for (int k = 0; k < 400; ++k) ps.push_back({W * (-0.01f + 1.02f * g.unit()), H * (-0.01f + 1.02f * g.unit())});
+            for (const Vec2& p : ps) {
+                for (float d : ds) check(p, d);
+                for (int k = 0; k < 6; ++k) check(p, D * g.unit());
+            }
+        }
+    }
+    t.expect(mismatched == 0, "%ld of %ld evaluations differ from the scalar reference; first: %s", mismatched, compared,
+             firstBad.c_str());
+    t.expect(tabled > 100000 && fallbacks > 1000, "too little coverage: %ld from the tables, %ld fallbacks", tabled, fallbacks);
+    t.note("%ld evaluations (%ld train values from the tables, %ld fallbacks) == the scalar lane-by-lane evaluation, bit for bit",
+           compared, tabled, fallbacks);
+}
+}  // namespace ot
+
 int main(int argc, char** argv) {
 #ifndef OCEAN_TESTS_NO_SHIM
     if (argc > 1 && std::strcmp(argv[1], "--accepts") == 0) return ot::acceptsMain(argc, argv);
@@ -3872,6 +4030,7 @@ int main(int argc, char** argv) {
     // E1 physics
     ot::testDivergence();
     ot::testFlowTables();
+    ot::testFlowLanes();
     ot::testE1Buoyancy();
     ot::testDrift();
     ot::testCosts();

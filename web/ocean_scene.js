@@ -1,5 +1,5 @@
 "use strict";
-/* evo_boids Ocean preview: the 3D tank, deep (three.js).
+/* evo_boids 3-D Ocean: the 3D tank, deep (three.js).
  *
  * A copy of web/scene3d.js (the Classic tank) for the Ocean preview page
  * (web/ocean.html), registered as window.EvoOceanScene; to be folded back into
@@ -13,13 +13,19 @@
  *     corners of the box around y = -D/2; following a fish follows its depth.
  *     It is free: it orbits below the horizontal (to nearly straight up),
  *     moves in depth (moveView, and screen-plane panning from the side), and
- *     clampView keeps it out of the sand and its centre within the water
+ *     clampView keeps it out of the sand and its centre within the water.
+ *     setMove (the page's W A S D, Q / E, Shift) flies it smoothly; while
+ *     following a fish the same keys dolly, circle and raise the camera
+ *     around the fish and the follow stays on (stepFly)
  *   - light fades and shifts blue with depth (fish, shadows, food); the floor
  *     is sand (grain, ripples) under the caustics; seen from below, the
  *     surface shows Snell's window and a shimmer (SURF_FS). setLight({on, L0,
  *     k}) (E1: the engine's light field) makes the fish / food fall-off the
  *     engine's L(d) = L0·exp(−k·d); off, the preview's linear depth / D
  *   - each body pitches by s.vz (+ = sinking, head down), pivoting at the head
+ *   - the flashlight (setFlashlight, viewer only): a cone of clear light from
+ *     the camera onto the followed fish or the point it looks at; inside it
+ *     the fish, food and sand show their true colours (BEAM_FN)
  *
  * Every fish is a faceted low-poly body bent along the six spine points the
  * core exports; the floor below catches its shadow and slow caustic light.
@@ -128,6 +134,25 @@
     "float fogOf(vec3 w) { float d = length(cameraPosition - w) * uFogDensity; return 1.0 - exp(-d * d); }"
   ].join("\n");
 
+  /* The flashlight (setFlashlight; viewer only, the simulation never sees
+   * it): a cone of clear light from the camera along uBeamDir, half-angle
+   * atan(uBeamTan), soft at its rim, fading out past uBeamReach along the
+   * axis. Inside it the fish, the food and the sand show their true colours:
+   * no depth fall-off, no water tint, no fog. beamOf() is that share, 0..1
+   * (times uBeamOn, the fade); 0 leaves every pixel exactly as without it. */
+  var BEAM_FN = [
+    "uniform float uBeamOn; uniform vec3 uBeamDir; uniform float uBeamTan; uniform float uBeamReach;",
+    "float beamOf(vec3 w) {",
+    "  if (uBeamOn <= 0.001) return 0.0;",
+    "  vec3 d = w - cameraPosition;",
+    "  float along = dot(d, uBeamDir);",
+    "  if (along <= 0.0) return 0.0;",
+    "  float r = along * uBeamTan;",
+    "  float perp = length(d - uBeamDir * along);",
+    "  return uBeamOn * (1.0 - smoothstep(0.45 * r, r, perp)) * (1.0 - smoothstep(uBeamReach, uBeamReach * 1.6, along));",
+    "}"
+  ].join("\n");
+
   /* Light under water: dimmer and bluer with depth (0 at the surface, 1 at
    * the tank's floor depth D), shared by the fish, their shadows and the food.
    * With the engine's light field on (E1: oc_light_enabled, setLight), the
@@ -159,6 +184,7 @@
     "uniform vec3 uLight; uniform float uTime; uniform vec3 uSelect;",
     FOG_FN,
     DEPTH_FN,
+    BEAM_FN,
     "varying vec3 vWorld; varying vec3 vCol; varying float vPart; varying float vOy;",
     "varying float vSel; varying float vEmber;",
     "void main() {",
@@ -176,17 +202,27 @@
     "  vec3 col = base * (amb + diff * vec3(1.0, 0.96, 0.86) * 0.92);",
     "  float rim = pow(1.0 - max(dot(N, V), 0.0), 3.0);",
     "  col += rim * mix(base, vec3(0.6, 1.0, 0.92), 0.55) * 0.35;",
+    "  vec3 clear = col;",                                                             /* in clear light (the flashlight) */
     "  col = underwaterAt(col, vWorld.y);",
     "  vec3 ember = vec3(1.0, 0.38, 0.16) * (0.8 + 0.2 * sin(uTime * 6.0));",
+    "  vec3 add = vec3(0.0);",
     "  if (vPart > 1.5) {",                                                            /* eyes */
     "    col = vEmber > 0.5 ? ember * 1.2 : vec3(0.02, 0.03, 0.03);",
     "    col += pow(max(dot(reflect(-uLight, N), V), 0.0), 20.0) * 0.8;",
+    "    clear = col;",
     "  } else if (vEmber > 0.5) {",
-    "    col += ember * rim * 0.55;",
+    "    add += ember * rim * 0.55;",
     "  }",
-    "  if (vSel > 0.75) col += uSelect * (0.16 + 0.55 * rim);",
-    "  else if (vSel > 0.25) col += uSelect * 0.4 * rim;",
-    "  gl_FragColor = vec4(mix(col, uFog, fogOf(vWorld)), 1.0);",
+    "  if (vSel > 0.75) add += uSelect * (0.16 + 0.55 * rim);",
+    "  else if (vSel > 0.25) add += uSelect * 0.4 * rim;",
+    "  col += add;",
+    "  vec3 murky = mix(col, uFog, fogOf(vWorld));",
+    "  float bk = beamOf(vWorld);",
+    "  if (bk > 0.0) {",
+    "    clear = (clear + add) * (1.0 + 0.2 * max(dot(N, -uBeamDir), 0.0));",        /* the beam's own light on the side facing it */
+    "    murky = mix(murky, clear, bk);",
+    "  }",
+    "  gl_FragColor = vec4(murky, 1.0);",
     "}"
   ].join("\n");
 
@@ -239,6 +275,7 @@
    * broad noise, so their tiles never line up) and the fog go on top. */
   var FLOOR_FS = [
     FOG_FN,
+    BEAM_FN,
     "uniform vec2 uHalf; uniform float uTime; uniform float uCausticAmt;",
     "uniform sampler2D uCaustic; uniform vec3 uSand; uniform vec3 uSandDark; uniform vec3 uWater;",
     "uniform vec3 uCausticCol; uniform vec3 uEdge; uniform vec3 uLight;",
@@ -320,15 +357,20 @@
     "  slope -= 0.45 * gr.zw;",
     "  vec3 N = normalize(vec3(-slope.x, 1.0, -slope.y));",
     "  float lit = max(dot(N, uLight), 0.0) / uLight.y;",               /* 1 on flat sand */
-    "  vec3 sand = base * (1.0 + detail + gr.x) * lit * (1.0 + 0.16 * hgt) * uWater;",
-    "  sand *= vec3(1.0 + 0.06 * gr.y, 1.0, 1.0 - 0.06 * gr.y);",
+    "  vec3 dry = base * (1.0 + detail + gr.x) * lit * (1.0 + 0.16 * hgt);",   /* the sand in clear light */
+    "  dry *= vec3(1.0 + 0.06 * gr.y, 1.0, 1.0 - 0.06 * gr.y);",
+    "  vec3 sand = dry * uWater;",
     "  vec3 col = sand * mix(0.36, 1.0, inside);",                      /* beyond the glass it is unlit */
     "  vec2 uv = p / 420.0 + (L.xy - 0.5) * 0.2;",
     "  float cA = texture2D(uCaustic, uv + vec2(uTime * 0.013, uTime * 0.008)).r;",
     "  float cB = texture2D(uCaustic, R1 * uv * 1.31 + vec2(-uTime * 0.010, uTime * 0.012)).r;",
-    "  col += uCausticCol * min(cA, cB) * uCausticAmt * (0.25 + 0.75 * inside) * (0.55 + 0.45 * lit);",
-    "  col += uEdge * (1.0 - smoothstep(0.0, 4.0, abs(dOut))) * 0.22;",       /* where the glass meets the floor */
+    "  vec3 caus = uCausticCol * min(cA, cB) * uCausticAmt * (0.25 + 0.75 * inside) * (0.55 + 0.45 * lit);",
+    "  vec3 edge = uEdge * (1.0 - smoothstep(0.0, 4.0, abs(dOut))) * 0.22;",   /* where the glass meets the floor */
+    "  col += caus;",
+    "  col += edge;",
     "  col = mix(col, uFog, max(fogOf(vWorld), smoothstep(0.0, 1100.0, dOut)));",
+    "  float bk = beamOf(vWorld);",
+    "  if (bk > 0.0) col = mix(col, dry * mix(0.36, 1.0, inside) + caus + edge, bk);",
     "  gl_FragColor = vec4(col, 1.0);",
     "}"
   ].join("\n");
@@ -368,12 +410,14 @@
     "attribute float seed;",
     "uniform float uPx; uniform float uTime; uniform float uSize;",
     DEPTH_FN,
+    BEAM_FN,
     "varying float vTw; varying float vDz;",
     "void main() {",
     "  vec4 mv = viewMatrix * vec4(position, 1.0);",
     "  gl_Position = projectionMatrix * mv;",
-    "  vDz = shadeOf(position.y);",
-    "  vTw = (0.78 + 0.22 * sin(uTime * 2.3 + seed * 6.2831)) * (1.0 - 0.3 * vDz);",
+    "  float bk = beamOf(position);",                                   /* in the flashlight: its true colour */
+    "  vDz = shadeOf(position.y) * (1.0 - bk);",
+    "  vTw = (0.78 + 0.22 * sin(uTime * 2.3 + seed * 6.2831)) * (1.0 - 0.3 * vDz) * (1.0 + 0.25 * bk);",
     "  gl_PointSize = max(2.0, uSize * uPx / -mv.z);",
     "}"
   ].join("\n");
@@ -595,19 +639,27 @@
       uDepth: { value: TD },
       uFloorY: { value: FLOOR_Y },
       /* the engine's light field (setLight); off = the preview's depth shading */
-      uLightOn: { value: 0 }, uL0: { value: 1 }, uKWater: { value: 0 }
+      uLightOn: { value: 0 }, uL0: { value: 1 }, uKWater: { value: 0 },
+      /* the flashlight (setFlashlight, BEAM_FN): its fade 0..1, axis, cone, reach */
+      uBeamOn: { value: 0 }, uBeamDir: { value: new THREE.Vector3(0, -1, 0) },
+      uBeamTan: { value: 0.2 }, uBeamReach: { value: 1000 }
     };
+    function beamUniforms(u) {
+      u.uBeamOn = common.uBeamOn; u.uBeamDir = common.uBeamDir;
+      u.uBeamTan = common.uBeamTan; u.uBeamReach = common.uBeamReach;
+      return u;
+    }
 
     /* floor */
     var floorMat = new THREE.ShaderMaterial({
       vertexShader: FLOOR_VS, fragmentShader: FLOOR_FS,
-      uniforms: {
+      uniforms: beamUniforms({
         uHalf: common.uHalf, uTime: common.uTime, uFog: common.uFog, uFogDensity: common.uFogDensity,
         uCaustic: { value: (function () { var t = new THREE.DataTexture(new Uint8Array([0, 0, 0, 255]), 1, 1); t.needsUpdate = true; return t; })() },
         uCausticAmt: { value: 0 },
         uSand: { value: v3(C.sand) }, uSandDark: { value: v3(C.sandDark) }, uWater: { value: v3(C.water) },
         uCausticCol: { value: v3(C.caustic) }, uEdge: { value: v3(C.edge) }, uLight: common.uLight
-      }
+      })
     });
     var floor = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), floorMat);
     floor.rotation.x = -Math.PI / 2;
@@ -631,11 +683,11 @@
     scene.add(surface);
 
     /* fish + predators: instanced templates sharing one shader */
-    var fishUniforms = {
+    var fishUniforms = beamUniforms({
       uHalf: common.uHalf, uTime: common.uTime, uFog: common.uFog, uFogDensity: common.uFogDensity,
       uLight: common.uLight, uWag: { value: reduced ? 0 : 1 }, uSelect: { value: v3(C.select) },
       uDepth: common.uDepth, uLightOn: common.uLightOn, uL0: common.uL0, uKWater: common.uKWater
-    };
+    });
     var fishMat = new THREE.ShaderMaterial({ vertexShader: FISH_VS, fragmentShader: FISH_FS,
                                              uniforms: fishUniforms, side: THREE.DoubleSide });
     var shadowMat = new THREE.ShaderMaterial({
@@ -707,9 +759,9 @@
     var foodGeo = new THREE.BufferGeometry(), foodCap = 0;
     var foodMat = new THREE.ShaderMaterial({
       vertexShader: FOOD_VS, fragmentShader: FOOD_FS,
-      uniforms: { uPx: { value: 500 }, uTime: common.uTime, uSize: { value: 11 }, uDepth: common.uDepth,
+      uniforms: beamUniforms({ uPx: { value: 500 }, uTime: common.uTime, uSize: { value: 11 }, uDepth: common.uDepth,
                   uLightOn: common.uLightOn, uL0: common.uL0, uKWater: common.uKWater,
-                  uCore: { value: v3(C.foodCore) }, uGlow: { value: v3(C.foodGlow) } },
+                  uCore: { value: v3(C.foodCore) }, uGlow: { value: v3(C.foodGlow) } }),
       transparent: true, depthWrite: false, blending: THREE.AdditiveBlending
     });
     var food = new THREE.Points(foodGeo, foodMat);
@@ -869,6 +921,72 @@
       controls.enablePan = !on;
       controls.mouseButtons.LEFT = on ? MOUSE.ROTATE : MOUSE.PAN;
       controls.touches.ONE = on ? TOUCH.ROTATE : TOUCH.PAN;
+    }
+
+    /* ---- keyboard flight (the page's W A S D, Q / E; setMove) ----
+     * moveIn: the held keys as axes in -1..1: f forward (W) / back (S), r right
+     * (D) / left (A), u up (E) / down (Q); boost = Shift (2.5x).
+     * Free camera: the camera and the point it orbits move together, W / S
+     * along the line of sight, A / D sideways (level), Q / E straight up and
+     * down, so clampView keeps the view at the tank exactly as for a drag.
+     * Following a fish: W / S dolly toward / away from it (40 units up to the
+     * whole-tank distance), A / D circle it, Q / E lower / raise the camera
+     * around it; the follow stays on. Velocities ease in and out (time
+     * constant 0.12 s), per frame time, so a held key glides instead of jumping.
+     * Speed: a share of the tank's size, less near what the camera looks at. */
+    var moveIn = { f: 0, r: 0, u: 0, boost: false };
+    var flyVel = new THREE.Vector3(), flyWant = new THREE.Vector3();
+    var flyFwd = new THREE.Vector3(), flyRight = new THREE.Vector3(), flyOff = new THREE.Vector3();
+    var orbitVel = { az: 0, pol: 0, dolly: 0 };
+    var FLY = { span: 0.22, near: 0.15, depth: 0.6, az: 1.3, pol: 0.8, dolly: 1.2, boost: 2.5, tIn: 0.12, tOut: 0.12 };
+    function flyLevel() {
+      var r = camera.position.distanceTo(controls.target);
+      return Math.max(FLY.near, Math.min(1, r / Math.max(1, fitDist)));
+    }
+    function stepFly(dt) {
+      if (!(dt > 0)) return;
+      var m = moveIn, any = !!(m.f || m.r || m.u), boost = m.boost ? FLY.boost : 1;
+      var k = 1 - Math.exp(-dt / (any ? FLY.tIn : FLY.tOut));
+      var t = controls.target, cp = camera.position;
+      if (follow) {
+        flyVel.set(0, 0, 0);
+        orbitVel.az += (m.r * FLY.az * boost - orbitVel.az) * k;
+        orbitVel.pol += (-m.u * FLY.pol * boost - orbitVel.pol) * k;
+        orbitVel.dolly += (-m.f * FLY.dolly * boost - orbitVel.dolly) * k;
+        if (!any && Math.abs(orbitVel.az) + Math.abs(orbitVel.pol) + Math.abs(orbitVel.dolly) < 1e-3) {
+          orbitVel.az = orbitVel.pol = orbitVel.dolly = 0;
+          return;
+        }
+        if (m.f) followDive = false;   /* the keys take over from the first close-up */
+        flyOff.copy(cp).sub(t);
+        var r = flyOff.length();
+        if (!(r > 1e-6)) return;
+        var theta = Math.atan2(flyOff.x, flyOff.z) + orbitVel.az * dt;
+        var phi = Math.acos(Math.max(-1, Math.min(1, flyOff.y / r))) + orbitVel.pol * dt;
+        phi = Math.max(0.05, Math.min(controls.maxPolarAngle, phi));
+        r = Math.max(controls.minDistance, Math.min(Math.max(controls.minDistance, fitDist), r * Math.exp(orbitVel.dolly * dt)));
+        cp.set(t.x + r * Math.sin(phi) * Math.sin(theta), t.y + r * Math.cos(phi), t.z + r * Math.sin(phi) * Math.cos(theta));
+        anim = null; userMoved = true;
+        return;
+      }
+      orbitVel.az = orbitVel.pol = orbitVel.dolly = 0;
+      flyWant.set(0, 0, 0);
+      if (m.f || m.r) {
+        camera.getWorldDirection(flyFwd);
+        flyRight.setFromMatrixColumn(camera.matrixWorld, 0);
+        flyRight.y = 0;
+        if (flyRight.lengthSq() > 1e-8) flyRight.normalize();
+        flyWant.addScaledVector(flyFwd, m.f).addScaledVector(flyRight, m.r);
+        if (flyWant.lengthSq() > 1) flyWant.normalize();
+        flyWant.multiplyScalar(Math.max(W, H) * FLY.span * flyLevel() * boost);
+      }
+      flyWant.y += m.u * TD * FLY.depth * boost;
+      flyVel.lerp(flyWant, k);
+      if (!any && flyVel.lengthSq() < 1) { flyVel.set(0, 0, 0); return; }   /* below 1 unit / s: stopped */
+      t.addScaledVector(flyVel, dt);
+      cp.addScaledVector(flyVel, dt);
+      anim = null; userMoved = true;
+      clampView();
     }
 
     function dir() { return new THREE.Vector3(0, Math.cos(POLAR), Math.sin(POLAR)); }
@@ -1254,6 +1372,7 @@
           else followDive = false;
         }
       }
+      stepFly(dt);   /* the held W A S D / Q E keys */
       controls.update(dt);
       clampView();   /* after follow, damping and animation alike */
       /* near/far follow the zoom, so a close-up keeps its depth precision and
@@ -1283,9 +1402,36 @@
         causticFade = Math.min(1, causticFade + dt / 1.4);
         floorMat.uniforms.uCausticAmt.value = 0.5 * (1 - Math.pow(1 - causticFade, 3));   /* strong enough to read on the sand */
       }
+      aimBeam(s, sel, dt);
       renderer.render(scene, camera);
     }
     var followDive = false;
+
+    /* The flashlight (viewer only; BEAM_FN). On, a cone of clear light from
+     * the camera: at the followed fish while following (a circle about 70
+     * units across it, more from far away), else at the point the camera
+     * looks at (the orbit centre; a ~11 degree cone). It reaches past its
+     * target by the tank's depth, so the sand behind a fish near the floor
+     * lights up too. Fades in and out over ~0.3 s. */
+    var beamWant = false, beamAmt = 0;
+    var beamTgt = new THREE.Vector3(), beamDir = new THREE.Vector3();
+    function aimBeam(s, sel, dt) {
+      var goal = beamWant ? 1 : 0;
+      beamAmt = reduced ? goal : beamAmt + (goal - beamAmt) * (1 - Math.exp(-dt * 10));
+      if (Math.abs(beamAmt - goal) < 0.002) beamAmt = goal;
+      common.uBeamOn.value = beamAmt;
+      if (beamAmt <= 0) return;
+      var onFish = follow && sel >= 0 && s && sel < s.n;
+      if (onFish) beamTgt.set(s.segs[12 * sel] - halfW, fishY(s, sel), s.segs[12 * sel + 1] - halfH);
+      else beamTgt.copy(controls.target);
+      beamDir.copy(beamTgt).sub(camera.position);
+      var dist = beamDir.length();
+      if (!(dist > 1e-3)) return;
+      beamDir.multiplyScalar(1 / dist);
+      common.uBeamDir.value.copy(beamDir);
+      common.uBeamTan.value = Math.max(70, dist * (onFish ? 0.12 : 0.2)) / dist;
+      common.uBeamReach.value = dist + TD * 1.2;
+    }
     /* The caustic pattern costs ~40 ms of JS on a laptop (more on a phone), so
      * it is built after the first frames, in idle time, and the light fades in. */
     var causticReady = false, causticFade = 0;
@@ -1358,6 +1504,19 @@
       /* the view up (+) or down (-) by dy sim units, kept between just above
        * the floor and a bit above the surface; stops a follow */
       moveView: moveView,
+      /* the held movement keys (stepFly): f forward / back, r right / left,
+       * u up / down, each -1..1; boost (Shift) 2.5x. Free camera: fly; while
+       * following: dolly (f), circle (r) and raise / lower (u) around the fish */
+      setMove: function (f, r, u, boost) {
+        function ax(v) { v = +v || 0; return v > 1 ? 1 : v < -1 ? -1 : v; }
+        moveIn.f = ax(f); moveIn.r = ax(r); moveIn.u = ax(u); moveIn.boost = !!boost;
+      },
+      /* the flight's state, for the tests: speeds now (free: units / s;
+       * following: rad / s, rad / s, 1 / s) */
+      motion: function () {
+        return { vel: flyVel.toArray(), orbit: { az: orbitVel.az, pol: orbitVel.pol, dolly: orbitVel.dolly },
+                 dist: camera.position.distanceTo(controls.target), fitDist: fitDist };
+      },
       /* put the camera at pos looking at target (three coords, [x, y, z]) */
       lookFrom: function (pos, target) {
         if (follow) { follow = false; setFollowControls(false); onFollow(false); }
@@ -1377,6 +1536,11 @@
       /* one step down: fewer pixels, then no shadows. false at the floor */
       degrade: function () { return setQuality(quality - 1); },
       setReducedMotion: function (on) { reduced = !!on; fishUniforms.uWag.value = reduced ? 0 : 1; },
+      /* the flashlight: clear light on the followed fish, or where the camera
+       * looks (aimBeam). Viewer only: nothing here reaches the simulation. */
+      setFlashlight: function (on) { beamWant = !!on; },
+      flashlight: function () { return beamWant; },
+      flashlightLevel: function () { return beamAmt; },
       zoomBy: function (f) {
         var t = controls.target, off = camera.position.clone().sub(t);
         var d = Math.max(controls.minDistance, Math.min(controls.maxDistance, off.length() * f));

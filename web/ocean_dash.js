@@ -46,6 +46,13 @@
     rows = []; every = 60; version++; wireCache = null; lastKey = "";
     if (host && host.setRecEvery) host.setRecEvery(every);
   }
+  /* the run went back to an earlier frame (a Turbo run that was lost): the
+   * samples after it are of a future that did not happen */
+  function rewind(frame) {
+    var n = rows.length;
+    rows = rows.filter(function (r) { return frameOf(r) <= frame; });
+    if (rows.length !== n) version++;
+  }
 
   /* ---- columns ---- */
   function times() { return rows.map(function (r) { return r.st[1] * DT; }); }
@@ -365,7 +372,7 @@
 
   window.EvoOceanDash = {
     attach: function (h) { host = h; if (h.setRecEvery) h.setRecEvery(every); },
-    push: push, ingest: ingest, reset: reset,
+    push: push, ingest: ingest, reset: reset, rewind: rewind,
     every: function () { return every; }, famK: FAM_K,
     open: open, close: close, isOpen: function () { return isOpen; },
     showTab: function (id) { if (isOpen) showTab(id); else { tab = id; open(); } },

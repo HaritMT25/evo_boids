@@ -131,12 +131,13 @@ struct OceanConfig {
     //     by up to ±5%): turning is STEER_X's, as under triangular motion (which
     //     already turns by STEER_X and ignores this).
     int   steerFrame      = 0;
-    // Food lifetime in seconds (0 = off: food lasts until eaten; range [0, 1e6]).
-    // On, every item is removed foodLife seconds after it appeared, eaten or not
-    // (it sinks out or decays). With a fixed inflow, food the fish do not find is
-    // lost, so how many fish a world can feed depends on how well they search.
-    // The world's first stock gets ages spread evenly over [0, foodLife) so it
-    // does not all vanish at once. No draws.
+    // Food lifetime in seconds (0 = off: food lasts until eaten; range [0,
+    // kOceanMaxFoodLife = 3600]). On, every item is removed foodLife seconds
+    // after it appeared, eaten or not (it sinks out or decays). With a fixed
+    // inflow, food the fish do not find is lost, so how many fish a world can
+    // feed depends on how well they search. The world's first stock gets ages
+    // spread evenly over [0, foodLife) so it does not all vanish at once. No
+    // draws.
     float foodLife        = 0.0f;
 };
 
@@ -315,10 +316,21 @@ inline bool readOceanJson(const char* json, SimConfig& sc, OceanConfig& oc, std:
     return true;
 }
 
+// The longest food lifetime, in seconds. A food age is a float that grows by
+// dt = 0.016 a step, so it must stay where that add is accurate: below 2^12
+// (4096) the float spacing is at most 2^-12 s, and each add rounds dt by at
+// most +0.71% (the binade [2^11, 2^12) adds 66 spacings, 0.01611 s); an item
+// born at age 0 reaches 3600 after 224377 steps instead of 225000 (0.28%
+// early). Further up it degrades: -2.3% per step from 2^13, +95% from 2^18,
+// and from 2^19 (524288) age + dt == age, so an item there never expires
+// (the 1e6 this range used to allow).
+inline constexpr float kOceanMaxFoodLife = 3600.0f;
+
 // "" when every knob is inside its range, else which one is not and why. The
 // ranges keep every product the step forms finite: e.g. kBuoy·(bodyBuoy·D −
 // depth) ≤ 1e3·D, vz·vDrag·dt ≤ (pitchMax + 16)·1e4·dt before the clamp, the
-// wave flow ≤ waveSpeed·(1 + 1.5/(b·k)) with b ≥ 1.
+// wave flow ≤ waveSpeed·(1 + 1.5/(b·k)) with b ≥ 1; and foodLife keeps the
+// food ages accurate (kOceanMaxFoodLife).
 inline std::string oceanConfigError(const OceanConfig& c) {
     const struct { const char* name; float v, lo, hi; } r[] = {
         {"depth", c.depth, 10.0f, 100000.0f},
@@ -336,7 +348,7 @@ inline std::string oceanConfigError(const OceanConfig& c) {
         {"L0", c.L0, 0.0f, 100.0f},
         {"kWater", c.kWater, 0.0f, 1.0f},
         {"kMouth", c.kMouth, 0.01f, 100.0f},
-        {"foodLife", c.foodLife, 0.0f, 1000000.0f},
+        {"foodLife", c.foodLife, 0.0f, kOceanMaxFoodLife},
     };
     for (const auto& e : r)
         if (!(e.v >= e.lo && e.v <= e.hi)) {   // NaN fails both
@@ -397,9 +409,23 @@ inline bool oceanConfigValid(const OceanConfig& c) { return oceanConfigError(c).
 //     predatorPerception, predatorCaptureRadius) <= 1e6: SpatialGrid casts
 //     (centre ± radius) / cell to int, cell = perceptionRadius >= 1 (a
 //     toroidal world already holds them under min(W, H) / 2; radiusError).
+// And the energies, where finite was not enough: every one in [-1e6, 1e6]
+// (kOceanMaxEnergy) — foodEnergy, metabolicRate, geneCost, moveCost,
+// reproEnergy, newbornEnergy, predatorMetabolism, predatorMoveCost,
+// predatorReproEnergy, predatorNewbornEnergy, predatorMeal. Accepted finite
+// values made infinities: one fish eating four items of foodEnergy 1e38 held
+// +inf; moveCost 1e38 at speed 30, or geneCost 1e38 over a genome, made one
+// step's cost inf (reserves -inf); predatorMeal 3e38 overflowed a predator's
+// energy within a few meals. Inside the range one step's costs are under
+// 3e11 (dt · 1e6 · (bodySize 2 · depth costs 201 + 80 genes + speed² 1.6e7)),
+// and one item, birth, bud or meal moves at most 1e6 (a meal of the prey's
+// reserves moves what the prey held), with at most 2e6 items a step: FLT_MAX
+// (3.4e38) is more than 1e25 steps away. Negative values stay valid
+// (predatorMoveCost / predatorMeal < 0 mean "moveCost" / "the prey's reserves").
 // And: every other float the step reads finite (maxTurnRate, the cooldowns,
-// ages, energies, the predator economy's ...), minPopulation, predatorCount
-// and foodPatches <= kOceanMaxCount.
+// ages, the predator economy's ...), minPopulation, predatorCount and
+// foodPatches <= kOceanMaxCount.
+inline constexpr float kOceanMaxEnergy = 1000000.0f;  // |every energy knob|
 inline constexpr int kOceanMaxCount = 100000;        // founders, the reseed floor, predators, food patches
 inline constexpr int kOceanMaxWorldSide = 100000;    // world width / height (the depth's own ceiling too)
 inline constexpr double kOceanMaxGridCells = 16777216.0;   // per neighbour grid (2^24)
@@ -420,6 +446,18 @@ inline std::string oceanSimConfigError(const SimConfig& c) {
         {"pickupRadius", c.pickupRadius, 0.0f, 1000000.0f},
         {"predatorPerception", c.predatorPerception, 0.0f, 1000000.0f},
         {"predatorCaptureRadius", c.predatorCaptureRadius, 0.0f, 1000000.0f},
+        // the energies (kOceanMaxEnergy)
+        {"foodEnergy", c.foodEnergy, -kOceanMaxEnergy, kOceanMaxEnergy},
+        {"metabolicRate", c.metabolicRate, -kOceanMaxEnergy, kOceanMaxEnergy},
+        {"geneCost", c.geneCost, -kOceanMaxEnergy, kOceanMaxEnergy},
+        {"moveCost", c.moveCost, -kOceanMaxEnergy, kOceanMaxEnergy},
+        {"reproEnergy", c.reproEnergy, -kOceanMaxEnergy, kOceanMaxEnergy},
+        {"newbornEnergy", c.newbornEnergy, -kOceanMaxEnergy, kOceanMaxEnergy},
+        {"predatorMetabolism", c.predatorMetabolism, -kOceanMaxEnergy, kOceanMaxEnergy},
+        {"predatorMoveCost", c.predatorMoveCost, -kOceanMaxEnergy, kOceanMaxEnergy},
+        {"predatorReproEnergy", c.predatorReproEnergy, -kOceanMaxEnergy, kOceanMaxEnergy},
+        {"predatorNewbornEnergy", c.predatorNewbornEnergy, -kOceanMaxEnergy, kOceanMaxEnergy},
+        {"predatorMeal", c.predatorMeal, -kOceanMaxEnergy, kOceanMaxEnergy},
     };
     for (const auto& e : r)
         if (!(e.v >= e.lo && e.v <= e.hi)) {   // NaN fails both
@@ -433,20 +471,15 @@ inline std::string oceanSimConfigError(const SimConfig& c) {
     if (c.targetFood < 0 || c.targetFood > 1000000) return "targetFood must be in [0, 1000000]";
     // Every other float the Ocean step reads must at least be finite: a JSON
     // number past FLT_MAX (1e39) is an infinite float — maxTurnRate inf made
-    // the heading NaN in one step; an infinite cooldown, age or predator-
-    // economy value poisons the timers and energies the same way.
+    // the heading NaN in one step; an infinite cooldown or age poisons the
+    // timers the same way. (The energies have their range above.)
     const struct { const char* name; float v; } finite[] = {
         {"reproMaxDistance", c.reproMaxDistance}, {"reproSoftWidth", c.reproSoftWidth},
         {"reproGracePeriod", c.reproGracePeriod}, {"bodyMutation", c.bodyMutation},
-        {"foodEnergy", c.foodEnergy}, {"metabolicRate", c.metabolicRate}, {"geneCost", c.geneCost},
-        {"moveCost", c.moveCost}, {"maxAge", c.maxAge}, {"reproEnergy", c.reproEnergy},
-        {"newbornEnergy", c.newbornEnergy}, {"reproCooldown", c.reproCooldown},
+        {"maxAge", c.maxAge}, {"reproCooldown", c.reproCooldown},
         {"interactCooldown", c.interactCooldown}, {"minSpeed", c.minSpeed}, {"maxTurnRate", c.maxTurnRate},
         {"mutationMultiplier", c.mutationMultiplier}, {"predatorCooldown", c.predatorCooldown},
-        {"predatorMetabolism", c.predatorMetabolism}, {"predatorMoveCost", c.predatorMoveCost},
-        {"predatorReproEnergy", c.predatorReproEnergy}, {"predatorNewbornEnergy", c.predatorNewbornEnergy},
-        {"predatorMeal", c.predatorMeal}, {"predatorMaxAge", c.predatorMaxAge},
-        {"predatorTraitMutation", c.predatorTraitMutation},
+        {"predatorMaxAge", c.predatorMaxAge}, {"predatorTraitMutation", c.predatorTraitMutation},
     };
     for (const auto& e : finite)
         if (!std::isfinite(e.v)) return std::string(e.name) + " must be finite";

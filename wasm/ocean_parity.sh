@@ -403,6 +403,19 @@ radd r_pred_cd_inf  '1 10 --cfg {"predatorCount":2,"predatorCooldown":1e39}'
 radd r_pred_meal    '1 10 --cfg {"predatorCount":2,"predatorEconomy":true,"predatorMeal":1e39}'
 radd r_pred_repro   '1 10 --cfg {"predatorCount":2,"predatorEconomy":true,"predatorReproEnergy":-1e39}'
 radd r_pred_age_inf '1 10 --cfg {"predatorCount":2,"predatorEconomy":true,"predatorMaxAge":1e39}'
+# The energies in [-1e6, 1e6] (kOceanMaxEnergy): finite values past it overflowed
+# (one fish eating four items of 1e38: reserves +inf; moveCost 1e38: a step's cost inf).
+radd r_food_energy  '1 1 --pop 1 --cfg {"minPopulation":0,"pickupRadius":1000000,"foodEnergy":1e38}'
+radd r_move_cost    '1 10 --cfg {"moveCost":1e38}'
+radd r_gene_cost    '1 10 --cfg {"geneCost":-1000001}'
+radd r_metab_big    '1 10 --cfg {"metabolicRate":2e6}'
+radd r_newborn_big  '1 10 --cfg {"newbornEnergy":1e7}'
+radd r_repro_big    '1 10 --cfg {"reproEnergy":-2e6}'
+radd r_pred_meal_big '1 10 --cfg {"predatorCount":4,"predatorEconomy":true,"predatorMeal":3e38}'
+radd r_pred_mcost_big '1 10 --cfg {"predatorCount":2,"predatorEconomy":true,"predatorMoveCost":1e38}'
+radd r_pred_newborn_big '1 10 --cfg {"predatorCount":2,"predatorEconomy":true,"predatorNewbornEnergy":-3e38}'
+radd r_live_energy  '1 10 --set foodEnergy=1000001@5'
+radd r_live_pred_metab '1 10 --cfg {"predatorCount":2,"predatorEconomy":true} --set predatorMetabolism=1e30@5'
 # (Each just past its ceiling, and still small enough to allocate: were the
 # check missing, oc_init would accept it, not crash into a false "refused".)
 radd r_pop_big      '1 10 --pop 100001'
@@ -414,7 +427,8 @@ radd r_live_minpop  '1 10 --set minPopulation=100001@5'
 radd r_predcount_big '1 10 --cfg {"predatorCount":100001}'
 radd r_patches_big  '1 10 --cfg {"foodPatches":100001}'
 # The ocean-vision keys: the int keys (eye, eyeOnly, eyeCode, steerFrame) are
-# whole numbers in int's range, then in range; foodLife in [0, 1e6]. r_eye_*
+# whole numbers in int's range, then in range; foodLife in [0, 3600] (beyond,
+# float ages lose accuracy, and from 2^19 s they stop: kOceanMaxFoodLife). r_eye_*
 # are asked of the eye build's shim, the rest of the plain build's (where eye,
 # eyeOnly and eyeCode must stay 0).
 radd r_steer_frac   '1 10 --cfg {"steerFrame":0.5}'
@@ -424,9 +438,12 @@ radd r_steer_dup    '1 10 --cfg {"steerFrame":1,"steerFrame":0.5}'
 radd r_life_neg     '1 10 --cfg {"foodLife":-1}'
 radd r_life_big     '1 10 --cfg {"foodLife":1000001}'
 radd r_life_inf     '1 10 --cfg {"foodLife":1e39}'
+radd r_life_hour    '1 10 --cfg {"foodLife":3600.5}'
+radd r_life_stall   '1 10 --cfg {"foodLife":1000000}'
 radd r_live_steer   '1 10 --set steerFrame=0.5@5'
 radd r_live_steer2  '1 10 --set steerFrame=2@5'
 radd r_live_life    '1 10 --set foodLife=1e7@5'
+radd r_live_life_hour '1 10 --set foodLife=3601@5'
 radd r_plain_eye    '1 10 --cfg {"eye":1}'
 radd r_plain_eyeonly '1 10 --cfg {"eyeOnly":1}'
 radd r_plain_eyecode '1 10 --cfg {"eyeCode":1}'

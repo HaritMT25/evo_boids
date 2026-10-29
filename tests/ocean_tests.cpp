@@ -46,7 +46,9 @@
 //   food_life     foodLife: an item goes on the step its age reaches foodLife;
 //                 off, none do; the first stock's ages spread; draws unchanged;
 //                 the spawn cap counts live items (what expires frees its place
-//                 in the same step: targetFood 1, 2 a step, foodLife dt -> 2)
+//                 in the same step: targetFood 1, 2 a step, foodLife dt -> 2);
+//                 the range ends at 3600 s (kOceanMaxFoodLife), where an item
+//                 at foodLife - 0.0625 still goes within four steps
 //   reproducible  same seed twice -> identical fingerprints; another seed and a
 //                 1-ulp change in any section change the hash — incl. a
 //                 vortex frequency, a food-patch depth, a grid's cell size, the
@@ -129,7 +131,8 @@
 //   exp           oceanmath::expf: ±0 -> 1, NaN / ±inf, beyond the float
 //                 range; within 4 ulp of e^x and monotone on [-87, 88]
 //   ranges        every Ocean knob, and the SimConfig keys the Ocean bounds
-//                 (oceanSimConfigError: the current, foodPatchRadius): its
+//                 (oceanSimConfigError: the current, foodPatchRadius, the
+//                 energies at ±1e6, foodLife at 3600): its
 //                 range's ends accepted, just outside, inf and the -1e37 hole
 //                 refused (oc_init, oc_set_param); a run at each end stays
 //                 finite; bool / mode keys strict
@@ -1619,6 +1622,42 @@ void testFoodLife() {
         t.expect(!oceanConfigValid(oc), "foodLife -1 accepted");
         oc.foodLife = std::numeric_limits<float>::infinity();
         t.expect(!oceanConfigValid(oc), "foodLife inf accepted");
+        // The range ends where a float age still advances accurately by dt
+        // (kOceanMaxFoodLife); 1e6 used to be accepted, and from 2^19 s an age
+        // stops growing (age + dt == age): such an item never expired.
+        oc.foodLife = kOceanMaxFoodLife;
+        t.expect(oceanConfigValid(oc) && kOceanMaxFoodLife == 3600.0f, "foodLife %g (the range end) refused", oc.foodLife);
+        for (float v : {std::nextafter(kOceanMaxFoodLife, 1e9f), 3601.0f, 524288.0f, 1e6f}) {
+            oc.foodLife = v;
+            t.expect(!oceanConfigValid(oc), "foodLife %.9g accepted", (double)v);
+        }
+    }
+    // At the range end every age still advances each step: an item placed at
+    // foodLife - 0.0625 goes on the fourth step (an add there is 0.01611 s:
+    // 0.0644 in four), and items at 2048 and 3000 age by a step's worth.
+    {
+        OceanConfig oc;
+        oc.foodLife = kOceanMaxFoodLife;
+        OceanWorld w;
+        initQuiet(w, 31, 240.0f, oc);
+        const float ages[] = {kOceanMaxFoodLife - 0.0625f, 2048.0f, 3000.0f};
+        for (float a : ages) {
+            OceanFood f;
+            f.pos = {300.0f + a / 10.0f, 500.0f};
+            f.depth = 120.0f;
+            f.age = a;
+            w.food.push_back(f);
+        }
+        int goneAt = -1;
+        for (int s = 1; s <= 4; ++s) {
+            w.update(0.016f);
+            if (goneAt < 0 && w.food.size() == 2) goneAt = s;
+        }
+        t.expect(goneAt == 4 && w.totalFoodExpired == 1, "foodLife %g: an item at %.9g went at step %d (expected 4), %lld expired",
+                 (double)kOceanMaxFoodLife, (double)ages[0], goneAt, w.totalFoodExpired);
+        const bool aged = w.food.size() == 2 && w.food[0].age > ages[1] + 0.06f && w.food[0].age < ages[1] + 0.07f &&
+                          w.food[1].age > ages[2] + 0.06f && w.food[1].age < ages[2] + 0.07f;
+        t.expect(aged, "foodLife %g: the items at 2048 / 3000 did not age by ~0.064 s in 4 steps", (double)kOceanMaxFoodLife);
     }
     // Hand-placed items in a quiet world (no fish, no spawn): with foodLife 1 each one
     // goes on the first step its age reaches 1 — an item placed at age a lasts
@@ -3213,8 +3252,20 @@ void testRanges() {
         {"foodPatchRadius", 0, 100000, R"("toroidal":true,"foodPatches":3,)"},
         {"foodSpawnBase", -10000, 10000, ""}, {"foodSpawnAmp", -10000, 10000, ""},
         {"maxSpeed", 30, 2000, ""}, {"predatorSpeed", 0, 2000, R"("predatorCount":3,)"},
-        // the food lifetime (ocean-vision)
-        {"foodLife", 0, 1e6, ""},
+        // the food lifetime (ocean-vision): up to kOceanMaxFoodLife
+        {"foodLife", 0, 3600, ""},
+        // the energies, [-1e6, 1e6] (kOceanMaxEnergy); fish at the fastest
+        // speed / with many genes / deep where it matters (predators: their
+        // economy on, at most 50 of them: reproEnergy -1e6 buds every step)
+        {"foodEnergy", -1e6, 1e6, R"("pickupRadius":1000000,)"},
+        {"metabolicRate", -1e6, 1e6, R"("bodyModel":true,"depthCostScaled":true,"cHold":100,"cPress":100,)"},
+        {"geneCost", -1e6, 1e6, ""}, {"moveCost", -1e6, 1e6, R"("minSpeed":2000,"maxSpeed":2000,)"},
+        {"reproEnergy", -1e6, 1e6, ""}, {"newbornEnergy", -1e6, 1e6, R"("reproEnergy":0,)"},
+        {"predatorMetabolism", -1e6, 1e6, R"("predatorEconomy":true,"predatorMaxPopulation":50,)"},
+        {"predatorMoveCost", -1e6, 1e6, R"("predatorEconomy":true,"predatorMaxPopulation":50,"predatorSpeed":2000,)"},
+        {"predatorReproEnergy", -1e6, 1e6, R"("predatorEconomy":true,"predatorMaxPopulation":50,)"},
+        {"predatorNewbornEnergy", -1e6, 1e6, R"("predatorEconomy":true,"predatorMaxPopulation":50,"predatorReproEnergy":0,)"},
+        {"predatorMeal", -1e6, 1e6, R"("predatorEconomy":true,"predatorMaxPopulation":50,"predatorCooldown":0,)"},
     };
     auto cfgOf = [](const K& k, double v) {
         char num[40];
@@ -3246,7 +3297,13 @@ void testRanges() {
                           R"({"foodDepthMode":0.5})", R"({"foodDepthMode":1e300})", R"({"waveBand":0})",
                           // the current's int keys, and the config that hung wrapCoord
                           R"({"currentMode":2})", R"({"currentMode":-1})", R"({"currentEddies":101})", R"({"currentEddies":-1})",
-                          R"({"currentMode":1,"currentStrength":1e20,"deepCurrent":true,"foodDrift":true,"targetFood":1})"})
+                          R"({"currentMode":1,"currentStrength":1e20,"deepCurrent":true,"foodDrift":true,"targetFood":1})",
+                          // finite energies that overflowed (the Codex audit): reserves +inf from four
+                          // items, a step's cost inf (reserves -inf), a predator's energy inf
+                          R"({"minPopulation":0,"pickupRadius":1000000,"foodEnergy":1e38})",
+                          R"({"minPopulation":0,"targetFood":0,"foodSpawnBase":0,"foodSpawnAmp":0,"minSpeed":30,"maxSpeed":30,"moveCost":1e38})",
+                          R"({"geneCost":1e38})", R"({"predatorCount":4,"predatorEconomy":true,"predatorMeal":3e38})",
+                          R"({"predatorCount":2,"predatorEconomy":true,"predatorMoveCost":1e38})"})
         refused += t.expect(oc_init(1002, 1920, 1080, 240.0, 100, c) == 0, "%s accepted", c);
     for (const char* c : {R"({"deepCurrent":1,"sizeDrift":true,"mouthGate":0,"foodDepthMode":1})"}) {
         const int initOk = oc_init(1002, 1920, 1080, 240.0, 100, c);
@@ -3761,7 +3818,7 @@ void testPreset() {
 // oc_init / oc_set_param: an int key's JSON number must be a whole number in
 // int's range (refused before any cast, at every occurrence of the key), then
 // lie in its range (eye / eyeOnly 0..1 and eyeCode 0..31 in the eye build, 0 in
-// the plain one; steerFrame 0..1); foodLife in [0, 1e6]; a refused call keeps
+// the plain one; steerFrame 0..1); foodLife in [0, 3600]; a refused call keeps
 // the world as it was.
 void testVisionKeys() {
     Test t("vision_keys");
@@ -3806,7 +3863,8 @@ void testVisionKeys() {
         {R"({"eyeCode":8})", true, false},        {R"({"eye":1,"eyeOnly":1,"eyeCode":16})", true, false},
         {R"({"eyeCode":31})", true, false},       {R"({"eyeCode":32})", false, false},
         {R"({"foodLife":0})", true, true},        {R"({"foodLife":12.5})", true, true},
-        {R"({"foodLife":1e6})", true, true},      {R"({"foodLife":1000001})", false, false},
+        {R"({"foodLife":3600})", true, true},     {R"({"foodLife":3600.5})", false, false},
+        {R"({"foodLife":1e6})", false, false},    {R"({"foodLife":1000001})", false, false},
         {R"({"foodLife":-0.001})", false, false}, {R"({"foodLife":1e39})", false, false},
         {R"({"foodLife":-1e39})", false, false},
     };
@@ -3826,7 +3884,7 @@ void testVisionKeys() {
         const ofp::Fingerprint before = ofp::fingerprint(*g_world);
         struct L { const char* key; double v; };
         const L bad[] = {{"steerFrame", 0.5}, {"steerFrame", 2.0}, {"steerFrame", 2147483648.0}, {"eyeOnly", 1.5},
-                         {"eyeCode", 32.0}, {"eyeCode", 1e300}, {"eye", 0.25}, {"eye", 2.0}, {"foodLife", 1e7},
+                         {"eyeCode", 32.0}, {"eyeCode", 1e300}, {"eye", 0.25}, {"eye", 2.0}, {"foodLife", 1e7}, {"foodLife", 3601.0},
                          {"foodLife", std::numeric_limits<double>::infinity()}, {"foodLife", -1.0},
                          {"eyeCode", std::numeric_limits<double>::quiet_NaN()}};
         for (const L& l : bad) {

@@ -21,9 +21,12 @@
 //     currentGyreEps in [-1, 1], currentMode 0 / 1, foodPatchRadius in
 //     [0, 1e5]), or a key whose value reaches an int conversion out of range
 //     (foodSpawnBase / foodSpawnAmp in [-1e4, 1e4], targetFood in [0, 1e6],
-//     maxSpeed <= 2000, predatorSpeed in [0, 2000], every radius <= 1e6); a
-//     non-finite value in any other float the step reads (maxTurnRate, the
-//     cooldowns, maxAge, the energies, the predator economy's floats, ...);
+//     maxSpeed <= 2000, predatorSpeed in [0, 2000], every radius <= 1e6); an
+//     energy outside [-1e6, 1e6] (foodEnergy, metabolicRate, geneCost,
+//     moveCost, reproEnergy, newbornEnergy and the predator economy's
+//     metabolism, move cost, repro / newborn energies and meal: finite values
+//     like foodEnergy 1e38 overflowed reserves to inf); a non-finite value in
+//     any other float the step reads (maxTurnRate, the cooldowns, maxAge, ...);
 //     minPopulation, predatorCount or foodPatches above 1e5; a width or
 //     height outside [100, 1e5], a population outside [0, 1e5], or neighbour
 //     grids (cell = perceptionRadius) over 2^24 cells (oceanWorldSizeError);
@@ -51,7 +54,8 @@
 //     plain one.
 //   * steerFrame (OceanConfig::steerFrame: STEER_X / STEER_Y in world x / y, or
 //     in the fish's own frame) is 0 or 1 in both builds; foodLife (seconds,
-//     0 = off) is in [0, 1e6].
+//     0 = off) is in [0, 3600] (kOceanMaxFoodLife: where a float age still
+//     advances accurately by dt).
 //   * With no cfgJson the world is the tuned preview (applyOceanDefaults +
 //     OceanConfig defaults, src/ocean/ocean_config.hpp).
 //

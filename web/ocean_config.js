@@ -51,7 +51,7 @@
     lightEnabled: [false], L0: [1, { step: 0.1, min: 0, max: 100 }], kWater: [0.006, { step: 0.001, min: 0, max: 1 }],
     sizeDrift: [false], sizeFight: [false], mouthGate: [false], kMouth: [2, { step: 0.1, min: 0.01 }],
     steerFrame: [0, { options: ["World x / y (Classic's)", "The fish's own frame"] }],
-    eye: [0, { bit: true }], eyeOnly: [0, { bit: true }], eyeCode: [0, { step: 1, min: 0, max: 7, int: true }]
+    eye: [0, { bit: true }], eyeOnly: [0, { bit: true }], eyeCode: [0, { step: 1, min: 0, max: 31, int: true }]
   };
 
   /* oc_set_param's whitelist: these apply at once */
@@ -152,7 +152,7 @@
     predatorMaxAge: "0 = until it starves", predatorMinPopulation: "0 = off; put back below this",
     predatorMaxPopulation: "0 = none", currentDrift: "0 = a still pattern", fastTanh: "changes the numbers",
     foodLife: "0 = until eaten", depth: "0 = surface", kBuoy: "per second", waveSpeed: "0 = still",
-    cHold: "× metabolism when scaled", cPress: "× metabolism when scaled", eyeCode: "bits 1, 2, 4"
+    cHold: "× metabolism when scaled", cPress: "× metabolism when scaled", eyeCode: "bits 1, 2, 4; cloaks 8, 16"
   };
   /* what one press of − / + changes */
   var BTN_STEP = {
@@ -258,7 +258,7 @@
     steerFrame: { d: "Which way STEER_X / STEER_Y push: in world x / y (Classic's, and the food senses' frame), or in the fish's own frame (STEER_X turns it right or left, STEER_Y along its heading), so a sense in its own frame can turn it toward what it senses. Fast-swims-straight already turns by STEER_X and ignores this. Applies live.", t: "try: the fish's own frame, for the 3-D senses" },
     eye: { d: "The compound eye: six sectors around the fish (ahead, behind, left, right, up, down), each reporting the nearest thing in it by nearness, apparent size and contrast. Only in the eye build of the module. Applies live.", t: "try: on in the eye build" },
     eyeOnly: { d: "Turn off the labelled senses the eye replaces (food direction, neighbours, the predator bearing, ...): the fish see only through the eye (or, with it off, nothing outside their own body). Eye build only. Applies live.", t: "try: on with the eye, to see what evolves from sight alone" },
-    eyeCode: { d: "The eye's encoding, a sum of bits: 1 faded contrast, 2 opponent pairs (left + right and right − left, ...), 4 every object in a sector instead of the nearest. Eye build only. Applies live.", t: "try: 0, then 2" },
+    eyeCode: { d: "The eye's encoding, a sum of bits (0 to 31): 1 faded contrast, 2 opponent pairs (left + right and right − left, ...), 4 every object in a sector instead of the nearest; and two cloaks: 8 the eye ignores other fish (it still sees predators), 16 the eye ignores food (the labelled senses still see both). Eye build only. Applies live.", t: "try: 0, then 2; 16 to see whether food-finding needs the eye" },
     governor: { d: "When frames take too long: first run fewer steps per frame, then draw the tank with less detail. Never changes the simulation itself.", t: "try: on; off to see the uncapped run (it may stutter)" },
     colourBrain: { d: "Off: each family line (every fish descended from the same starting fish) has its own colour, the one it has in the dashboards. On: the colour comes from the genome's wiring, so similar brains look alike.", t: "try: off to follow families, on to see what their brains converged on" },
     followLight: { d: "While you follow a fish (F), a flashlight shows it and its surroundings in clear light: true colours, no depth fade, no water tint. The dock's flashlight button (L) turns it on anywhere. Drawing only: the fish never see it.", t: "try: on (the default)" }

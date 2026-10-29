@@ -61,7 +61,7 @@ function statsLen() { return M._oc_stats_len(); }
 function fail(err, what) {
   var whole = owns && !stepping;
   running = false; stopRequested = false; stepping = false; session++;
-  var msg = { type: "error", message: what + ": " + String(err && err.message || err), totalSteps: totalSteps };
+  var msg = { type: "error", message: (what ? what + ": " : "") + String(err && err.message || err), totalSteps: totalSteps };
   var transfer = [];
   if (whole) {
     try { postRows(); msg.mem = heap().slice(0); transfer.push(msg.mem); } catch (e) { delete msg.mem; }
@@ -70,7 +70,7 @@ function fail(err, what) {
   owns = false;
   postMessage(msg, transfer);
 }
-function guarded(fn) { try { fn(); } catch (err) { fail(err, "Turbo stopped"); } }
+function guarded(fn) { try { fn(); } catch (err) { fail(err, ""); } }
 
 onmessage = function (e) {
   var msg = e.data || {};
@@ -109,7 +109,7 @@ onmessage = function (e) {
       var ok = H.withCString(M, key, function (ptr) { return M._oc_set_param(ptr, value); });
       postMessage({ type: "set", key: key, value: value, ok: !!ok, error: ok ? "" : H.cString(M, M._oc_last_error()),
                     frame: frameNow() });
-    } catch (err) { fail(err, "Turbo stopped on a live setting"); }
+    } catch (err) { fail(err, "on a live setting"); }
   }
 };
 

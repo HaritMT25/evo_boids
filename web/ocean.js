@@ -252,8 +252,9 @@
   /* a new world (oc_init or oc_reset), or one handed back by Turbo */
   function afterNewWorld(fromTurbo) {
     var w0 = W, h0 = H, d0 = D;
-    lastS = null;   /* its views are the old world's: the next frame cuts new ones */
     readWorld();
+    M._oc_sync();         /* the last snapshot's views are the old world's: */
+    lastS = snapshot();   /* the new world's now, not at the next frame */
     if (scene && (W !== w0 || H !== h0 || D !== d0)) { scene.setWorld(W, H, D); labelHist(); }
     applyDisplaySwitches();
     estPrev.n = 0;
@@ -762,7 +763,7 @@
   /* s again, if anything grew the memory since it was cut (an export that
    * allocates: the summary, the family lines, the fish card's, the wiring, a
    * name list, a C string): the same buffers (only oc_sync and a new world
-   * rewrite them, and both drop the snapshot), on the live memory */
+   * rewrite them, and both cut a new snapshot), on the live memory */
   function fresh(s) {
     if (!s || s.buf === heap()) return s;   /* (the appearance rows: a view of this sync's too) */
     var t = snapshot();

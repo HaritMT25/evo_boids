@@ -1221,38 +1221,92 @@
     el("ts-pop").textContent = t ? Math.round(t.pop).toLocaleString() : "–";
     el("ts-food").textContent = t ? Math.round(t.food).toLocaleString() : "–";
   }
+  var turboEntryCfg = null;   /* runCfg when Turbo took the world */
   function onTurboMessage(e) {
     var msg = e.data || {};
     if (msg.type === "stats") {
       turboStats = msg;
-      if (turboState === "entering") { turboState = "turbo"; updateLocks(); }
+      if (turboState === "entering") { turboState = "turbo"; updateLocks(); flushHeld(); }
       paintTurbo();
     } else if (msg.type === "rec") {
       if (dash()) dash().ingest(msg.rows);
     } else if (msg.type === "set") {
-      if (msg.ok) liveApplied(msg.key, typeof KEYS[msg.key][0] === "boolean" ? msg.value === 1 : msg.value);
-      else showError((LABELS[msg.key] || msg.key) + ": " + msg.error);
+      for (var i = 0; i < inflight.length; i++) if (inflight[i][0] === msg.key) { inflight.splice(i, 1); break; }
+      if (msg.ok) liveApplied(msg.key, valOf(msg.key, msg.value));
+      else refuse(msg.key, msg.error, inflight.some(function (f) { return f[0] === msg.key; }));
     } else if (msg.type === "memory") {
       if (turboState !== "exiting") return;
       try { takeMemory(msg.mem); }
-      catch (err) { showError("Turbo could not hand the world back: " + (err.message || err)); turboState = "live"; updateLocks(); return; }
-      turboState = "live";
-      afterNewWorld(true);
-      sampleBucket = Math.floor(M._oc_stats ? frameNow() / (dash() ? dash().every() : 60) : -1);
-      setPaused(false);
-      updateLocks();
+      catch (err) {
+        /* the worker still has the world: it carries on, nothing is lost */
+        turboWorker.postMessage({ cmd: "resume" });
+        turboState = "turbo";
+        updateLocks();
+        showError("Turbo could not hand the world back (" + (err.message || err) + "), so it keeps running. Stop it again to retry.");
+        flushHeld();
+        return;
+      }
+      turboBack();
       showNote("Turbo ran " + (msg.totalSteps || 0).toLocaleString() + " steps.");
     } else if (msg.type === "error") {
-      showError("Turbo stopped: " + (msg.message || "unknown error"));
-      turboState = "live";   /* this page still holds its last state: nothing lost */
-      updateLocks();
+      turboFailed("Turbo stopped: " + (msg.message || "unknown error"), msg.mem);
     }
   }
-  function frameNow() { M._oc_sync(); return new Float64Array(heap(), M._oc_stats(), statsLen)[1]; }
+  /* the page owns the world again (its memory: the worker's, or its own) */
+  function turboBack(quiet) {
+    turboState = "live";
+    inflight.forEach(function (f) { heldLive[f[0]] = f[1]; });   /* never answered: never applied */
+    inflight = [];
+    afterNewWorld(true);
+    sampleBucket = Math.floor(M._oc_stats ? frameNow() / (dash() ? dash().every() : 60) : -1);
+    setPaused(false);
+    updateLocks();
+    flushHeld(quiet);
+  }
+  /* The worker stopped on an error, or died. With its memory (the world was
+   * whole), the run goes on from where Turbo got it, as after a Stop.
+   * Without, from where Turbo took it: this page's own copy, untouched
+   * since; Turbo's steps are lost, and the live changes that applied in the
+   * worker are applied again here. Either way the worker is done: a fresh
+   * one runs the next Turbo. */
+  function turboFailed(why, mem) {
+    var was = turboState;
+    dropWorker();
+    if (was === "live") return;
+    var back = false;
+    if (mem && was !== "entering") {
+      try { takeMemory(mem); back = true; } catch (err) { why += "; the world it had could not come back (" + (err.message || err) + ")"; }
+    }
+    var redo = [];
+    if (!back && was !== "entering" && turboEntryCfg) {
+      var now = runCfg, before = turboEntryCfg;
+      Object.keys(Object.assign({}, now, before)).forEach(function (k) {
+        var a = Object.prototype.hasOwnProperty.call(now, k) ? now[k] : KEYS[k] && KEYS[k][0];
+        var b = Object.prototype.hasOwnProperty.call(before, k) ? before[k] : KEYS[k] && KEYS[k][0];
+        if (LIVE[k] && a !== b && !(k in heldLive)) { heldLive[k] = numOf(k, a); redo.push(LABELS[k] || k); }
+      });
+      runCfg = Object.assign({}, before);
+    }
+    turboBack(true);
+    if (!back && was !== "entering" && dash() && dash().rewind) dash().rewind(frameNow());
+    showError(why + (back ? ". The world is back where Turbo got it." :
+              was === "entering" ? "." : ". Its steps are lost: the world is back where Turbo took it" +
+              (redo.length ? ", with " + redo.join(", ") + " applied again." : ".")));
+  }
+  function dropWorker() {
+    if (!turboWorker) return;
+    turboWorker.onmessage = null;
+    turboWorker.onerror = null;
+    turboWorker.terminate();
+    turboWorker = null;
+  }
+  function frameNow() { M._oc_sync(); return HO.f64(M, M._oc_stats(), statsLen)[1]; }
   function enterTurbo() {
     if (turboState !== "live" || !M || MOCK) { if (MOCK) showNote("Turbo needs the real engine."); return; }
     turboState = "entering";
     turboStats = null;
+    turboEntryCfg = Object.assign({}, runCfg);
+    inflight = [];
     select(null);
     unfollow();
     updateLocks();
@@ -1260,13 +1314,12 @@
       turboWorker = new Worker(A.worker);
       turboWorker.onmessage = onTurboMessage;
       turboWorker.onerror = function (ev) {
-        showError("The Turbo worker failed: " + (ev.message || "could not load ocean_worker.js"));
-        turboState = "live";
-        updateLocks();
+        if (ev && ev.preventDefault) ev.preventDefault();
+        turboFailed("The Turbo worker failed: " + (ev && ev.message || "could not load ocean_worker.js"), null);
       };
     }
     var mem = heap().slice(0);
-    turboWorker.postMessage({ cmd: "start", js: moduleUrls.js, wasm: moduleUrls.wasm, mem: mem,
+    turboWorker.postMessage({ cmd: "start", js: moduleUrls.js, wasm: moduleUrls.wasm, handoff: moduleUrls.handoff, mem: mem,
                               recEvery: dash() ? dash().every() : 60, famK: dash() ? dash().famK : 8 }, [mem]);
   }
   function exitTurbo() {

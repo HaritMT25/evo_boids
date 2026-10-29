@@ -1899,7 +1899,14 @@ private:
         }
 
         // ---- food: nearest within R in 3-D; DX/DY/DZ = the unit vector to it ----
+        // foodD2 is the winner's d² (+inf before one): sqrt is monotone, so an
+        // item with d² >= foodD2 has sqrt(d²) >= foodDist and cannot pass the
+        // strict test below; only a smaller d² takes the sqrt and that test
+        // (which still decides: distinct d² can share a sqrt, e.g. 1 + 2^-23
+        // and 1). NaN fails both. The count, the eye and the mouth gate run
+        // for every item as before.
         float foodDx = 0, foodDy = 0, foodDz = 0, foodDist = R;
+        float foodD2 = std::numeric_limits<float>::infinity();
         int foodCount = 0;
         auto smell = [&](int fi, Vec2 fp) {
             float dx = fp.x - c.pos.x;
@@ -1915,11 +1922,14 @@ private:
             // ... the smell senses only what this fish could swallow.
             if (ocfg.mouthGate && food[fi].size > ocfg.kMouth * c.bodySize) return;   // E1: not food for me
             ++foodCount;
-            const float dist = std::sqrt(d2);
-            if (dist < foodDist) {
-                foodDist = dist;
-                const float invD = (dist > 0.001f) ? 1.0f / dist : 0.0f;
-                foodDx = dx * invD; foodDy = dy * invD; foodDz = dz * invD;
+            if (d2 < foodD2) {
+                const float dist = std::sqrt(d2);
+                if (dist < foodDist) {
+                    foodD2 = d2;
+                    foodDist = dist;
+                    const float invD = (dist > 0.001f) ? 1.0f / dist : 0.0f;
+                    foodDx = dx * invD; foodDy = dy * invD; foodDz = dz * invD;
+                }
             }
         };
         if (cfg.toroidal) foodGrid_.forEachInRadiusWrapped(c.pos, R, smell);

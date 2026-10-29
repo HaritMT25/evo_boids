@@ -175,7 +175,10 @@
 //   * a fish's look (hot_ eyeSize / eyeCon) is refreshed after it has moved,
 //     flow drift included; predators' contrast is taken before the per-fish
 //     phase (they move, and drift, after it);
-//   * foodLife ages food after this step's drift and before the spawn;
+//   * foodLife ages food after this step's drift and before the spawn, and
+//     the spawn cap (targetFood·2) counts the LIVE items: what expired this
+//     step frees its place in the same step's spawn, not only after the
+//     end-of-step erase;
 //   * CURRENT_FWD / LR (kept in eye-only mode) read the 3-D flow under E1;
 //   * steerFrame turns STEER_X / STEER_Y before the flow drift is added.
 //
@@ -202,6 +205,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <initializer_list>
 #include <limits>
 #include <string>
 #include <type_traits>
@@ -216,6 +220,23 @@
 #include "ocean_math.hpp"
 #include "fish.hpp"
 #include "appearance_model.hpp"
+
+// The defensive clamps every Ocean entry point applies to the SimConfig half
+// after reading the cfg JSON and before checking or using it: oc_init /
+// oc_set_param (wasm/ocean_wasm.cpp clampConfig), the harness's world builder
+// and live --set (tools/ocean_fingerprint.hpp clampConfigLikeShim), the probe
+// (tools/ocean_probe.cpp). Main.cpp's clamps minus its min / max swaps (the
+// Ocean refuses a reversed pair instead). perceptionRadius is the neighbour
+// grids' cell size, so it must be >= 1: at 0 SpatialGrid::init divided by
+// zero and cast the infinity to int.
+inline void clampOceanSimConfig(SimConfig& c) {
+    if (c.perceptionRadius < 1.0f) c.perceptionRadius = 1.0f;
+    if (c.maxNeighbors < 0) c.maxNeighbors = 0;
+    if (c.maxNeighbors > MAX_TOPOLOGICAL_NEIGHBORS) c.maxNeighbors = MAX_TOPOLOGICAL_NEIGHBORS;
+    if (c.predatorMinPopulation < 0) c.predatorMinPopulation = 0;
+    if (c.predatorMinPopulation > 2000) c.predatorMinPopulation = 2000;
+    if (c.predatorMaxPopulation < 0) c.predatorMaxPopulation = 0;
+}
 
 struct OceanFood {
     Vec2  pos;
@@ -353,6 +374,52 @@ public:
     long long totalFoodEaten = 0;           // food items eaten by fish (a statistic: not
                                             // part of the fingerprint, changes nothing)
     long long totalFoodExpired = 0;         // food items that reached foodLife uneaten (likewise)
+    // A diagnostic (likewise not hashed, never read by the step): how many
+    // non-finite floats the fish, food items and predators held when they
+    // were removed (removedDead). An object killed by a non-finite value
+    // (reserves -inf: it starves) is erased within the step that made it,
+    // before any scan of the world can see it; this keeps the evidence.
+    // tools/ocean_parity_driver.cpp adds each step's increase to that step's
+    // non-finite count, so such a run fails the harness like any other.
+    long long totalNonFiniteRemoved = 0;
+
+    // How many of an object's floats are not finite: the floats
+    // tools/ocean_fingerprint.hpp countNonFinite scans for each kind.
+    static long nonFiniteFloats(const Fish& c) {
+        long n = 0;
+        auto f = [&](float v) { n += !std::isfinite(v); };
+        for (float v : {c.speed, c.age, c.foodReserves, c.reproTimer, c.interactTimer, c.responsiveness,
+                        c.oscPeriod, c.oscPhase, c.bodySize, c.bodyElong, c.pos.x, c.pos.y, c.vel.x, c.vel.y,
+                        c.lastMoveDir.x, c.lastMoveDir.y, c.depth, c.vz, c.bodyBuoy})
+            f(v);
+        for (const Vec2& b : c.body) { f(b.x); f(b.y); }
+        for (const auto& nr : c.nnet.neurons) f(nr.output);
+        for (float s : c.lastSensors) f(s);
+        for (float a : c.lastActions) f(a);
+        return n;
+    }
+    static long nonFiniteFloats(const OceanFood& fd) {
+        long n = 0;
+        for (float v : {fd.pos.x, fd.pos.y, fd.depth, fd.size, fd.age}) n += !std::isfinite(v);
+#ifdef EVO_OCEAN_EYE
+        n += !std::isfinite(fd.eyeCon);
+#endif
+        return n;
+    }
+    static long nonFiniteFloats(const OceanPredator& p) {
+        long n = 0;
+        for (float v : {p.pos.x, p.pos.y, p.vel.x, p.vel.y, p.digestTimer, p.energy, p.age, p.speedFactor,
+                        p.buddingFactor, p.depth, p.pitch})
+            n += !std::isfinite(v);
+        return n;
+    }
+    // The end-of-step erases' predicate: dead, and its non-finite floats counted.
+    template <class T>
+    bool removedDead(const T& o) {
+        if (o.alive) return false;
+        totalNonFiniteRemoved += nonFiniteFloats(o);
+        return true;
+    }
 
     static constexpr float LONGPROBE_DIST = 200.0f;
     static constexpr float LONGPROBE_RADIUS = 30.0f;   // the probe's horizontal reach
@@ -540,6 +607,7 @@ public:
         return waveTrainExactAt(i, p, d, taperAt(d));
     }
     Flow waveTrainExactAt(int i, Vec2 p, float d, const Taper& tp) const {
+        ensureWaves();   // public: it may be the first reader after the waves came on directly
         const WaveTrain& t = waves_[i];
         const float B = tp.B, Bp = tp.Bp;
         const float A = t.frac * ocfg.waveSpeed;
@@ -612,6 +680,7 @@ public:
         totalReseeds = 0;
         totalFoodEaten = 0;
         totalFoodExpired = 0;
+        totalNonFiniteRemoved = 0;
     }
 
     void spawnFood() {
@@ -689,17 +758,22 @@ public:
             }
         }
 
+        // Every item is alive here (the last step erased the dead ones), so
+        // food.size() - expiredNow is the live stock the spawn cap counts.
+        int expiredNow = 0;   // marked dead just below; erased at the end of the step
         if (ocfg.foodLife > 0.0f) {   // food older than foodLife is gone, eaten or not
             for (auto& f : food) {
                 if (!f.alive) continue;
                 f.age += dt;
-                if (f.age >= ocfg.foodLife) { f.alive = false; ++totalFoodExpired; }
+                if (f.age >= ocfg.foodLife) { f.alive = false; ++totalFoodExpired; ++expiredNow; }
             }
         }
 
+        // The cap is on live items: an expired one frees its place now (foodLife
+        // off: expiredNow is 0, the cap as it always was).
         float foodRate = cfg.foodSpawnBase + cfg.foodSpawnAmp * evomath::sinf(frame * 0.001f);
         for (int i = 0; i < static_cast<int>(foodRate); ++i) {
-            if (static_cast<int>(food.size()) < cfg.targetFood * 2) spawnFood();
+            if (static_cast<int>(food.size()) - expiredNow < cfg.targetFood * 2) spawnFood();
         }
 
         if (frame % 3 == 0) signals.decay();
@@ -804,10 +878,10 @@ public:
 
         if (appearanceOn()) appearanceCompact();   // keeps records[i] where creatures[i].alive (same order)
         creatures.erase(std::remove_if(creatures.begin(), creatures.end(),
-                                       [](const Fish& c) { return !c.alive; }),
+                                       [this](const Fish& c) { return removedDead(c); }),
                         creatures.end());
         food.erase(std::remove_if(food.begin(), food.end(),
-                                  [](const OceanFood& f) { return !f.alive; }),
+                                  [this](const OceanFood& f) { return removedDead(f); }),
                    food.end());
 
         if ((int)creatures.size() < cfg.minPopulation) {
@@ -2107,7 +2181,7 @@ private:
         if (econ) {
             for (auto& baby : newborns) predators.push_back(std::move(baby));
             predators.erase(std::remove_if(predators.begin(), predators.end(),
-                                           [](const OceanPredator& p) { return !p.alive; }),
+                                           [this](const OceanPredator& p) { return removedDead(p); }),
                             predators.end());
         }
     }

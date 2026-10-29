@@ -55,6 +55,19 @@
 //   --sparse           fingerprint only at the printed steps, no chain, no
 //                      per-step scan (the pre-v2 behaviour; for timing the
 //                      per-step overhead only — its output has no chain=)
+//   --unchecked        TEST-ONLY: the cfg JSON and every --set skip the Ocean's
+//                      ranges (oceanConfigError, oceanSimConfigError; the JSON
+//                      reader's own checks and the world-size check still run),
+//                      so a config the page refuses can be run on purpose
+//                      (wasm/ocean_parity.sh's nf_* cases: the non-finite
+//                      diagnostic must still catch it). Its header says
+//                      unchecked=1. Never for a parity case.
+//
+// The non-finite count (nonfinite_max / nonfinite_from on the final line)
+// is, per step, the non-finite floats of the scanned state plus those held by
+// the objects removed since the last scan (OceanWorld::totalNonFiniteRemoved:
+// a fish whose reserves went -inf starves and is erased within the step, so
+// no scan sees it); `cover` reports the latter as nonFiniteRemoved when > 0.
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -81,8 +94,8 @@ bool parseSet(const char* s, LiveSet& out) {
 
 // oc_set_param's path: the value into a one-key JSON (an int key, which must
 // be a whole number, as its exact integer; any other "%.9g"), read onto copies
-// of both configs, clamped, checked, assigned.
-bool applySet(OceanWorld& w, const LiveSet& s) {
+// of both configs, clamped, checked (not with --unchecked), assigned.
+bool applySet(OceanWorld& w, const LiveSet& s, bool unchecked) {
     char num[40];
     if (isSimConfigIntKey(s.name) || isOceanIntKey(s.name)) {
         if (!isIntValue(s.value)) return false;
@@ -96,10 +109,29 @@ bool applySet(OceanWorld& w, const LiveSet& s) {
     std::string err;
     if (!readOceanJson(json.c_str(), sc, oc, err)) return false;
     ofp::clampConfigLikeShim(sc);
-    if (!oceanConfigValid(oc) || !oceanSimConfigError(sc).empty()) return false;
+    if (!unchecked && (!oceanConfigValid(oc) || !oceanSimConfigError(sc).empty())) return false;
     if (oc.appearance != w.ocfg.appearance) return false;   // init only (oc_set_param refuses a change)
     w.cfg = sc;
     w.ocfg = oc;
+    return true;
+}
+
+// --unchecked's world: ofp::initWorld without the Ocean's ranges (the JSON
+// reader's checks, the shim's clamps and the world-size check still apply).
+bool initWorldUnchecked(OceanWorld& w, unsigned seed, int W, int H, float depth, int pop, const char* cfgJson,
+                        std::string& err) {
+    SimConfig sc;
+    applyOceanDefaults(sc);
+    OceanConfig oc;
+    if (!readOceanJson(cfgJson, sc, oc, err)) return false;
+    ofp::clampConfigLikeShim(sc);
+    oc.depth = depth;
+    err = oceanWorldSizeError(sc, W, H, pop);
+    if (!err.empty()) return false;
+    rng.seed(seed);
+    w.cfg = sc;
+    w.ocfg = oc;
+    w.init(W, H, depth, pop);
     return true;
 }
 
@@ -116,7 +148,8 @@ struct Coverage {
     // The ocean-vision features (OceanConfig eye / eyeOnly / eyeCode / steerFrame /
     // foodLife). Printed in the `cover` line only when non-zero (kQuietWhenZero):
     // they are 0 in every case without those features, whose baselines were
-    // recorded before the counters existed.
+    // recorded before the counters existed (foodCapFreed: 0 in every case
+    // before life_cap_*).
     long long eyeSteps = 0;          // fish-steps that ran with the compound eye on
     long long eyeOnlySteps = 0;      // fish-steps in eye-only mode (labeled senses off)
     long long eyeCodeMask = 0;       // OR of the eyeCode bits that ran with the eye on
@@ -125,7 +158,16 @@ struct Coverage {
     long long labeledLit = 0;        // fish (captured) in eye-only mode with a labeled input != 0 (must stay 0)
     long long steerOwnSteps = 0;     // fish-steps that pushed STEER_X / STEER_Y in their own frame
     long long agesKept = 0;          // steps that began with foodLife off and a food age kept != 0
+    // Steps whose spawn refilled places that food expiring in the same step
+    // freed: the step began with S items, k expired, and S + spawned went past
+    // the cap (targetFood·2) — the spawn the cap allowed only because it counts
+    // live items (spawned = the end stock − S + k + the items fish ate).
+    long long foodCapFreed = 0;
+    long long food0_ = 0, expired0_ = 0, eaten0_ = 0;   // the step's start (before)
     void before(const OceanWorld& w) {
+        food0_ = (long long)w.food.size();
+        expired0_ = w.totalFoodExpired;
+        eaten0_ = w.totalFoodEaten;
         const float wb = std::min(w.ocfg.wallBand, 0.5f * w.D);   // the step's own band (stepFish)
         for (const Fish& c : w.creatures) {
             if (!c.alive || !(wb > 0.0f)) continue;
@@ -147,6 +189,10 @@ struct Coverage {
                 if (f.age != 0.0f) { ++agesKept; break; }
     }
     void after(const OceanWorld& w) {
+        if (const long long k = w.totalFoodExpired - expired0_; k > 0) {
+            const long long spawned = (long long)w.food.size() - food0_ + k + (w.totalFoodEaten - eaten0_);
+            foodCapFreed += (food0_ + spawned > 2LL * w.cfg.targetFood);
+        }
         popMax = std::max(popMax, (long long)w.creatures.size());
         predMax = std::max(predMax, (long long)w.predators.size());
         for (const OceanPredator& p : w.predators) {
@@ -187,7 +233,8 @@ struct Coverage {
             {"eyeSteps", eyeSteps}, {"eyeOnlySteps", eyeOnlySteps}, {"eyeCodeMask", eyeCodeMask},
             {"eyeE1Steps", eyeE1Steps}, {"eyeLit", eyeLit}, {"labeledLit", labeledLit},
             {"steerOwnSteps", steerOwnSteps}, {"foodExpired", w.totalFoodExpired},
-            {"agesKept", agesKept},
+            {"agesKept", agesKept}, {"foodCapFreed", foodCapFreed},
+            {"nonFiniteRemoved", w.totalNonFiniteRemoved},
             // the appearance genome's construction (the engine's own statistics;
             // never read by the step): records built, branches taken
             {"appFounders", (long long)w.appearanceStats().founders},
@@ -199,13 +246,15 @@ struct Coverage {
             {"appBroken", (long long)w.appearanceBroken()},
         };
     }
-    // The counters the `cover` line leaves out while they are 0 (see above).
+    // The counters the `cover` line leaves out while they are 0 (see above;
+    // nonFiniteRemoved is 0 in every passing case).
     static bool quietWhenZero(const std::string& k) {
         static const char* const kQuietWhenZero[] = {"eyeSteps", "eyeOnlySteps", "eyeCodeMask", "eyeE1Steps",
                                                      "eyeLit", "labeledLit", "steerOwnSteps", "foodExpired",
-                                                     "agesKept", "appFounders", "appOffspring", "appMean", "appCopyA",
-                                                     "appCopyB", "appNovel", "appShapeMean", "appShapeCopyA",
-                                                     "appShapeCopyB", "appShapeNovel", "appBroken"};
+                                                     "agesKept", "foodCapFreed", "nonFiniteRemoved", "appFounders",
+                                                     "appOffspring", "appMean", "appCopyA", "appCopyB", "appNovel",
+                                                     "appShapeMean", "appShapeCopyA", "appShapeCopyB", "appShapeNovel",
+                                                     "appBroken"};
         for (const char* q : kQuietWhenZero) if (k == q) return true;
         return false;
     }
@@ -242,7 +291,7 @@ int main(int argc, char** argv) {
     if (argc < 3) {
         std::fprintf(stderr, "usage: %s SEED STEPS [--every K] [--w W --h H --depth D --pop N]"
                              " [--cfg JSON] [--set NAME=V@STEP] [--expect NAMEopV] [--dump PATH --dump-step S]"
-                             " [--capture] [--logs C,R] [--trace] [--sparse]\n",
+                             " [--capture] [--logs C,R] [--trace] [--sparse] [--unchecked]\n",
                      argv[0]);
         return 2;
     }
@@ -259,7 +308,7 @@ int main(int argc, char** argv) {
     double depth = 240.0;
     const char* cfgJson = nullptr;
     const char* dumpPath = nullptr;
-    bool capture = false, sparse = false;
+    bool capture = false, sparse = false, unchecked = false;
     int clusterMax = -1, reproLogMax = -1;
     std::vector<LiveSet> sets;
     std::vector<Expect> expects;
@@ -292,6 +341,7 @@ int main(int argc, char** argv) {
         else if (!std::strcmp(argv[i], "--trace")) every = 1;
         else if (!std::strcmp(argv[i], "--capture")) capture = true;
         else if (!std::strcmp(argv[i], "--sparse")) sparse = true;
+        else if (!std::strcmp(argv[i], "--unchecked")) unchecked = true;
         else { std::fprintf(stderr, "unknown or incomplete argument: %s\n", argv[i]); return 2; }
     }
     if (every <= 0) every = steps > 0 ? steps : 1;
@@ -299,7 +349,8 @@ int main(int argc, char** argv) {
 
     OceanWorld w;
     std::string err;
-    if (!ofp::initWorld(w, seed, W, H, (float)depth, pop, cfgJson, err)) {
+    if (!(unchecked ? initWorldUnchecked(w, seed, W, H, (float)depth, pop, cfgJson, err)
+                    : ofp::initWorld(w, seed, W, H, (float)depth, pop, cfgJson, err))) {
         std::fprintf(stderr, "config refused: %s\n", err.c_str());
         return 4;
     }
@@ -310,9 +361,9 @@ int main(int argc, char** argv) {
         w.cfg.reproLog = true;
         w.cfg.reproLogMax = reproLogMax;
     }
-    std::printf("ocean_parity format=%d%s seed=%u steps=%ld every=%ld world=%dx%dx%.9g pop=%d capture=%d logs=%d,%d cfg=%s\n",
-                ofp::kFormatVersion, kOceanHasEye ? " build=eye" : "", seed, steps, every, W, H, depth, pop,
-                (int)capture, clusterMax, reproLogMax, cfgJson ? cfgJson : "{}");
+    std::printf("ocean_parity format=%d%s%s seed=%u steps=%ld every=%ld world=%dx%dx%.9g pop=%d capture=%d logs=%d,%d cfg=%s\n",
+                ofp::kFormatVersion, kOceanHasEye ? " build=eye" : "", unchecked ? " unchecked=1" : "", seed, steps,
+                every, W, H, depth, pop, (int)capture, clusterMax, reproLogMax, cfgJson ? cfgJson : "{}");
     for (const LiveSet& s : sets) std::printf("set %s=%.9g @%ld\n", s.name.c_str(), s.value, s.step);
     for (const Expect& e : expects) {
         // An unknown counter name is a harness error, not a pass.
@@ -326,8 +377,11 @@ int main(int argc, char** argv) {
         std::fclose(f);
     };
 
-    // Non-finite state is a failure even when both builds agree (see ofp::countNonFinite).
+    // Non-finite state is a failure even when both builds agree (see ofp::countNonFinite),
+    // and so is one held by an object removed since the last scan (the engine's
+    // diagnostic, OceanWorld::totalNonFiniteRemoved: it died within a step).
     long nonFiniteMax = 0, nonFiniteFirst = -1;
+    long long removedSeen = 0;   // w.totalNonFiniteRemoved at the last scan
     ofp::Hasher chain;   // every step's full fingerprint, in order
     ofp::Hasher appchain;   // every step's appearance section (kept apart from `chain`: cosmetic)
     Coverage cover;
@@ -336,7 +390,8 @@ int main(int argc, char** argv) {
         const ofp::Fingerprint fp = ofp::fingerprint(w);
         chain.u64(fp.all);
         if (fp.appShown) appchain.u64(fp.app);
-        const long nf = ofp::countNonFinite(w);
+        const long nf = ofp::countNonFinite(w) + (long)(w.totalNonFiniteRemoved - removedSeen);
+        removedSeen = w.totalNonFiniteRemoved;
         if (nf > 0 && nonFiniteFirst < 0) nonFiniteFirst = step;
         nonFiniteMax = std::max(nonFiniteMax, nf);
         if (printIt) {
@@ -354,7 +409,7 @@ int main(int argc, char** argv) {
     const auto t0 = std::chrono::steady_clock::now();
     for (long s = 0; s < steps; ++s) {
         for (const LiveSet& ls : sets)
-            if (ls.step == s && !applySet(w, ls)) {
+            if (ls.step == s && !applySet(w, ls, unchecked)) {
                 std::fprintf(stderr, "--set %s refused\n", ls.name.c_str());
                 return 4;
             }

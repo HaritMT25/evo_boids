@@ -21,15 +21,24 @@
 //     currentGyreEps in [-1, 1], currentMode 0 / 1, foodPatchRadius in
 //     [0, 1e5]), or a key whose value reaches an int conversion out of range
 //     (foodSpawnBase / foodSpawnAmp in [-1e4, 1e4], targetFood in [0, 1e6],
-//     maxSpeed <= 2000, predatorSpeed in [0, 2000], every radius <= 1e6); a
-//     non-finite value in any other float the step reads (maxTurnRate, the
-//     cooldowns, maxAge, the energies, the predator economy's floats, ...);
+//     maxSpeed <= 2000, predatorSpeed in [0, 2000], every radius <= 1e6); an
+//     energy outside [-1e6, 1e6] (foodEnergy, metabolicRate, geneCost,
+//     moveCost, reproEnergy, newbornEnergy and the predator economy's
+//     metabolism, move cost, repro / newborn energies and meal: finite values
+//     like foodEnergy 1e38 overflowed reserves to inf); a non-finite value in
+//     any other float the step reads (maxTurnRate, the cooldowns, maxAge, ...);
 //     minPopulation, predatorCount or foodPatches above 1e5; a width or
 //     height outside [100, 1e5], a population outside [0, 1e5], or neighbour
 //     grids (cell = perceptionRadius) over 2^24 cells (oceanWorldSizeError);
 //     and (readOceanJson) an int-typed key — SimConfig's, or the Ocean's
 //     foodDepthMode, eye, eyeOnly, eyeCode, steerFrame — whose JSON number is
-//     not a whole number in int's range, before anything casts it.
+//     not a whole number in int's range, before anything casts it; and, at
+//     any occurrence, a SimConfig bool key (toroidal, bodyModel,
+//     triangularMotion, foodDrift, predatorEconomy, predatorInheritance,
+//     fastTanh) that is not true / false ({"toroidal":1} used to be passed
+//     over: the world kept its walls), or an Ocean one (deepCurrent,
+//     lightEnabled, depthCostScaled, sizeDrift, sizeFight, mouthGate) that is
+//     not true / false / 0 / 1.
 //   * oc_set_param: the Ocean keys kBuoy, pitchMax, vDrag, wallBand,
 //     buoyMutation, cHold, cPress, foodDepthSpread, the E1 keys (waveSpeed,
 //     waveBand, waveGravity, L0, kWater, kMouth, and the on/off keys
@@ -51,7 +60,8 @@
 //     plain one.
 //   * steerFrame (OceanConfig::steerFrame: STEER_X / STEER_Y in world x / y, or
 //     in the fish's own frame) is 0 or 1 in both builds; foodLife (seconds,
-//     0 = off) is in [0, 1e6].
+//     0 = off) is in [0, 3600] (kOceanMaxFoodLife: where a float age still
+//     advances accurately by dt).
 //   * With no cfgJson the world is the tuned preview (applyOceanDefaults +
 //     OceanConfig defaults, src/ocean/ocean_config.hpp).
 //
@@ -196,15 +206,9 @@ void familyColor(std::uint64_t id, std::uint8_t* out) {
 // The defensive clamps main.cpp applies (copied from wasm/evo_wasm.cpp) minus
 // its min/max swaps: Ocean refuses a reversed speed or genome-length pair
 // (configOk) instead of reordering it, so a live change to one bound can never
-// silently move the other.
-void clampConfig(SimConfig& c) {
-    if (c.perceptionRadius < 1.0f) c.perceptionRadius = 1.0f;
-    if (c.maxNeighbors < 0) c.maxNeighbors = 0;
-    if (c.maxNeighbors > MAX_TOPOLOGICAL_NEIGHBORS) c.maxNeighbors = MAX_TOPOLOGICAL_NEIGHBORS;
-    if (c.predatorMinPopulation < 0) c.predatorMinPopulation = 0;
-    if (c.predatorMinPopulation > 2000) c.predatorMinPopulation = 2000;
-    if (c.predatorMaxPopulation < 0) c.predatorMaxPopulation = 0;
-}
+// silently move the other. Shared with the harness and the probe
+// (ocean_world.hpp clampOceanSimConfig).
+void clampConfig(SimConfig& c) { clampOceanSimConfig(c); }
 
 // Every refusal oc_init and oc_set_param share, on the config exactly as the
 // engine will hold it (after the JSON's double -> float / int conversion and

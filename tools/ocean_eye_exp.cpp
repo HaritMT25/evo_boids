@@ -66,7 +66,10 @@
 //            minus nothing (appended columns; the food / predator indices are
 //            unchanged by them: every scene starts from the same state and rng)
 //   base_abs  |lateral steer with nothing in view| (per fish, mean over the 8
-//            headings): a turning bias in empty space; base_x the signed mean
+//            headings of the absolute value): a turning bias, or any steady
+//            sideways push, in empty space; base_x the signed mean (a steady
+//            world-frame steer has base_x ~ 0 — its body-frame part changes sign
+//            around the headings — and base_abs > 0)
 //   food_r / food_l  each side alone vs nothing: lateral steer with food on the
 //            right minus nothing / nothing minus with food on the left (+ =
 //            toward it; food_h = food_r + food_l); fish_r / fish_l likewise for
@@ -267,8 +270,9 @@ struct Behav {
 };
 // behaveOne's indices: 8 food / predator, 4 conspecific, then 12 the lateral
 // steer with nothing in view, 13 / 14 food right / left vs nothing, 15 / 16 the
-// conspecific right / left vs nothing (+ = toward it)
-constexpr int kBehavIdx = 17;
+// conspecific right / left vs nothing (+ = toward it), 17 |the lateral steer
+// with nothing in view| (each heading's absolute value: base_abs)
+constexpr int kBehavIdx = 18;
 
 // What one fish does (its 3rd-step actions) in a held scene. kind: 0 nothing,
 // 1 food, 2 predator, 3 a conspecific; sector 0..5 = ahead, behind, left,
@@ -276,7 +280,8 @@ constexpr int kBehavIdx = 17;
 struct Probe {
     const OceanWorld& tmpl;
     RandomGen sceneRng;
-    void act(const Fish& base, Vec2 heading, int kind, int sector, float out[NUM_ACTIONS]) {
+    // sensOut (optional): the 3rd step's NUM_SENSES inputs too.
+    void act(const Fish& base, Vec2 heading, int kind, int sector, float out[NUM_ACTIONS], float* sensOut = nullptr) {
         OceanWorld w = tmpl;
         const Vec2 P = {0.5f * (float)w.width, 0.5f * (float)w.height};
         const float Z = 0.5f * w.D;
@@ -337,8 +342,39 @@ struct Probe {
         }
         rng = keep;
         std::memcpy(out, w.creatures[0].lastActions, sizeof(float) * NUM_ACTIONS);
+        if (sensOut) std::memcpy(sensOut, w.creatures[0].lastSensors, sizeof(float) * NUM_SENSES);
     }
 };
+
+// The behavioural test's world: quiet, eye-only, the full eye (the cloaks
+// cleared), still water, with the run's own motion settings; and the rng its
+// scenes draw from. The world's rng is left as it was.
+OceanWorld behavTemplate(const OceanWorld& w, unsigned seed, RandomGen& sceneRng) {
+    OceanWorld tmpl;
+    tmpl.cfg = w.cfg;
+    tmpl.cfg.targetFood = 0; tmpl.cfg.foodSpawnBase = 0; tmpl.cfg.foodSpawnAmp = 0;
+    tmpl.cfg.minPopulation = 0; tmpl.cfg.maxPopulation = 0;
+    tmpl.cfg.predatorCount = 0; tmpl.cfg.predatorEconomy = false; tmpl.cfg.predatorMinPopulation = 0;
+    tmpl.cfg.metabolicRate = 0; tmpl.cfg.moveCost = 0; tmpl.cfg.geneCost = 0; tmpl.cfg.maxAge = 1e9f;
+    tmpl.cfg.currentStrength = 0; tmpl.cfg.foodPatches = 0; tmpl.cfg.foodDrift = false;
+    tmpl.cfg.captureActivations = true;
+    tmpl.ocfg = w.ocfg;
+    // Still water: no food lifetime (a held item must not age out before it is
+    // seen, whatever the run's foodLife) and no E1 flow (waves / a deep current
+    // would keep the CURRENT_* inputs live although currentStrength is 0).
+    tmpl.ocfg.foodLife = 0.0f;
+    tmpl.ocfg.waveSpeed = 0.0f;
+    tmpl.ocfg.deepCurrent = false;
+    tmpl.ocfg.eye = 1;
+    tmpl.ocfg.eyeOnly = 1;
+    tmpl.ocfg.eyeCode &= ~(kEyeCodeNoFish | kEyeCodeNoFood);   // the full eye (see the header)
+    const RandomGen keep = rng;
+    rng.seed(seed * 7919u + 17u);
+    tmpl.init(w.width, w.height, w.D, 0);
+    sceneRng = rng;
+    rng = keep;
+    return tmpl;
+}
 
 // One fish's indices, averaged over 8 headings. lat = steer along the body's
 // right axis (world-frame STEER_X/Y projected; triangular motion or steerFrame 1:
@@ -371,6 +407,7 @@ void behaveOne(Probe& pr, const Fish& base, bool bodyFrame, double idx[kBehavIdx
         idx[9] += cd[5][STEER_Z] - cd[4][STEER_Z];
         idx[10] += cd[0][SPEED_ADJUST] - none[SPEED_ADJUST];
         idx[12] += lat(none);
+        idx[17] += std::abs(lat(none));
         idx[13] += lat(fd[3]) - lat(none);
         idx[14] += lat(none) - lat(fd[2]);
         idx[15] += lat(cd[3]) - lat(none);
@@ -396,7 +433,7 @@ void addBehav(Behav& b, const double idx[kBehavIdx]) {
     b.pos_pred_spd += idx[5] > 0.05; b.pos_pred_v += idx[4] > 0.05;
     b.fish_h += idx[8]; b.fish_v += idx[9]; b.fish_spd += idx[10]; b.react_fish += idx[11];
     b.pos_fish_h += idx[8] > 0.05;
-    b.base_abs += std::abs(idx[12]); b.base_x += idx[12];
+    b.base_abs += idx[17]; b.base_x += idx[12];   // mean |lat| per heading (|mean lat| let headings cancel)
     b.food_r += idx[13]; b.food_l += idx[14]; b.fish_r += idx[15]; b.fish_l += idx[16];
     const bool r = idx[13] > 0.05, l = idx[14] > 0.05;
     b.pos_food_both += r && l;
@@ -418,29 +455,12 @@ void writeBehavRow(std::FILE* f, const char* arm, unsigned seed, const char* who
 }
 
 void behaviouralTest(const OceanWorld& w, const char* arm, unsigned seed, const std::string& path) {
-    // A quiet eye-only world with the run's own motion settings.
-    OceanWorld tmpl;
-    tmpl.cfg = w.cfg;
-    tmpl.cfg.targetFood = 0; tmpl.cfg.foodSpawnBase = 0; tmpl.cfg.foodSpawnAmp = 0;
-    tmpl.cfg.minPopulation = 0; tmpl.cfg.maxPopulation = 0;
-    tmpl.cfg.predatorCount = 0; tmpl.cfg.predatorEconomy = false; tmpl.cfg.predatorMinPopulation = 0;
-    tmpl.cfg.metabolicRate = 0; tmpl.cfg.moveCost = 0; tmpl.cfg.geneCost = 0; tmpl.cfg.maxAge = 1e9f;
-    tmpl.cfg.currentStrength = 0; tmpl.cfg.foodPatches = 0; tmpl.cfg.foodDrift = false;
-    tmpl.cfg.captureActivations = true;
-    tmpl.ocfg = w.ocfg;
-    // Still water: no food lifetime (a held item must not age out before it is
-    // seen, whatever the run's foodLife) and no E1 flow (waves / a deep current
-    // would keep the CURRENT_* inputs live although currentStrength is 0).
-    tmpl.ocfg.foodLife = 0.0f;
-    tmpl.ocfg.waveSpeed = 0.0f;
-    tmpl.ocfg.deepCurrent = false;
-    tmpl.ocfg.eye = 1;
-    tmpl.ocfg.eyeOnly = 1;
-    tmpl.ocfg.eyeCode &= ~(kEyeCodeNoFish | kEyeCodeNoFood);   // the full eye (see the header)
-    const RandomGen keep = rng;
-    rng.seed(seed * 7919u + 17u);
-    tmpl.init(w.width, w.height, w.D, 0);
-    Probe pr{tmpl, rng};
+    // A quiet eye-only world with the run's own motion settings. (Every scene
+    // saves and restores the world's rng itself, and the random genomes have
+    // their own stream: nothing below reads the world's rng.)
+    RandomGen sceneRng;
+    const OceanWorld tmpl = behavTemplate(w, seed, sceneRng);
+    Probe pr{tmpl, sceneRng};
     RandomGen genRng;
     genRng.seed(seed * 104729u + 3u);
     Behav evo, rnd;
@@ -457,7 +477,6 @@ void behaviouralTest(const OceanWorld& w, const char* arm, unsigned seed, const 
         behaveOne(pr, f, tri, idx);
         addBehav(rnd, idx);
     }
-    rng = keep;
     std::FILE* out = std::fopen(path.c_str(), "w");
     if (!out) { std::fprintf(stderr, "cannot write %s\n", path.c_str()); return; }
     std::fprintf(out, "arm,seed,genomes,n,food_h,food_v,food_spd,pred_h,pred_v,pred_spd,react_food,react_pred,"
@@ -486,14 +505,24 @@ void behaviouralTest(const OceanWorld& w, const char* arm, unsigned seed, const 
 //                 food" whatever the channel; CON wired so also turns AWAY from
 //                 predators, whose CON is < 0)
 //   bi_away       both sides, gL > 0 > gR;   bi_same  both sides, same sign
-// where gS = Σ_feature G[S][f][STEER_X] · v_f, v = what a food item 50 away
-// at mid-depth gives each feature (PROX 1 − 50/R, SIZE 4/54, CON 1 − L(D/2)):
-// the turn food on that side would cause. hc_PROX / hc_SIZE / hc_CON: the same
-// class on one feature alone. hdom: the feature with the largest summed |G| to
-// STEER_X over both lateral sectors (raw weights); hdom_food: weighted by v.
-// The VERTICAL class likewise from up (−) / down (+) to STEER_Z (+ = deeper).
-// (With eyeCode bit 1, opponent pairs, the RIGHT slot is right − left: a
-// right_only fish steers both ways; the experiment's codes do not set it.)
+// where gS = Σ_input G[input][STEER_X] · x_S[input]: the turn food on side S
+// would cause, with x_S = the 18 eye inputs one food item 50 away at
+// mid-depth on side S really produces in this run's encoding (eyeCode; read
+// from the engine in a held scene of the behavioural test's quiet world, the
+// cloaks cleared as there: what the fish would see of food). eyeCode 0 lights
+// only side S's sector (PROX 1 − 50/R, SIZE 4/54, CON 1 − L(D/2)); faded
+// contrast (bit 1) makes CON = PROX · (1 − L), summed sectors (4) squash each
+// feature to x / (1 + |x|), opponent pairs (2) put the food in both lateral
+// slots (left + right, right − left) — so the same wires can turn toward
+// food in one encoding and away in another (the classes used to take the
+// code-0 values whatever the run's code). hc_PROX / hc_SIZE / hc_CON: the
+// same class on one feature alone (that feature's inputs only). hdom: the
+// feature with the largest summed |G| to STEER_X over both lateral sectors
+// (raw weights); hdom_food: weighted by the feature's food value (vf: its
+// mean |x| on the side that sees the food). The VERTICAL class likewise from
+// up (−) / down (+) to STEER_Z (+ = deeper), with food above / below.
+// left_only / right_only are topology (which sector's inputs have a path):
+// with opponent pairs a right_only fish steers both ways (gL, gR say how).
 //
 // File (CSV-like, the first field says the row kind):
 //   # comment lines (run, cfg, the column lists)
@@ -567,15 +596,42 @@ struct FishWiring {
     double gL = 0, gR = 0, gU = 0, gD = 0;
 };
 
+// The eye inputs (index 3·sector + feature) one food item 50 units from a fish
+// at mid-depth produces, in w's encoding: x[0] food on the left, x[1] on the
+// right, x[2] above, x[3] below (heading +x; the behavioural test's quiet
+// world, cloaks cleared). vf[f]: feature f's mean |input| over the two
+// lateral scenes' own sectors. The world's rng is left as it was.
+void foodSceneInputs(const OceanWorld& w, unsigned seed, double x[4][ocean::kEyeInputs], double vf[3]) {
+    RandomGen sceneRng;
+    const OceanWorld tmpl = behavTemplate(w, seed, sceneRng);
+    Probe pr{tmpl, sceneRng};
+    Fish viewer;   // no wiring: only its eye matters
+    const RandomGen keep = rng;
+    viewer.init({0.5f * (float)w.width, 0.5f * (float)w.height}, 0.5f * w.D);
+    rng = keep;
+    buildNeuralNet(viewer.genome, viewer.nnet);
+    const int sectors[4] = {2, 3, 4, 5};   // Probe's: left, right, up, down
+    float acts[NUM_ACTIONS], sens[NUM_SENSES];
+    for (int k = 0; k < 4; ++k) {
+        pr.act(viewer, {1.0f, 0.0f}, 1, sectors[k], acts, sens);
+        for (int i = 0; i < ocean::kEyeInputs; ++i) x[k][i] = (double)sens[ocean::kEyeFirst + i];
+    }
+    for (int f = 0; f < 3; ++f) vf[f] = 0.5 * (std::abs(x[0][3 * 2 + f]) + std::abs(x[1][3 * 3 + f]));
+}
+
 // The class of a sector pair (neg side, pos side) on dump action a, over the
-// features in [f0, f1), food-weighted by v.
-int pairClass(const FishWiring& fw, int sNeg, int sPos, int a, int f0, int f1, const double v[3], double& gN,
-              double& gP) {
+// features in [f0, f1): gN / gP = the gains times the inputs food on the neg /
+// pos side produces (xNeg, xPos: every sector's, see foodSceneInputs).
+int pairClass(const FishWiring& fw, int sNeg, int sPos, int a, int f0, int f1, const double xNeg[],
+              const double xPos[], double& gN, double& gP) {
     gN = gP = 0.0;
     bool n = false, p = false;
+    for (int s = 0; s < ocean::kEyeSectors; ++s)
+        for (int f = f0; f < f1; ++f) {
+            gN += fw.G[s][f][a] * xNeg[3 * s + f];
+            gP += fw.G[s][f][a] * xPos[3 * s + f];
+        }
     for (int f = f0; f < f1; ++f) {
-        gN += fw.G[sNeg][f][a] * v[f];
-        gP += fw.G[sPos][f][a] * v[f];
         n = n || fw.any[sNeg][f][a];
         p = p || fw.any[sPos][f][a];
     }
@@ -587,7 +643,8 @@ int pairClass(const FishWiring& fw, int sNeg, int sPos, int a, int f0, int f1, c
     return 5;
 }
 
-FishWiring wiringOf(const NeuralNet& nn, const double v[3], std::vector<EyePath>& paths) {
+FishWiring wiringOf(const NeuralNet& nn, const double x[4][ocean::kEyeInputs], const double vf[3],
+                    std::vector<EyePath>& paths) {
     FishWiring fw;
     eyePaths(nn, paths, fw.truncated);
     fw.paths = (long)paths.size();
@@ -600,15 +657,15 @@ FishWiring wiringOf(const NeuralNet& nn, const double v[3], std::vector<EyePath>
         if (a == 2) ++fw.spdPaths;
     }
     double gn, gp;
-    fw.hclass = pairClass(fw, 2, 3, 0, 0, 3, v, fw.gL, fw.gR);
-    fw.vclass = pairClass(fw, 4, 5, 1, 0, 3, v, fw.gU, fw.gD);
-    for (int f = 0; f < 3; ++f) fw.hcf[f] = pairClass(fw, 2, 3, 0, f, f + 1, v, gn, gp);
+    fw.hclass = pairClass(fw, 2, 3, 0, 0, 3, x[0], x[1], fw.gL, fw.gR);
+    fw.vclass = pairClass(fw, 4, 5, 1, 0, 3, x[2], x[3], fw.gU, fw.gD);
+    for (int f = 0; f < 3; ++f) fw.hcf[f] = pairClass(fw, 2, 3, 0, f, f + 1, x[0], x[1], gn, gp);
     double best = 0, bestFood = 0, bestV = 0;
     for (int f = 0; f < 3; ++f) {
         const double h = std::abs(fw.G[2][f][0]) + std::abs(fw.G[3][f][0]);
         const double z = std::abs(fw.G[4][f][1]) + std::abs(fw.G[5][f][1]);
         if (h > best) { best = h; fw.hdom = f; }
-        if (h * v[f] > bestFood) { bestFood = h * v[f]; fw.hdomFood = f; }
+        if (h * vf[f] > bestFood) { bestFood = h * vf[f]; fw.hdomFood = f; }
         if (z > bestV) { bestV = z; fw.vdom = f; }
     }
     return fw;
@@ -616,22 +673,27 @@ FishWiring wiringOf(const NeuralNet& nn, const double v[3], std::vector<EyePath>
 
 struct WiringDump {
     std::FILE* f = nullptr;
-    double v[3] = {};        // a food item's PROX / SIZE / CON at 50 units, mid-depth
+    double x[4][ocean::kEyeInputs] = {};   // the eye inputs food 50 away gives, left / right / above / below
+    double vf[3] = {};                      // PROX / SIZE / CON's food value (foodSceneInputs)
     RandomGen rndRng;        // the random genomes' own stream
     std::vector<EyePath> paths;
 
     bool open(const std::string& path, const OceanWorld& w, const char* arm, unsigned seed, const char* cfgJson) {
         f = std::fopen(path.c_str(), "w");
         if (!f) return false;
-        const float R = w.cfg.perceptionRadius;
-        v[0] = 1.0 - 50.0 / R;
-        v[1] = ocean::kEyeFoodSize / (ocean::kEyeFoodSize + 50.0);
-        v[2] = ocean::eyeContrast(ocean::kEyeFoodBright, 0.5f * w.D);
+        foodSceneInputs(w, seed, x, vf);   // in this run's encoding (eyeCode)
         rndRng.seed(seed * 40503u + 29u);
         std::fprintf(f, "# ocean_eye_exp wiring dump: arm %s seed %u eye %d eyeOnly %d eyeCode %d steerFrame %d cfg %s\n",
                      arm, seed, w.ocfg.eye, w.ocfg.eyeOnly, w.ocfg.eyeCode, w.ocfg.steerFrame, cfgJson ? cfgJson : "{}");
-        std::fprintf(f, "# food-weighting v: PROX %.4f SIZE %.4f CON %.4f; paths to STEER_X / STEER_Z / SPEED_ADJUST, <= %d hidden hops\n",
-                     v[0], v[1], v[2], kMaxHops);
+        std::fprintf(f, "# food-weighting vf: PROX %.4f SIZE %.4f CON %.4f; paths to STEER_X / STEER_Z / SPEED_ADJUST, <= %d hidden hops\n",
+                     vf[0], vf[1], vf[2], kMaxHops);
+        const char* const scene[4] = {"left", "right", "above", "below"};
+        for (int k = 0; k < 4; ++k) {   // the inputs the classes weight the gains by
+            std::fprintf(f, "# food %s (eyeCode %d, cloaks cleared):", scene[k], w.ocfg.eyeCode & ~kEyeCodeCloaks);
+            for (int s = 0; s < ocean::kEyeSectors; ++s)
+                std::fprintf(f, " %s %.4f/%.4f/%.4f", kSectorNames[s], x[k][3 * s], x[k][3 * s + 1], x[k][3 * s + 2]);
+            std::fputc('\n', f);
+        }
         std::fprintf(f, "#S,step,who,n,h_none,h_left_only,h_right_only,h_bi_toward,h_bi_away,h_bi_same,"
                         "con_bi_toward,prox_bi_toward,size_bi_toward,hdom_PROX,hdom_SIZE,hdom_CON,direct_lr,"
                         "v_none,v_up_only,v_down_only,v_bi_toward,v_bi_away,v_bi_same,genome_len_mean\n");
@@ -667,7 +729,7 @@ struct WiringDump {
         long idx = 0;
         for (const Fish& c : w.creatures) {
             if (!c.alive) continue;
-            const FishWiring fw = wiringOf(c.nnet, v, paths);
+            const FishWiring fw = wiringOf(c.nnet, x, vf, paths);
             evo.add(fw, c.genome.size());
             std::fprintf(f, "F,%ld,%ld,%llu,%llu,%u,%zu,%zu,%ld,%ld,%s,%s,%s,%.5g,%.5g,%s,%s,%s", step, idx,
                          (unsigned long long)c.id, (unsigned long long)c.lineageId, (unsigned)c.generation,
@@ -694,7 +756,7 @@ struct WiringDump {
             NeuralNet nn;
             buildNeuralNet(g, nn);
             std::vector<EyePath> rp;
-            rnd.add(wiringOf(nn, v, rp), g.size());
+            rnd.add(wiringOf(nn, x, vf, rp), g.size());
             ++idx;
         }
         evo.write(f, step, "evolved");
@@ -713,6 +775,7 @@ double median(std::vector<double> v) {
 
 }  // namespace
 
+#ifndef OCEAN_EYE_EXP_NO_MAIN   // tests/ocean_tests.cpp (eye build) includes this file without it
 int main(int argc, char** argv) {
     unsigned seed = 1;
     long steps = 100000, every = 10000, evolve = 30000;
@@ -920,3 +983,4 @@ int main(int argc, char** argv) {
     }
     return 0;
 }
+#endif  // OCEAN_EYE_EXP_NO_MAIN

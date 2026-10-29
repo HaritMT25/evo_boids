@@ -62,7 +62,8 @@
 // Not hashed, by design: scratch the step rebuilds from hashed state before
 // reading it (the grids' entries — the food grid's copies of each item's depth /
 // size / eyeCon among them — hot_, pending_, the neighbour vectors and the
-// bounded food scan's list of items within R (foodSeen_), the
+// bounded food scan's list of items within R (foodSeen_), update's per-step
+// newborn / parent / predator-newborn buffers (cleared before use), the
 // E1 flow cache flow_ — src/ocean/ocean_flow.hpp: tables and keys derived from
 // cfg / ocfg / the world size / the wave phases / the CurrentField's vortices
 // and the frame, rebuilt by OceanWorld::ensureFlow before any read; the flow
@@ -248,6 +249,7 @@ struct OceanWorld_ : WorldCommon {
     SpatialGrid creatureGrid; OceanFoodGrid foodGrid; std::vector<FishHot_> hot; std::vector<Pending_> pending;
     std::vector<int> neighbors, nearbyFood, nearby, near;
     std::vector<int> foodSeen;   // scratch (see above)
+    std::vector<int> newborns, newbornParents, predNewborns;   // scratch: update's per-step buffers, empty between steps
     CurrentField current; std::vector<Vec2> patches; std::vector<float> patchDepth;
     std::vector<appearance::Record> app; std::uint64_t appKey; int appFlags; bool appBroken; appearance::Stats appStats;
     WaveTrain_ waves[OceanWorld::kWaveTrains];

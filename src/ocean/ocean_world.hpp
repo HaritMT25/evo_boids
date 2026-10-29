@@ -826,8 +826,12 @@ public:
 #endif
 
         // ---- serial phase: signals, deaths, eating, interaction --------------
-        std::vector<Fish> newborns;
-        std::vector<std::uint32_t> newbornParents;   // appearance: (maternal, other) index per newborn
+        // This step's newborns and their parents (scratch members: cleared
+        // here, so only their capacity carries over).
+        std::vector<Fish>& newborns = newborns_;
+        std::vector<std::uint32_t>& newbornParents = newbornParents_;   // appearance: (maternal, other) index per newborn
+        newborns.clear();
+        newbornParents.clear();
         const float pr2 = cfg.pickupRadius * cfg.pickupRadius;
         const float ir2 = cfg.interactRadius * cfg.interactRadius;
         for (int i = 0; i < numCreatures; ++i) {
@@ -873,6 +877,8 @@ public:
 
         for (auto& baby : newborns) { baby.id = nextId_++; creatures.push_back(std::move(baby)); }
         if (appearanceOn()) appearanceAppendNewborns(newborns.size(), newbornParents);
+        newborns.clear();   // the moved-from shells
+        newbornParents.clear();
 
         updatePredators(dt);
         if (cfg.predatorEconomy && cfg.predatorMinPopulation > 0) refillPredators();
@@ -995,7 +1001,10 @@ private:
             appearance::Record r;
             r.ownerId = creatures[first + k].id;
             std::uint8_t modes[appearance::kPatternGroups], mmodes[appearance::kMorphGroups];
-            const appearance::Genome A = app_[parents[2 * k]].genome, B = app_[parents[2 * k + 1]].genome;
+            // The parents' genomes by reference: nothing writes app_ until the
+            // push_back, after makeOffspring is done with them.
+            const appearance::Genome& A = app_[parents[2 * k]].genome;
+            const appearance::Genome& B = app_[parents[2 * k + 1]].genome;
             appearance::makeOffspring(appKey_, r.ownerId, A, B, inh, appFlags_, r.genome, modes, mmodes);
             app_.push_back(r);
             appStats_.count(modes, mmodes, appFlags_);
@@ -1004,7 +1013,10 @@ private:
     void appearanceCompact() {
         std::size_t k = 0;
         for (std::size_t i = 0; i < creatures.size(); ++i)
-            if (creatures[i].alive) app_[k++] = app_[i];
+            if (creatures[i].alive) {
+                if (k != i) app_[k] = app_[i];   // a survivor before the first death stays put
+                ++k;
+            }
         app_.resize(k);
     }
     void appearanceCheck() {
@@ -1030,6 +1042,10 @@ private:
     std::vector<PendingSignal> pending_;
     std::vector<int> neighbors_, nearbyFood_, nearby_, near_;
     std::vector<FoodSeen> foodSeen_;   // foodWithin's list (scratch, one fish at a time)
+    // update's per-step buffers (scratch: cleared before use, empty between steps)
+    std::vector<Fish> newborns_;
+    std::vector<std::uint32_t> newbornParents_;
+    std::vector<OceanPredator> predNewborns_;
     CurrentField current_;
     std::vector<Vec2> foodPatches_;
     std::vector<float> foodPatchDepth_;   // foodDepthMode 1: one depth per patch
@@ -2210,7 +2226,8 @@ private:
         const float detect2  = cfg.predatorPerception * cfg.predatorPerception;
         const float capture2 = cfg.predatorCaptureRadius * cfg.predatorCaptureRadius;
 
-        std::vector<OceanPredator> newborns;
+        std::vector<OceanPredator>& newborns = predNewborns_;   // scratch: cleared, its capacity reused
+        newborns.clear();
         for (OceanPredator& p : predators) {
             const float speed    = cfg.predatorSpeed * p.speedFactor;
             const float burnRate = cfg.predatorMetabolism + pmc * speed * speed;
@@ -2323,6 +2340,7 @@ private:
 
         if (econ) {
             for (auto& baby : newborns) predators.push_back(std::move(baby));
+            newborns.clear();
             predators.erase(std::remove_if(predators.begin(), predators.end(),
                                            [this](const OceanPredator& p) { return removedDead(p); }),
                             predators.end());

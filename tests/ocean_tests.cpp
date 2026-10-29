@@ -184,8 +184,13 @@
 //                 oc_last_error() is read: as arguments of one expect() their
 //                 order was unspecified.)
 //
+//   preflight     `--accepts` asks a case's --set changes by step, as the
+//                 driver applies them (stable within a step; past STEPS not
+//                 asked): minSpeed=200@10 + maxSpeed=300@5 over 20 steps is
+//                 accepted in both argument orders
+//
 // `ocean_tests --accepts SEED STEPS [driver args]` instead asks the shim
-// whether it would accept one ocean_parity_driver case (see acceptsMain).
+// whether it would accept one ocean_parity_driver case (see acceptsCase).
 //
 // Build with -DOCEAN_TESTS_NO_SHIM to leave out the shim-based checks.
 #include <algorithm>
@@ -4200,15 +4205,23 @@ void testProbe() {
 
 // ocean_tests --accepts SEED STEPS [ocean_parity_driver args]: would the page
 // accept this harness case? oc_init with the case's world and cfg JSON, then
-// oc_set_param for each --set. wasm/ocean_parity.sh asks this of every case,
-// so "extreme but valid" means valid to the shim, not just to the driver.
-int acceptsMain(int argc, char** argv) {
-    if (argc < 4) { std::printf("usage: --accepts SEED STEPS [driver args]\n"); return 2; }
+// oc_set_param for each --set in the order the driver applies them: by step
+// (before step S + 1, after S steps), the argument order kept within a step;
+// a change at S >= STEPS is never applied, so it is not asked either. (It used
+// to ask them in argument order: --set minSpeed=200@10 --set maxSpeed=300@5,
+// which the driver runs, was refused for minSpeed 200 > the default
+// maxSpeed 150.) wasm/ocean_parity.sh asks this of every case, so "extreme
+// but valid" means valid to the shim, not just to the driver. argv as main's
+// (argv[1] = "--accepts"); 0 accepted, 1 refused, 2 bad arguments; msg says why.
+int acceptsCase(int argc, char** argv, std::string& msg) {
+    if (argc < 4) { msg = "usage: --accepts SEED STEPS [driver args]"; return 2; }
     const unsigned seed = (unsigned)std::strtoul(argv[2], nullptr, 10);
+    const long steps = std::strtol(argv[3], nullptr, 10);
     int W = 1920, H = 1080, pop = 300;
     double depth = 240.0;
     const char* cfg = nullptr;
-    std::vector<std::pair<std::string, double>> sets;
+    struct Change { std::string name; double value; long step; };
+    std::vector<Change> sets;
     for (int i = 4; i < argc; ++i) {
         auto is = [&](const char* k) { return std::strcmp(argv[i], k) == 0 && i + 1 < argc; };
         if (is("--w")) W = std::atoi(argv[++i]);
@@ -4216,24 +4229,71 @@ int acceptsMain(int argc, char** argv) {
         else if (is("--depth")) depth = std::atof(argv[++i]);
         else if (is("--pop")) pop = std::atoi(argv[++i]);
         else if (is("--cfg")) cfg = argv[++i];
-        else if (is("--set")) {
+        else if (is("--set")) {   // NAME=VALUE@STEP, parsed as the driver's parseSet
             const char* s = argv[++i];
             const char* eq = std::strchr(s, '=');
-            if (!eq) { std::printf("bad --set %s\n", s); return 2; }
-            sets.emplace_back(std::string(s, eq - s), std::strtod(eq + 1, nullptr));
+            const char* at = std::strrchr(s, '@');
+            if (!eq || !at || at < eq || eq == s) { msg = std::string("bad --set ") + s + " (NAME=VALUE@STEP)"; return 2; }
+            const long step = std::strtol(at + 1, nullptr, 10);
+            if (step < 0) { msg = std::string("bad --set ") + s + " (a negative step)"; return 2; }
+            sets.push_back({std::string(s, eq - s), std::strtod(eq + 1, nullptr), step});
         }
         else if (is("--every") || is("--dump") || is("--dump-step") || is("--expect") || is("--logs")) ++i;
         else if (!std::strcmp(argv[i], "--capture") || !std::strcmp(argv[i], "--trace") || !std::strcmp(argv[i], "--sparse")) {}
-        else { std::printf("unknown driver argument %s\n", argv[i]); return 2; }
+        else { msg = std::string("unknown driver argument ") + argv[i]; return 2; }
     }
-    if (!oc_init(seed, W, H, depth, pop, cfg)) { std::printf("refused by oc_init: %s\n", oc_last_error()); return 1; }
-    for (const auto& s : sets)
-        if (!oc_set_param(s.first.c_str(), s.second)) {
-            std::printf("refused by oc_set_param(%s, %g): %s\n", s.first.c_str(), s.second, oc_last_error());
+    std::stable_sort(sets.begin(), sets.end(), [](const Change& a, const Change& b) { return a.step < b.step; });
+    if (!oc_init(seed, W, H, depth, pop, cfg)) { msg = std::string("refused by oc_init: ") + oc_last_error(); return 1; }
+    for (const Change& s : sets) {
+        if (s.step >= steps) continue;   // after the run's last step: the driver never applies it
+        if (!oc_set_param(s.name.c_str(), s.value)) {
+            char buf[120];
+            std::snprintf(buf, sizeof buf, "refused by oc_set_param(%s, %g) at step %ld: ", s.name.c_str(), s.value, s.step);
+            msg = buf + std::string(oc_last_error());
             return 1;
         }
-    std::printf("accepted\n");
+    }
+    msg = "accepted";
     return 0;
+}
+int acceptsMain(int argc, char** argv) {
+    std::string msg;
+    const int rc = acceptsCase(argc, argv, msg);
+    std::printf("%s\n", msg.c_str());
+    return rc;
+}
+
+// The preflight above asks a case's live changes in the driver's order. The
+// audit's sequence over 20 steps, minSpeed 200 at step 10 after maxSpeed 300
+// at step 5, is accepted in BOTH argument orders; swapped in time (minSpeed
+// first) it is refused; changes in one step keep their argument order; a
+// change at or after STEPS is not applied and so not asked; a malformed or
+// negative-step --set is an argument error.
+void testPreflight() {
+    Test t("preflight");
+    struct C { std::vector<std::string> args; int rc; const char* what; };
+    const C cs[] = {
+        {{"1", "20", "--set", "minSpeed=200@10", "--set", "maxSpeed=300@5"}, 0, "valid in time, minSpeed listed first"},
+        {{"1", "20", "--set", "maxSpeed=300@5", "--set", "minSpeed=200@10"}, 0, "valid in time, maxSpeed listed first"},
+        {{"1", "20", "--set", "minSpeed=200@5", "--set", "maxSpeed=300@10"}, 1, "minSpeed 200 at step 5 > maxSpeed 150"},
+        {{"1", "20", "--set", "maxSpeed=300@5", "--set", "minSpeed=200@5"}, 0, "one step, argument order: maxSpeed first"},
+        {{"1", "20", "--set", "minSpeed=200@5", "--set", "maxSpeed=300@5"}, 1, "one step, argument order: minSpeed first"},
+        {{"1", "20", "--set", "maxSpeed=1e30@20"}, 0, "a change at step 20 of 20 is never applied"},
+        {{"1", "20", "--set", "maxSpeed=1e30@19"}, 1, "a change at step 19 of 20 is applied (and refused)"},
+        {{"1", "20", "--cfg", R"({"predatorCount":2})", "--set", "kBuoy=3@12", "--set", "pitchMax=0.2@3", "--set", "minSpeed=200@15",
+          "--set", "maxSpeed=250@14"}, 0, "four changes, out of argument order"},
+        {{"1", "20", "--set", "maxSpeed=300"}, 2, "no @STEP"},
+        {{"1", "20", "--set", "maxSpeed=300@-1"}, 2, "a negative step"},
+    };
+    for (const C& c : cs) {
+        std::vector<std::string> args = {"ocean_tests", "--accepts"};
+        args.insert(args.end(), c.args.begin(), c.args.end());
+        std::vector<char*> av;
+        for (std::string& a : args) av.push_back(a.data());
+        std::string msg;
+        const int rc = acceptsCase((int)av.size(), av.data(), msg);
+        t.expect(rc == c.rc, "%s: rc %d, expected %d (%s)", c.what, rc, c.rc, msg.c_str());
+    }
 }
 #endif
 
@@ -4455,6 +4515,7 @@ int main(int argc, char** argv) {
     // E1 with the eye build's features, and their keys through the shim
 #ifndef OCEAN_TESTS_NO_SHIM
     ot::testVisionKeys();
+    ot::testPreflight();
 #endif
     ot::testEyeE1();
     std::printf("OCEAN TESTS: %d passed, %d failed\n", ot::g_passed, ot::g_failed);

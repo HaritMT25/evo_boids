@@ -1927,16 +1927,30 @@ private:
             neighborCount++;
         };
 
+        // The grid's candidates within R in 3-D, by their hot_ state, in list
+        // order (as foodWithin, the 3-D test and the self test without a branch):
+        // each candidate's offset and d² are written, the list advancing exactly
+        // for another fish with !(d2 > R²). hot_ does not change while one fish
+        // senses, so these are the values the loops below would have read.
+        if (foodSeen_.size() < neighbors.size() + 1) foodSeen_.resize(neighbors.size() + 1);
+        FoodSeen* kept = foodSeen_.data();
+        int nKept = 0;
+        for (int ni : neighbors) {
+            const FishHot& other = hot_[ni];
+            float dx = other.pos.x - c.pos.x;
+            float dy = other.pos.y - c.pos.y;
+            if (tor) { dx = wrapDx(dx); dy = wrapDy(dy); }
+            const float dz = other.depth - c.depth;
+            const float d2 = dx * dx + dy * dy + dz * dz;
+            kept[nKept] = {dx, dy, dz, d2, ni};
+            nKept += (int)(ni != selfIdx) & (int)!(d2 > R2);
+        }
+
         if (cfg.maxNeighbors <= 0) {
-            for (int ni : neighbors) {
-                if (ni == selfIdx) continue;
+            for (int j = 0; j < nKept; ++j) {
+                const int ni = kept[j].k;
                 const FishHot& other = hot_[ni];
-                float dx = other.pos.x - c.pos.x;
-                float dy = other.pos.y - c.pos.y;
-                if (tor) { dx = wrapDx(dx); dy = wrapDy(dy); }
-                const float dz = other.depth - c.depth;
-                const float d2 = dx * dx + dy * dy + dz * dz;
-                if (d2 > R2) continue;
+                const float dx = kept[j].dx, dy = kept[j].dy, dz = kept[j].dz, d2 = kept[j].d2;
 #ifdef EVO_OCEAN_EYE
                 if constexpr (Eye) { if (eyeFish) eyeSee(eye, fwd, rht, dx, dy, dz, d2, other.eyeSize, other.eyeCon, R); }
 #endif
@@ -1948,15 +1962,10 @@ private:
             const int keepMax = std::min(cfg.maxNeighbors, MAX_TOPOLOGICAL_NEIGHBORS);
             Candidate best[MAX_TOPOLOGICAL_NEIGHBORS];
             int have = 0;
-            for (int ni : neighbors) {
-                if (ni == selfIdx) continue;
-                const FishHot& other = hot_[ni];
-                float dx = other.pos.x - c.pos.x;
-                float dy = other.pos.y - c.pos.y;
-                if (tor) { dx = wrapDx(dx); dy = wrapDy(dy); }
-                const float dz = other.depth - c.depth;
-                const float d2 = dx * dx + dy * dy + dz * dz;
-                if (d2 > R2) continue;
+            for (int j = 0; j < nKept; ++j) {
+                const int ni = kept[j].k;
+                [[maybe_unused]] const FishHot& other = hot_[ni];
+                const float dx = kept[j].dx, dy = kept[j].dy, dz = kept[j].dz, d2 = kept[j].d2;
                 ++inRadiusCount;
 #ifdef EVO_OCEAN_EYE
                 if constexpr (Eye) { if (eyeFish) eyeSee(eye, fwd, rht, dx, dy, dz, d2, other.eyeSize, other.eyeCon, R); }

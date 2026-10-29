@@ -324,11 +324,30 @@
   };
   var PREDATOR_SPEED = 110;
   function round(v, step) { return +(Math.round(v / step) * step).toFixed(6); }
+  /* Wrap-around senses need every radius under half the world's smaller side
+   * (src/ocean/ocean_world.hpp radiusError: the grid's wrapped query), the
+   * fish's long probe (30) among them. */
+  var TORUS_RADII = ["perceptionRadius", "interactRadius", "pickupRadius", "predatorPerception", "predatorCaptureRadius"];
+  var LONG_PROBE_RADIUS = 30;
+  function fitTorus(set, labels, side) {
+    var lim = side / 2;   /* a radius r fits when 2r < side */
+    if (!(LONG_PROBE_RADIUS < lim)) {   /* not even the probe: walls */
+      delete set.toroidal;
+      labels.splice(labels.indexOf("wrap-around senses"), 1);
+      return;
+    }
+    var cap = Math.ceil(lim) - 1, cut = [];
+    TORUS_RADII.forEach(function (k) {
+      if ((k in set ? set[k] : KEYS[k][0]) >= lim) { set[k] = cap; cut.push(LABELS[k].toLowerCase()); }
+    });
+    if (cut.length) labels.push(cut.join(", ") + " cut to " + cap + " to fit the wrap-around");
+  }
 
-  /* rand: () => [0, 1); e1: the E1 preset as an object.
+  /* rand: () => [0, 1); e1: the E1 preset as an object; size: [width,
+   * height] of the world it will start (radii are kept to what it allows).
    * -> { population, set: {key: value}, labels: [...] }; every key left out
    * stays at its default. */
-  function draw(rand, basePop, e1) {
+  function draw(rand, basePop, e1, size) {
     function chance(p) { return rand() < p; }
     function pick(a) { return a[Math.floor(rand() * a.length)]; }
     function range(key) { var r = RANGES[key]; return round(r[0] + (r[1] - r[0]) * rand(), r[2]); }
@@ -431,9 +450,10 @@
       if (chance(CHANCE.grace)) set.reproGracePeriod = 60;
       labels.push("picky partners (match gate " + set.reproMaxDistance + ")");
     }
+    if (set.toroidal && size) fitTorus(set, labels, Math.min(size[0], size[1]));
     return { population: population, set: set, labels: labels };
   }
 
-  root.EvoOceanConfig = { KEYS: KEYS, LIVE: LIVE, TABS: TABS, LABELS: LABELS, HINTS: HINTS, BTN_STEP: BTN_STEP,
-                          TIPS: TIPS, RANGES: RANGES, CHANCE: CHANCE, draw: draw };
+  root.EvoOceanConfig = { KEYS: KEYS, LIVE: LIVE, NEG_ON_RESTART: NEG_ON_RESTART, TABS: TABS, LABELS: LABELS, HINTS: HINTS,
+                          BTN_STEP: BTN_STEP, TIPS: TIPS, RANGES: RANGES, CHANCE: CHANCE, draw: draw };
 })(typeof window !== "undefined" ? window : globalThis);

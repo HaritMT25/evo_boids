@@ -609,7 +609,7 @@
   }
   function randomize() {
     if (!M || guardTurbo()) return;
-    var pick = CFG.draw(Math.random, KEYS.population[0], e1Preset());
+    var pick = CFG.draw(Math.random, KEYS.population[0], e1Preset(), fittedWorld());   /* the size it will start at */
     resetForm();
     Object.keys(pick.set).forEach(function (k) { setVal(k, pick.set[k]); });
     setVal("population", pick.population);

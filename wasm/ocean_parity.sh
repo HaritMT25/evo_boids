@@ -45,6 +45,9 @@
 #   ONLY=def_s1 wasm/ocean_parity.sh  # one case (a grep -E pattern on the name)
 #   NO_TESTS=1 wasm/ocean_parity.sh   # parity cases only
 #   NO_EYE=1 wasm/ocean_parity.sh     # the plain Ocean build only
+#   FAST=1 wasm/ocean_parity.sh       # CI's subset (FAST_CASES below: 39 cases, about a
+#                                     # quarter of the cases' cost) with EVERY guard and both
+#                                     # builds' unit checks; not with --rebaseline
 #
 # Two builds: the plain Ocean build (-DEVO_WORLD_OCEAN; every case not named
 # eye_*) and the compound-eye build (+ -DEVO_OCEAN_EYE: 64 sensors, its own
@@ -101,6 +104,10 @@ fi
 # cannot go with --overwrite. (ONLY may: the guards below still run then.)
 if [ "$OVERWRITE" = 1 ] && [ -n "${NO_TESTS:-}" ]; then
     echo "--overwrite cannot go with NO_TESTS: the unit checks and the shim / config guards must run before a baseline is written" >&2
+    exit 2
+fi
+if [ "$REBASE" = 1 ] && [ -n "${FAST:-}" ]; then
+    echo "--rebaseline cannot go with FAST (CI's subset): run the whole matrix, or name the cases with ONLY" >&2
     exit 2
 fi
 cd "$(dirname "$0")/.."
@@ -345,6 +352,20 @@ add eye_cloak_both_only_capture_s17 '17 3000 --capture --cfg {"eye":1,"eyeOnly":
 add eye_cloak_live_s21 '21 3000 --cfg {"predatorCount":3,"eye":1} --set eyeCode=8@500 --set eyeCode=16@1000 --set eyeOnly=1@1500 --set eyeCode=28@2000 --set eyeCode=0@2500 --expect eyeCodeMask=28 --expect eyeOnlySteps>0' \
                   "cloaks switched mid-run (oc_set_param): 0 -> 8 -> 16 -> 16 eye-only -> 28 -> 0"
 
+# CI's subset (FAST=1; .github/workflows/ci.yml on every push / pull request;
+# the whole matrix runs there weekly and on demand): one or more cases of every
+# family above, the cheap ones — defaults, predators + economy, rich, the
+# extremes, live changes, capture, the population cap, triangular + body, E1
+# (alone, preset, live, extreme, costs), own-frame steering, the food lifetime
+# (with the spawn-cap cases), and in the eye build the eye off / on / captured,
+# eye-only, blind, the encodings, the cloaks, E1 + eye-only + foodLife.
+FAST_CASES="def_s1 pred_s7 econ_s42 rich_s5 rich_toro_s7 x_steep_s3 x_deep_s8 x_shallow_s4 live_s21 capture_s17
+ cap_s31 x_tri_body_s9 e1_deep_s5 e1_waves_s3 e1_preset_s42 e1_live_s21 e1_x_shallow_s4 e1_costs_s8 steer_own_s1
+ steer_own_live_s21 life_s1 life_rich_toro_s7 life_live_s21 steer_life_e1_s5 life_cap_fixture_s1 life_cap_s3
+ eye_off_s1 eye_def_s1 eye_capture_s17 eye_blind_s1 eye_only_capture_s17 eye_code7_only_capture_s17 eye_code_live_s21
+ eye_e1_only_steer_life_s3 eye_cloak_both_only_capture_s17 eye_cloak_live_s21 eye_cloak_food_only_steer_l12_s3
+ eye_life_steer_blind_s4 eye_x_shallow_s4"
+
 # Configs the page must REFUSE (oc_init / oc_set_param; ocean_tests --accepts
 # must exit 1): every Ocean knob has a finite range, so none of these can run.
 RNAMES=(); RARGS=()
@@ -495,8 +516,18 @@ SEL=()
 for i in "${!NAMES[@]}"; do
     if [ -n "${ONLY:-}" ] && ! [[ ${NAMES[$i]} =~ ${ONLY} ]]; then continue; fi
     if [ -n "${NO_EYE:-}" ] && [[ ${NAMES[$i]} == eye_* ]]; then continue; fi
+    if [ -n "${FAST:-}" ] && [[ " $(echo $FAST_CASES) " != *" ${NAMES[$i]} "* ]]; then continue; fi
     SEL+=("$i")
 done
+FAST_BAD=""
+if [ -n "${FAST:-}" ]; then   # every FAST_CASES name must be a case (a typo would silently shrink the subset)
+    for c in $FAST_CASES; do
+        found=0
+        for nm in "${NAMES[@]}"; do [ "$nm" = "$c" ] && found=1 && break; done
+        [ "$found" = 1 ] || FAST_BAD="$FAST_BAD $c"
+    done
+    echo "== FAST: CI's subset, ${#SEL[@]} of ${#NAMES[@]} cases${FAST_BAD:+; NOT CASES:$FAST_BAD}"
+fi
 # Every case must be a world the page accepts: the real oc_init / oc_set_param
 # validation (wasm/ocean_wasm.cpp, through ocean_tests --accepts) is asked first.
 declare -A REFUSED=()
@@ -564,6 +595,7 @@ if [ -z "$nfbad" ]; then
 else
     echo "== non-finite state removed within a step NOT caught:$nfbad"; GUARD_FAILED=1
 fi
+[ -n "$FAST_BAD" ] && GUARD_FAILED=1
 # Baseline files without a case (a renamed or dropped case): stale history.
 ORPHANS=""
 if [ -z "${ONLY:-}" ] && [ -d "$BASE" ]; then
@@ -779,5 +811,5 @@ if [ -n "${NO_TESTS:-}" ]; then
          "unit checks, shim validation and config guards NOT run (NO_TESTS)"
     exit 0
 fi
-echo "== ALL $NPASS OCEAN PARITY CASES PASS: native == wasm == baseline, bit for bit, every step; expectations met;" \
-     "unit checks pass in both builds"
+echo "== ALL $NPASS OCEAN PARITY CASES PASS${FAST:+ (the FAST subset, of ${#NAMES[@]})}: native == wasm == baseline, bit for bit," \
+     "every step; expectations met; unit checks pass in both builds"

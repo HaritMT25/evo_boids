@@ -1,0 +1,33 @@
+name: ocean-full
+
+# The Ocean's whole determinism matrix (wasm/ocean_parity.sh, every case:
+# native == wasm == the committed baseline, every step), its guards and unit
+# checks. ci.yml runs the FAST subset on every push; this runs everything,
+# weekly and on demand (Actions -> ocean-full -> Run workflow).
+on:
+  schedule:
+    - cron: "23 5 * * 1"
+  workflow_dispatch:
+
+jobs:
+  ocean-full:
+    name: ocean (module freshness, unit checks, full parity matrix)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+      - uses: mymindstorm/setup-emsdk@v16
+        with:
+          actions-cache-folder: emsdk-cache
+          version: 6.0.4
+      - name: Build the Ocean module
+        run: bash wasm/build_ocean.sh
+      - name: Committed Ocean module matches the sources
+        run: |
+          if ! git diff --quiet -- web/evo_ocean.js web/evo_ocean.wasm; then
+            git status --short web/
+            echo "::error::web/evo_ocean.js / .wasm are stale: run wasm/build_ocean.sh and commit the result"
+            exit 1
+          fi
+      - name: Ocean parity (every case), guards and unit checks
+        run: JOBS=$(nproc) bash wasm/ocean_parity.sh

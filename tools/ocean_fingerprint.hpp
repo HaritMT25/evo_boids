@@ -56,7 +56,9 @@
 // the eye is off) and predCon_ (every predator's contrast, rewritten by
 // eyePrepare each step the eye is on); and OceanWorld::oprof (-DEVO_OCEAN_PROF,
 // wall clock). Statistics the step never reads: totalFoodEaten and
-// totalFoodExpired (the harness's coverage counters report them instead).
+// totalFoodExpired (the harness's coverage counters report them instead),
+// and the diagnostic totalNonFiniteRemoved (the driver adds it to its
+// non-finite count).
 //
 // Every word added for the ocean-vision state (the tagged config keys, the
 // food ages, the eye build's eyeCon) is hashed only in states a format-2
@@ -201,7 +203,8 @@ struct Pending_ { bool wants; Vec2 pos; };
 struct OceanWorld_ : WorldCommon {
     int width, height; float D; OceanConfig ocfg;
     std::vector<Fish> creatures; std::vector<OceanPredator> predators; std::vector<OceanFood> food;
-    SignalGrid signals; long long totalReseeds, totalFoodEaten, totalFoodExpired;   // the last two: statistics
+    SignalGrid signals; long long totalReseeds, totalFoodEaten, totalFoodExpired,   // the last three: statistics
+        totalNonFiniteRemoved;
 #ifdef EVO_OCEAN_PROF
     OceanWorld::OceanProf oprof;   // wall clock
 #endif
@@ -673,6 +676,7 @@ inline void dumpState(const OceanWorld& w, std::FILE* out) {
     d.ull("reproWindow", w.reproWindow_.size()); d.ull("reproWindowNext", w.reproWindowNext_);
     d.ull("deathLog", w.deathLog.size()); d.ull("birthLog", w.birthLog.size());
     d.ll("foodEaten", w.totalFoodEaten); d.ll("foodExpired", w.totalFoodExpired);   // statistics (not hashed)
+    d.ll("nonFiniteRemoved", w.totalNonFiniteRemoved);
     std::fprintf(out, "\ngeometry");
     for (const SpatialGrid* g : {&field<peek::OwCreatureGrid>(w), &field<peek::OwFoodGrid>(w)}) {
         d.ll("gridW", field<peek::SgWidth>(*g)); d.ll("gridH", field<peek::SgHeight>(*g));

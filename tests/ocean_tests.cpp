@@ -49,6 +49,11 @@
 //                 in the same step: targetFood 1, 2 a step, foodLife dt -> 2);
 //                 the range ends at 3600 s (kOceanMaxFoodLife), where an item
 //                 at foodLife - 0.0625 still goes within four steps
+//   nonfinite_rm  OceanWorld::totalNonFiniteRemoved counts the non-finite
+//                 floats of what the end-of-step erase removes: a fish at
+//                 moveCost 1e38 (reserves -inf, starved), a predator at
+//                 predatorMoveCost 1e38, food of size inf (validation
+//                 bypassed); finite deaths count 0; not hashed; init resets it
 //   reproducible  same seed twice -> identical fingerprints; another seed and a
 //                 1-ulp change in any section change the hash — incl. a
 //                 vortex frequency, a food-patch depth, a grid's cell size, the
@@ -1780,6 +1785,80 @@ void testFoodLife() {
     }
 }
 
+// OceanWorld::totalNonFiniteRemoved: the non-finite floats an object held when
+// the end-of-step erase removed it (the driver adds them to its per-step scan;
+// an object that died of an infinity within a step used to leave no trace).
+// The Codex audit's fixture, validation bypassed (moveCost 1e38 is refused
+// now): one fish at speed 30, its step cost inf, reserves -inf; it starves and
+// the world it leaves is finite. Likewise a predator (predatorMoveCost 1e38)
+// and a food item (size inf, eaten). Finite deaths count nothing; the counter
+// is not hashed, and init resets it.
+void testRemovedNonFinite() {
+    Test t("nonfinite_rm");
+    const float inf = std::numeric_limits<float>::infinity();
+    {   // a fish
+        OceanWorld w;
+        initQuiet(w, 1501, 240.0f, OceanConfig{});
+        w.cfg.minSpeed = w.cfg.maxSpeed = 30.0f;
+        w.cfg.moveCost = 1e38f;
+        addFish(w, {600.0f, 500.0f}, 120.0f, {}, 0.5f);
+        w.update(0.016f);
+        t.expect(w.creatures.empty() && w.totalDeathsStarvation == 1 && ofp::countNonFinite(w) == 0 &&
+                     w.totalNonFiniteRemoved >= 1,
+                 "moveCost 1e38: pop %zu, %lld starved, %ld non-finite in the world, %lld in removed objects (want 0, 1, 0, >= 1)",
+                 w.creatures.size(), w.totalDeathsStarvation, ofp::countNonFinite(w), w.totalNonFiniteRemoved);
+    }
+    {   // a predator
+        OceanWorld w;
+        initQuiet(w, 1502, 240.0f, OceanConfig{});
+        w.cfg.predatorEconomy = true;
+        w.cfg.predatorMoveCost = 1e38f;
+        OceanPredator p;
+        p.pos = {600.0f, 500.0f};
+        p.vel = {1.0f, 0.0f};
+        p.depth = 120.0f;
+        p.energy = 30.0f;
+        w.predators.push_back(p);
+        w.update(0.016f);
+        t.expect(w.predators.empty() && w.totalPredatorDeathsStarvation == 1 && ofp::countNonFinite(w) == 0 &&
+                     w.totalNonFiniteRemoved >= 1,
+                 "predatorMoveCost 1e38: %zu predators, %lld starved, %ld / %lld non-finite (want 0, 1, 0, >= 1)",
+                 w.predators.size(), w.totalPredatorDeathsStarvation, ofp::countNonFinite(w), w.totalNonFiniteRemoved);
+    }
+    {   // a food item of infinite size, eaten
+        OceanWorld w;
+        initQuiet(w, 1503, 240.0f, OceanConfig{});
+        addFish(w, {600.0f, 500.0f}, 120.0f, {}, 0.5f);
+        OceanFood f;
+        f.pos = {600.0f, 500.0f};
+        f.depth = 120.0f;
+        f.size = inf;
+        w.food.push_back(f);
+        w.update(0.016f);
+        t.expect(w.food.empty() && w.totalFoodEaten == 1 && ofp::countNonFinite(w) == 0 && w.totalNonFiniteRemoved == 1,
+                 "food of size inf: %zu left, %lld eaten, %ld / %lld non-finite (want 0, 1, 0, 1)", w.food.size(),
+                 w.totalFoodEaten, ofp::countNonFinite(w), w.totalNonFiniteRemoved);
+    }
+    {   // finite deaths (starvation, predation, predator economy) count nothing
+        OceanWorld w;
+        std::string err;
+        if (t.expect(ofp::initWorld(w, 1504, 1920, 1080, 240.0f, 300,
+                                    R"({"predatorCount":4,"predatorEconomy":true,"predatorMinPopulation":2,"metabolicRate":3})", err),
+                     "init: %s", err.c_str())) {
+            for (int s = 0; s < 600; ++s) w.update(0.016f);
+            t.expect(w.totalDeaths > 0 && w.totalNonFiniteRemoved == 0, "%lld deaths, %lld non-finite floats removed (want > 0, 0)",
+                     w.totalDeaths, w.totalNonFiniteRemoved);
+            t.note("600 steps, %lld deaths (%lld starved, %lld eaten), %lld food eaten: nothing non-finite removed", w.totalDeaths,
+                   w.totalDeathsStarvation, w.totalDeathsPredation, w.totalFoodEaten);
+            const ofp::Fingerprint fp = ofp::fingerprint(w);
+            w.totalNonFiniteRemoved = 7;
+            t.expect(ofp::fingerprint(w) == fp, "totalNonFiniteRemoved changed the fingerprint (it is a diagnostic)");
+            ofp::initWorld(w, 1504, 1920, 1080, 240.0f, 10, nullptr, err);
+            t.expect(w.totalNonFiniteRemoved == 0, "init kept totalNonFiniteRemoved %lld", w.totalNonFiniteRemoved);
+        }
+    }
+}
+
 std::vector<ofp::Fingerprint> runPrints(unsigned seed, const char* cfg, int pop, int steps, int every) {
     std::vector<ofp::Fingerprint> out;
     OceanWorld w;
@@ -3288,7 +3367,10 @@ void testRanges() {
             ++accepted;
             oc_step(300);
             ++runs;
-            t.expect(ofp::countNonFinite(*g_world) == 0, "%s: non-finite state after 300 steps", c.c_str());
+            // finite now, and nothing removed on the way held a non-finite float
+            t.expect(ofp::countNonFinite(*g_world) == 0 && g_world->totalNonFiniteRemoved == 0,
+                     "%s: non-finite state after 300 steps (%lld floats in removed objects)", c.c_str(),
+                     g_world->totalNonFiniteRemoved);
             for (const Fish& f : g_world->creatures)
                 if (!t.expect(f.depth >= 0.0f && f.depth <= g_world->D, "%s: depth %.9g", c.c_str(), f.depth)) break;
         }
@@ -4301,6 +4383,7 @@ int main(int argc, char** argv) {
     ot::testEyeOnly();
     ot::testEyeCode();
     ot::testFoodLife();
+    ot::testRemovedNonFinite();
     ot::testReproducible();
     ot::testRadii();
 #ifndef OCEAN_TESTS_NO_SHIM

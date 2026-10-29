@@ -21,6 +21,10 @@
 #      old age, the population sat at maxPopulation, the logs decimated, ...).
 # A case also FAILS if its state ever holds a non-finite float (scanned every
 # step), even when both builds agree on it: wasm leaves a NaN's bits to the host.
+# That includes an object removed within a step while it held one (a fish whose
+# reserves went -inf starves and is erased before any scan: the engine counts
+# what removed objects held, OceanWorld::totalNonFiniteRemoved, and the driver
+# adds it to the step's count); the nf_* list checks that this is caught.
 # Then builds tests/ocean_tests.cpp both ways and runs it (unit checks; their
 # output must also match between the builds).
 #
@@ -465,6 +469,18 @@ radd r_eye_live_code '1 10 --set eyeCode=32@5'
 radd r_eye_live_code_frac '1 10 --set eyeCode=2.5@5'
 radd r_eye_radius_sq '1 10 --cfg {"eye":1,"perceptionRadius":1e20}'
 
+# Non-finite state that is gone before any scan can see it (the Codex audit of
+# PR #18, finding 6): a fish whose reserves overflow to -inf starves and is
+# erased within the step, a predator likewise. Each nf_* run must still report
+# it, in both builds: nonfinite_max > 0 and cover nonFiniteRemoved > 0, with the
+# objects gone from the final world (the third field). The energy ranges refuse
+# these configs now, so they run with the driver's TEST-ONLY --unchecked (the
+# Ocean's ranges not applied); they are not parity cases.
+NFNAMES=(); NFARGS=(); NFGONE=()
+nfadd () { NFNAMES+=("$1"); NFARGS+=("$2"); NFGONE+=("$3"); }
+nfadd nf_move_cost      '1 3 --pop 1 --unchecked --cfg {"minPopulation":0,"targetFood":0,"foodSpawnBase":0,"foodSpawnAmp":0,"minSpeed":30,"maxSpeed":30,"moveCost":1e38}' 'pop=0'
+nfadd nf_pred_move_cost '1 3 --pop 0 --unchecked --cfg {"minPopulation":0,"targetFood":0,"foodSpawnBase":0,"foodSpawnAmp":0,"predatorCount":2,"predatorEconomy":true,"predatorMoveCost":1e38}' 'pred=0'
+
 run_one () {  # run_one INDEX: native and wasm side by side
     local i=$1 name=${NAMES[$1]} s
     s=$(sfx "$name")
@@ -527,6 +543,27 @@ if [ -n "$RC_INT" ] && [ "$RC_INT" = "$OC_INT" ]; then
 else
     echo "== int keys DRIFT: readConfig reads '$RC_INT', kSimConfigIntKeys lists '$OC_INT'"; GUARD_FAILED=1
 fi
+# Non-finite state removed within a step must still fail a run (the nf_* list).
+nfbad=""
+for i in "${!NFNAMES[@]}"; do
+    read -r -a A <<< "${NFARGS[$i]}"
+    for b in native wasm; do
+        f="$OUT/${NFNAMES[$i]}.nf_$b.txt"
+        if [ $b = native ]; then "$OUT/opd_native" "${A[@]}" > "$f" 2> /dev/null; else $NODE "$OUT/opd_wasm.js" "${A[@]}" > "$f" 2> /dev/null; fi
+        rc=$?
+        fin=$(grep '^final ' "$f")
+        nfm=$(echo "$fin" | tr ' ' '\n' | sed -n 's/^nonfinite_max=//p')
+        rem=$(grep '^cover ' "$f" | tr ' ' '\n' | sed -n 's/^nonFiniteRemoved=//p')
+        if [ "$rc" != 0 ] || [ -z "$nfm" ] || [ "$nfm" = 0 ] || [ -z "$rem" ] || [ "$rem" = 0 ] || [[ $fin != *" ${NFGONE[$i]} "* ]]; then
+            nfbad="$nfbad ${NFNAMES[$i]}($b: rc=$rc nonfinite_max=${nfm:-?} nonFiniteRemoved=${rem:-0})"
+        fi
+    done
+done
+if [ -z "$nfbad" ]; then
+    echo "== non-finite state removed within a step: ${#NFNAMES[@]} of ${#NFNAMES[@]} nf_* runs caught, native and wasm (--unchecked)"
+else
+    echo "== non-finite state removed within a step NOT caught:$nfbad"; GUARD_FAILED=1
+fi
 # Baseline files without a case (a renamed or dropped case): stale history.
 ORPHANS=""
 if [ -z "${ONLY:-}" ] && [ -d "$BASE" ]; then
@@ -585,7 +622,8 @@ for i in "${SEL[@]}"; do
     elif [ "$(get nonfinite_max)" != 0 ]; then
         # Both builds may agree here and still not be portable: wasm leaves a
         # NaN's sign/payload to the host (x86 0xffc00000, ARM 0x7fc00000).
-        res="FAIL  non-finite state from step $(get nonfinite_from) (up to $(get nonfinite_max) values)"
+        rmv=$(grep '^cover ' "$n" | tr ' ' '\n' | sed -n 's/^nonFiniteRemoved=//p')
+        res="FAIL  non-finite state from step $(get nonfinite_from) (up to $(get nonfinite_max) values${rmv:+; $rmv held by objects removed within a step})"
         cmp -s "$n" "$w" && res="$res; native == wasm on this host only"
     elif ! cmp -s "$n" "$w"; then
         res="FAIL  native != wasm: $(first_diff "$n" "$w" wasm)"
@@ -733,7 +771,7 @@ fi
 if [ "$FAILED" = 1 ] || [ "$TESTS_OK" = 0 ] || [ "$GUARD_FAILED" = 1 ]; then
     [ "$FAILED" = 1 ] && echo "== OCEAN PARITY FAILED: bisect with --trace, then --dump-step/--dump (native vs wasm, or old vs new engine)"
     [ "$TESTS_OK" = 0 ] && echo "== OCEAN UNIT CHECKS FAILED"
-    [ "$GUARD_FAILED" = 1 ] && echo "== OCEAN CONFIG GUARDS FAILED (a bad config accepted, the E1 preset copy or the int-key list drifted, or an orphan baseline)"
+    [ "$GUARD_FAILED" = 1 ] && echo "== OCEAN CONFIG GUARDS FAILED (a bad config accepted, the E1 preset copy or the int-key list drifted, an orphan baseline, or removed non-finite state not caught)"
     exit 1
 fi
 if [ -n "${NO_TESTS:-}" ]; then

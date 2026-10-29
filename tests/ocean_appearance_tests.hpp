@@ -577,9 +577,11 @@ inline void testAppearanceDiversity() {
         pick.seed(seed);
         std::uint64_t nextId = N + 1;
         for (int gen = 1; gen <= 40; ++gen) {
-            for (int i = 0; i < N; ++i)
-                makeOffspring(seed * 7919u, nextId++, pop[pick.uint(N - 1)], pop[pick.uint(N - 1)], Inheritance{}, kAll,
-                              next[(std::size_t)i]);
+            for (int i = 0; i < N; ++i) {
+                const std::uint32_t a = pick.uint(N - 1);   // in order (argument order is unspecified)
+                const std::uint32_t b = pick.uint(N - 1);
+                makeOffspring(seed * 7919u, nextId++, pop[a], pop[b], Inheritance{}, kAll, next[(std::size_t)i]);
+            }
             pop.swap(next);
             if (gen != 8 && gen != 40) continue;
             sds(sd);

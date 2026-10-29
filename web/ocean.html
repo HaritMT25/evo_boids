@@ -649,6 +649,30 @@
     #fishcard, #fishcard.flip { top: calc(76px + var(--safe-t)); bottom: auto; max-height: calc(100dvh - 180px); }
     #fishcard.expanded .fc-brain .inet { height: 340px; }
   }
+  /* A short window (a landscape phone; an embed, such as the portfolio's
+   * 890 x 453), as Classic's compact layout: the fish card, its brain open,
+   * fits between the top bar and the dock instead of scrolling, the brain
+   * taking what height is left (the Turbo card and the keys have their own
+   * rules above). After the wide rules, which it overrides. */
+  @media (max-height: 560px) {
+    #fishcard { max-height: calc(100dvh - 64px - var(--dock-h) - 22px - var(--safe-t) - var(--safe-b)); }
+    .fc-head { gap: 10px; padding: 4px 4px 2px 10px; }
+    #ititle { font-size: 15px; }
+    #isub { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .fc-stats { gap: 6px 12px; padding: 2px 12px 8px; }
+    .stat .k { font-size: 11px; }
+    .stat .v { font-size: 13px; }
+    .fc-stats .bar { display: none; }   /* the numbers stay; the brain gets the room */
+    #fishcard .fc-brain .inet, #fishcard.expanded .fc-brain .inet { height: clamp(96px, calc(100dvh - 346px), 170px); }
+    #isense { min-height: 2.8em; padding: 4px 12px 8px; font-size: 12px; }
+  }
+  @media (max-height: 560px) and (pointer: fine) {
+    .fc-head .icon-btn { width: 36px; height: 36px; }
+  }
+  @media (max-height: 560px) and (min-width: 960px) {
+    #fishcard, #fishcard.flip { top: calc(64px + var(--safe-t));
+                                max-height: calc(100dvh - 64px - var(--dock-h) - 24px - var(--safe-t) - var(--safe-b)); }
+  }
   @media (pointer: coarse) {
     .stepper { height: 44px; }
     .stepper button { width: 44px; }

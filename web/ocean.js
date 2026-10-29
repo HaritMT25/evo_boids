@@ -36,7 +36,10 @@
  *      &colour=brain|family &guide=0|1 &intro=1 (web/guide.js)
  *      ?mock=1 loads ocean_mock.js from beside the page instead of the engine
  *      (a JS stand-in for page development, not part of web/).
- *      A Restart writes seed / pop / depth / cfg back, so a reload keeps it.
+ *      The link's setup goes to oc_init as it is; one it refuses stops the
+ *      page with the engine's reason (and a link without it).
+ *      A Restart writes seed / pop / depth / w / h / cfg back, so a reload, or
+ *      the link on another screen, is the same world.
  *      A query with only Classic's keys (?view, ?threads, ...) goes to Classic
  *      before this runs: the site's root was Classic (ocean.html's head).
  * Keys: space pause, + / - (or arrows) steps per frame, F follow (the selected
@@ -198,12 +201,46 @@
     if (!ok) return false;
     initArgs = { seed: seed >>> 0, population: population, depth: depth, cfg: cfg };
     runCfg = Object.assign({}, cfg);
+    clearFieldNotes();
     afterNewWorld();
     return true;
+  }
+  /* A setup from outside the sheet (the link's, a setup file's), started as
+   * it is: oc_init sees its values themselves, so a refusal says why, and
+   * only a setup it accepts goes into the sheet, whose fields would round or
+   * drop what they can't hold (0.5 for a count, 2 for an on / off key or a
+   * choice). On a refusal nothing changes: the running world, the sheet.
+   * raw: the cfg as text instead (a ?cfg= that is not JSON). Returns "", or
+   * why not. A switch must be true or false: the engine reads Classic's
+   * switches (toroidal, bodyModel, ...) only as JSON booleans and passes over
+   * anything else, so {"toroidal":1} would run without it under a sheet
+   * showing it on. */
+  function importWorld(seed, population, depth, cfg, raw) {
+    var clean = {}, bad = [];
+    Object.keys(cfg || {}).forEach(function (k) {
+      if (ARGS[k]) return;
+      clean[k] = cfg[k];
+      if (KEYS[k] && typeof KEYS[k][0] === "boolean" && typeof cfg[k] !== "boolean")
+        bad.push(k + " must be true or false (got " + JSON.stringify(cfg[k]) + ")");
+    });
+    if (bad.length) return bad.join("; ");
+    if (!initWorld(seed, population, depth, clean, raw)) return lastError();
+    resetForm();
+    setVal("seed", seed >>> 0); setVal("population", population); setVal("depth", depth);
+    cfgToForm(clean);
+    updateNeeds(); updateTabDots(); setPending(false);
+    var odd = Object.keys(clean).filter(function (k) {
+      if (!KEYS[k]) return false;
+      var a = getVal(k), b = clean[k], bool = typeof KEYS[k][0] === "boolean" || (KEYS[k][1] || {}).bit;
+      return bool ? !!a !== !!b : a !== b;
+    });
+    if (odd.length) console.warn("ocean: the sheet shows " + odd.join(", ") + " differently from the setup it runs");
+    return "";
   }
   /* a new world (oc_init or oc_reset), or one handed back by Turbo */
   function afterNewWorld(fromTurbo) {
     var w0 = W, h0 = H, d0 = D;
+    lastS = null;   /* its views are the old world's: the next frame cuts new ones */
     readWorld();
     if (scene && (W !== w0 || H !== h0 || D !== d0)) { scene.setWorld(W, H, D); labelHist(); }
     applyDisplaySwitches();
@@ -1798,6 +1835,7 @@
 
   /* ---------------- start ---------------- */
   buildHist();
+  var linkRefused = false;   /* oc_init refused the link's ?cfg= / ?e1=1 */
   splashSay(MOCK ? "Starting the ocean (mock engine)…" : "Starting the ocean…");
   var sceneReady = window.EvoOceanScene ? EvoOceanScene.load() : Promise.reject(new Error("ocean_scene.js missing"));
   Promise.all([loadModule().catch(function (e) {
@@ -1817,21 +1855,22 @@
       var i = el("o_" + k); if (i) i.disabled = true;
       var row = el("f_" + k); if (row) row.querySelectorAll(".stepper button").forEach(function (b) { b.disabled = true; });
     });
-    /* the URL's world into the sheet: ?seed / ?pop / ?depth, ?cfg (JSON; one
-     * that is not goes to oc_init as it is, so it says why), ?e1=1 under it */
+    /* the URL's world: ?seed / ?pop / ?depth, ?cfg (JSON; one that is not
+     * goes to oc_init as it is, so it says why), ?e1=1 under it. The setup
+     * goes to oc_init as it is (importWorld), and into the sheet only once
+     * accepted: a value the sheet would round or drop is refused with the
+     * engine's reason, not quietly changed. */
     var rawCfg = P.get("cfg") || "", userCfg = {}, badCfg = false;
     if (rawCfg) { try { userCfg = JSON.parse(rawCfg); if (!userCfg || typeof userCfg !== "object" || Array.isArray(userCfg)) badCfg = true; } catch (e) { badCfg = true; } }
     if (E1 && !has("oc_e1_preset")) throw new Error("?e1=1 needs oc_e1_preset: rebuild web/evo_ocean (wasm/build_ocean.sh)");
     var cfg0 = badCfg ? {} : Object.assign({}, E1 ? e1Preset() : {}, userCfg);
     var num = function (key, def, lo, hi) { var v = parseFloat(P.get(key)); return isFinite(v) ? Math.max(lo, Math.min(hi, v)) : def; };
-    setVal("seed", num("seed", KEYS.seed[0], 0, 4294967295) >>> 0);
-    setVal("population", Math.round(num("pop", KEYS.population[0], 0, 100000)));
-    setVal("depth", num("depth", KEYS.depth[0], 10, 100000));
-    cfgToForm(cfg0);
-    updateNeeds(); updateTabDots();
-    var f = readForm();
-    if (!initWorld(f.seed, f.population, f.depth, f.cfg, badCfg ? rawCfg : undefined))
-      throw new Error("oc_init failed: " + lastError());
+    var refused = importWorld(num("seed", KEYS.seed[0], 0, 4294967295) >>> 0, Math.round(num("pop", KEYS.population[0], 0, 100000)),
+                              num("depth", KEYS.depth[0], 10, 100000), cfg0, badCfg ? rawCfg : undefined);
+    if (refused) {
+      linkRefused = !!(rawCfg || E1);
+      throw new Error("This link's settings were refused: " + refused);
+    }
     scene = EvoOceanScene.create(canvas, {
       tankDepth: D,
       coarse: coarseMQ.matches,
@@ -1905,6 +1944,13 @@
   }).catch(function (e) {
     var why = String(e && e.message || e);
     splashSay("The 3-D Ocean could not start.\n" + why, true);
+    if (linkRefused) {   /* the same link without its settings */
+      var u = new URL(location.href), a = document.createElement("a");
+      u.searchParams.delete("cfg"); u.searchParams.delete("e1");
+      a.href = u.href; a.id = "splashplain"; a.className = "btn";
+      a.textContent = "Open it with the default settings";
+      el("splashstate").parentNode.appendChild(a);
+    }
     console.error("ocean: " + why);
   });
 })();

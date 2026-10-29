@@ -29,5 +29,7 @@ jobs:
             echo "::error::web/evo_ocean.js / .wasm are stale: run wasm/build_ocean.sh and commit the result"
             exit 1
           fi
-      - name: Ocean parity (every case), guards and unit checks
-        run: JOBS=$(nproc) bash wasm/ocean_parity.sh
+      - name: The page's Turbo hand-off (node, two real modules)
+        run: node tests/ocean_turbo_handoff.js
+      - name: Ocean parity (every case, every appearance twin), guards and unit checks
+        run: APP_TWINS=all JOBS=$(nproc) bash wasm/ocean_parity.sh

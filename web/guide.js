@@ -49,7 +49,7 @@
       body: function () {
         var brain = app().colourByBrain && app().colourByBrain();
         if (tank()) {
-          return "This is the tank view: the same world drawn in 3D, for looks. Glowing specks are " +
+          return "This is the tank view: this flat world drawn as a tank in perspective, for looks. Glowing specks are " +
                  "food, " + (brain ? "colour follows the brain's wiring" : "each family has its own colour") +
                  ", and the dark fish with glowing eyes are predators. " +
                  (touch() ? "Drag to look around, pinch to zoom, twist with two fingers to turn. "
@@ -88,6 +88,13 @@
         return "Fish, generations and frame rate. <b>gen</b> is the longest family line alive. " +
                (touch() ? "Tap" : "Click") + " it for the rest: food, births, deaths, and the " +
                "average generation, which climbs as evolution runs.";
+      } },
+    { drawer: false, title: "Two worlds",
+      target: function () { return rectOf("#worlds"); },
+      body: function () {
+        return "You are in <b>2-D Classic</b>, the original flat world that the native app runs; the tank and " +
+               "the flat view in the settings are two pictures of it. <b>3-D</b> opens the Ocean, where the fish " +
+               "sense depth and steer in it. Each world runs on its own, so switching starts the other one fresh.";
       } },
     { desktopOnly: true, drawer: false, title: "Keyboard",
       body: function () {

@@ -4,21 +4,44 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#071f20">
-<meta name="description" content="evo_boids 3-D Ocean: the same evolving fish, steering in real depth in a deep tank.">
+<meta name="description" content="Fish with tiny neural networks evolve in your browser, steering in real depth in a 3-D ocean. Nothing scores them: the ones that find food and partners leave children.">
 <title>evo_boids · 3-D Ocean</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230b1d1f'/%3E%3Cpath d='M6 16c4-6 11-7 16-3l4-4v14l-4-4c-5 4-12 3-16-3z' fill='%2364b5e8'/%3E%3Ccircle cx='11' cy='15' r='1.4' fill='%230b1d1f'/%3E%3C/svg%3E">
-<!-- The 3-D Ocean: the Classic page's controls (web/index.html: the top bar,
-     the dock, the settings sheet, the fish card, Turbo, the dashboards, the
-     tour) over the Ocean world. Its own page, because renderer.js calls the
-     Classic exports unconditionally: web/ocean.js runs the world
-     (web/evo_ocean.{js,wasm}, factory createEvoOcean; Turbo in
+<!-- The 3-D Ocean, the site's landing page: the Classic page's controls
+     (web/index.html: the top bar, the dock, the settings sheet, the fish card,
+     Turbo, the dashboards, the tour) over the Ocean world. Its own page,
+     because renderer.js calls the Classic exports unconditionally: web/ocean.js
+     runs the world (web/evo_ocean.{js,wasm}, factory createEvoOcean; Turbo in
      web/ocean_worker.js), web/ocean_scene.js draws the deep tank,
      web/ocean_config.js holds the settings, web/ocean_dash.js the dashboards
      (web/charts.js draws them), web/guide.js the tour (its steps from
      ocean.js). The styles below are Classic's (the same tokens and
-     components), less the flat view's, plus the Ocean's few. Published beside
-     the Classic page by wasm/build_site.sh (dist/ocean.html, hashed assets);
-     single-threaded, so it needs no cross-origin isolation. -->
+     components), less the flat view's, plus the Ocean's few. wasm/build_site.sh
+     publishes it as the site's root (dist/index.html, and dist/ocean.html for
+     the links from before) with Classic at dist/classic.html; single-threaded,
+     so it needs no cross-origin isolation. -->
+<script>
+  /* Classic's old links. Until the Ocean became the landing page, the site's
+   * root was Classic, so a link such as /?view=flat or /?threads=0 meant
+   * Classic, and it still opens Classic, query and hash kept: a query with
+   * one of the keys only Classic reads and none of the keys only the Ocean
+   * reads goes to Classic's page. The Ocean writes ?seed= on every restart,
+   * so its own links always carry one of its keys. Keys both pages read the
+   * same way (colour, guide, intro) decide nothing; Classic reads no seed and
+   * no cfg. As web/ is served, Classic's page is index.html; the deploy build
+   * (wasm/build_site.sh) rewrites the name to classic.html. ocean.js does
+   * not start while this navigates (EVO_REDIRECT). */
+  (function () {
+    var CLASSIC_PAGE = "index.html";
+    var CLASSIC_ONLY = ["view", "fish", "gl", "bench", "threads", "nthreads"];
+    var OCEAN_ONLY = ["seed", "pop", "depth", "w", "h", "cfg", "speed", "e1", "mock"];
+    var q = new URLSearchParams(location.search), has = function (k) { return q.has(k); };
+    if (CLASSIC_ONLY.some(has) && !OCEAN_ONLY.some(has)) {
+      window.EVO_REDIRECT = true;
+      location.replace(CLASSIC_PAGE + location.search + location.hash);
+    }
+  })();
+</script>
 <style>
   /* ---------- tokens (web/index.html's) ---------- */
   :root {
@@ -125,7 +148,7 @@
   #topbar > * { pointer-events: auto; }
   #readout {
     display: inline-flex; align-items: center; gap: 10px;
-    min-height: 44px; max-width: calc(100vw - 132px);
+    min-height: 44px; max-width: calc(100vw - 132px - var(--worlds-w) - 8px);
     padding: 0 14px 0 10px;
     border-radius: 999px;
     font-size: 13px; color: var(--ink-2); text-align: left;
@@ -134,8 +157,36 @@
   #readout .mark { display: inline-flex; align-items: center; gap: 6px; color: var(--ink); font-family: var(--mono); font-size: 13px; }
   #readout .mark svg { width: 20px; height: 20px; color: var(--deep); }
   #readout .mark span { display: none; }
-  #readout .mark em { font-style: normal; color: var(--deep); }
   #readout b { color: var(--ink); font-weight: 600; }
+  /* The two worlds, the same switch on both pages (web/index.html has its
+   * twin): 3-D Ocean, the world with depth, and 2-D Classic, the flat world
+   * (which Classic draws as a tank or flat). Beside the readout; the current
+   * world is not a link, so pressing it never restarts the run. */
+  :root { --worlds-w: 90px; }
+  #worlds {
+    display: inline-flex; flex: none; gap: 2px; margin-right: auto;
+    height: 44px; padding: 3px; border-radius: 999px;
+    font-size: 13px; font-weight: 600; line-height: 1;
+  }
+  @media (pointer: coarse) { #worlds { height: 50px; } }   /* 44 px to tap */
+  /* a phone: the frame rate stays in the live numbers' panel */
+  @media (max-width: 479px) { #readout .ro-rate { display: none; } }
+  #worlds .seg {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 0 9px; border-radius: 999px;
+    color: var(--ink-2); text-decoration: none; white-space: nowrap;
+    transition: background-color 150ms var(--ease), color 150ms var(--ease);
+  }
+  #worlds a.seg:hover { background: var(--surface-3); color: var(--ink); }
+  #worlds .seg[aria-current] { cursor: default; }
+  #worlds .w3[aria-current] { background: oklch(0.70 0.11 235 / 0.24); color: oklch(0.84 0.09 235); }
+  #worlds .w2[aria-current] { background: var(--plankton-soft); color: var(--plankton); }
+  #worlds .long { display: none; }
+  @media (min-width: 760px) {
+    :root { --worlds-w: 196px; }
+    #worlds .seg { padding: 0 13px; }
+    #worlds .long { display: inline; }
+  }
   #readout .sep { width: 1px; height: 16px; background: var(--line); }
   #readout .warn { color: var(--ember); }
   #readout .ro-depth { display: none; }
@@ -637,13 +688,17 @@
 
   <header id="topbar">
     <button id="readout" class="chip-surface" aria-expanded="false" aria-controls="statpanel" title="live numbers: tap for details">
-      <span class="mark"><svg class="i"><use href="#i-fish"/></svg><span>evo_boids <em>Ocean</em></span></span>
+      <span class="mark"><svg class="i"><use href="#i-fish"/></svg><span>evo_boids</span></span>
       <span class="sep" aria-hidden="true"></span>
       <span><b id="ro-fish" class="num">–</b> fish</span>
       <span>gen <b id="ro-gen" class="num">–</b></span>
       <span class="ro-depth">depth <b id="ro-depth" class="num">–</b></span>
-      <span><b id="ro-fps" class="num">–</b> fps</span>
+      <span class="ro-rate"><b id="ro-fps" class="num">–</b> fps</span>
     </button>
+    <nav id="worlds" class="chip-surface" aria-label="world">
+      <span class="seg w3" aria-current="page" title="3-D Ocean: fish that sense depth and steer in it (this page)">3-D<span class="long"> Ocean</span></span>
+      <a class="seg w2" id="to2d" href="index.html" title="2-D Classic: the original flat world, drawn as a tank or flat (opens here; this run stops)">2-D<span class="long"> Classic</span></a>
+    </nav>
     <div id="tools" class="chip-surface">
       <button id="dashbtn" class="icon-btn" aria-label="dashboards: charts of this run" aria-expanded="false" title="Dashboards"><svg class="i"><use href="#i-chart"/></svg></button>
       <button id="menubtn" class="icon-btn" aria-label="settings" aria-expanded="false" aria-controls="drawer" title="Settings"><svg class="i"><use href="#i-sliders"/></svg></button>
@@ -745,8 +800,7 @@
         <h3>Defaults</h3>
         <button id="advreset" class="btn ghost" style="margin-top:8px">Reset every setting</button>
         <p id="credit">evo_boids © 2026 Harit Tarwani ·
-          <a href="https://creativecommons.org/licenses/by-nc/4.0/" target="_blank" rel="noopener noreferrer">CC BY-NC 4.0</a><br>
-          <a id="classiclink" href="index.html">Classic (2-D)</a> · the flat world, as the native app draws it</p>
+          <a href="https://creativecommons.org/licenses/by-nc/4.0/" target="_blank" rel="noopener noreferrer">CC BY-NC 4.0</a></p>
       </section>
       <!-- the other panels are built by ocean.js (EvoOceanConfig.TABS) -->
     </div>
@@ -786,7 +840,7 @@
   <div id="splash" aria-live="polite">
     <div>
       <div class="word"><svg class="i"><use href="#i-fish"/></svg>evo_boids Ocean</div>
-      <p>The same evolving fish, steering in depth.</p>
+      <p>Fish with tiny brains, evolving in a sea with depth.</p>
       <span class="swim" aria-hidden="true"></span>
       <div id="splashstate">Starting the ocean…</div>
     </div>

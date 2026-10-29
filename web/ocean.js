@@ -33,6 +33,8 @@
  *      ?mock=1 loads ocean_mock.js from beside the page instead of the engine
  *      (a JS stand-in for page development, not part of web/).
  *      A Restart writes seed / pop / depth / cfg back, so a reload keeps it.
+ *      A query with only Classic's keys (?view, ?threads, ...) goes to Classic
+ *      before this runs: the site's root was Classic (ocean.html's head).
  * Keys: space pause, + / - (or arrows) steps per frame, F follow (the selected
  *       fish, else a random one; again: another), Esc close / stop following
  *       / let go, R a new world (new seed), shift+R replay this one, C fit the
@@ -45,6 +47,8 @@
  *
  * window.EvoOcean: a small handle for the console and the tests. */
 (function () {
+  /* the page is on its way to Classic (an old Classic link: ocean.html's head) */
+  if (window.EVO_REDIRECT) return;
   var A = window.EVO_ASSETS, CFG = window.EvoOceanConfig;
   var P = new URLSearchParams(location.search);
   var MOCK = P.get("mock") === "1";
@@ -1552,11 +1556,12 @@
     steps: function (h) {
       var tap = function () { return h.touch() ? "Tap" : "Click"; };
       return [
-        { welcome: true, drawer: false, title: "Welcome to the 3-D Ocean",
+        { welcome: true, drawer: false, title: "Welcome to evo_boids",
           body: function () {
-            return "The same fish as Classic, with tiny neural networks wired by their genes, but in a sea with real " +
-                   "depth: they sense up and down and steer in it, and each inherits the depth it floats at. Nobody " +
-                   "programs what they do: their behaviour evolves.<br>Take the one-minute tour?";
+            return "Each fish has a tiny neural network wired by its genes. Fish that eat enough have children with " +
+                   "slightly mutated genes. This is the 3-D Ocean, a sea with real depth: they sense up and down and " +
+                   "steer in it, and each inherits the depth it floats at. Nobody programs what they do: their " +
+                   "behaviour evolves.<br>Take the one-minute tour?";
           } },
         { drawer: false, title: "The tank",
           target: function () { return h.rectOf("#tank"); },
@@ -1587,6 +1592,13 @@
           body: function () {
             return "Fish, generations, their average depth and the frame rate. " + tap() + " it for the rest: food, " +
                    "births and deaths, family lines, and where in the depth the fish are.";
+          } },
+        { drawer: false, title: "Two worlds",
+          target: function () { return h.rectOf("#worlds"); },
+          body: function () {
+            return "You are in the <b>3-D Ocean</b>. <b>2-D</b> opens Classic, the original flat world that the " +
+                   "native app runs, which you can watch as a tank or flat. Each world runs on its own, so " +
+                   "switching starts the other one fresh.";
           } },
         { desktopOnly: true, drawer: false, title: "Keyboard",
           body: function () {
@@ -1627,7 +1639,7 @@
                    "<b>Restart</b>; settings marked <i>live</i> apply at once.";
           } },
         { last: true, drawer: false, title: "You're set",
-          body: function () { return "Replay this tour any time with <b>Tour</b> in the settings. Classic, the flat world, is linked from the Run tab."; } }
+          body: function () { return "Replay this tour any time with <b>Tour</b> in the settings. Enjoy!"; } }
       ];
     },
     intro: function (h) {

@@ -110,6 +110,7 @@ bool applySet(OceanWorld& w, const LiveSet& s, bool unchecked) {
     if (!readOceanJson(json.c_str(), sc, oc, err)) return false;
     ofp::clampConfigLikeShim(sc);
     if (!unchecked && (!oceanConfigValid(oc) || !oceanSimConfigError(sc).empty())) return false;
+    if (oc.appearance != w.ocfg.appearance) return false;   // init only (oc_set_param refuses a change)
     w.cfg = sc;
     w.ocfg = oc;
     return true;
@@ -234,6 +235,15 @@ struct Coverage {
             {"steerOwnSteps", steerOwnSteps}, {"foodExpired", w.totalFoodExpired},
             {"agesKept", agesKept}, {"foodCapFreed", foodCapFreed},
             {"nonFiniteRemoved", w.totalNonFiniteRemoved},
+            // the appearance genome's construction (the engine's own statistics;
+            // never read by the step): records built, branches taken
+            {"appFounders", (long long)w.appearanceStats().founders},
+            {"appOffspring", (long long)w.appearanceStats().offspring},
+            {"appMean", (long long)w.appearanceStats().pattern[0]}, {"appCopyA", (long long)w.appearanceStats().pattern[1]},
+            {"appCopyB", (long long)w.appearanceStats().pattern[2]}, {"appNovel", (long long)w.appearanceStats().pattern[3]},
+            {"appShapeMean", (long long)w.appearanceStats().morph[0]}, {"appShapeCopyA", (long long)w.appearanceStats().morph[1]},
+            {"appShapeCopyB", (long long)w.appearanceStats().morph[2]}, {"appShapeNovel", (long long)w.appearanceStats().morph[3]},
+            {"appBroken", (long long)w.appearanceBroken()},
         };
     }
     // The counters the `cover` line leaves out while they are 0 (see above;
@@ -241,7 +251,10 @@ struct Coverage {
     static bool quietWhenZero(const std::string& k) {
         static const char* const kQuietWhenZero[] = {"eyeSteps", "eyeOnlySteps", "eyeCodeMask", "eyeE1Steps",
                                                      "eyeLit", "labeledLit", "steerOwnSteps", "foodExpired",
-                                                     "agesKept", "foodCapFreed", "nonFiniteRemoved"};
+                                                     "agesKept", "foodCapFreed", "nonFiniteRemoved", "appFounders",
+                                                     "appOffspring", "appMean", "appCopyA", "appCopyB", "appNovel",
+                                                     "appShapeMean", "appShapeCopyA", "appShapeCopyB", "appShapeNovel",
+                                                     "appBroken"};
         for (const char* q : kQuietWhenZero) if (k == q) return true;
         return false;
     }
@@ -370,11 +383,13 @@ int main(int argc, char** argv) {
     long nonFiniteMax = 0, nonFiniteFirst = -1;
     long long removedSeen = 0;   // w.totalNonFiniteRemoved at the last scan
     ofp::Hasher chain;   // every step's full fingerprint, in order
+    ofp::Hasher appchain;   // every step's appearance section (kept apart from `chain`: cosmetic)
     Coverage cover;
     auto observe = [&](long step, bool printIt) {
         if (sparse && !printIt) return;
         const ofp::Fingerprint fp = ofp::fingerprint(w);
         chain.u64(fp.all);
+        if (fp.appShown) appchain.u64(fp.app);
         const long nf = ofp::countNonFinite(w) + (long)(w.totalNonFiniteRemoved - removedSeen);
         removedSeen = w.totalNonFiniteRemoved;
         if (nf > 0 && nonFiniteFirst < 0) nonFiniteFirst = step;
@@ -382,6 +397,7 @@ int main(int argc, char** argv) {
         if (printIt) {
             std::fputs(ofp::fingerprintLine("fp", step, w, fp).c_str(), stdout);
             if (!sparse) std::printf(" chain=%016llx", (unsigned long long)chain.value());
+            if (!sparse && fp.appShown) std::printf(" appchain=%016llx", (unsigned long long)appchain.value());
             std::fputc('\n', stdout);
         }
     };

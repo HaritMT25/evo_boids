@@ -39,6 +39,12 @@
       "headers": [
         { "key": "Cache-Control", "value": "no-cache" }
       ]
+    },
+    {
+      "source": "/classic.html",
+      "headers": [
+        { "key": "Cache-Control", "value": "no-cache" }
+      ]
     }
   ]
 }

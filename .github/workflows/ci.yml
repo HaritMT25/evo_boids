@@ -55,7 +55,7 @@ jobs:
         run: bash wasm/build_site.sh
 
   # The Ocean (3-D) world: its browser module rebuilt and compared with the
-  # committed one, then wasm/ocean_parity.sh on CI's FAST subset (39 of the
+  # committed one, then wasm/ocean_parity.sh on CI's FAST subset (43 of the
   # cases, about a quarter of their cost: one or more of every family) with
   # every guard (the page's validation of each case, the refused configs, the
   # removed-non-finite runs, the preset / int-key / orphan checks) and the

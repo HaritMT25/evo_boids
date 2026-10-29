@@ -2,7 +2,7 @@
 
 An artificial-life simulation in C++20 where fish with small neural networks evolve by inheritance and mutation. It runs natively and in the browser through WebAssembly.
 
-**Live demo:** _link goes here after the first deploy_
+**Live demo:** https://evo-boids.vercel.app/ opens the 3-D Ocean; the switch at the top opens 2-D Classic (https://evo-boids.vercel.app/classic.html).
 
 ![evo_boids running in the browser](docs/demo.gif) <!-- placeholder: GIF to be recorded -->
 
@@ -54,7 +54,7 @@ tests/         core_tests, predator_smoke, core_bench (no SFML needed)
   - `evo_boids_mt` uses pthreads. It needs `SharedArrayBuffer`, which browsers allow only on cross-origin-isolated pages (COOP `same-origin` + COEP `require-corp`).
   - `evo_boids` is single-threaded.
   - `web/loader.js` checks `self.crossOriginIsolated` and picks one. Inside an iframe on a page without those headers, it always gets the single-threaded build.
-- **Drawing.** With WebGL2, the background, food, fish and predators are drawn with one instanced draw call per kind (`web/gl_renderer.js`). The result is copied onto a 2D canvas, which draws the HUD and the neural inspector on top, the way the native SFML window does. Without WebGL2, everything is drawn with canvas 2D, at one fill per body segment. The controls around the world (a live readout, a playback dock, the settings, Turbo) are HTML, outside the canvas. The **tank view**, the default, draws the same world in 3D instead (below); the flat view is the native window's picture.
+- **Drawing.** With WebGL2, the background, food, fish and predators are drawn with one instanced draw call per kind (`web/gl_renderer.js`). The result is copied onto a 2D canvas, which draws the HUD and the neural inspector on top, the way the native SFML window does. Without WebGL2, everything is drawn with canvas 2D, at one fill per body segment. The controls around the world (a live readout, a playback dock, the settings, Turbo) are HTML, outside the canvas. Classic's **tank view**, the default, draws the same 2-D world as a tank in perspective instead (below); the flat view is the native window's picture. Neither is the 3-D Ocean, a separate world with depth (see "The site").
 - **Frame budget.** When a frame takes too long, the page first lowers the simulation speed (in the tank view, it first draws the tank with less detail). Then it removes creatures uniformly at random and caps births, so the agent count drops instead of the frame rate. A message says when this happens, and the readout keeps an orange dot for the rest of the run, because a run changed this way can no longer be replayed from its seed. It can be switched off ("hold 60 fps").
 
 ## Build and run
@@ -80,13 +80,17 @@ Requires [Emscripten](https://emscripten.org) (`source ~/emsdk/emsdk_env.sh`) an
 ```bash
 cmake --preset wasm-st && cmake --build --preset wasm-st   # -> web/evo_boids.{js,wasm}
 cmake --preset wasm-mt && cmake --build --preset wasm-mt   # -> web/evo_boids_mt.{js,wasm}
+bash wasm/build_ocean.sh                                   # -> web/evo_ocean.{js,wasm} (the 3-D Ocean)
 
 python3 wasm/serve.py            # serves the repo root WITH COOP/COEP
-                                 # open http://localhost:8123/web/  (threaded)
-python3 -m http.server 8123      # plain server: same page, single-threaded
+                                 # open http://localhost:8123/web/  (Classic, threaded)
+                                 # and  http://localhost:8123/web/ocean.html  (the 3-D Ocean)
+python3 -m http.server 8123      # plain server: same pages, Classic single-threaded
 ```
 
-Page options:
+`web/` keeps its own names, Classic at `index.html`; the deploy build gives the site its own ("The site", below, which also lists the Ocean's page options).
+
+Classic's page options:
 
 | Option | Effect |
 |---|---|
@@ -98,6 +102,7 @@ Page options:
 | `?intro=1` | always show the first-visit Turbo card |
 | `?view=3d` / `?view=flat` | starts in the tank view / the flat view (otherwise the visitor's last choice; the tank the first time, and the flat view under `?bench`, so its numbers compare with the tables below) |
 | `?fish=1` / `?fish=0` | draws the flat view's fish as fish shapes / as circles (otherwise remembered; circles the first time) |
+| `?colour=brain` / `?colour=family` | colours the fish by brain similarity / by family line (otherwise the visitor's last choice; family the first time) |
 
 Keyboard: <kbd>Space</kbd> pause · <kbd>↑</kbd> <kbd>↓</kbd> speed · <kbd>R</kbd> a fresh world · <kbd>Esc</kbd> closes what is open (the settings, the live numbers, then the selected fish). Click a fish to inspect it, empty water to let it go. In the tank view also <kbd>F</kbd> follow the selected fish · <kbd>C</kbd> fit the view; drag to pan, scroll to zoom (towards the pointer), right-drag to tilt and turn.
 
@@ -121,9 +126,36 @@ Checks run in each:
 
 Safari on macOS/iOS has not been tested.
 
+### The site: the 3-D Ocean and 2-D Classic
+
+Two worlds, each on its own page with the same controls:
+
+| URL | page | what it is |
+|---|---|---|
+| `/` | `web/ocean.html` | **3-D Ocean**, the landing page: the fish sense depth and steer in it, in a deep tank. Its own engine (`web/evo_ocean.*`), single-threaded, reproducible from its seed |
+| `/classic.html` | `web/index.html` | **2-D Classic**: the original flat world, the one the native app runs, threaded where the page is cross-origin isolated; drawn as a tank in perspective (the default) or flat |
+| `/ocean.html` | `web/ocean.html` | the same page as `/`, for links from before the Ocean moved to the root |
+
+A **3-D | 2-D** switch beside the live readout, on both pages, moves between them ("3-D Ocean | 2-D Classic", or "3-D | 2-D" under 760 px). The current world is highlighted and is not a link, so pressing it never restarts the run; each world runs on its own, so switching starts the other one fresh. Classic's tank and flat views stay a setting of Classic (Settings → Run → Tank view): both are pictures of the 2-D world. Both tours point at the switch.
+
+**Links from before.** Until 2026-10-28 the root was Classic. A query on `/` (or `/ocean.html`) with one of the keys only Classic reads (`view`, `fish`, `gl`, `bench`, `threads`, `nthreads`) and none of the keys only the Ocean reads (`seed`, `pop`, `depth`, `w`, `h`, `cfg`, `speed`, `e1`, `mock`) goes to `/classic.html` with its query and hash, before the Ocean starts (a script at the top of `web/ocean.html`). So `/?view=flat`, `/?threads=0` and `/?bench` open Classic as they did, and the Ocean's own links, which carry `?seed=` from the first restart on, stay. Keys both pages read the same way (`colour`, `guide`, `intro`) decide nothing: `/?guide=0` is the Ocean. Classic reads no `seed` and no `cfg`, so no key means one thing on one page and another on the other. A query with keys of both, which neither page writes, stays on the Ocean.
+
+**Embedded.** Both pages run inside an iframe on a page without COOP/COEP (the portfolio's EvoBoids.exe window frames `/` at about 890×453): Classic then runs single-threaded, the Ocean as always. Windows 560 px tall or less, such as that one, get each page's compact layout; there the Ocean's fish card drops its bars and sizes the brain to fit between the top bar and the dock.
+
+The Ocean's page options (`web/ocean.js` lists them):
+
+| Option | Effect |
+|---|---|
+| `?seed=N` `&pop=N` `&depth=D` | the world's seed, starting population and depth; a restart writes them back, so the address replays the world |
+| `?cfg={...}` | settings as JSON (the config keys the settings show) |
+| `?w=` `&h=` | the world's size (1920×1080, or on its side on a portrait screen) |
+| `?speed=N` | steps per frame |
+| `?e1=1` | the E1 physics preset, under `?cfg` |
+| `?colour=`, `?guide=`, `?intro=1` | as Classic's, above |
+
 ### Phones and touch screens
 
-Every screen gets the same controls around the world: the live readout at the top left (fish, generation, frame rate; tap it for the rest), the dashboards and settings buttons at the top right, and a playback dock at the bottom (pause, speed, Turbo, Randomize). On a desktop with a mouse they sit around the world, not over it, and the flat view draws the world exactly as before: the canvas is pixel-identical to the previous page's for a fixed checkpoint, HUD and inspector included. Small and touch screens, and windows 560 px tall or less (such as an embed), differ:
+Every screen gets the same controls around the world: the live readout at the top left (fish, generation, frame rate; tap it for the rest; a phone narrower than 480 px leaves the frame rate to that panel) with the 3-D | 2-D switch beside it, the dashboards and settings buttons at the top right, and a playback dock at the bottom (pause, speed, Turbo, Randomize). On a desktop with a mouse they sit around the world, not over it, and the flat view draws the world exactly as before: the canvas is pixel-identical to the previous page's for a fixed checkpoint, HUD and inspector included. Small and touch screens, and windows 560 px tall or less (such as an embed), differ:
 
 - **World shape.** In portrait, or on any touch screen, a start or restart creates a world with the area of 1920×1080 but the shape of the screen, so it fills the screen instead of a 16:9 strip. Food density and crowding stay the same. Rotating the device keeps the running world, and a "fit to screen" button restarts it with a fitted one. A checkpoint keeps its own size, and `?bench` always uses 1920×1080. The controls float over the world here.
 - **The selected fish.** On screens 700 px wide or less, windows 560 px tall or less, and touch screens, the inspector is a card instead of a canvas panel: energy (with the breeding threshold marked), age and speed, and the live network below, where tapping a node names it. The card sits at the bottom of a phone (on the right of a wider screen) and moves to the other side when the fish swims under it. The on-canvas HUD is left out there; the readout carries the essentials.
@@ -133,9 +165,9 @@ Every screen gets the same controls around the world: the live readout at the to
 
 So far this is measured in emulation only: Playwright's iPhone 13 profile in WebKit 26.6 and its Pixel 7 profile in Chrome 155, portrait and landscape. The world covers 99.7–99.8% of the screen in all four cases, of which the top bar and the dock float over about 11% (Pixel 7, portrait); the fish card with its network open covers 43% (Pixel 7) and 49% (iPhone 13). No real phone has been tested, so frame rate, battery use, memory, and whether the threaded module starts on iOS are unmeasured.
 
-### Tank view (the default)
+### Classic's tank view (the default)
 
-The page draws the world as a shallow 3D tank seen at an angle, made with three.js (`web/scene3d.js`, by techy-Nik). It changes nothing in the simulation, only the picture. A first visit gets it; the switch in the settings' Run tab (or `?view=flat`) turns it off, and the page remembers the choice. The flat view shows the world as the simulation sees it, as the native app does; the tank is for looks, and takes liberties:
+Classic draws its 2-D world as a shallow tank seen at an angle, made with three.js (`web/scene3d.js`, by techy-Nik). It changes nothing in the simulation, only the picture; the world with real depth is the 3-D Ocean, a different page. A first visit gets the tank; the Tank view switch in the settings' Run tab (or `?view=flat`) turns it off, and the page remembers the choice. The flat view shows the world as the simulation sees it, as the native app does; the tank is for looks, and takes liberties:
 
 - **What is drawn from the simulation:** every fish's six spine points (bent through with a spline), colour (its family line, or its genome with the brain switch on) and body size; food positions; predator positions and whether they are hunting or digesting; the current's flow grid.
 - **What is added for looks:** a tail beat, a fixed swim height per fish (±4 world units), lighting, shading and fog (a fish's back is drawn darker than its colour, distant fish fade toward the water), shadows, caustic light, drifting specks of "marine snow" that are not food, and each predator's recent path used as its spine.
@@ -201,7 +233,7 @@ Uncapped rich-food setups reached ~2,400 fish headless; in the browser, the fram
 **Turbo, first.** A first visit opens with one card that points at the Turbo button and says what it does: evolution is slow to watch, and Turbo runs the simulation headless, many times faster, and keeps going in a background tab. **Try Turbo** starts it; **Cancel** (or Escape) closes the card, and then the tour below offers itself. The card is remembered in `localStorage` (`?intro=1` shows it again).
 
 **First-visit guide.** After that card, a first visit is offered a one-minute spotlight tour:
-- what you're looking at, a fish's brain, and the live readout
+- what you're looking at, a fish's brain, the live readout, and the 3-D | 2-D switch between the two worlds
 - the keyboard (with a mouse only)
 - the playback dock (including what Turbo's "headless" means), the dashboards, the settings, Randomize, your own settings, and checkpoints
 
@@ -236,19 +268,20 @@ The chart button beside the settings button opens charts of the running world. E
 Live at https://evo-boids.vercel.app/.
 
 ```bash
-wasm/build_site.sh                                  # -> dist/: index.html, hashed assets, vercel.json
+wasm/build_site.sh                                  # -> dist/: index.html (the Ocean), ocean.html (the same),
+                                                    #    classic.html, hashed assets, vercel.json
 vercel project add evo-boids                        # once: create the project
 vercel link --cwd dist --project evo-boids --yes    # once: link dist/ to it (kept across rebuilds)
 vercel build --prod --cwd dist                      # -> dist/.vercel/output, headers included
 vercel deploy --prebuilt --prod --cwd dist          # production (drop both --prod for a preview)
 ```
 
-Deploy the prebuilt output. A plain `vercel deploy --cwd dist`, which builds on Vercel's side, went live on 2026-10-18 without any of the `vercel.json` headers: no COOP/COEP, so the page ran single-threaded. The same files built locally with `vercel build` keep them. After a deploy, check that `curl -sI https://evo-boids.vercel.app/` shows `cross-origin-opener-policy: same-origin`.
+Deploy the prebuilt output. A plain `vercel deploy --cwd dist`, which builds on Vercel's side, went live on 2026-10-18 without any of the `vercel.json` headers: no COOP/COEP, so the page ran single-threaded. The same files built locally with `vercel build` keep them. After a deploy, check that `curl -sI https://evo-boids.vercel.app/classic.html` shows `cross-origin-opener-policy: same-origin`.
 
 `dist/vercel.json` sets:
-- COOP/COEP on every path (the Turbo worker and the pthread workers need them too)
+- COOP/COEP on every path: Classic's threaded module needs them, and its Turbo worker and pthread workers too. The Ocean, single-threaded, needs none and runs the same under them, at the top level and in an iframe on a page without them
 - `application/wasm` for `.wasm` files
-- a one-year immutable cache for the hashed assets, and `no-cache` for `index.html`
+- a one-year immutable cache for the hashed assets, and `no-cache` for the three pages
 
 Every asset is same-origin, so cross-origin isolation holds. There are no serverless functions.
 

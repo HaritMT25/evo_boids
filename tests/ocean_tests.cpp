@@ -29,15 +29,20 @@
 //                 exactly (1 − z/wb)·3·dt, capped at D/2 in a shallow sea
 //   capture       captureActivations changes no dynamics
 //   eye           (eye build) a hand-built scene's 18 eye inputs bit for bit;
-//                 off = 0; in range; no side effects (eyeCode 0 and 7)
+//                 off = 0; in range; no side effects (eyeCode 0, 7 and 31)
 //   eye_only      (eye build) eyeOnly: the 23 labeled inputs 0, every other
 //                 input bit-identical to the labeled run's; blind likewise;
-//                 also with eyeCode 7
+//                 also with eyeCode 7, 8 (cloaked fish: no neighbour query in
+//                 eye-only mode) and 20 (cloaked food + summed sectors)
 //   eye_code      (eye build) eyeCode: a scene with several objects per sector,
-//                 the 18 inputs bit for bit for every code 0..7 (and 4 / 7
-//                 eye-only); non-eye inputs unchanged; faded contrast 0 at R;
-//                 ranges in populated worlds; 0..7 valid, live via oc_set_param
-//                 (plain build: eyeCode must stay 0)
+//                 the 18 inputs bit for bit for every code 0..31 — the
+//                 encodings x the cloaks (8 the eye ignores fish, 16 food) —
+//                 and seven codes eye-only; non-eye (labeled) inputs unchanged
+//                 by any code; the cloaks by name (a cloaked kind neither shows
+//                 nor hides: the food behind a nearer fish, the predator behind
+//                 the food; 24 = predators only); faded contrast 0 at R;
+//                 ranges in populated worlds; 0..31 valid, live via
+//                 oc_set_param (plain build: eyeCode must stay 0)
 //   food_life     foodLife: an item goes on the step its age reaches foodLife;
 //                 off, none do; the first stock's ages spread; draws unchanged
 //   reproducible  same seed twice -> identical fingerprints; another seed and a
@@ -127,6 +132,15 @@
 //                 refused (oc_init, oc_set_param); a run at each end stays
 //                 finite; bool / mode keys strict
 //   e1_hash       a wave-phase or E1-knob ulp changes only its own section
+//   lazy_waves    the wave modes are prepared only once the waves are on
+//                 (never by a waves-off step or flow reader, a deep current
+//                 alone included; an unprepared train gives zero flow); off
+//                 at init and switched on directly before the first step ==
+//                 on at init, every section after 200 steps (geo before: the
+//                 first flow read prepares the same modes); on live at step
+//                 100 (the step prepares them), off again keeps the modes and
+//                 the stopped clock; a reused world re-initialised with the
+//                 waves off is unprepared again
 //   preset        kE1PresetJson is accepted and is what it says
 //   wrap          OceanWorld::wrapCoord (constant time) == the loops it
 //                 replaced, bit for bit, at every edge of [-span, 2·span) and
@@ -1178,14 +1192,14 @@ void testEye() {
     // they see, so a world of them (with food and wandering predators that draw
     // and capture) must run identically with the eye on and off — same state,
     // same draws — and differ only in lastSensors. (k = 2: the eye on with every
-    // eyeCode bit set.)
+    // encoding bit set; k = 3: every eyeCode bit, the cloaks too.)
     {
-        ofp::Fingerprint fp[3];
+        ofp::Fingerprint fp[4];
         long nonzero = 0;
-        for (int k = 0; k < 3; ++k) {
+        for (int k = 0; k < 4; ++k) {
             OceanConfig oc;
             oc.eye = k ? 1 : 0;
-            oc.eyeCode = (k == 2) ? kEyeCodeAll : 0;
+            oc.eyeCode = (k == 2) ? kEyeCodeAll : (k == 3) ? kEyeCodeMax : 0;
             OceanWorld w;
             initQuiet(w, 64, 240.0f, oc, /*capture*/ true);
             w.cfg.predatorCount = 3;
@@ -1207,11 +1221,11 @@ void testEye() {
                 for (const Fish& c : w.creatures)
                     for (int e = 0; e < ocean::kEyeInputs; ++e) nonzero += (c.lastSensors[ocean::kEyeFirst + e] != 0.0f);
         }
-        for (int k = 1; k < 3; ++k)
+        for (int k = 1; k < 4; ++k)
             t.expect(fp[0].ctr == fp[k].ctr && fp[0].fish == fp[k].fish && fp[0].food == fp[k].food &&
                          fp[0].pred == fp[k].pred && fp[0].rng == fp[k].rng,
                      "the eye (eyeCode %d) changed an unwired world (fish %016llx vs %016llx, rng %016llx vs %016llx)",
-                     k == 2 ? kEyeCodeAll : 0, (unsigned long long)fp[0].fish, (unsigned long long)fp[k].fish,
+                     k == 2 ? kEyeCodeAll : k == 3 ? kEyeCodeMax : 0, (unsigned long long)fp[0].fish, (unsigned long long)fp[k].fish,
                      (unsigned long long)fp[0].rng, (unsigned long long)fp[k].rng);
         t.expect(nonzero > 0, "the eye saw nothing in the side-effect world");
     }
@@ -1273,11 +1287,16 @@ void testEyeOnly() {
     };
     struct Case { bool toroidal; int maxNeighbors; };
     for (const Case cs : {Case{false, 0}, Case{true, 7}}) {
-        for (int mode = 0; mode < 3; ++mode) {   // blind, eye-only, eye-only with eyeCode 7
-            const int eye = mode ? 1 : 0, code = (mode == 2) ? kEyeCodeAll : 0;
+        // blind, eye-only, eye-only with eyeCode 7, and the cloaks (8: no fish
+        // query in eye-only mode; 16 + summed: no food query)
+        for (int mode = 0; mode < 5; ++mode) {
+            static const int kCode[5] = {0, 0, kEyeCodeAll, kEyeCodeNoFish, kEyeCodeNoFood | kEyeCodeSummed};
+            const int eye = mode ? 1 : 0, code = kCode[mode];
             const Run lab = run(eye, 0, cs.toroidal, cs.maxNeighbors, code);
             const Run only = run(eye, 1, cs.toroidal, cs.maxNeighbors, code);
-            const char* name = (mode == 0) ? "blind" : (mode == 1) ? "eye-only" : "eye-only (eyeCode 7)";
+            static const char* kName[5] = {"blind", "eye-only", "eye-only (eyeCode 7)", "eye-only (eyeCode 8)",
+                                           "eye-only (eyeCode 20)"};
+            const char* name = kName[mode];
             t.expect(only.fp.ctr == lab.fp.ctr && only.fp.fish == lab.fp.fish && only.fp.food == lab.fp.food &&
                          only.fp.pred == lab.fp.pred && only.fp.sig == lab.fp.sig && only.fp.rng == lab.fp.rng,
                      "%s (toroidal %d, topo %d) changed an unwired world (fish %016llx vs %016llx, rng %016llx vs %016llx)",
@@ -1292,12 +1311,13 @@ void testEyeOnly() {
         }
     }
     t.note("23 labeled inputs 0 in eye-only and blind; kept + eye inputs bit-identical to the labeled runs"
-           " (eyeCode 0 and 7)");
+           " (eyeCode 0, 7, 8, 20)");
 }
 
 // OceanConfig::eyeCode (bit 0 faded contrast, bit 1 opponent pairs, bit 2
-// summed sectors). (1) A hand-built scene with several objects per sector, for
-// every code 0..7 (and code 4 / 7 in eye-only mode): the 18 inputs bit for bit
+// summed sectors; the cloaks bit 3 no fish, bit 4 no food). (1) A hand-built
+// scene with several objects per sector, for every code 0..31 (and seven codes
+// in eye-only mode): the 18 inputs bit for bit
 // against the definitions, computed here the same way. The engine visits fish
 // (grid order), then food (grid order), then predators (index order); float
 // sums depend on order, so every sector holds at most two objects of a group
@@ -1367,6 +1387,9 @@ void testEyeCode() {
         float nd2[6], nsize[6], ncon[6], sp[6] = {}, ss[6] = {}, sc[6] = {};
         for (int k = 0; k < 6; ++k) { nd2[k] = std::numeric_limits<float>::infinity(); nsize[k] = ncon[k] = 0.0f; }
         for (const Obj& o : objs) {
+            // The cloaks: that kind is not binned at all (bits 3 / 4).
+            if ((code & kEyeCodeNoFish) && o.type == kFish) continue;
+            if ((code & kEyeCodeNoFood) && o.type == kFood) continue;
             const Vec2 pos = {P.x + o.dx, P.y + o.dy};
             const float oz = z + o.dz;
             const float dx = pos.x - P.x, dy = pos.y - P.y, dz = oz - z;
@@ -1406,12 +1429,14 @@ void testEyeCode() {
     };
     static const char* kSec[] = {"ahead", "behind", "left", "right", "up", "down"};
     std::vector<float> rest0;   // code 0's non-eye inputs
-    float got7[ocean::kEyeInputs] = {}, got0[ocean::kEyeInputs] = {};
+    float got7[ocean::kEyeInputs] = {}, got0[ocean::kEyeInputs] = {}, gotNF[ocean::kEyeInputs] = {},
+          gotND[ocean::kEyeInputs] = {}, got24[ocean::kEyeInputs] = {};
     struct V { int code, eyeOnly; };
     std::vector<V> vs;
-    for (int c = 0; c <= kEyeCodeAll; ++c) vs.push_back({c, 0});
-    vs.push_back({kEyeCodeSummed, 1});
-    vs.push_back({kEyeCodeAll, 1});
+    for (int c = 0; c <= kEyeCodeMax; ++c) vs.push_back({c, 0});   // every encoding x cloak
+    for (int c : {kEyeCodeSummed, kEyeCodeAll, kEyeCodeNoFish, kEyeCodeNoFood, kEyeCodeNoFish | kEyeCodeSummed,
+                  kEyeCodeNoFood | kEyeCodeAll, kEyeCodeCloaks | kEyeCodeOpponent})
+        vs.push_back({c, 1});   // eye-only: the cloaked kind's query is skipped
     for (const V& vv : vs) {
         OceanWorld w;
         const int v = build(w, vv.code, vv.eyeOnly);
@@ -1431,13 +1456,40 @@ void testEyeCode() {
         std::vector<float> rest;
         for (int k = 0; k < NUM_SENSES; ++k) if (!ocean::isEyeSense(k)) rest.push_back(S[k]);
         if (vv.code == 0) { rest0 = rest; std::memcpy(got0, S + ocean::kEyeFirst, sizeof got0); }
-        else t.expect(rest == rest0, "eyeCode %d changed a non-eye input", vv.code);
+        else t.expect(rest == rest0, "eyeCode %d changed a non-eye input", vv.code);   // the labels see every kind
         if (vv.code == kEyeCodeAll) std::memcpy(got7, S + ocean::kEyeFirst, sizeof got7);
+        if (vv.code == kEyeCodeNoFish) std::memcpy(gotNF, S + ocean::kEyeFirst, sizeof gotNF);
+        if (vv.code == kEyeCodeNoFood) std::memcpy(gotND, S + ocean::kEyeFirst, sizeof gotND);
+        if (vv.code == kEyeCodeCloaks) std::memcpy(got24, S + ocean::kEyeFirst, sizeof got24);
     }
     t.note("scene, code 0: ahead %.4f/%.4f/%.4f left %.4f/%.4f/%.4f right %.4f/%.4f/%.4f", got0[0], got0[1], got0[2],
            got0[6], got0[7], got0[8], got0[9], got0[10], got0[11]);
     t.note("scene, code 7: ahead %.4f/%.4f/%.4f left+right %.4f/%.4f/%.4f right-left %.4f/%.4f/%.4f", got7[0],
            got7[1], got7[2], got7[6], got7[7], got7[8], got7[9], got7[10], got7[11]);
+    // The cloaks, by name (besides the model above): a cloaked kind neither
+    // shows nor hides. Code 8: the fish nearest up (25 above) gives way to the
+    // food 60 above, the fish right / down to the predators behind them;
+    // code 16: the food ahead (30) gives way to the fish (46), both food items
+    // behind to the predator; code 24: only predators.
+    {
+        const float foodUp = ocean::eyeContrast(ocean::kEyeFoodBright, z - 60.0f);
+        const float predCon = ocean::eyeContrast(ocean::kEyePredBright, z), fishCon = ocean::eyeContrast(ocean::kEyeFishBright, z);
+        const float predBehindCon = ocean::eyeContrast(ocean::kEyePredBright, z + 10.0f);
+        t.expect(gotNF[14] == foodUp && got0[14] != foodUp && gotNF[11] == predCon && gotNF[0] == got0[0],
+                 "code 8: up CON %.6g (food %.6g), right CON %.6g (predator %.6g)", gotNF[14], foodUp, gotNF[11], predCon);
+        t.expect(gotND[2] != got0[2] && gotND[5] == predBehindCon,
+                 "code 16: ahead CON %.6g, behind CON %.6g (predator %.6g)", gotND[2], gotND[5], predBehindCon);
+        t.expect(std::abs(gotND[2] - fishCon) < 0.05f, "code 16: ahead CON %.6g is not a fish's (%.6g)", gotND[2], fishCon);
+        bool onlyPred = true;
+        for (int k = 0; k < ocean::kEyeSectors; ++k) {
+            const float cn = got24[3 * k + 2];
+            const bool empty = got24[3 * k] == 0.0f && got24[3 * k + 1] == 0.0f && cn == 0.0f;
+            onlyPred &= empty || cn < 0.0f;   // predators are dark: CON < 0 at these depths
+        }
+        t.expect(onlyPred && got24[6] == 0.0f && got24[12] == 0.0f, "code 24: a sector shows a fish or food item");
+        t.note("cloaks: code 8 up CON %.4f (food) vs code 0 %.4f (fish); code 16 behind CON %.4f (predator); "
+               "code 24 left/up empty", gotNF[14], got0[14], gotND[5]);
+    }
 
     // (2) Faded contrast fades to exactly 0 at R: one food item 100 ahead.
     for (int code : {0, kEyeCodeFaded, kEyeCodeSummed}) {
@@ -1506,22 +1558,26 @@ void testEyeCode() {
                slots ? 100.0 * occupied / slots : 0.0);
     }
 
-    // (4) Validity: 0..7 in the eye build; live through oc_set_param.
+    // (4) Validity: 0..31 in the eye build; live through oc_set_param.
     {
         OceanConfig oc;
-        bool ok = oceanConfigValid(oc) && oc.eyeCode == 0;
-        for (int c = 0; c <= kEyeCodeAll; ++c) { oc.eyeCode = c; ok &= oceanConfigValid(oc); }
-        t.expect(ok, "an eyeCode in 0..7 refused (or the default is not 0)");
-        for (int c : {-1, 8, 16, 1 << 30}) { oc.eyeCode = c; t.expect(!oceanConfigValid(oc), "eyeCode %d accepted", c); }
+        bool ok = oceanConfigValid(oc) && oc.eyeCode == 0 && kEyeCodeMax == 31;
+        for (int c = 0; c <= kEyeCodeMax; ++c) { oc.eyeCode = c; ok &= oceanConfigValid(oc); }
+        t.expect(ok, "an eyeCode in 0..31 refused (or the default is not 0)");
+        for (int c : {-1, 32, 64, 1 << 30}) { oc.eyeCode = c; t.expect(!oceanConfigValid(oc), "eyeCode %d accepted", c); }
 #ifndef OCEAN_TESTS_NO_SHIM
         t.expect(oc_init(69, 1920, 1080, 240.0, 50, R"({"eye":1,"eyeCode":7})") == 1, "oc_init eyeCode 7: %s",
                  oc_last_error());
         t.expect(g_world && g_world->ocfg.eyeCode == 7, "eyeCode not stored");
         t.expect(oc_set_param("eyeCode", 5.0) == 1 && g_world->ocfg.eyeCode == 5, "oc_set_param eyeCode 5: %s",
                  oc_last_error());
-        t.expect(oc_set_param("eyeCode", 8.0) == 0 && g_world->ocfg.eyeCode == 5, "oc_set_param eyeCode 8 accepted");
-        t.note("oc_set_param(eyeCode, 8): %s", oc_last_error());
-        t.expect(oc_init(69, 1920, 1080, 240.0, 50, R"({"eye":1,"eyeCode":9})") == 0, "oc_init eyeCode 9 accepted");
+        t.expect(oc_set_param("eyeCode", 24.0) == 1 && g_world->ocfg.eyeCode == 24, "oc_set_param eyeCode 24: %s",
+                 oc_last_error());
+        t.expect(oc_set_param("eyeCode", 32.0) == 0 && g_world->ocfg.eyeCode == 24, "oc_set_param eyeCode 32 accepted");
+        t.note("oc_set_param(eyeCode, 32): %s", oc_last_error());
+        t.expect(oc_init(69, 1920, 1080, 240.0, 50, R"({"eye":1,"eyeCode":33})") == 0, "oc_init eyeCode 33 accepted");
+        t.expect(oc_init(69, 1920, 1080, 240.0, 50, R"({"eye":1,"eyeCode":16})") == 1 && g_world->ocfg.eyeCode == 16,
+                 "oc_init eyeCode 16: %s", oc_last_error());
 #endif
     }
 }
@@ -1537,7 +1593,7 @@ void testEye() {
     oc.eyeOnly = 1;
     t.expect(!oceanConfigValid(oc), "eyeOnly = 1 accepted by a build without the eye");
     oc.eyeOnly = 0;
-    for (int c = 1; c <= kEyeCodeAll; ++c) { oc.eyeCode = c; t.expect(!oceanConfigValid(oc), "eyeCode = %d accepted by a build without the eye", c); }
+    for (int c = 1; c <= kEyeCodeMax; ++c) { oc.eyeCode = c; t.expect(!oceanConfigValid(oc), "eyeCode = %d accepted by a build without the eye", c); }
 #ifndef OCEAN_TESTS_NO_SHIM
     t.expect(oc_init(69, 1920, 1080, 240.0, 50, R"({"eyeCode":1})") == 0, "oc_init eyeCode 1 accepted without the eye");
     t.expect(oc_init(69, 1920, 1080, 240.0, 50, nullptr) == 1 && oc_set_param("eyeCode", 4.0) == 0,
@@ -1711,6 +1767,7 @@ void testReproducible() {
       w.food[13].eyeCon = std::numeric_limits<float>::infinity();
       t.expect(ofp::countNonFinite(w) == nf + 1, "a non-finite food eyeCon is not counted"); w.food[13].eyeCon = keep; }
     { const int keep = w.ocfg.eyeCode; w.ocfg.eyeCode = 5; only("eyeCode (0 -> 5)", &FP::cfg); w.ocfg.eyeCode = keep; }
+    { const int keep = w.ocfg.eyeCode; w.ocfg.eyeCode = kEyeCodeNoFood; only("eyeCode (0 -> 16, a cloak)", &FP::cfg); w.ocfg.eyeCode = keep; }
 #endif
     { long nf = ofp::countNonFinite(w); const float keep = w.food[13].age;
       w.food[13].age = std::numeric_limits<float>::quiet_NaN();
@@ -3412,6 +3469,99 @@ void testE1Hash() {
     t.expect(!w3.waveClockStarted() && !w3.flowE1() && oceanE1AtDefaults(w3.ocfg), "a preview world has E1 state");
 }
 
+// Lazy wave preparation (OceanWorld::prepareWaves; harness format 3): the
+// modes are set only once the waves are on, and preparing late is the same as
+// preparing at init for everything but the geo hash of the steps before.
+void testLazyWaves() {
+    Test t("lazy_waves");
+    namespace pk = ofp::peek;
+    std::string err;
+    auto unprepared = [](const OceanWorld& w) {
+        for (const auto& tr : ofp::field<pk::OwWaves>(w))
+            if (!(tr.frac == 0.0f && tr.kx == 0.0 && tr.ky == 0.0 && tr.phi == 0.0 && tr.phase == 0.0)) return false;
+        return true;
+    };
+    auto sameModes = [](const OceanWorld& a, const OceanWorld& b) {   // bit for bit, phase aside
+        for (int i = 0; i < OceanWorld::kWaveTrains; ++i) {
+            const auto& x = ofp::field<pk::OwWaves>(a)[i];
+            const auto& y = ofp::field<pk::OwWaves>(b)[i];
+            if (ofp::bits64(x.kx) != ofp::bits64(y.kx) || ofp::bits64(x.ky) != ofp::bits64(y.ky) ||
+                ofp::bits64(x.phi) != ofp::bits64(y.phi) || ofp::bits(x.k) != ofp::bits(y.k) ||
+                ofp::bits(x.qx) != ofp::bits(y.qx) || ofp::bits(x.qy) != ofp::bits(y.qy) ||
+                ofp::bits(x.frac) != ofp::bits(y.frac) || x.frac == 0.0f)
+                return false;
+        }
+        return true;
+    };
+    auto allButGeo = [](const ofp::Fingerprint& a, const ofp::Fingerprint& b) {
+        for (auto s : ofp::kSections)
+            if (s != &ofp::Fingerprint::geo && a.*s != b.*s) return false;
+        return true;
+    };
+    // Waves off (the preview; a deep current alone, flowE1 on): never prepared,
+    // whatever the step or the flow readers evaluate.
+    for (const char* cfg : {(const char*)nullptr, R"({"deepCurrent":true,"currentStrength":30,"foodDrift":true})"}) {
+        OceanWorld w;
+        ofp::initWorld(w, 1701, 1920, 1080, 240.0f, 100, cfg, err);
+        t.expect(unprepared(w), "%s: waves prepared at init with the waves off", cfg ? cfg : "preview");
+        const std::uint64_t geo0 = ofp::fingerprint(w).geo;
+        for (int s = 0; s < 40; ++s) w.update(0.016f);
+        (void)w.flowAt({100.0f, 200.0f}, 50.0f);
+        (void)w.flowExactAt({100.0f, 200.0f}, 50.0f);
+        for (int i = 0; i < OceanWorld::kWaveTrains; ++i) {
+            const OceanWorld::Flow u = w.waveTrainAt(i, {300.0f, 400.0f}, 60.0f);
+            t.expect(u.x == 0.0f && u.y == 0.0f && u.d == 0.0f, "an unprepared train gives flow");
+        }
+        t.expect(unprepared(w) && ofp::fingerprint(w).geo == geo0, "%s: waves prepared without being on",
+                 cfg ? cfg : "preview");
+    }
+    // Eager (waves on at init) vs lazy (off at init, switched on directly
+    // before the first step, as the driver's --set waveSpeed=6@0): the same
+    // state before the step but for geo, and every section equal after it.
+    const char* on = R"({"waveSpeed":6,"deepCurrent":true,"currentStrength":30,"foodDrift":true,"predatorCount":2})";
+    const char* off = R"({"waveSpeed":0,"deepCurrent":true,"currentStrength":30,"foodDrift":true,"predatorCount":2})";
+    OceanWorld a;
+    ofp::initWorld(a, 1702, 1920, 1080, 240.0f, 150, on, err);
+    t.expect(!unprepared(a), "waves on at init: not prepared");
+    const ofp::Fingerprint a0 = ofp::fingerprint(a);
+    for (int s = 0; s < 200; ++s) a.update(0.016f);
+    const ofp::Fingerprint a1 = ofp::fingerprint(a);
+    OceanWorld b;
+    ofp::initWorld(b, 1702, 1920, 1080, 240.0f, 150, off, err);
+    b.ocfg.waveSpeed = 6.0f;
+    t.expect(unprepared(b), "switched on directly: prepared before anything read the flow");
+    const ofp::Fingerprint b0 = ofp::fingerprint(b);   // hashCurrent reads flowAt (cur) before geo is hashed
+    t.expect(allButGeo(a0, b0), "lazy vs eager at init: a section other than geo differs");
+    t.expect(sameModes(a, b), "the first flow read did not prepare the modes the eager world has");
+    t.expect(a0.geo == b0.geo, "lazy vs eager: geo differs once prepared (the fingerprint read the flow)");
+    for (int s = 0; s < 200; ++s) b.update(0.016f);
+    t.expect(ofp::fingerprint(b) == a1, "lazy vs eager after 200 steps: the states differ");
+    // Switched on live at step 100 (the step prepares them; no reader first),
+    // then off: prepared once, the modes and the stopped clock kept.
+    OceanWorld c;
+    ofp::initWorld(c, 1703, 1920, 1080, 240.0f, 100, off, err);
+    for (int s = 0; s < 100; ++s) c.update(0.016f);
+    t.expect(unprepared(c), "off for 100 steps: prepared");
+    c.ocfg.waveSpeed = 6.0f;
+    c.update(0.016f);
+    t.expect(sameModes(a, c) && c.waveClockStarted(), "switched on live: the step did not prepare and run them");
+    for (int s = 0; s < 49; ++s) c.update(0.016f);
+    double ph[OceanWorld::kWaveTrains];
+    for (int i = 0; i < OceanWorld::kWaveTrains; ++i) ph[i] = c.wavePhase(i);
+    c.ocfg.waveSpeed = 0.0f;
+    for (int s = 0; s < 50; ++s) c.update(0.016f);
+    bool kept = sameModes(a, c);
+    for (int i = 0; i < OceanWorld::kWaveTrains; ++i) kept &= c.wavePhase(i) == ph[i];
+    t.expect(kept, "switched off: the modes or the stopped clock were not kept");
+    // A reused world re-initialised with the waves off is unprepared again
+    // (its geo == a fresh world's).
+    OceanWorld fresh;
+    ofp::initWorld(fresh, 1704, 1920, 1080, 240.0f, 80, nullptr, err);
+    const std::uint64_t freshGeo = ofp::fingerprint(fresh).geo;
+    ofp::initWorld(a, 1704, 1920, 1080, 240.0f, 80, nullptr, err);
+    t.expect(unprepared(a) && ofp::fingerprint(a).geo == freshGeo, "a reused world kept its prepared waves");
+}
+
 // The loops OceanWorld::wrapCoord replaced (capped: n counts the passes).
 float wrapLoops(float v, float span, long& n) {
     n = 0;
@@ -3584,7 +3734,7 @@ void testPreset() {
 // eye, eyeOnly, eyeCode, steerFrame (int keys) and foodLife through the real
 // oc_init / oc_set_param: an int key's JSON number must be a whole number in
 // int's range (refused before any cast, at every occurrence of the key), then
-// lie in its range (eye / eyeOnly 0..1 and eyeCode 0..7 in the eye build, 0 in
+// lie in its range (eye / eyeOnly 0..1 and eyeCode 0..31 in the eye build, 0 in
 // the plain one; steerFrame 0..1); foodLife in [0, 1e6]; a refused call keeps
 // the world as it was.
 void testVisionKeys() {
@@ -3605,7 +3755,7 @@ void testVisionKeys() {
             refused += t.expect(tryInit(c) == 0, "%s accepted", c.c_str());
         }
         // whole numbers outside the key's range: refused by the range check
-        for (const char* v : {"-1", "8", "2147483647", "-2147483648"}) {
+        for (const char* v : {"-1", "32", "2147483647", "-2147483648"}) {   // 32: past every key's range (eyeCode 0..31)
             const std::string c = std::string("{\"") + k + "\":" + v + "}";
             const int ok = tryInit(c);
             refused += t.expect(ok == 0 && std::string(oc_last_error()).find(k) != std::string::npos,
@@ -3627,7 +3777,8 @@ void testVisionKeys() {
         {R"({"eyeOnly":1})", true, false},        {R"({"eyeOnly":2})", false, false},
         {R"({"eye":1,"eyeOnly":1,"eyeCode":7})", true, false},
         {R"({"eyeCode":1})", true, false},        {R"({"eyeCode":7})", true, false},
-        {R"({"eyeCode":8})", false, false},
+        {R"({"eyeCode":8})", true, false},        {R"({"eye":1,"eyeOnly":1,"eyeCode":16})", true, false},
+        {R"({"eyeCode":31})", true, false},       {R"({"eyeCode":32})", false, false},
         {R"({"foodLife":0})", true, true},        {R"({"foodLife":12.5})", true, true},
         {R"({"foodLife":1e6})", true, true},      {R"({"foodLife":1000001})", false, false},
         {R"({"foodLife":-0.001})", false, false}, {R"({"foodLife":1e39})", false, false},
@@ -3649,7 +3800,7 @@ void testVisionKeys() {
         const ofp::Fingerprint before = ofp::fingerprint(*g_world);
         struct L { const char* key; double v; };
         const L bad[] = {{"steerFrame", 0.5}, {"steerFrame", 2.0}, {"steerFrame", 2147483648.0}, {"eyeOnly", 1.5},
-                         {"eyeCode", 8.0}, {"eyeCode", 1e300}, {"eye", 0.25}, {"eye", 2.0}, {"foodLife", 1e7},
+                         {"eyeCode", 32.0}, {"eyeCode", 1e300}, {"eye", 0.25}, {"eye", 2.0}, {"foodLife", 1e7},
                          {"foodLife", std::numeric_limits<double>::infinity()}, {"foodLife", -1.0},
                          {"eyeCode", std::numeric_limits<double>::quiet_NaN()}};
         for (const L& l : bad) {
@@ -4046,6 +4197,7 @@ int main(int argc, char** argv) {
     ot::testShimInts();
 #endif
     ot::testE1Hash();
+    ot::testLazyWaves();
 #ifndef OCEAN_TESTS_NO_SHIM
     ot::testPreset();
 #endif

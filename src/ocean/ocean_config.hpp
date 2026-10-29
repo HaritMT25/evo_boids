@@ -115,6 +115,11 @@ struct OceanConfig {
     //     (invertible: one wire can steer both ways)
     //   4 summed sectors: each sector sums over every object in it (squashed
     //     x / (1 + |x|)) instead of reporting only the nearest
+    // and two ablation bits (the "cloaked" eye: which kinds of object the eye
+    // bins at all; the labeled senses are unchanged):
+    //   8 the eye ignores fish (it sees food and predators)
+    //   16 the eye ignores food (it sees fish and predators)
+    // So 0..31; predators are always seen.
     int   eyeCode         = 0;
     // The frame STEER_X / STEER_Y push in (the non-triangular motion model):
     // 0 = world x / y, Classic's (and NEAREST_FOOD_DX / DY's) frame;
@@ -142,13 +147,17 @@ inline constexpr bool kOceanHasEye = true;
 inline constexpr bool kOceanHasEye = false;
 #endif
 
-// OceanConfig::eyeCode's bits.
+// OceanConfig::eyeCode's bits: three encodings, two cloaks.
 inline constexpr int kEyeCodeFaded    = 1;   // CON = PROX x (b − L)
 inline constexpr int kEyeCodeOpponent = 2;   // left/right, up/down as sum and difference
 inline constexpr int kEyeCodeSummed   = 4;   // every object in a sector, not the nearest
-inline constexpr int kEyeCodeAll      = kEyeCodeFaded | kEyeCodeOpponent | kEyeCodeSummed;
+inline constexpr int kEyeCodeAll      = kEyeCodeFaded | kEyeCodeOpponent | kEyeCodeSummed;   // every encoding
+inline constexpr int kEyeCodeNoFish   = 8;   // the eye does not bin fish
+inline constexpr int kEyeCodeNoFood   = 16;  // the eye does not bin food
+inline constexpr int kEyeCodeCloaks   = kEyeCodeNoFish | kEyeCodeNoFood;
+inline constexpr int kEyeCodeMax      = kEyeCodeAll | kEyeCodeCloaks;   // 31: every bit
 inline constexpr bool eyeCodeValid(int code) {
-    return code == 0 || (kOceanHasEye && code > 0 && code <= kEyeCodeAll);
+    return code == 0 || (kOceanHasEye && code > 0 && code <= kEyeCodeMax);
 }
 
 // x is a whole number in int's range (so (int)x is defined and exact). NaN and
@@ -345,7 +354,8 @@ inline std::string oceanConfigError(const OceanConfig& c) {
     if (c.eyeOnly != 0 && !(kOceanHasEye && c.eyeOnly == 1))
         return kOceanHasEye ? std::string("eyeOnly must be 0 or 1") : std::string("eyeOnly") + noEye;
     if (!eyeCodeValid(c.eyeCode))
-        return kOceanHasEye ? std::string("eyeCode must be 0..7 (bits: 1 faded contrast, 2 opponent pairs, 4 summed sectors)")
+        return kOceanHasEye ? std::string("eyeCode must be 0..31 (bits: 1 faded contrast, 2 opponent pairs, 4 summed sectors,"
+                                          " 8 the eye ignores fish, 16 the eye ignores food)")
                             : std::string("eyeCode") + noEye;
     if (c.steerFrame != 0 && c.steerFrame != 1) return "steerFrame must be 0 or 1";
     return "";

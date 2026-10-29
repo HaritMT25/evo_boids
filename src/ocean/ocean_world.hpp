@@ -125,6 +125,16 @@
 //          [−1, 1]; CON in [−2, 2] in both (open intervals with bit 2).
 // Every encoding sees the same objects in the same order as code 0 (no extra
 // queries, no draws), so eye-only mode's bit-identity holds for each.
+// Two ablation bits (the "cloaked" eye) choose which KINDS of object the eye
+// bins at all — the nearest or the sum is then over the rest, so a cloaked
+// kind neither shows nor hides anything behind it:
+//   bit 3 (8)  the eye ignores fish (food and predators still seen)
+//   bit 4 (16) the eye ignores food (fish and predators still seen)
+// Predators are always seen. Only the eye is cloaked: every labeled sense
+// (and the interaction vote) is unchanged, so with the labels on the loops run
+// as before and only skip the eye's bin; in eye-only mode eyeScan skips the
+// cloaked kind's query altogether (it feeds nothing else). Each composes with
+// the encodings (e.g. 12 = summed sectors over food and predators). No draws.
 //
 // Eye-only mode (OceanConfig::eyeOnly, the eye build only): the 23 LABELED
 // exteroceptive senses the eye replaces (ocean::kLabeledSenses) read 0 and are
@@ -461,6 +471,7 @@ public:
     Flow flowExactAt(Vec2 p, float d) const {
         Flow U = currentFlowExactAt(p, d);
         if (wavesOn()) {
+            ensureWaves();   // (waves switched on by a direct config change, nothing read since)
             const Taper tp = taperAt(d);
             for (int i = 0; i < kWaveTrains; ++i) {
                 const Flow u = waveTrainExactAt(i, p, d, tp);
@@ -500,13 +511,17 @@ public:
         tp.Bp = (smooth01d(r1) * s2 - s1 * smooth01d(r2)) / b;
         return tp;
     }
-    // Wave train i alone (whatever waveSpeed is; 0 gives zero flow).
+    // Wave train i alone (whatever waveSpeed is; 0 gives zero flow — so do
+    // trains never prepared, which only a world whose waves were never on has).
     Flow waveTrainAt(int i, Vec2 p, float d) const {
         if (!flowE1()) return waveTrainExactAt(i, p, d);
         ensureFlow();
         return waveTrainFast(i, p, d);
     }
-    Flow waveTrainExactAt(int i, Vec2 p, float d) const { return waveTrainExactAt(i, p, d, taperAt(d)); }
+    Flow waveTrainExactAt(int i, Vec2 p, float d) const {
+        ensureWaves();
+        return waveTrainExactAt(i, p, d, taperAt(d));
+    }
     Flow waveTrainExactAt(int i, Vec2 p, float d, const Taper& tp) const {
         const WaveTrain& t = waves_[i];
         const float B = tp.B, Bp = tp.Bp;
@@ -553,8 +568,9 @@ public:
                                                            : CurrentField::Mode::Eddies;
         current_.init(cmode, w, h, cfg.currentEddies, cfg.currentStrength,
                       cfg.currentCore, cfg.currentDrift, cfg.currentGyreEps);
-        prepareWaves();
         initFlowCache();
+        for (WaveTrain& t : waves_) t = WaveTrain{};   // unprepared (a reused world too)
+        ensureWaves();                                 // prepared now only if the waves are on
         foodPatches_.clear();
         foodPatchDepth_.clear();
         for (int i = 0; i < cfg.foodPatches; ++i) {
@@ -621,7 +637,10 @@ public:
 
         current_.advance(frame);
         flow_.curAdvanced = true;
-        if (wavesOn()) advanceWaves(dt);   // the wave clock runs only while waves are on
+        if (wavesOn()) {   // the wave clock runs only while waves are on
+            ensureWaves();   // switched on live since the last step: the modes first
+            advanceWaves(dt);
+        }
 
         if (flowE1()) {
             ensureFlow();   // the E1 cache, for this frame / phase / config (read by every flowFast below)
@@ -844,14 +863,28 @@ private:
     // (double, for θ); k, q = |K|, K/|K|; phase = the travelled ∫ω dt, kept in
     // [0, 2π) (the only wave state that changes); ω = sqrt(waveGravity·k) is
     // read fresh each step, so a live waveGravity change is smooth.
+    //
+    // Prepared lazily: the modes (and the flow cache's wave part) are set the
+    // first time the waves are on — at init, at the start of a step, or in a
+    // flow reader after a direct config change (the driver's --set, the tests)
+    // — and kept from then on; a world whose waves were never on keeps the
+    // unprepared defaults below (frac 0: no amplitude), which is what its geo
+    // section hashes. Invariant: wavesOn() => wavesPrepared() wherever the
+    // waves are evaluated. The modes depend on the world size alone (and phase
+    // is 0 until the clock first runs), so preparing late gives the trains
+    // they would have had from init: only the geo hash of the steps before
+    // differs. `mutable` for the const readers (ensureFlow); the clock
+    // (advanceWaves) runs only in update.
     static constexpr double kTwoPi = 6.283185307179586;
     struct WaveTrain {
         double kx = 0.0, ky = 0.0, phase = 0.0, phi = 0.0;
         float k = 1.0f, qx = 1.0f, qy = 0.0f, frac = 0.0f;
     };
-    WaveTrain waves_[kWaveTrains];
+    mutable WaveTrain waves_[kWaveTrains];
 
-    void prepareWaves() {
+    bool wavesPrepared() const { return waves_[0].frac != 0.0f; }   // kFrac[0] = 0.5 once prepared
+    void ensureWaves() const { if (wavesOn() && !wavesPrepared()) prepareWaves(); }
+    void prepareWaves() const {
         const auto& kModes = oceanflow::kWaveModes;   // the flow tables are built from the same modes
         static const float kFrac[kWaveTrains] = {0.5f, 0.3f, 0.2f};
         for (int i = 0; i < kWaveTrains; ++i) {
@@ -866,6 +899,23 @@ private:
             t.phi = (double)i;   // 0, 1, 2 rad
             t.phase = 0.0;
         }
+        // The flow cache's wave part (initFlowCache leaves it empty): T = K / |K|²,
+        // and in cell units (∂/∂x = d/dt · kXCells / W); the depth pieces and the
+        // phase factors are (re)built by the next ensureFlow from these modes.
+        oceanflow::FlowCache& c = flow_;
+        c.xScale = (double)oceanflow::kXCells / (double)width;
+        c.yScale = (double)oceanflow::kYCells / (double)height;
+        for (int i = 0; i < kWaveTrains; ++i) {
+            const WaveTrain& t = waves_[i];
+            const double kk = t.kx * t.kx + t.ky * t.ky;
+            c.Tx[i] = (float)(t.kx / kk);
+            c.Ty[i] = (float)(t.ky / kk);
+            c.TxS[i] = (float)(t.kx / kk * c.xScale);
+            c.TyS[i] = (float)(t.ky / kk * c.yScale);
+        }
+        c.yRot.assign(oceanflow::kYCells, oceanflow::TrigV{});
+        c.depthKeyed = false;
+        c.phaseKeyed = false;
     }
     void advanceWaves(float dt) {
         for (WaveTrain& t : waves_) {
@@ -876,9 +926,11 @@ private:
 
     // ---- the E1 flow cache (ocean_flow.hpp) --------------------------------
     // Derived scratch: rebuilt from hashed state (cfg / ocfg / the world size
-    // at init, the CurrentField's vortices, the frame, the live wave knobs
-    // and phases) by ensureFlow before it is read, on bitwise keys: init
-    // clears it; a waveSpeed / waveBand change rebuilds the depth pieces
+    // at init, the CurrentField's vortices, the frame, the live wave knobs,
+    // modes and phases) by ensureFlow before it is read, on bitwise keys: init
+    // clears it; preparing the waves (prepareWaves, the first time they are
+    // on) sets its wave part and unkeys the depth pieces and phase factors; a
+    // waveSpeed / waveBand change rebuilds the depth pieces
     // (the phases are kept); waveGravity only changes the clock. ensureFlow
     // runs once per step (update, after the clocks advance) and in every
     // public reader, so the shim, the harness driver (which assigns configs
@@ -901,19 +953,7 @@ private:
             for (std::size_t i = 0; i < flow_.eddies.size(); ++i)
                 flow_.eddies[i].signScale = flow_.vort[i * CurrentField::VORTEX_FLOATS + 2] * scale;
         }
-        // The waves' T = K / |K|² (prepareWaves has set K for this world), and
-        // in cell units (∂/∂x = d/dt · kXCells / W).
-        flow_.xScale = (double)oceanflow::kXCells / (double)width;
-        flow_.yScale = (double)oceanflow::kYCells / (double)height;
-        for (int i = 0; i < kWaveTrains; ++i) {
-            const WaveTrain& t = waves_[i];
-            const double kk = t.kx * t.kx + t.ky * t.ky;
-            flow_.Tx[i] = (float)(t.kx / kk);
-            flow_.Ty[i] = (float)(t.ky / kk);
-            flow_.TxS[i] = (float)(t.kx / kk * flow_.xScale);
-            flow_.TyS[i] = (float)(t.ky / kk * flow_.yScale);
-        }
-        flow_.yRot.assign(oceanflow::kYCells, oceanflow::TrigV{});
+        // The waves' part is prepareWaves' (when the waves are first on).
     }
 
     static std::uint32_t floatKey(float v) { std::uint32_t u; std::memcpy(&u, &v, 4); return u; }
@@ -997,8 +1037,10 @@ private:
 
     void ensureFlow() const {
         oceanflow::FlowCache& c = flow_;
+        ensureWaves();
         // The waves' depth pieces: rebuilt when waveSpeed, waveBand or D move.
-        {
+        // Only for prepared waves (never on: nothing reads them, wavesOn() is false).
+        if (wavesPrepared()) {
             const std::uint32_t ks = floatKey(ocfg.waveSpeed), kb = floatKey(ocfg.waveBand), kd = floatKey(D);
             if (!c.depthKeyed || ks != c.keySpeed || kb != c.keyBand || kd != c.keyD) {
                 buildDepth();
@@ -1010,7 +1052,7 @@ private:
         }
         // The phase factors: regenerated when a phase moves (every step while
         // the waves run; frozen with the clock), from the static base.
-        {
+        if (wavesPrepared()) {
             bool same = c.phaseKeyed;
             std::uint64_t kp[kWaveTrains];
             for (int i = 0; i < kWaveTrains; ++i) {
@@ -1540,24 +1582,28 @@ private:
     // predator loops — the same queries, every object within R in the same
     // visit order (so the same 18 inputs, ties included), none of the labeled
     // sums, the topological cut, the nearest-neighbour genome compare or the
-    // long probe. Bin: EyeBin (nearest) or EyeSum (summed sectors).
+    // long probe. Bin: EyeBin (nearest) or EyeSum (summed sectors). A cloaked
+    // kind (eyeCode 8 / 16) is not queried at all: here its query feeds nothing
+    // else (neighbors_ is scratch).
     template <class Bin>
     void eyeScan(const Fish& c, int selfIdx, Vec2 fwd, Vec2 rht, Bin* eye) {
         const float R = cfg.perceptionRadius, R2 = R * R;
-        std::vector<int>& neighbors = neighbors_;
-        neighbors.clear();
-        if (cfg.toroidal) creatureGrid_.queryRadiusWrapped(c.pos, R, neighbors);
-        else              creatureGrid_.queryRadius(c.pos, R, neighbors);
-        for (int ni : neighbors) {
-            if (ni == selfIdx) continue;
-            const FishHot& other = hot_[ni];
-            float dx = other.pos.x - c.pos.x;
-            float dy = other.pos.y - c.pos.y;
-            if (cfg.toroidal) { dx = wrapDx(dx); dy = wrapDy(dy); }
-            const float dz = other.depth - c.depth;
-            const float d2 = dx * dx + dy * dy + dz * dz;
-            if (d2 > R2) continue;
-            eyeSee(eye, fwd, rht, dx, dy, dz, d2, other.eyeSize, other.eyeCon, R);
+        if (!(ocfg.eyeCode & kEyeCodeNoFish)) {
+            std::vector<int>& neighbors = neighbors_;
+            neighbors.clear();
+            if (cfg.toroidal) creatureGrid_.queryRadiusWrapped(c.pos, R, neighbors);
+            else              creatureGrid_.queryRadius(c.pos, R, neighbors);
+            for (int ni : neighbors) {
+                if (ni == selfIdx) continue;
+                const FishHot& other = hot_[ni];
+                float dx = other.pos.x - c.pos.x;
+                float dy = other.pos.y - c.pos.y;
+                if (cfg.toroidal) { dx = wrapDx(dx); dy = wrapDy(dy); }
+                const float dz = other.depth - c.depth;
+                const float d2 = dx * dx + dy * dy + dz * dz;
+                if (d2 > R2) continue;
+                eyeSee(eye, fwd, rht, dx, dy, dz, d2, other.eyeSize, other.eyeCon, R);
+            }
         }
         auto look = [&](int fi, Vec2 fp) {
             float dx = fp.x - c.pos.x;
@@ -1568,8 +1614,10 @@ private:
             if (d2 > R2) return;
             eyeSee(eye, fwd, rht, dx, dy, dz, d2, ocean::kEyeFoodSize, food[fi].eyeCon, R);
         };
-        if (cfg.toroidal) foodGrid_.forEachInRadiusWrapped(c.pos, R, look);
-        else              foodGrid_.forEachInRadius(c.pos, R, look);
+        if (!(ocfg.eyeCode & kEyeCodeNoFood)) {
+            if (cfg.toroidal) foodGrid_.forEachInRadiusWrapped(c.pos, R, look);
+            else              foodGrid_.forEachInRadius(c.pos, R, look);
+        }
         for (std::size_t k = 0; k < predators.size(); ++k) {
             const OceanPredator& p = predators[k];
             float dx = p.pos.x - c.pos.x;
@@ -1594,6 +1642,10 @@ private:
         using Bin = std::conditional_t<Sum, EyeSum, EyeBin>;
         [[maybe_unused]] Bin eye[ocean::kEyeSectors];
         if constexpr (Eye) eyeInit(eye);
+        // The cloaks (eyeCode 8 / 16): the eye skips that kind's objects; the
+        // labeled senses below still use them.
+        [[maybe_unused]] const bool eyeFish = !(ocfg.eyeCode & kEyeCodeNoFish);
+        [[maybe_unused]] const bool eyeFood = !(ocfg.eyeCode & kEyeCodeNoFood);
 #else
         static_assert(!Sum, "summed sectors need the eye build");
 #endif
@@ -1667,7 +1719,7 @@ private:
                 const float d2 = dx * dx + dy * dy + dz * dz;
                 if (d2 > R2) continue;
 #ifdef EVO_OCEAN_EYE
-                if constexpr (Eye) eyeSee(eye, fwd, rht, dx, dy, dz, d2, other.eyeSize, other.eyeCon, R);
+                if constexpr (Eye) { if (eyeFish) eyeSee(eye, fwd, rht, dx, dy, dz, d2, other.eyeSize, other.eyeCon, R); }
 #endif
                 attendTo(ni, other, dx, dy, dz, std::sqrt(d2));
             }
@@ -1688,7 +1740,7 @@ private:
                 if (d2 > R2) continue;
                 ++inRadiusCount;
 #ifdef EVO_OCEAN_EYE
-                if constexpr (Eye) eyeSee(eye, fwd, rht, dx, dy, dz, d2, other.eyeSize, other.eyeCon, R);
+                if constexpr (Eye) { if (eyeFish) eyeSee(eye, fwd, rht, dx, dy, dz, d2, other.eyeSize, other.eyeCon, R); }
 #endif
                 if (have == keepMax) {
                     const Candidate& worst = best[have - 1];
@@ -1747,8 +1799,8 @@ private:
             const float d2 = dx * dx + dy * dy + dz * dz;
             if (d2 > R2) return;
 #ifdef EVO_OCEAN_EYE
-            // The eye sees every item within R (size does not hide it) ...
-            if constexpr (Eye) eyeSee(eye, fwd, rht, dx, dy, dz, d2, ocean::kEyeFoodSize, food[fi].eyeCon, R);
+            // The eye sees every item within R (size does not hide it; unless cloaked) ...
+            if constexpr (Eye) { if (eyeFood) eyeSee(eye, fwd, rht, dx, dy, dz, d2, ocean::kEyeFoodSize, food[fi].eyeCon, R); }
 #endif
             // ... the smell senses only what this fish could swallow.
             if (ocfg.mouthGate && food[fi].size > ocfg.kMouth * c.bodySize) return;   // E1: not food for me

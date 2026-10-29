@@ -46,19 +46,11 @@
 # eye_*) and the compound-eye build (+ -DEVO_OCEAN_EYE: 64 sensors, its own
 # planes and genetics; the eye_* cases, eye on unless the case says otherwise;
 # eye_only_* / eye_blind_* = OceanConfig::eyeOnly with the eye on / off;
-# eye_code* = OceanConfig::eyeCode, the eye's encodings; eye_e1_* = with E1
+# eye_code* = OceanConfig::eyeCode, the eye's encodings; eye_cloak_* = its
+# cloaks, eyeCode 8 / 16: the eye ignores fish / food; eye_e1_* = with E1
 # physics on). Each build's native and wasm binaries are compared with each
 # other and with the baselines, each build's unit checks run natively and
 # under node, and the r_eye_* refusals are asked of the eye build's shim.
-#   NO_EYE=1 wasm/ocean_parity.sh     # the plain Ocean build only
-#
-# Two builds: the plain Ocean build (-DEVO_WORLD_OCEAN; every case not named
-# eye_*) and the compound-eye build (+ -DEVO_OCEAN_EYE: 64 sensors, its own
-# planes; the eye_* cases, eye on unless the case says otherwise; eye_only_* /
-# eye_blind_* = OceanConfig::eyeOnly with the eye on / off; eye_code* =
-# OceanConfig::eyeCode, the eye's encodings). Each build's
-# native and wasm binaries are compared with each other, and each build's unit
-# checks run natively and under node.
 #
 # Bisecting a FAIL: the table names the first differing line (step and
 # sections; `chain` alone = the states differed at some step since the last
@@ -322,6 +314,26 @@ add eye_e1_only_steer_life_s3 "3 5000 --cfg {$EXP,$SV,\"waveSpeed\":6,\"deepCurr
                   "eye-only + own frame + foodLife 8 + E1 waves / deep current + the experiment's economy"
 add eye_e1_live_s21 '21 3000 --cfg {"currentStrength":40,"foodDrift":true,"predatorCount":2,"eye":1} --set waveSpeed=6@500 --set eyeOnly=1@900 --set deepCurrent=1@1200 --set steerFrame=1@1500 --set foodLife=6@1800 --set waveSpeed=0@2400 --set eyeCode=4@2600 --expect eyeE1Steps>0 --expect foodExpired>0 --expect steerOwnSteps>0' \
                   "E1 and the eye's keys switched live, interleaved (oc_set_param)"
+# ---- the cloaked eye (eyeCode 8: the eye ignores fish, 16: it ignores food;
+# predators always seen; the labeled senses unchanged; in eye-only mode the
+# cloaked kind is not queried) ----
+# L12 = the cloaked-eye ablation's world verbatim (experiment 2's cfg_L12.json:
+# the stable predator economy, 1 food item/step x 15 energy, foodLife 12 s).
+L12='"predatorCount":4,"predatorSpeed":110,"predatorPerception":150,"predatorCaptureRadius":14,"predatorEconomy":true,"predatorCooldown":3,"predatorMetabolism":2,"predatorMeal":10,"predatorReproEnergy":60,"predatorMaxPopulation":6,"predatorMinPopulation":2,"predatorInheritance":true,"foodSpawnBase":1,"foodSpawnAmp":0,"foodEnergy":15,"targetFood":800,"foodLife":12'
+add eye_cloak_fish_s1 '1 3000 --cfg {"eye":1,"eyeCode":8} --expect eyeCodeMask=8 --expect eyeSteps>0' \
+                  "the eye ignores fish, labels on (the neighbour loop runs, only the eye's bin skips fish)"
+add eye_cloak_food_capture_s17 '17 3000 --capture --cfg {"eye":1,"eyeCode":16,"predatorCount":2,"currentStrength":50} --expect eyeCodeMask=16 --expect eyeLit>0' \
+                  "the eye ignores food, every sensor bit hashed (the labeled food senses still read it)"
+add eye_cloak_sum_rich_toro_s7 "7 3000 --cfg {$RICH,\"toroidal\":true,\"foodDepthMode\":1,\"eye\":1,\"eyeCode\":12} --expect eyeCodeMask=12" \
+                  "summed sectors over food + predators (fish cloaked) + rich + toroidal + topological 7"
+add eye_cloak_fish_only_steer_l12_s3 "3 5000 --cfg {$L12,\"eye\":1,\"eyeOnly\":1,\"steerFrame\":1,\"eyeCode\":8} --expect eyeCodeMask=8 --expect eyeOnlySteps>0 --expect steerOwnSteps>0 --expect foodExpired>0" \
+                  "eye-only (no neighbour query) + own frame, the ablation's world (L12)"
+add eye_cloak_food_only_steer_l12_s3 "3 5000 --cfg {$L12,\"eye\":1,\"eyeOnly\":1,\"steerFrame\":1,\"eyeCode\":16} --expect eyeCodeMask=16 --expect eyeOnlySteps>0 --expect steerOwnSteps>0 --expect foodExpired>0" \
+                  "eye-only (no food query) + own frame, the ablation's world (L12)"
+add eye_cloak_both_only_capture_s17 '17 3000 --capture --cfg {"eye":1,"eyeOnly":1,"eyeCode":24,"predatorCount":4,"currentStrength":50} --expect eyeCodeMask=24 --expect eyeLit>0 --expect labeledLit=0' \
+                  "only predators seen (eyeCode 24), eye-only, every sensor bit hashed"
+add eye_cloak_live_s21 '21 3000 --cfg {"predatorCount":3,"eye":1} --set eyeCode=8@500 --set eyeCode=16@1000 --set eyeOnly=1@1500 --set eyeCode=28@2000 --set eyeCode=0@2500 --expect eyeCodeMask=28 --expect eyeOnlySteps>0' \
+                  "cloaks switched mid-run (oc_set_param): 0 -> 8 -> 16 -> 16 eye-only -> 28 -> 0"
 
 # Configs the page must REFUSE (oc_init / oc_set_param; ocean_tests --accepts
 # must exit 1): every Ocean knob has a finite range, so none of these can run.
@@ -420,12 +432,13 @@ radd r_eye_dup      '1 10 --cfg {"eye":1,"eye":0.5}'
 radd r_eye_only_frac '1 10 --cfg {"eye":1,"eyeOnly":0.5}'
 radd r_eye_only_two '1 10 --cfg {"eyeOnly":2}'
 radd r_eye_code_frac '1 10 --cfg {"eye":1,"eyeCode":0.5}'
-radd r_eye_code_big '1 10 --cfg {"eye":1,"eyeCode":8}'
+radd r_eye_code_big '1 10 --cfg {"eye":1,"eyeCode":32}'
+radd r_plain_cloak  '1 10 --cfg {"eyeCode":16}'
 radd r_eye_code_huge '1 10 --cfg {"eye":1,"eyeCode":1e300}'
 radd r_eye_code_neg '1 10 --cfg {"eye":1,"eyeCode":-1}'
 radd r_eye_code_int '1 10 --cfg {"eye":1,"eyeCode":2147483648}'
 radd r_eye_live_frac '1 10 --set eye=0.5@5'
-radd r_eye_live_code '1 10 --set eyeCode=8@5'
+radd r_eye_live_code '1 10 --set eyeCode=32@5'
 radd r_eye_live_code_frac '1 10 --set eyeCode=2.5@5'
 radd r_eye_radius_sq '1 10 --cfg {"eye":1,"perceptionRadius":1e20}'
 

@@ -491,11 +491,20 @@ inline bool oceanConfigValid(const OceanConfig& c) { return oceanConfigError(c).
 //     spawns (int)(base + amp·sin(·)) times; 1e20 was accepted (finite).
 //   * targetFood in [0, 1e6]: the spawn cap is targetFood·2 (int arithmetic),
 //     and init lays out targetFood items.
-//   * maxSpeed <= 2000 and predatorSpeed in [0, 2000] (defaults 150, 110): a
-//     fish moves at most 2·maxSpeed·dt per step (speedFactor <= 2), a
+//   * maxSpeed in [0.01, 2000] and predatorSpeed in [0, 2000] (defaults 150,
+//     110): a fish moves at most 2·maxSpeed·dt per step (speedFactor <= 2), a
 //     predator 2·predatorSpeed·dt — at dt 0.016 under 64, less than the
 //     smallest world (100), so the single add / subtract wraps keep positions
 //     in the world, and SpatialGrid's (int)(position / cell) stays in range.
+//     The floor 0.01 (kOceanMinMaxSpeed) keeps OWN_SPEED = speed / maxSpeed
+//     finite: a founder starts at speed 80 before its first move clamps it,
+//     and 80 / 1e-38 was +inf on the first captured step (the live-code audit
+//     of PRs #22-#25, finding 4); now OWN_SPEED <= 2700 / 0.01.
+//   * maxTurnRate in [-1e4, 1e4] (default 4; kOceanMaxTurnRate): triangular
+//     motion forms maxTurnRate · turnFactor (<= 4/3 at bodyElong 0.5), and
+//     3e38 · 4/3 overflowed to inf, then 0 · inf = NaN even with no steering
+//     (the same audit). Inside the range one step turns by at most
+//     1e4 · 4/3 · dt = 213 rad, a finite angle the portable sin / cos reduce.
 //   * every radius (perceptionRadius, interactRadius, pickupRadius,
 //     predatorPerception, predatorCaptureRadius) <= 1e6: SpatialGrid casts
 //     (centre ± radius) / cell to int, cell = perceptionRadius >= 1 (a
@@ -517,6 +526,8 @@ inline bool oceanConfigValid(const OceanConfig& c) { return oceanConfigError(c).
 // ages, the predator economy's ...), minPopulation, predatorCount and
 // foodPatches <= kOceanMaxCount.
 inline constexpr float kOceanMaxEnergy = 1000000.0f;  // |every energy knob|
+inline constexpr float kOceanMinMaxSpeed = 0.01f;     // maxSpeed's floor (OWN_SPEED = speed / maxSpeed)
+inline constexpr float kOceanMaxTurnRate = 10000.0f;  // |maxTurnRate| (× turnFactor <= 4/3)
 inline constexpr int kOceanMaxCount = 100000;        // founders, the reseed floor, predators, food patches
 inline constexpr int kOceanMaxWorldSide = 100000;    // world width / height (the depth's own ceiling too)
 inline constexpr double kOceanMaxGridCells = 16777216.0;   // per neighbour grid (2^24)
@@ -530,7 +541,8 @@ inline std::string oceanSimConfigError(const SimConfig& c) {
         {"foodPatchRadius", c.foodPatchRadius, 0.0f, 100000.0f},
         {"foodSpawnBase", c.foodSpawnBase, -10000.0f, 10000.0f},
         {"foodSpawnAmp", c.foodSpawnAmp, -10000.0f, 10000.0f},
-        {"maxSpeed", c.maxSpeed, 0.0f, 2000.0f},
+        {"maxSpeed", c.maxSpeed, kOceanMinMaxSpeed, 2000.0f},
+        {"maxTurnRate", c.maxTurnRate, -kOceanMaxTurnRate, kOceanMaxTurnRate},
         {"predatorSpeed", c.predatorSpeed, 0.0f, 2000.0f},
         {"perceptionRadius", c.perceptionRadius, 0.0f, 1000000.0f},
         {"interactRadius", c.interactRadius, 0.0f, 1000000.0f},
@@ -568,7 +580,7 @@ inline std::string oceanSimConfigError(const SimConfig& c) {
         {"reproMaxDistance", c.reproMaxDistance}, {"reproSoftWidth", c.reproSoftWidth},
         {"reproGracePeriod", c.reproGracePeriod}, {"bodyMutation", c.bodyMutation},
         {"maxAge", c.maxAge}, {"reproCooldown", c.reproCooldown},
-        {"interactCooldown", c.interactCooldown}, {"minSpeed", c.minSpeed}, {"maxTurnRate", c.maxTurnRate},
+        {"interactCooldown", c.interactCooldown}, {"minSpeed", c.minSpeed},
         {"mutationMultiplier", c.mutationMultiplier}, {"predatorCooldown", c.predatorCooldown},
         {"predatorMaxAge", c.predatorMaxAge}, {"predatorTraitMutation", c.predatorTraitMutation},
     };

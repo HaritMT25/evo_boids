@@ -464,6 +464,13 @@ radd r_radius_big   '1 10 --cfg {"predatorCount":2,"predatorPerception":1e30}'
 # Every other float the step reads must be finite (1e39 is an infinite float),
 # and the counts / world sizes that size allocations have generous ceilings.
 radd r_turn_inf     '1 10 --cfg {"triangularMotion":true,"maxTurnRate":1e39}'
+# Arithmetic-safe motion bounds (the live-code audit of PRs #22-#25, finding 4):
+# maxTurnRate 3e38 x turnFactor 4/3 overflowed (then 0 x inf = NaN); maxSpeed
+# 1e-38 made the first captured OWN_SPEED = 80 / 1e-38 = inf.
+radd r_turn_big     '1 10 --cfg {"triangularMotion":true,"bodyModel":true,"maxTurnRate":3e38}'
+radd r_turn_neg_big '1 10 --cfg {"triangularMotion":true,"maxTurnRate":-10001}'
+radd r_speed_tiny   '1 10 --pop 1 --capture --cfg {"minPopulation":0,"minSpeed":0,"maxSpeed":1e-38}'
+radd r_live_speed_tiny '1 10 --cfg {"minSpeed":0} --set maxSpeed=0.001@5'
 radd r_cooldown_inf '1 10 --cfg {"interactCooldown":1e39}'
 radd r_repro_cd_inf '1 10 --cfg {"reproCooldown":-1e39}'
 radd r_pred_metab   '1 10 --cfg {"predatorCount":2,"predatorEconomy":true,"predatorMetabolism":1e39}'
@@ -778,8 +785,12 @@ TWINS=${APP_TWINS:-$DEFAULT_TWINS}
 # The case's output minus its app* fields and its app* expectations.
 app_strip () { sed -E '/^expect app/d; s/ app[A-Za-z]*=[^ ]*//g' "$1" | tail -n +2; }
 twin_args () {  # twin_args ARGS -> the same with appearance 0 in its cfg and no app* expectations
+    # A live `--set appearance=N@S` is a no-op only at the value the world was
+    # built with (the driver refuses a change, exit 4): in the twin, built with
+    # appearance 0, it becomes `appearance=0` (app_live_s21's appearance=3@2200;
+    # the live-code audit of PRs #22-#25, finding 1).
     local a
-    a=$(printf '%s\n' "$1" | sed -E 's/ --expect app[A-Za-z]*[<>=]+[0-9]+//g')
+    a=$(printf '%s\n' "$1" | sed -E 's/ --expect app[A-Za-z]*[<>=]+[0-9]+//g; s/--set appearance=[0-9.]+@/--set appearance=0@/g')
     if [[ $a == *'"appearance":'* ]]; then printf '%s\n' "$a" | sed -E 's/"appearance":[0-9]+/"appearance":0/'
     elif [[ $a == *"--cfg {"* ]]; then printf '%s\n' "$a" | sed 's/--cfg {/--cfg {"appearance":0,/'
     else printf '%s --cfg {"appearance":0}\n' "$a"; fi

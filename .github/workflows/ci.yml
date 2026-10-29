@@ -86,3 +86,9 @@ jobs:
         run: node tests/ocean_turbo_handoff.js
       - name: Ocean parity (FAST subset), guards and unit checks
         run: FAST=1 JOBS=$(nproc) bash wasm/ocean_parity.sh
+      # The appearance-off twin of the live-knob case, as the weekly
+      # APP_TWINS=all run makes it (its live `appearance` no-op must become
+      # appearance=0 in the twin; the live-code audit of PRs #22-#25, finding 1).
+      # The unit checks and the eye build already ran in the step above.
+      - name: Ocean appearance twin of app_live_s21
+        run: APP_TWINS=all ONLY=app_live_s21 NO_TESTS=1 NO_EYE=1 bash wasm/ocean_parity.sh

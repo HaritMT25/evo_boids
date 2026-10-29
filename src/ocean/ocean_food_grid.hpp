@@ -141,15 +141,26 @@ public:
         const float r2 = radius * radius;
         const float* X = x_.data();
         const float* Y = y_.data();
+        forEachRunWrapped(center, radius, [&](int b, int e, float cx0, float cy0) {
+            for (int k = b; k < e; ++k) {
+                const float dx = X[k] - cx0;
+                const float dy = Y[k] - cy0;
+                if (dx * dx + dy * dy <= r2) f(k);
+            }
+        });
+    }
+    // The wrapped query's images (SpatialGrid's nine, in its order, each
+    // clipped, the empty ones skipped), row by row: f(b, e, cx0, cy0) for the
+    // slots [b, e) of each row's run of cells and the image's translated centre
+    // (cx0, cy0) — the centre its 2-D test is against. A cell can fall in two
+    // images' runs (a world under 2 cells wide past R); its entries are then
+    // candidates twice, within r of at most one of the two centres.
+    template <class F>
+    void forEachRunWrapped(Vec2 center, float radius, F&& f) const {
         forEachImage(center, radius, [&](float cx0, float cy0, int minCx, int maxCx, int minCy, int maxCy) {
             for (int cy = minCy; cy <= maxCy; ++cy) {
                 const std::size_t rowBase = static_cast<std::size_t>(cy) * cols_;
-                const int e = start_[rowBase + maxCx + 1];
-                for (int k = start_[rowBase + minCx]; k < e; ++k) {
-                    const float dx = X[k] - cx0;
-                    const float dy = Y[k] - cy0;
-                    if (dx * dx + dy * dy <= r2) f(k);
-                }
+                f(start_[rowBase + minCx], start_[rowBase + maxCx + 1], cx0, cy0);
             }
         });
     }

@@ -662,6 +662,25 @@ void testSenseEdges() {
                              "%s: food dx %.9g (want %g), nearest age %.9g (want %.9g)", name, S.s[NEAREST_FOOD_DX], wantDx,
                              S.s[NEAREST_NEIGHBOR_AGE], wantAge);
             }
+        // (6b) A narrow torus (250 x 250, R 100): viewer x 10, so cell column 1
+        // ([100, 200)) is in the central image's run and in the +x image's; every
+        // food item sits in it within R of the viewer, so all are kept by the
+        // central image and are candidates again (rejected) in the +x image.
+        {
+            OceanWorld w;
+            world(w, 312, m, /*toroidal*/ true);
+            w.cfg.predatorPerception = 100.0f;   // every radius under min(W, H) / 2
+            w.init(250, 250, 240.0f, 0);
+            addQuiet(w, 10.0f, 125.0f, 120.0f, east);
+            for (int j = 0; j < 13; ++j)
+                addFood(w, 100.0f + 0.75f * (float)j, 125.0f + 3.0f * (float)(j % 5) - 6.0f, 110.0f + 1.5f * (float)j);
+            addQuiet(w, 104.0f, 120.0f, 125.0f, east, 30.0f);
+            std::snprintf(name, sizeof name, "narrow torus (%s)", m.name);
+            const Sensed S = stepAndCompare(t, name, w);
+            if (labels)
+                t.expect(sameBits(S.s[FOOD_DENSITY], tanhCountOver10(13)), "%s: density %.9g, expected all 13 items", name,
+                         S.s[FOOD_DENSITY]);
+        }
         // (7) mouthGate: X (size 2, nearest) seen but not food; Y (size 1.2 ==
         // kMouth·L) the nearest food; Z behind; N a NaN depth and S a NaN size,
         // both counted, neither the nearest. Visit order: S, Z, X, Y, N.

@@ -1703,9 +1703,7 @@ private:
     // candidates). The kept records are what the grid's visitor saw, in its
     // order, with its arithmetic.
     int foodWithin(const Fish& c, float R) {
-        const int total = foodGrid_.entryCount();
-        if ((int)foodSeen_.size() < total) foodSeen_.resize(total);   // a write per candidate, < total of them
-        FoodSeen* out = foodSeen_.data();
+        FoodSeen* out = foodSeenList();
         const float* fx = foodGrid_.xs();
         const float* fy = foodGrid_.ys();
         const float* fz = foodGrid_.depths();
@@ -1752,6 +1750,50 @@ private:
         return n;
     }
 
+    // The toroidal food scan, as foodWithin (the same list: every item within R
+    // in 3-D, in the grid's visit order — here the nine images in their order).
+    // Per candidate both of the old scan's tests, each with its own arithmetic:
+    // the grid's 2-D test against the image's translated centre (cx0, cy0), and
+    // the 3-D test on the scan's offset, the difference from c.pos wrapped by
+    // wrapDelta's rule (d > W/2: d − W; d < −W/2: d + W; else d) — the two round
+    // differently, so both stay (sense_edges, "wrapped filter"). The rule is
+    // taken as a select between the three values wrapDelta returns, each
+    // computed as it computes it: no branch, the same bits. Scalar.
+    int foodWithinWrapped(const Fish& c, float R) {
+        FoodSeen* out = foodSeenList();
+        const float* fx = foodGrid_.xs();
+        const float* fy = foodGrid_.ys();
+        const float* fz = foodGrid_.depths();
+        const float R2 = R * R;
+        const float px = c.pos.x, py = c.pos.y, pz = c.depth;
+        const float W = (float)width, H = (float)height;
+        const float hw = 0.5f * W, hh = 0.5f * H;   // wrapDelta's half = 0.5f · span
+        int n = 0;
+        foodGrid_.forEachRunWrapped(c.pos, R, [&](int b, int e, float cx0, float cy0) {
+            for (int k = b; k < e; ++k) {
+                const float gx = fx[k] - cx0, gy = fy[k] - cy0;   // the grid's 2-D test
+                const float q2 = gx * gx + gy * gy;
+                const float ux = fx[k] - px, uy = fy[k] - py;     // the scan's offset, wrapped
+                const float dx = (ux > hw) ? ux - W : ((ux < -hw) ? ux + W : ux);
+                const float dy = (uy > hh) ? uy - H : ((uy < -hh) ? uy + H : uy);
+                const float dz = fz[k] - pz;
+                const float d2 = dx * dx + dy * dy + dz * dz;
+                out[n] = {dx, dy, dz, d2, k};
+                n += (int)(q2 <= R2) & (int)!(d2 > R2);
+            }
+        });
+        return n;
+    }
+    // foodSeen_ with room for a query's writes: one per candidate, the list
+    // advancing only on a kept item, and an item is kept at most once (in a
+    // wrapped query it can be a candidate twice, within R of one image only), so
+    // a write lands at most at index entryCount().
+    FoodSeen* foodSeenList() {
+        const std::size_t need = (std::size_t)foodGrid_.entryCount() + 1;
+        if (foodSeen_.size() < need) foodSeen_.resize(need);
+        return foodSeen_.data();
+    }
+
 #ifdef EVO_OCEAN_EYE
     // Eye-only mode: the eye's half of computeSensors' neighbour, food and
     // predator loops — the same queries, every object within R in the same
@@ -1782,26 +1824,15 @@ private:
         }
         // k: the item's grid slot (its payload == food[index]'s); the offset
         // and d² as computeSensors' smell takes them (see there).
-        const float* fz = foodGrid_.depths();
         const float* fcon = foodGrid_.eyeCons();
         auto look = [&](int k, float dx, float dy, float dz, float d2) {
             if (d2 > R2) return;
             eyeSee(eye, fwd, rht, dx, dy, dz, d2, ocean::kEyeFoodSize, fcon[k], R);
         };
-        if (!(ocfg.eyeCode & kEyeCodeNoFood)) {
-            if (cfg.toroidal) {
-                const float* fx = foodGrid_.xs();
-                const float* fy = foodGrid_.ys();
-                foodGrid_.forEachInRadiusWrapped(c.pos, R, [&](int k) {
-                    const float dx = wrapDx(fx[k] - c.pos.x), dy = wrapDy(fy[k] - c.pos.y);
-                    const float dz = fz[k] - c.depth;
-                    look(k, dx, dy, dz, dx * dx + dy * dy + dz * dz);
-                });
-            } else {   // foodWithin's list: the items within R, in the grid's visit order
-                const int n = foodWithin(c, R);
-                const FoodSeen* s = foodSeen_.data();
-                for (int j = 0; j < n; ++j) look(s[j].k, s[j].dx, s[j].dy, s[j].dz, s[j].d2);
-            }
+        if (!(ocfg.eyeCode & kEyeCodeNoFood)) {   // the items within R, in the grid's visit order
+            const int n = cfg.toroidal ? foodWithinWrapped(c, R) : foodWithin(c, R);
+            const FoodSeen* s = foodSeen_.data();
+            for (int j = 0; j < n; ++j) look(s[j].k, s[j].dx, s[j].dy, s[j].dz, s[j].d2);
         }
         for (std::size_t k = 0; k < predators.size(); ++k) {
             const OceanPredator& p = predators[k];
@@ -1993,7 +2024,6 @@ private:
         // k: the item's grid slot, whose depth / size / eyeCon are food[index]'s
         // (copied at this step's build; food does not change in the per-fish
         // phase); (dx, dy, dz) its offset, d2 = dx·dx + dy·dy + dz·dz.
-        const float* fz = foodGrid_.depths();
         const float* fsize = foodGrid_.sizes();
 #ifdef EVO_OCEAN_EYE
         [[maybe_unused]] const float* fcon = foodGrid_.eyeCons();
@@ -2017,24 +2047,14 @@ private:
                 }
             }
         };
-        if (tor) {
-            // The grid tests each image against its translated centre; the offset
-            // is the wrapped difference from c.pos (they round differently, so
-            // both stay: tests/ocean_sense_tests.hpp, "wrapped filter").
-            const float* fx = foodGrid_.xs();
-            const float* fy = foodGrid_.ys();
-            foodGrid_.forEachInRadiusWrapped(c.pos, R, [&](int k) {
-                const float dx = wrapDx(fx[k] - c.pos.x), dy = wrapDy(fy[k] - c.pos.y);
-                const float dz = fz[k] - c.depth;
-                smell(k, dx, dy, dz, dx * dx + dy * dy + dz * dz);
-            });
-        } else {
-            // Bounded: foodWithin's list — the items within R in the grid's visit
-            // order, with the grid's own offset and q2 = dx·dx + dy·dy (taken
-            // against the query centre c.pos, the very values the offset here
-            // was), so d² = q2 + dz·dz is the same left-to-right sum; the grid's
-            // 2-D test stays. smell's d2 > R² test is then always false.
-            const int n = foodWithin(c, R);
+        {
+            // The items within R in the grid's visit order (foodWithin /
+            // foodWithinWrapped, see there; both keep the grid's 2-D test). Bounded,
+            // with the grid's own offset and q2 = dx·dx + dy·dy (taken against
+            // the query centre c.pos, the very values the offset here was), so
+            // d² = q2 + dz·dz is the same left-to-right sum; toroidal, with the
+            // wrapped difference from c.pos. smell's d2 > R² test is then always false.
+            const int n = tor ? foodWithinWrapped(c, R) : foodWithin(c, R);
             const FoodSeen* s = foodSeen_.data();
             for (int j = 0; j < n; ++j) smell(s[j].k, s[j].dx, s[j].dy, s[j].dz, s[j].d2);
         }

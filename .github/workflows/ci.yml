@@ -53,3 +53,36 @@ jobs:
         run: bash wasm/parity.sh
       - name: Static site assembles
         run: bash wasm/build_site.sh
+
+  # The Ocean (3-D) world: its browser module rebuilt and compared with the
+  # committed one; the page's Turbo hand-off against that module (two real
+  # instances, in node); then wasm/ocean_parity.sh on CI's FAST subset (43 of
+  # the 100 cases, about a quarter of their cost: one or more of every family,
+  # and the appearance twins of the selected ones) with every guard (the
+  # page's validation of each case, the refused configs, the removed-non-finite
+  # runs, the preset / int-key / bool-key / orphan checks) and the unit checks,
+  # native and wasm, plain and eye builds. The whole matrix runs in
+  # .github/workflows/ocean-full.yml (weekly, and on demand).
+  ocean:
+    name: ocean (module freshness, unit checks, parity subset)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: mymindstorm/setup-emsdk@v16
+        with:
+          actions-cache-folder: emsdk-cache
+          # The version the committed web/evo_ocean.wasm was built with.
+          version: 6.0.4
+      - name: Build the Ocean module
+        run: bash wasm/build_ocean.sh
+      - name: Committed Ocean module matches the sources
+        run: |
+          if ! git diff --quiet -- web/evo_ocean.js web/evo_ocean.wasm; then
+            git status --short web/
+            echo "::error::web/evo_ocean.js / .wasm are stale: run wasm/build_ocean.sh and commit the result"
+            exit 1
+          fi
+      - name: The page's Turbo hand-off (node, two real modules)
+        run: node tests/ocean_turbo_handoff.js
+      - name: Ocean parity (FAST subset), guards and unit checks
+        run: FAST=1 JOBS=$(nproc) bash wasm/ocean_parity.sh

@@ -21,6 +21,10 @@
 #      old age, the population sat at maxPopulation, the logs decimated, ...).
 # A case also FAILS if its state ever holds a non-finite float (scanned every
 # step), even when both builds agree on it: wasm leaves a NaN's bits to the host.
+# That includes an object removed within a step while it held one (a fish whose
+# reserves went -inf starves and is erased before any scan: the engine counts
+# what removed objects held, OceanWorld::totalNonFiniteRemoved, and the driver
+# adds it to the step's count); the nf_* list checks that this is caught.
 # Then builds tests/ocean_tests.cpp both ways and runs it (unit checks; their
 # output must also match between the builds).
 #
@@ -41,6 +45,9 @@
 #   ONLY=def_s1 wasm/ocean_parity.sh  # one case (a grep -E pattern on the name)
 #   NO_TESTS=1 wasm/ocean_parity.sh   # parity cases only
 #   NO_EYE=1 wasm/ocean_parity.sh     # the plain Ocean build only
+#   FAST=1 wasm/ocean_parity.sh       # CI's subset (FAST_CASES below: 43 cases, about a
+#                                     # quarter of the cases' cost) with EVERY guard and both
+#                                     # builds' unit checks; not with --rebaseline
 #
 # Two builds: the plain Ocean build (-DEVO_WORLD_OCEAN; every case not named
 # eye_*) and the compound-eye build (+ -DEVO_OCEAN_EYE: 64 sensors, its own
@@ -109,6 +116,10 @@ fi
 # cannot go with --overwrite. (ONLY may: the guards below still run then.)
 if [ "$OVERWRITE" = 1 ] && [ -n "${NO_TESTS:-}" ]; then
     echo "--overwrite cannot go with NO_TESTS: the unit checks and the shim / config guards must run before a baseline is written" >&2
+    exit 2
+fi
+if [ "$REBASE" = 1 ] && [ -n "${FAST:-}" ]; then
+    echo "--rebaseline cannot go with FAST (CI's subset): run the whole matrix, or name the cases with ONLY" >&2
     exit 2
 fi
 cd "$(dirname "$0")/.."
@@ -249,6 +260,12 @@ add life_live_s21 '21 3000 --cfg {"predatorCount":3} --set foodLife=6@600 --set 
                   "foodLife switched on / off (ages kept and hashed) / on mid-run (oc_set_param)"
 add steer_life_e1_s5 "5 3000 --cfg {\"waveSpeed\":6,\"deepCurrent\":true,\"currentStrength\":20,\"foodDrift\":true,\"depthCostScaled\":true,\"cHold\":0.05,\"cPress\":0.03,\"steerFrame\":1,\"foodLife\":8,$SV} --expect steerOwnSteps>0 --expect foodExpired>0" \
                   "E1 waves + deep current + scaled costs with own-frame steering and foodLife 8"
+# The spawn cap (targetFood·2) counts live items: food expiring in a step frees
+# its place in that step's spawn (foodCapFreed: steps that refilled such places).
+add life_cap_fixture_s1 '1 3000 --pop 0 --cfg {"minPopulation":0,"targetFood":1,"foodSpawnBase":2,"foodSpawnAmp":0,"foodLife":0.016} --expect foodExpired=5999 --expect foodCapFreed=3000' \
+                  "no fish, cap 2, 2 items/step that last one step: 2 live items every step"
+add life_cap_s3   '3 3000 --cfg {"targetFood":300,"foodSpawnBase":6,"foodSpawnAmp":0,"foodLife":10} --expect foodExpired>0 --expect foodCapFreed>0' \
+                  "foodLife 10 with the stock at its cap (targetFood 300, 6 items/step)"
 # ---- the compound-eye build (-DEVO_OCEAN_EYE: 64 sensors, its own planes) ----
 # Every case named eye_* runs in the eye build (the eye on unless it says
 # otherwise; eye_only_* / eye_blind_* = eyeOnly with the eye on / off; eye_code*
@@ -364,6 +381,23 @@ add app_rich_toro_e1_s9 "9 3000 --cfg {$RICH,\"toroidal\":true,\"waveSpeed\":6,\
                   "max knobs + rich (reseeds, predation) + toroidal + E1 + body model"
 add app_long_s42  '42 20000 --every 500 --expect appOffspring>0' "20k steps, defaults: the genealogy over a long run"
 
+# CI's subset (FAST=1; .github/workflows/ci.yml on every push / pull request;
+# the whole matrix runs there weekly and on demand): one or more cases of every
+# family above, the cheap ones — defaults, predators + economy, rich, the
+# extremes, live changes, capture, the population cap, triangular + body, E1
+# (alone, preset, live, extreme, costs), own-frame steering, the food lifetime
+# (with the spawn-cap cases), in the eye build the eye off / on / captured,
+# eye-only, blind, the encodings, the cloaks, E1 + eye-only + foodLife, and
+# the appearance genome's settings (patterns only, shapes only, every knob at
+# its maximum, live knobs). The appearance twins of DEFAULT_TWINS run for the
+# selected cases only (13 of them).
+FAST_CASES="def_s1 pred_s7 econ_s42 rich_s5 rich_toro_s7 x_steep_s3 x_deep_s8 x_shallow_s4 live_s21 capture_s17
+ cap_s31 x_tri_body_s9 e1_deep_s5 e1_waves_s3 e1_preset_s42 e1_live_s21 e1_x_shallow_s4 e1_costs_s8 steer_own_s1
+ steer_own_live_s21 life_s1 life_rich_toro_s7 life_live_s21 steer_life_e1_s5 life_cap_fixture_s1 life_cap_s3
+ eye_off_s1 eye_def_s1 eye_capture_s17 eye_blind_s1 eye_only_capture_s17 eye_code7_only_capture_s17 eye_code_live_s21
+ eye_e1_only_steer_life_s3 eye_cloak_both_only_capture_s17 eye_cloak_live_s21 eye_cloak_food_only_steer_l12_s3
+ eye_life_steer_blind_s4 eye_x_shallow_s4 app_patterns_s1 app_shapes_s42 app_max_mut_s8 app_live_s21"
+
 # Configs the page must REFUSE (oc_init / oc_set_param; ocean_tests --accepts
 # must exit 1): every Ocean knob has a finite range, so none of these can run.
 RNAMES=(); RARGS=()
@@ -384,6 +418,17 @@ radd r_kwater       '1 10 --cfg {"kWater":-0.1}'
 radd r_l0           '1 10 --cfg {"L0":1e39}'
 radd r_kmouth       '1 10 --cfg {"kMouth":0}'
 radd r_bool         '1 10 --cfg {"deepCurrent":2}'
+# A SimConfig switch is true / false, an Ocean one true / false / 0 / 1, at every
+# occurrence (SimConfig's reader kept the old value for anything else:
+# {"toroidal":1} ran with walls).
+radd r_bool_sim_one '1 10 --cfg {"toroidal":1}'
+radd r_bool_sim_two '1 10 --cfg {"toroidal":2}'
+radd r_bool_sim_frac '1 10 --cfg {"bodyModel":0.5}'
+radd r_bool_sim_str '1 10 --cfg {"foodDrift":"yes"}'
+radd r_bool_sim_null '1 10 --cfg {"predatorEconomy":null}'
+radd r_bool_sim_dup '1 10 --cfg {"triangularMotion":true,"triangularMotion":2}'
+radd r_bool_ocean_str '1 10 --cfg {"lightEnabled":"on"}'
+radd r_bool_ocean_dup '1 10 --cfg {"deepCurrent":true,"deepCurrent":"x"}'
 radd r_depth        '1 10 --depth 1e6'
 radd r_live_kbuoy   '1 10 --set kBuoy=1e37@5'
 radd r_live_wave    '1 10 --set waveSpeed=500@5'
@@ -426,6 +471,19 @@ radd r_pred_cd_inf  '1 10 --cfg {"predatorCount":2,"predatorCooldown":1e39}'
 radd r_pred_meal    '1 10 --cfg {"predatorCount":2,"predatorEconomy":true,"predatorMeal":1e39}'
 radd r_pred_repro   '1 10 --cfg {"predatorCount":2,"predatorEconomy":true,"predatorReproEnergy":-1e39}'
 radd r_pred_age_inf '1 10 --cfg {"predatorCount":2,"predatorEconomy":true,"predatorMaxAge":1e39}'
+# The energies in [-1e6, 1e6] (kOceanMaxEnergy): finite values past it overflowed
+# (one fish eating four items of 1e38: reserves +inf; moveCost 1e38: a step's cost inf).
+radd r_food_energy  '1 1 --pop 1 --cfg {"minPopulation":0,"pickupRadius":1000000,"foodEnergy":1e38}'
+radd r_move_cost    '1 10 --cfg {"moveCost":1e38}'
+radd r_gene_cost    '1 10 --cfg {"geneCost":-1000001}'
+radd r_metab_big    '1 10 --cfg {"metabolicRate":2e6}'
+radd r_newborn_big  '1 10 --cfg {"newbornEnergy":1e7}'
+radd r_repro_big    '1 10 --cfg {"reproEnergy":-2e6}'
+radd r_pred_meal_big '1 10 --cfg {"predatorCount":4,"predatorEconomy":true,"predatorMeal":3e38}'
+radd r_pred_mcost_big '1 10 --cfg {"predatorCount":2,"predatorEconomy":true,"predatorMoveCost":1e38}'
+radd r_pred_newborn_big '1 10 --cfg {"predatorCount":2,"predatorEconomy":true,"predatorNewbornEnergy":-3e38}'
+radd r_live_energy  '1 10 --set foodEnergy=1000001@5'
+radd r_live_pred_metab '1 10 --cfg {"predatorCount":2,"predatorEconomy":true} --set predatorMetabolism=1e30@5'
 # (Each just past its ceiling, and still small enough to allocate: were the
 # check missing, oc_init would accept it, not crash into a false "refused".)
 radd r_pop_big      '1 10 --pop 100001'
@@ -437,7 +495,8 @@ radd r_live_minpop  '1 10 --set minPopulation=100001@5'
 radd r_predcount_big '1 10 --cfg {"predatorCount":100001}'
 radd r_patches_big  '1 10 --cfg {"foodPatches":100001}'
 # The ocean-vision keys: the int keys (eye, eyeOnly, eyeCode, steerFrame) are
-# whole numbers in int's range, then in range; foodLife in [0, 1e6]. r_eye_*
+# whole numbers in int's range, then in range; foodLife in [0, 3600] (beyond,
+# float ages lose accuracy, and from 2^19 s they stop: kOceanMaxFoodLife). r_eye_*
 # are asked of the eye build's shim, the rest of the plain build's (where eye,
 # eyeOnly and eyeCode must stay 0).
 radd r_steer_frac   '1 10 --cfg {"steerFrame":0.5}'
@@ -447,9 +506,12 @@ radd r_steer_dup    '1 10 --cfg {"steerFrame":1,"steerFrame":0.5}'
 radd r_life_neg     '1 10 --cfg {"foodLife":-1}'
 radd r_life_big     '1 10 --cfg {"foodLife":1000001}'
 radd r_life_inf     '1 10 --cfg {"foodLife":1e39}'
+radd r_life_hour    '1 10 --cfg {"foodLife":3600.5}'
+radd r_life_stall   '1 10 --cfg {"foodLife":1000000}'
 radd r_live_steer   '1 10 --set steerFrame=0.5@5'
 radd r_live_steer2  '1 10 --set steerFrame=2@5'
 radd r_live_life    '1 10 --set foodLife=1e7@5'
+radd r_live_life_hour '1 10 --set foodLife=3601@5'
 radd r_plain_eye    '1 10 --cfg {"eye":1}'
 radd r_plain_eyeonly '1 10 --cfg {"eyeOnly":1}'
 radd r_plain_eyecode '1 10 --cfg {"eyeCode":1}'
@@ -485,6 +547,18 @@ radd r_app_live_two '1 10 --set appearance=2@5'
 radd r_app_live_mut '1 10 --set patternMutation=0.3@5'
 radd r_app_live_nov '1 10 --set morphologyNovelProbability=0.26@5'
 
+# Non-finite state that is gone before any scan can see it (the Codex audit of
+# PR #18, finding 6): a fish whose reserves overflow to -inf starves and is
+# erased within the step, a predator likewise. Each nf_* run must still report
+# it, in both builds: nonfinite_max > 0 and cover nonFiniteRemoved > 0, with the
+# objects gone from the final world (the third field). The energy ranges refuse
+# these configs now, so they run with the driver's TEST-ONLY --unchecked (the
+# Ocean's ranges not applied); they are not parity cases.
+NFNAMES=(); NFARGS=(); NFGONE=()
+nfadd () { NFNAMES+=("$1"); NFARGS+=("$2"); NFGONE+=("$3"); }
+nfadd nf_move_cost      '1 3 --pop 1 --unchecked --cfg {"minPopulation":0,"targetFood":0,"foodSpawnBase":0,"foodSpawnAmp":0,"minSpeed":30,"maxSpeed":30,"moveCost":1e38}' 'pop=0'
+nfadd nf_pred_move_cost '1 3 --pop 0 --unchecked --cfg {"minPopulation":0,"targetFood":0,"foodSpawnBase":0,"foodSpawnAmp":0,"predatorCount":2,"predatorEconomy":true,"predatorMoveCost":1e38}' 'pred=0'
+
 run_one () {  # run_one INDEX: native and wasm side by side
     local i=$1 name=${NAMES[$1]} s
     s=$(sfx "$name")
@@ -499,8 +573,18 @@ SEL=()
 for i in "${!NAMES[@]}"; do
     if [ -n "${ONLY:-}" ] && ! [[ ${NAMES[$i]} =~ ${ONLY} ]]; then continue; fi
     if [ -n "${NO_EYE:-}" ] && [[ ${NAMES[$i]} == eye_* ]]; then continue; fi
+    if [ -n "${FAST:-}" ] && [[ " $(echo $FAST_CASES) " != *" ${NAMES[$i]} "* ]]; then continue; fi
     SEL+=("$i")
 done
+FAST_BAD=""
+if [ -n "${FAST:-}" ]; then   # every FAST_CASES name must be a case (a typo would silently shrink the subset)
+    for c in $FAST_CASES; do
+        found=0
+        for nm in "${NAMES[@]}"; do [ "$nm" = "$c" ] && found=1 && break; done
+        [ "$found" = 1 ] || FAST_BAD="$FAST_BAD $c"
+    done
+    echo "== FAST: CI's subset, ${#SEL[@]} of ${#NAMES[@]} cases${FAST_BAD:+; NOT CASES:$FAST_BAD}"
+fi
 # Every case must be a world the page accepts: the real oc_init / oc_set_param
 # validation (wasm/ocean_wasm.cpp, through ocean_tests --accepts) is asked first.
 declare -A REFUSED=()
@@ -547,6 +631,39 @@ if [ -n "$RC_INT" ] && [ "$RC_INT" = "$OC_INT" ]; then
 else
     echo "== int keys DRIFT: readConfig reads '$RC_INT', kSimConfigIntKeys lists '$OC_INT'"; GUARD_FAILED=1
 fi
+# And the bool-key check (kSimConfigBoolKeys, kOceanBoolKeys) exactly the keys
+# readConfig reads with boolOr and readOceanConfig with readBool.
+RC_BOOL=$(sed -n '/^inline void readConfig/,/^}/p' src/core/checkpoint_io.hpp | grep -o 'boolOr("[A-Za-z]*"' | sed 's/boolOr("//;s/"//' | sort | tr '\n' ' ')
+OC_BOOL=$(sed -n '/kSimConfigBoolKeys\[\] = {/,/};/p' src/ocean/ocean_config.hpp | grep -o '"[A-Za-z]*"' | tr -d '"' | sort | tr '\n' ' ')
+RO_BOOL=$(sed -n '/^inline bool readOceanConfig/,/^}/p' src/ocean/ocean_config.hpp | grep -o 'readBool(o, "[A-Za-z]*"' | sed 's/.*"\([A-Za-z]*\)"/\1/' | sort | tr '\n' ' ')
+OO_BOOL=$(sed -n '/kOceanBoolKeys\[\] = {/,/};/p' src/ocean/ocean_config.hpp | grep -o '"[A-Za-z]*"' | tr -d '"' | sort | tr '\n' ' ')
+if [ -n "$RC_BOOL" ] && [ "$RC_BOOL" = "$OC_BOOL" ] && [ -n "$RO_BOOL" ] && [ "$RO_BOOL" = "$OO_BOOL" ]; then
+    echo "== bool keys: kSimConfigBoolKeys == readConfig's boolOr keys ($(echo "$OC_BOOL" | wc -w)), kOceanBoolKeys == readOceanConfig's readBool keys ($(echo "$OO_BOOL" | wc -w))"
+else
+    echo "== bool keys DRIFT: readConfig '$RC_BOOL' vs kSimConfigBoolKeys '$OC_BOOL'; readOceanConfig '$RO_BOOL' vs kOceanBoolKeys '$OO_BOOL'"; GUARD_FAILED=1
+fi
+# Non-finite state removed within a step must still fail a run (the nf_* list).
+nfbad=""
+for i in "${!NFNAMES[@]}"; do
+    read -r -a A <<< "${NFARGS[$i]}"
+    for b in native wasm; do
+        f="$OUT/${NFNAMES[$i]}.nf_$b.txt"
+        if [ $b = native ]; then "$OUT/opd_native" "${A[@]}" > "$f" 2> /dev/null; else $NODE "$OUT/opd_wasm.js" "${A[@]}" > "$f" 2> /dev/null; fi
+        rc=$?
+        fin=$(grep '^final ' "$f")
+        nfm=$(echo "$fin" | tr ' ' '\n' | sed -n 's/^nonfinite_max=//p')
+        rem=$(grep '^cover ' "$f" | tr ' ' '\n' | sed -n 's/^nonFiniteRemoved=//p')
+        if [ "$rc" != 0 ] || [ -z "$nfm" ] || [ "$nfm" = 0 ] || [ -z "$rem" ] || [ "$rem" = 0 ] || [[ $fin != *" ${NFGONE[$i]} "* ]]; then
+            nfbad="$nfbad ${NFNAMES[$i]}($b: rc=$rc nonfinite_max=${nfm:-?} nonFiniteRemoved=${rem:-0})"
+        fi
+    done
+done
+if [ -z "$nfbad" ]; then
+    echo "== non-finite state removed within a step: ${#NFNAMES[@]} of ${#NFNAMES[@]} nf_* runs caught, native and wasm (--unchecked)"
+else
+    echo "== non-finite state removed within a step NOT caught:$nfbad"; GUARD_FAILED=1
+fi
+[ -n "$FAST_BAD" ] && GUARD_FAILED=1
 # Baseline files without a case (a renamed or dropped case): stale history.
 ORPHANS=""
 if [ -z "${ONLY:-}" ] && [ -d "$BASE" ]; then
@@ -605,7 +722,8 @@ for i in "${SEL[@]}"; do
     elif [ "$(get nonfinite_max)" != 0 ]; then
         # Both builds may agree here and still not be portable: wasm leaves a
         # NaN's sign/payload to the host (x86 0xffc00000, ARM 0x7fc00000).
-        res="FAIL  non-finite state from step $(get nonfinite_from) (up to $(get nonfinite_max) values)"
+        rmv=$(grep '^cover ' "$n" | tr ' ' '\n' | sed -n 's/^nonFiniteRemoved=//p')
+        res="FAIL  non-finite state from step $(get nonfinite_from) (up to $(get nonfinite_max) values${rmv:+; $rmv held by objects removed within a step})"
         cmp -s "$n" "$w" && res="$res; native == wasm on this host only"
     elif ! cmp -s "$n" "$w"; then
         res="FAIL  native != wasm: $(first_diff "$n" "$w" wasm)"
@@ -805,7 +923,7 @@ fi
 if [ "$FAILED" = 1 ] || [ "$TESTS_OK" = 0 ] || [ "$GUARD_FAILED" = 1 ]; then
     [ "$FAILED" = 1 ] && echo "== OCEAN PARITY FAILED: bisect with --trace, then --dump-step/--dump (native vs wasm, or old vs new engine)"
     [ "$TESTS_OK" = 0 ] && echo "== OCEAN UNIT CHECKS FAILED"
-    [ "$GUARD_FAILED" = 1 ] && echo "== OCEAN CONFIG GUARDS FAILED (a bad config accepted, the E1 preset copy or the int-key list drifted, or an orphan baseline)"
+    [ "$GUARD_FAILED" = 1 ] && echo "== OCEAN CONFIG GUARDS FAILED (a bad config accepted, the E1 preset copy or the int- / bool-key lists drifted, an orphan baseline, or removed non-finite state not caught)"
     exit 1
 fi
 if [ -n "${NO_TESTS:-}" ]; then
@@ -813,5 +931,5 @@ if [ -n "${NO_TESTS:-}" ]; then
          "unit checks, shim validation and config guards NOT run (NO_TESTS)"
     exit 0
 fi
-echo "== ALL $NPASS OCEAN PARITY CASES PASS: native == wasm == baseline, bit for bit, every step; expectations met;" \
-     "unit checks pass in both builds"
+echo "== ALL $NPASS OCEAN PARITY CASES PASS${FAST:+ (the FAST subset, of ${#NAMES[@]})}: native == wasm == baseline, bit for bit," \
+     "every step; expectations met; unit checks pass in both builds"

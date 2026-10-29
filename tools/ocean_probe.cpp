@@ -7,6 +7,9 @@
 //   ./ocean_probe --seed 1 --steps 30000 [--w 1920 --h 1080 --depth 240 --pop 300]
 //                 [--every 5000] [--e1] [--cfg '{"kBuoy":0.3,"foodPatches":6}']
 //   --e1: the E1 preset (ocean_config.hpp kE1PresetJson) first, --cfg on top.
+//
+// tests/ocean_tests.cpp includes this file with OCEAN_PROBE_NO_MAIN for
+// probeInitWorld (the "probe" check: the probe's world == the shim's).
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -15,6 +18,36 @@
 #include "ocean/ocean_config.hpp"
 #include "ocean/ocean_world.hpp"
 
+// The probe's world, built as oc_init builds the page's (wasm/ocean_wasm.cpp):
+// applyOceanDefaults, the E1 preset (e1), the cfg JSON, the shared clamps
+// (clampOceanSimConfig: perceptionRadius 0 is stored as 1, the neighbour
+// grids' cell size), then the Ocean's ranges and oc_init's world checks, then
+// rng.seed and init. "" when built, else why not (nothing allocated).
+inline std::string probeInitWorld(OceanWorld& w, unsigned seed, int W, int H, double depth, int pop, bool e1,
+                                  const char* cfgJson) {
+    SimConfig sc;
+    applyOceanDefaults(sc);
+    OceanConfig oc;
+    std::string err;
+    if (e1 && !readOceanJson(kE1PresetJson, sc, oc, err)) return err;
+    if (!readOceanJson(cfgJson, sc, oc, err)) return err;
+    clampOceanSimConfig(sc);
+    oc.depth = (float)depth;
+    if (!oceanConfigValid(oc)) return "bad ocean config: " + oceanConfigError(oc);
+    if (const std::string se = oceanSimConfigError(sc); !se.empty()) return "bad config for the Ocean: " + se;
+    // oc_init's world checks: width / height / founders and the neighbour
+    // grids' cell count (oceanWorldSizeError, before any allocation), and
+    // every radius (OceanWorld::radiusError).
+    if (const std::string we = oceanWorldSizeError(sc, W, H, pop); !we.empty()) return "bad world: " + we;
+    if (const std::string re = OceanWorld::radiusError(sc, W, H); !re.empty()) return "bad radius: " + re;
+    rng.seed(seed);
+    w.cfg = sc;
+    w.ocfg = oc;
+    w.init(W, H, (float)depth, pop);
+    return "";
+}
+
+#ifndef OCEAN_PROBE_NO_MAIN
 namespace {
 
 void report(const OceanWorld& w, double secs) {
@@ -62,26 +95,11 @@ int main(int argc, char** argv) {
         else { std::fprintf(stderr, "unknown or incomplete argument: %s\n", argv[i]); return 2; }
     }
 
-    SimConfig sc;
-    applyOceanDefaults(sc);
-    OceanConfig oc;
-    std::string err;
-    if (e1 && !readOceanJson(kE1PresetJson, sc, oc, err)) { std::fprintf(stderr, "%s\n", err.c_str()); return 2; }
-    if (!readOceanJson(cfgJson, sc, oc, err)) { std::fprintf(stderr, "%s\n", err.c_str()); return 2; }
-    oc.depth = (float)depth;
-    if (!oceanConfigValid(oc)) { std::fprintf(stderr, "bad ocean config: %s\n", oceanConfigError(oc).c_str()); return 2; }
-    if (const std::string se = oceanSimConfigError(sc); !se.empty()) { std::fprintf(stderr, "bad config for the Ocean: %s\n", se.c_str()); return 2; }
-    // oc_init's world checks (wasm/ocean_wasm.cpp): width / height / founders
-    // and the neighbour grids' cell count (oceanWorldSizeError, before any
-    // allocation), and every radius (OceanWorld::radiusError).
-    if (const std::string we = oceanWorldSizeError(sc, W, H, pop); !we.empty()) { std::fprintf(stderr, "bad world: %s\n", we.c_str()); return 2; }
-    if (const std::string re = OceanWorld::radiusError(sc, W, H); !re.empty()) { std::fprintf(stderr, "bad radius: %s\n", re.c_str()); return 2; }
-
-    rng.seed(seed);
     OceanWorld w;
-    w.cfg = sc;
-    w.ocfg = oc;
-    w.init(W, H, (float)depth, pop);
+    if (const std::string err = probeInitWorld(w, seed, W, H, depth, pop, e1, cfgJson); !err.empty()) {
+        std::fprintf(stderr, "%s\n", err.c_str());
+        return 2;
+    }
     std::printf("seed=%u %dx%dx%.0f pop=%d e1=%d cfg=%s\n", seed, W, H, depth, pop, (int)e1, cfgJson ? cfgJson : "{}");
 
     const auto t0 = std::chrono::steady_clock::now();
@@ -125,3 +143,4 @@ int main(int argc, char** argv) {
                 mean, sd, 100.0 * maxBin, anySteerZ, keyPath, keyDirect, secs());
     return 0;
 }
+#endif  // OCEAN_PROBE_NO_MAIN

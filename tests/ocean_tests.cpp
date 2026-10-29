@@ -49,7 +49,16 @@
 //   food_grid     OceanFoodGrid == SpatialGrid: the same lists and visits, and
 //                 each entry's payload is its item's
 //   food_life     foodLife: an item goes on the step its age reaches foodLife;
-//                 off, none do; the first stock's ages spread; draws unchanged
+//                 off, none do; the first stock's ages spread; draws unchanged;
+//                 the spawn cap counts live items (what expires frees its place
+//                 in the same step: targetFood 1, 2 a step, foodLife dt -> 2);
+//                 the range ends at 3600 s (kOceanMaxFoodLife), where an item
+//                 at foodLife - 0.0625 still goes within four steps
+//   nonfinite_rm  OceanWorld::totalNonFiniteRemoved counts the non-finite
+//                 floats of what the end-of-step erase removes: a fish at
+//                 moveCost 1e38 (reserves -inf, starved), a predator at
+//                 predatorMoveCost 1e38, food of size inf (validation
+//                 bypassed); finite deaths count 0; not hashed; init resets it
 //   reproducible  same seed twice -> identical fingerprints; another seed and a
 //                 1-ulp change in any section change the hash — incl. a
 //                 vortex frequency, a food-patch depth, a grid's cell size, the
@@ -68,6 +77,11 @@
 //                 prints, rng included, taken BEFORE the shim runs: an extra
 //                 draw in oc_step fails); a fresh world re-inited replays, a
 //                 reused one keeps exactly frame / ids / totals (asserted)
+//   probe         tools/ocean_probe.cpp's world (probeInitWorld) == the shim's
+//                 (oc_init), every section, for perceptionRadius 0 / 0.25 /
+//                 the default and with --e1: a radius below 1 stored as 1 (the
+//                 grids' cell size; 0 used to divide by zero in SpatialGrid),
+//                 both neighbour grids' geometry finite
 //   pred_econ     fixtures: burn = metabolism + predatorMoveCost·speed² (or
 //                 moveCost when < 0), a fixed predatorMeal vs the prey's
 //                 reserves, death at predatorMaxAge — bit for bit
@@ -132,7 +146,8 @@
 //   exp           oceanmath::expf: ±0 -> 1, NaN / ±inf, beyond the float
 //                 range; within 4 ulp of e^x and monotone on [-87, 88]
 //   ranges        every Ocean knob, and the SimConfig keys the Ocean bounds
-//                 (oceanSimConfigError: the current, foodPatchRadius): its
+//                 (oceanSimConfigError: the current, foodPatchRadius, the
+//                 energies at ±1e6, foodLife at 3600): its
 //                 range's ends accepted, just outside, inf and the -1e37 hole
 //                 refused (oc_init, oc_set_param); a run at each end stays
 //                 finite; bool / mode keys strict
@@ -173,9 +188,19 @@
 //                 themselves accepted. (Every shim call is made before
 //                 oc_last_error() is read: as arguments of one expect() their
 //                 order was unspecified.)
+//   shim_bools    bool keys (kSimConfigBoolKeys, kOceanBoolKeys, by member): a
+//                 SimConfig switch is true / false ({"toroidal":1} used to be
+//                 ignored, the world kept walls: now refused), an Ocean one
+//                 true / false / 0 / 1; anything else refused with the key
+//                 named, every occurrence (a repeated key too), via oc_init too
+//
+//   preflight     `--accepts` asks a case's --set changes by step, as the
+//                 driver applies them (stable within a step; past STEPS not
+//                 asked): minSpeed=200@10 + maxSpeed=300@5 over 20 steps is
+//                 accepted in both argument orders
 //
 // `ocean_tests --accepts SEED STEPS [driver args]` instead asks the shim
-// whether it would accept one ocean_parity_driver case (see acceptsMain).
+// whether it would accept one ocean_parity_driver case (see acceptsCase).
 //
 // Build with -DOCEAN_TESTS_NO_SHIM to leave out the shim-based checks.
 #include <algorithm>
@@ -194,6 +219,15 @@
 #include "../tools/ocean_fingerprint.hpp"
 #ifndef OCEAN_TESTS_NO_SHIM
 #include "../wasm/ocean_wasm.cpp"
+#endif
+#define OCEAN_PROBE_NO_MAIN
+#include "../tools/ocean_probe.cpp"   // probeInitWorld (the "probe" check)
+#ifdef EVO_OCEAN_EYE
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"   // the tool's own entry points
+#define OCEAN_EYE_EXP_NO_MAIN
+#include "../tools/ocean_eye_exp.cpp"   // its behavioural probe and wiring classifier (eye_exp)
+#pragma GCC diagnostic pop
 #endif
 
 namespace ot {
@@ -1623,6 +1657,42 @@ void testFoodLife() {
         t.expect(!oceanConfigValid(oc), "foodLife -1 accepted");
         oc.foodLife = std::numeric_limits<float>::infinity();
         t.expect(!oceanConfigValid(oc), "foodLife inf accepted");
+        // The range ends where a float age still advances accurately by dt
+        // (kOceanMaxFoodLife); 1e6 used to be accepted, and from 2^19 s an age
+        // stops growing (age + dt == age): such an item never expired.
+        oc.foodLife = kOceanMaxFoodLife;
+        t.expect(oceanConfigValid(oc) && kOceanMaxFoodLife == 3600.0f, "foodLife %g (the range end) refused", oc.foodLife);
+        for (float v : {std::nextafter(kOceanMaxFoodLife, 1e9f), 3601.0f, 524288.0f, 1e6f}) {
+            oc.foodLife = v;
+            t.expect(!oceanConfigValid(oc), "foodLife %.9g accepted", (double)v);
+        }
+    }
+    // At the range end every age still advances each step: an item placed at
+    // foodLife - 0.0625 goes on the fourth step (an add there is 0.01611 s:
+    // 0.0644 in four), and items at 2048 and 3000 age by a step's worth.
+    {
+        OceanConfig oc;
+        oc.foodLife = kOceanMaxFoodLife;
+        OceanWorld w;
+        initQuiet(w, 31, 240.0f, oc);
+        const float ages[] = {kOceanMaxFoodLife - 0.0625f, 2048.0f, 3000.0f};
+        for (float a : ages) {
+            OceanFood f;
+            f.pos = {300.0f + a / 10.0f, 500.0f};
+            f.depth = 120.0f;
+            f.age = a;
+            w.food.push_back(f);
+        }
+        int goneAt = -1;
+        for (int s = 1; s <= 4; ++s) {
+            w.update(0.016f);
+            if (goneAt < 0 && w.food.size() == 2) goneAt = s;
+        }
+        t.expect(goneAt == 4 && w.totalFoodExpired == 1, "foodLife %g: an item at %.9g went at step %d (expected 4), %lld expired",
+                 (double)kOceanMaxFoodLife, (double)ages[0], goneAt, w.totalFoodExpired);
+        const bool aged = w.food.size() == 2 && w.food[0].age > ages[1] + 0.06f && w.food[0].age < ages[1] + 0.07f &&
+                          w.food[1].age > ages[2] + 0.06f && w.food[1].age < ages[2] + 0.07f;
+        t.expect(aged, "foodLife %g: the items at 2048 / 3000 did not age by ~0.064 s in 4 steps", (double)kOceanMaxFoodLife);
     }
     // Hand-placed items in a quiet world (no fish, no spawn): with foodLife 1 each one
     // goes on the first step its age reaches 1 — an item placed at age a lasts
@@ -1683,6 +1753,30 @@ void testFoodLife() {
         t.expect(w.food.size() >= 1500 && w.food.size() <= 1503, "stock %zu, expected 1500..1503", w.food.size());
         t.expect(w.totalFoodExpired >= 2000, "only %lld expired (the first stock alone is 2000)", w.totalFoodExpired);
     }
+    // The spawn cap (targetFood·2) counts live items: what expires frees its
+    // place in the same step's spawn. No fish, targetFood 1 (cap 2), 2 items a
+    // step, each lasting one step (foodLife = dt): 2 live items after every
+    // step (the cap used to count the expired items until the end-of-step
+    // erase: one replacement a step, a stock of 1). Off: the cap holds 2.
+    for (int on = 0; on < 2; ++on) {
+        OceanWorld w;
+        std::string err;
+        const char* cfg = on ? R"({"minPopulation":0,"targetFood":1,"foodSpawnBase":2,"foodSpawnAmp":0,"foodLife":0.016})"
+                             : R"({"minPopulation":0,"targetFood":1,"foodSpawnBase":2,"foodSpawnAmp":0})";
+        if (!t.expect(ofp::initWorld(w, 30, 1920, 1080, 240.0f, 0, cfg, err), "%s refused: %s", cfg, err.c_str())) continue;
+        int wrongAt = -1;
+        std::size_t wrongStock = 0;
+        for (int s = 1; s <= 50; ++s) {
+            w.update(dt);
+            const bool allLive = std::all_of(w.food.begin(), w.food.end(), [](const OceanFood& f) { return f.alive; });
+            if ((w.food.size() != 2 || !allLive) && wrongAt < 0) { wrongAt = s; wrongStock = w.food.size(); }
+        }
+        t.expect(wrongAt < 0, "foodLife %s, cap 2, 2 items/step: stock %zu after step %d, expected 2 live items",
+                 on ? "0.016" : "off", wrongStock, wrongAt);
+        const long long wantExpired = on ? 1 + 2 * 49 : 0;   // the first item, then both every step
+        t.expect(w.totalFoodExpired == wantExpired, "foodLife %s: %lld expired in 50 steps, expected %lld",
+                 on ? "0.016" : "off", w.totalFoodExpired, wantExpired);
+    }
     // Draws do not depend on foodLife (spawn cap not reached).
     {
         OceanWorld a, b;
@@ -1711,6 +1805,80 @@ void testFoodLife() {
         for (OceanFood& f : z.food) f.age = 0.0f;
         t.expect(ofp::fingerprint(w).food != ofp::fingerprint(z).food,
                  "foodLife switched off: the kept ages are invisible to the fingerprint");
+    }
+}
+
+// OceanWorld::totalNonFiniteRemoved: the non-finite floats an object held when
+// the end-of-step erase removed it (the driver adds them to its per-step scan;
+// an object that died of an infinity within a step used to leave no trace).
+// The Codex audit's fixture, validation bypassed (moveCost 1e38 is refused
+// now): one fish at speed 30, its step cost inf, reserves -inf; it starves and
+// the world it leaves is finite. Likewise a predator (predatorMoveCost 1e38)
+// and a food item (size inf, eaten). Finite deaths count nothing; the counter
+// is not hashed, and init resets it.
+void testRemovedNonFinite() {
+    Test t("nonfinite_rm");
+    const float inf = std::numeric_limits<float>::infinity();
+    {   // a fish
+        OceanWorld w;
+        initQuiet(w, 1501, 240.0f, OceanConfig{});
+        w.cfg.minSpeed = w.cfg.maxSpeed = 30.0f;
+        w.cfg.moveCost = 1e38f;
+        addFish(w, {600.0f, 500.0f}, 120.0f, {}, 0.5f);
+        w.update(0.016f);
+        t.expect(w.creatures.empty() && w.totalDeathsStarvation == 1 && ofp::countNonFinite(w) == 0 &&
+                     w.totalNonFiniteRemoved >= 1,
+                 "moveCost 1e38: pop %zu, %lld starved, %ld non-finite in the world, %lld in removed objects (want 0, 1, 0, >= 1)",
+                 w.creatures.size(), w.totalDeathsStarvation, ofp::countNonFinite(w), w.totalNonFiniteRemoved);
+    }
+    {   // a predator
+        OceanWorld w;
+        initQuiet(w, 1502, 240.0f, OceanConfig{});
+        w.cfg.predatorEconomy = true;
+        w.cfg.predatorMoveCost = 1e38f;
+        OceanPredator p;
+        p.pos = {600.0f, 500.0f};
+        p.vel = {1.0f, 0.0f};
+        p.depth = 120.0f;
+        p.energy = 30.0f;
+        w.predators.push_back(p);
+        w.update(0.016f);
+        t.expect(w.predators.empty() && w.totalPredatorDeathsStarvation == 1 && ofp::countNonFinite(w) == 0 &&
+                     w.totalNonFiniteRemoved >= 1,
+                 "predatorMoveCost 1e38: %zu predators, %lld starved, %ld / %lld non-finite (want 0, 1, 0, >= 1)",
+                 w.predators.size(), w.totalPredatorDeathsStarvation, ofp::countNonFinite(w), w.totalNonFiniteRemoved);
+    }
+    {   // a food item of infinite size, eaten
+        OceanWorld w;
+        initQuiet(w, 1503, 240.0f, OceanConfig{});
+        addFish(w, {600.0f, 500.0f}, 120.0f, {}, 0.5f);
+        OceanFood f;
+        f.pos = {600.0f, 500.0f};
+        f.depth = 120.0f;
+        f.size = inf;
+        w.food.push_back(f);
+        w.update(0.016f);
+        t.expect(w.food.empty() && w.totalFoodEaten == 1 && ofp::countNonFinite(w) == 0 && w.totalNonFiniteRemoved == 1,
+                 "food of size inf: %zu left, %lld eaten, %ld / %lld non-finite (want 0, 1, 0, 1)", w.food.size(),
+                 w.totalFoodEaten, ofp::countNonFinite(w), w.totalNonFiniteRemoved);
+    }
+    {   // finite deaths (starvation, predation, predator economy) count nothing
+        OceanWorld w;
+        std::string err;
+        if (t.expect(ofp::initWorld(w, 1504, 1920, 1080, 240.0f, 300,
+                                    R"({"predatorCount":4,"predatorEconomy":true,"predatorMinPopulation":2,"metabolicRate":3})", err),
+                     "init: %s", err.c_str())) {
+            for (int s = 0; s < 600; ++s) w.update(0.016f);
+            t.expect(w.totalDeaths > 0 && w.totalNonFiniteRemoved == 0, "%lld deaths, %lld non-finite floats removed (want > 0, 0)",
+                     w.totalDeaths, w.totalNonFiniteRemoved);
+            t.note("600 steps, %lld deaths (%lld starved, %lld eaten), %lld food eaten: nothing non-finite removed", w.totalDeaths,
+                   w.totalDeathsStarvation, w.totalDeathsPredation, w.totalFoodEaten);
+            const ofp::Fingerprint fp = ofp::fingerprint(w);
+            w.totalNonFiniteRemoved = 7;
+            t.expect(ofp::fingerprint(w) == fp, "totalNonFiniteRemoved changed the fingerprint (it is a diagnostic)");
+            ofp::initWorld(w, 1504, 1920, 1080, 240.0f, 10, nullptr, err);
+            t.expect(w.totalNonFiniteRemoved == 0, "init kept totalNonFiniteRemoved %lld", w.totalNonFiniteRemoved);
+        }
     }
 }
 
@@ -3193,8 +3361,20 @@ void testRanges() {
         {"foodPatchRadius", 0, 100000, R"("toroidal":true,"foodPatches":3,)"},
         {"foodSpawnBase", -10000, 10000, ""}, {"foodSpawnAmp", -10000, 10000, ""},
         {"maxSpeed", 30, 2000, ""}, {"predatorSpeed", 0, 2000, R"("predatorCount":3,)"},
-        // the food lifetime (ocean-vision)
-        {"foodLife", 0, 1e6, ""},
+        // the food lifetime (ocean-vision): up to kOceanMaxFoodLife
+        {"foodLife", 0, 3600, ""},
+        // the energies, [-1e6, 1e6] (kOceanMaxEnergy); fish at the fastest
+        // speed / with many genes / deep where it matters (predators: their
+        // economy on, at most 50 of them: reproEnergy -1e6 buds every step)
+        {"foodEnergy", -1e6, 1e6, R"("pickupRadius":1000000,)"},
+        {"metabolicRate", -1e6, 1e6, R"("bodyModel":true,"depthCostScaled":true,"cHold":100,"cPress":100,)"},
+        {"geneCost", -1e6, 1e6, ""}, {"moveCost", -1e6, 1e6, R"("minSpeed":2000,"maxSpeed":2000,)"},
+        {"reproEnergy", -1e6, 1e6, ""}, {"newbornEnergy", -1e6, 1e6, R"("reproEnergy":0,)"},
+        {"predatorMetabolism", -1e6, 1e6, R"("predatorEconomy":true,"predatorMaxPopulation":50,)"},
+        {"predatorMoveCost", -1e6, 1e6, R"("predatorEconomy":true,"predatorMaxPopulation":50,"predatorSpeed":2000,)"},
+        {"predatorReproEnergy", -1e6, 1e6, R"("predatorEconomy":true,"predatorMaxPopulation":50,)"},
+        {"predatorNewbornEnergy", -1e6, 1e6, R"("predatorEconomy":true,"predatorMaxPopulation":50,"predatorReproEnergy":0,)"},
+        {"predatorMeal", -1e6, 1e6, R"("predatorEconomy":true,"predatorMaxPopulation":50,"predatorCooldown":0,)"},
     };
     auto cfgOf = [](const K& k, double v) {
         char num[40];
@@ -3210,7 +3390,10 @@ void testRanges() {
             ++accepted;
             oc_step(300);
             ++runs;
-            t.expect(ofp::countNonFinite(*g_world) == 0, "%s: non-finite state after 300 steps", c.c_str());
+            // finite now, and nothing removed on the way held a non-finite float
+            t.expect(ofp::countNonFinite(*g_world) == 0 && g_world->totalNonFiniteRemoved == 0,
+                     "%s: non-finite state after 300 steps (%lld floats in removed objects)", c.c_str(),
+                     g_world->totalNonFiniteRemoved);
             for (const Fish& f : g_world->creatures)
                 if (!t.expect(f.depth >= 0.0f && f.depth <= g_world->D, "%s: depth %.9g", c.c_str(), f.depth)) break;
         }
@@ -3226,7 +3409,13 @@ void testRanges() {
                           R"({"foodDepthMode":0.5})", R"({"foodDepthMode":1e300})", R"({"waveBand":0})",
                           // the current's int keys, and the config that hung wrapCoord
                           R"({"currentMode":2})", R"({"currentMode":-1})", R"({"currentEddies":101})", R"({"currentEddies":-1})",
-                          R"({"currentMode":1,"currentStrength":1e20,"deepCurrent":true,"foodDrift":true,"targetFood":1})"})
+                          R"({"currentMode":1,"currentStrength":1e20,"deepCurrent":true,"foodDrift":true,"targetFood":1})",
+                          // finite energies that overflowed (the Codex audit): reserves +inf from four
+                          // items, a step's cost inf (reserves -inf), a predator's energy inf
+                          R"({"minPopulation":0,"pickupRadius":1000000,"foodEnergy":1e38})",
+                          R"({"minPopulation":0,"targetFood":0,"foodSpawnBase":0,"foodSpawnAmp":0,"minSpeed":30,"maxSpeed":30,"moveCost":1e38})",
+                          R"({"geneCost":1e38})", R"({"predatorCount":4,"predatorEconomy":true,"predatorMeal":3e38})",
+                          R"({"predatorCount":2,"predatorEconomy":true,"predatorMoveCost":1e38})"})
         refused += t.expect(oc_init(1002, 1920, 1080, 240.0, 100, c) == 0, "%s accepted", c);
     for (const char* c : {R"({"deepCurrent":1,"sizeDrift":true,"mouthGate":0,"foodDepthMode":1})"}) {
         const int initOk = oc_init(1002, 1920, 1080, 240.0, 100, c);
@@ -3276,6 +3465,88 @@ void testRanges() {
             if (!t.expect(f.pos.x >= 0.0f && f.pos.x < (float)W && f.pos.y >= 0.0f && f.pos.y < (float)W, "corner %d: food off the map", big)) break;
     }
     t.note("%d configs accepted, %d refused; %d runs at range ends, all finite", accepted, refused, runs);
+}
+
+// Bool keys: the shared reader's boolOr kept the old value for anything but a
+// JSON bool ({"toroidal":1} ran with walls while the page showed it on), and
+// readOceanConfig's readBool checked only a key's first occurrence. Now a
+// SimConfig switch must be true / false and an Ocean one true / false / 0 / 1
+// (its live encoding), at every occurrence; anything else is refused with the
+// key named. Every SimConfig and Ocean bool key by member (so the compiler
+// checks each is a bool and that the reader really sets it), then oc_init.
+void testShimBools() {
+    Test t("shim_bools");
+    const struct { const char* key; bool SimConfig::*m; } sims[] = {
+        {"toroidal", &SimConfig::toroidal}, {"bodyModel", &SimConfig::bodyModel},
+        {"triangularMotion", &SimConfig::triangularMotion}, {"foodDrift", &SimConfig::foodDrift},
+        {"predatorEconomy", &SimConfig::predatorEconomy}, {"predatorInheritance", &SimConfig::predatorInheritance},
+        {"fastTanh", &SimConfig::fastTanh},
+    };
+    const struct { const char* key; bool OceanConfig::*m; } oceans[] = {
+        {"deepCurrent", &OceanConfig::deepCurrent}, {"lightEnabled", &OceanConfig::lightEnabled},
+        {"depthCostScaled", &OceanConfig::depthCostScaled}, {"sizeDrift", &OceanConfig::sizeDrift},
+        {"sizeFight", &OceanConfig::sizeFight}, {"mouthGate", &OceanConfig::mouthGate},
+    };
+    t.expect(sizeof sims / sizeof sims[0] == sizeof kSimConfigBoolKeys / sizeof kSimConfigBoolKeys[0] &&
+                 sizeof oceans / sizeof oceans[0] == sizeof kOceanBoolKeys / sizeof kOceanBoolKeys[0],
+             "the bool-key lists and the member tables differ in size");
+    using Good = std::vector<std::pair<const char*, bool>>;
+    const Good simGood = {{"true", true}, {"false", false}};
+    const Good oceanGood = {{"true", true}, {"false", false}, {"1", true}, {"0", false}, {"1.0", true}, {"-0", false}};
+    std::vector<const char*> bad = {"2", "0.5", "-1", "1e300", "\"yes\"", "\"true\"", "null", "[1]", "{}"};
+    std::vector<const char*> simBad = bad;
+    for (const char* n : {"1", "0", "1.0", "-0"}) simBad.push_back(n);   // a SimConfig switch is a JSON bool
+    int accepted = 0, refused = 0;
+    // One checker for both tables: get(sc, oc) is the key's stored bool.
+    auto check = [&](const char* key, const Good& good, const std::vector<const char*>& bad, auto get, auto set) {
+        t.expect(isSimConfigBoolKey(key) || isOceanBoolKey(key), "%s is in neither bool-key list", key);
+        for (const auto& g : good) {
+            SimConfig sc;
+            OceanConfig oc;
+            set(sc, oc, !g.second);   // the opposite first: the read must set it
+            std::string err;
+            const std::string j = std::string("{\"") + key + "\":" + g.first + "}";
+            accepted += t.expect(readOceanJson(j.c_str(), sc, oc, err) && get(sc, oc) == g.second, "%s: refused or read %d (%s)",
+                                 j.c_str(), (int)get(sc, oc), err.c_str());
+        }
+        for (const char* b : bad)
+            for (int form = 0; form < 3; ++form) {   // alone, after a good occurrence, before one
+                SimConfig sc;
+                OceanConfig oc;
+                const bool before = get(sc, oc);
+                std::string err;
+                const std::string kb = std::string("\"") + key + "\":" + b, kg = std::string("\"") + key + "\":true";
+                const std::string j = "{" + (form == 0 ? kb : form == 1 ? kg + "," + kb : kb + "," + kg) + "}";
+                refused += t.expect(!readOceanJson(j.c_str(), sc, oc, err) && get(sc, oc) == before &&
+                                        err.find(key) != std::string::npos,
+                                    "%s: accepted, or the error does not name the key (%s)", j.c_str(), err.c_str());
+            }
+    };
+    for (const auto& k : sims)
+        check(k.key, simGood, simBad, [&](const SimConfig& sc, const OceanConfig&) { return sc.*k.m; },
+              [&](SimConfig& sc, OceanConfig&, bool v) { sc.*k.m = v; });
+    for (const auto& k : oceans)
+        check(k.key, oceanGood, bad, [&](const SimConfig&, const OceanConfig& oc) { return oc.*k.m; },
+              [&](SimConfig&, OceanConfig& oc, bool v) { oc.*k.m = v; });
+    // Through oc_init: the switches as JSON bools (and an Ocean one as 1) are
+    // stored; {"toroidal":1} (it used to run with walls), 2, a string, null and
+    // a bad repeat are refused, the world kept.
+    {
+        const int a = oc_init(1309, 1920, 1080, 240.0, 50, R"({"toroidal":true,"foodDrift":true,"bodyModel":false,"deepCurrent":1})");
+        t.expect(a == 1 && g_world->cfg.toroidal && g_world->cfg.foodDrift && !g_world->cfg.bodyModel && g_world->ocfg.deepCurrent,
+                 "oc_init {toroidal true, foodDrift true, bodyModel false, deepCurrent 1}: %s",
+                 a ? "not stored as on / on / off / on" : oc_last_error());
+        const ofp::Fingerprint kept = ofp::fingerprint(*g_world);
+        for (const char* c : {R"({"toroidal":1})", R"({"foodDrift":0})", R"({"toroidal":2})", R"({"predatorEconomy":"yes"})",
+                              R"({"fastTanh":null})", R"({"deepCurrent":true,"deepCurrent":"x"})",
+                              R"({"triangularMotion":true,"triangularMotion":0.5})"}) {
+            const int rc = oc_init(1310, 1920, 1080, 240.0, 50, c);
+            const std::string e = oc_last_error();
+            refused += t.expect(rc == 0 && e.find("true / false") != std::string::npos, "oc_init %s: rc %d (%s)", c, rc, e.c_str());
+        }
+        t.expect(ofp::fingerprint(*g_world) == kept, "a refused oc_init changed the world");
+    }
+    t.note("%d bool values read, %d refused (every key: alone, and repeated before / after a good value)", accepted, refused);
 }
 
 // Integer knobs and the values that reach an int conversion (the Codex
@@ -3566,6 +3837,32 @@ void testLazyWaves() {
     const std::uint64_t freshGeo = ofp::fingerprint(fresh).geo;
     ofp::initWorld(a, 1704, 1920, 1080, 240.0f, 80, nullptr, err);
     t.expect(unprepared(a) && ofp::fingerprint(a).geo == freshGeo, "a reused world kept its prepared waves");
+    // Every public flow reader prepares the modes when it is the first reader
+    // after the waves came on directly — the tapered overload
+    // waveTrainExactAt(i, p, d, taperAt(d)) too (it read the unprepared modes
+    // and gave zero flow). Its trains == an eagerly prepared world's, bit for
+    // bit; with the waves still off it prepares nothing and gives zero.
+    {
+        OceanWorld eager, lazy;
+        ofp::initWorld(eager, 1705, 1920, 1080, 240.0f, 0, on, err);
+        ofp::initWorld(lazy, 1705, 1920, 1080, 240.0f, 0, off, err);
+        const Vec2 p{300.0f, 400.0f};
+        const float d = 60.0f;
+        const OceanWorld::Flow z = lazy.waveTrainExactAt(0, p, d, lazy.taperAt(d));
+        t.expect(unprepared(lazy) && z.x == 0.0f && z.y == 0.0f && z.d == 0.0f,
+                 "the tapered reader with the waves off: prepared them, or gave flow");
+        lazy.ocfg.waveSpeed = 6.0f;
+        bool same = true, moving = false;
+        for (int i = 0; i < OceanWorld::kWaveTrains; ++i) {
+            const OceanWorld::Flow u = lazy.waveTrainExactAt(i, p, d, lazy.taperAt(d));   // the first reader (i = 0)
+            const OceanWorld::Flow e = eager.waveTrainExactAt(i, p, d);
+            same &= ofp::bits(u.x) == ofp::bits(e.x) && ofp::bits(u.y) == ofp::bits(e.y) && ofp::bits(u.d) == ofp::bits(e.d);
+            moving |= u.x != 0.0f || u.y != 0.0f || u.d != 0.0f;
+        }
+        t.expect(sameModes(eager, lazy) && same && moving,
+                 "the tapered reader first after the waves came on: unprepared modes or zero flow (%d %d %d)",
+                 (int)sameModes(eager, lazy), (int)same, (int)moving);
+    }
 }
 
 // The loops OceanWorld::wrapCoord replaced (capped: n counts the passes).
@@ -3741,7 +4038,7 @@ void testPreset() {
 // oc_init / oc_set_param: an int key's JSON number must be a whole number in
 // int's range (refused before any cast, at every occurrence of the key), then
 // lie in its range (eye / eyeOnly 0..1 and eyeCode 0..31 in the eye build, 0 in
-// the plain one; steerFrame 0..1); foodLife in [0, 1e6]; a refused call keeps
+// the plain one; steerFrame 0..1); foodLife in [0, 3600]; a refused call keeps
 // the world as it was.
 void testVisionKeys() {
     Test t("vision_keys");
@@ -3786,7 +4083,8 @@ void testVisionKeys() {
         {R"({"eyeCode":8})", true, false},        {R"({"eye":1,"eyeOnly":1,"eyeCode":16})", true, false},
         {R"({"eyeCode":31})", true, false},       {R"({"eyeCode":32})", false, false},
         {R"({"foodLife":0})", true, true},        {R"({"foodLife":12.5})", true, true},
-        {R"({"foodLife":1e6})", true, true},      {R"({"foodLife":1000001})", false, false},
+        {R"({"foodLife":3600})", true, true},     {R"({"foodLife":3600.5})", false, false},
+        {R"({"foodLife":1e6})", false, false},    {R"({"foodLife":1000001})", false, false},
         {R"({"foodLife":-0.001})", false, false}, {R"({"foodLife":1e39})", false, false},
         {R"({"foodLife":-1e39})", false, false},
     };
@@ -3806,7 +4104,7 @@ void testVisionKeys() {
         const ofp::Fingerprint before = ofp::fingerprint(*g_world);
         struct L { const char* key; double v; };
         const L bad[] = {{"steerFrame", 0.5}, {"steerFrame", 2.0}, {"steerFrame", 2147483648.0}, {"eyeOnly", 1.5},
-                         {"eyeCode", 32.0}, {"eyeCode", 1e300}, {"eye", 0.25}, {"eye", 2.0}, {"foodLife", 1e7},
+                         {"eyeCode", 32.0}, {"eyeCode", 1e300}, {"eye", 0.25}, {"eye", 2.0}, {"foodLife", 1e7}, {"foodLife", 3601.0},
                          {"foodLife", std::numeric_limits<double>::infinity()}, {"foodLife", -1.0},
                          {"eyeCode", std::numeric_limits<double>::quiet_NaN()}};
         for (const L& l : bad) {
@@ -3888,33 +4186,63 @@ void testEyeE1() {
                  "mouth-gated food: eye ahead %.4f, smell dist %.4f density %.4f (expected seen, not smelled)",
                  S[EYE_AHEAD_PROX], S[NEAREST_FOOD_DIST], S[FOOD_DENSITY]);
     }
-    {   // (3) no side effects under E1 (the preset + a predator economy), eye on vs off
+    {   // (3) no side effects under E1, eye on vs off. The world is built from ONE
+        // parsed config (it used to be parsed and dropped: initQuiet built its own,
+        // economy off, metabolism 0): the E1 preset, its SimConfig half too
+        // (currentStrength 5, foodDrift), a predator economy (3 predators) and the
+        // default metabolism, which the preset's scaled depth costs multiply; no
+        // founders, food spawn or floor (unwired fish and food are added below).
+        // What the case is for is asserted before anything is compared.
         ofp::Fingerprint fp[2];
         for (int k = 0; k < 2; ++k) {
-            OceanConfig oc;
-            OceanWorld w;
-            std::string err;
             SimConfig sc;
             applyOceanDefaults(sc);
+            OceanConfig oc;
+            std::string err;
             std::string json = std::string(kE1PresetJson);
             json.back() = ',';
-            json += k ? R"("eye":1})" : R"("eye":0})";
-            if (!t.expect(readOceanJson(json.c_str(), sc, oc, err), "preset: %s", err.c_str())) break;
-            initQuiet(w, 1304, 240.0f, oc, /*capture*/ true, false, 5.0f);
-            w.cfg.foodDrift = true;
-            w.cfg.predatorCount = 3;
-            for (int j = 0; j < 300; ++j)
-                addFish(w, {rng.range(10.0f, 1910.0f), rng.range(10.0f, 1070.0f)}, rng.range(0.0f, 240.0f), {}, 0.5f);
-            for (int j = 0; j < 500; ++j) w.spawnFood();
-            for (int j = 0; j < 3; ++j) {
-                OceanPredator p;
-                p.pos = {rng.range(10.0f, 1910.0f), rng.range(10.0f, 1070.0f)};
-                p.vel = {1.0f, 0.0f};
-                p.depth = rng.range(0.0f, 240.0f);
-                w.predators.push_back(p);
+            json += R"("predatorCount":3,"predatorEconomy":true,"minPopulation":0,"targetFood":0,"foodSpawnBase":0,)"
+                    R"("foodSpawnAmp":0,"maxAge":1e9,"eye":)";
+            json += k ? "1}" : "0}";
+            if (!t.expect(readOceanJson(json.c_str(), sc, oc, err), "%s: %s", json.c_str(), err.c_str())) break;
+            clampOceanSimConfig(sc);
+            sc.captureActivations = true;
+            oc.depth = 240.0f;
+            const std::string bad = oceanConfigError(oc) + oceanSimConfigError(sc);
+            t.expect(bad.empty(), "the intended config is out of range: %s", bad.c_str());
+            t.expect(sc.predatorEconomy && sc.predatorCount == 3 && sc.metabolicRate > 0.0f && oc.depthCostScaled &&
+                         oc.cHold > 0.0f && oc.cPress > 0.0f && sc.currentStrength == 5.0f && sc.foodDrift && oc.eye == k,
+                     "eye %d: not the intended world (economy %d, %d predators, metabolism %g, scaled costs %d)", k,
+                     (int)sc.predatorEconomy, sc.predatorCount, (double)sc.metabolicRate, (int)oc.depthCostScaled);
+            OceanWorld w;
+            rng.seed(1304);
+            w.cfg = sc;
+            w.ocfg = oc;
+            w.init(1920, 1080, 240.0f, 0);   // the 3 economy predators; no founders, no food
+            for (int j = 0; j < 300; ++j) {
+                // one draw per statement: the order of a call's arguments is
+                // unspecified (g++ and clang differ), the order of statements is not
+                const float x = rng.range(10.0f, 1910.0f);
+                const float y = rng.range(10.0f, 1070.0f);
+                const float z = rng.range(0.0f, 240.0f);
+                addFish(w, {x, y}, z, {}, 0.5f);
             }
+            for (int j = 0; j < 500; ++j) w.spawnFood();
+            const float e0 = w.predators.empty() ? 0.0f : w.predators[0].energy;
             for (int s = 0; s < 300; ++s) w.update(0.016f);
             t.expect(w.flowE1(), "the E1 flow is off");
+            // The economy and the metabolism really ran: a meal, a bud or a predator
+            // death, and the fish spent energy.
+            const long long econ = w.totalDeathsPredation + w.totalPredatorBirths + w.totalPredatorDeathsStarvation +
+                                   w.totalPredatorDeathsAge;
+            float spent = 0.0f;
+            for (const Fish& c : w.creatures) spent = std::max(spent, 30.0f - c.foodReserves);
+            t.expect(econ > 0 && spent > 0.0f && !w.predators.empty() && w.predators[0].energy != e0,
+                     "eye %d: the economy / metabolism did not run (%lld events, most spent %g)", k, econ, (double)spent);
+            if (k == 1)
+                t.note("unwired E1 world + predator economy, 300 steps: %lld meals, %lld predator births, %lld starved, "
+                       "%lld fish births, eye on == eye off", w.totalDeathsPredation, w.totalPredatorBirths,
+                       w.totalDeathsStarvation, w.totalBirths);
             fp[k] = ofp::fingerprint(w, /*withActivations*/ false);
         }
         t.expect(fp[0].ctr == fp[1].ctr && fp[0].fish == fp[1].fish && fp[0].food == fp[1].food &&
@@ -3955,18 +4283,198 @@ void testEyeE1() {
     }
 }
 
+// tools/ocean_eye_exp.cpp's behavioural probe (eye build), on fish whose
+// steering is known exactly: the only wire is hidden neuron 0 (undriven:
+// 0.5) -> STEER_X, so STEER_X = tanh(0.5 w) in every scene. base_abs is the
+// mean over the 8 headings of |the lateral steer with nothing in view|, base_x
+// its signed mean. World frame (steerFrame 0): the lateral part of a steady
+// world-x push is STEER_X · right.x, which changes sign around the headings:
+// base_x ~ 0 and base_abs = |STEER_X| · mean |right.x| (base_abs used to be
+// |base_x|, ~0 here). Own frame (steerFrame 1): base_abs = base_x = STEER_X.
+void testEyeExpProbe() {
+    Test t("eye_exp_probe");
+#ifdef EVO_OCEAN_EYE
+    for (int frame = 0; frame < 2; ++frame) {
+        OceanWorld w;
+        std::string err;
+        if (!t.expect(ofp::initWorld(w, 1801, 1920, 1080, 240.0f, 0,
+                                     frame ? R"({"eye":1,"eyeOnly":1,"steerFrame":1})" : R"({"eye":1,"eyeOnly":1})", err),
+                      "init: %s", err.c_str()))
+            continue;
+        RandomGen sceneRng;
+        const OceanWorld tmpl = behavTemplate(w, 7, sceneRng);
+        Probe pr{tmpl, sceneRng};
+        Fish f;
+        f.genome = {mkGene(false, 0, STEER_X, 6000)};
+        const RandomGen keep = rng;
+        f.init({960.0f, 540.0f}, 120.0f);
+        rng = keep;
+        buildNeuralNet(f.genome, f.nnet);
+        float acts[NUM_ACTIONS];
+        pr.act(f, {1.0f, 0.0f}, 0, 0, acts);
+        const float sx = acts[STEER_X];
+        double idx[kBehavIdx];
+        behaveOne(pr, f, frame == 1, idx);
+        Behav b;
+        addBehav(b, idx);
+        double want = 0.0, wantX = 0.0;
+        for (int h = 0; h < 8; ++h) {   // behaveOne's headings and lateral component
+            const float a = 6.2831853f * (float)h / 8 + 0.3f;
+            const float rx = -evomath::sinf(a);
+            const float lat = frame ? sx : sx * rx;
+            want += std::abs(lat) / 8.0;
+            wantX += lat / 8.0;
+        }
+        const char* fr = frame ? "own frame" : "world frame";
+        t.expect(std::abs(sx - std::tanh(0.5 * 6000.0 / 8192.0)) < 1e-5, "%s: STEER_X %.6f, expected tanh(0.5 w)", fr, (double)sx);
+        t.expect(std::abs(b.base_abs - want) < 1e-6 && std::abs(b.base_x - wantX) < 1e-6,
+                 "%s: base_abs %.6f base_x %.6f, expected %.6f %.6f", fr, b.base_abs, b.base_x, want, wantX);
+        if (frame == 0)
+            t.expect(std::abs(b.base_x) < 1e-5 && b.base_abs > 0.6 * sx, "world frame: base_x %.6f (want ~0), base_abs %.6f (want > 0)",
+                     b.base_x, b.base_abs);
+        else
+            t.expect(std::abs(b.base_abs - sx) < 1e-6 && std::abs(b.base_x - sx) < 1e-6, "own frame: base_abs %.6f base_x %.6f, want %.6f",
+                     b.base_abs, b.base_x, (double)sx);
+        t.note("%s, steady STEER_X %.4f: base_abs %.4f, base_x %.4f (|base_x|, the old base_abs: %.4f)", fr, (double)sx,
+               b.base_abs, b.base_x, std::abs(idx[12]));
+    }
+#endif
+}
+
+// tools/ocean_eye_exp.cpp's wiring classifier (eye build) against the engine.
+// For fish wired directly from eye inputs to STEER_X (steerFrame 1: + = a push
+// to the right; direct wires, so STEER_X = tanh(the summed input · weight)),
+// the gains it computes for food on the left / right (gL, gR: the path gains
+// times the inputs that food produces in the run's encoding) must give the
+// STEER_X the fish really makes in those scenes, for every encoding 0..7. The
+// Codex audit's fixture (perceptionRadius 100, D 240; left PROX +1, left CON
+// -1, right PROX -1, right CON +1) is bi_away under eyeCode 1 (faded
+// contrast: both turns away from food) and bi_toward under eyeCode 0; the
+// classifier used the code-0 inputs for every code, so it said bi_toward for
+// both.
+void testEyeExpWiring() {
+    Test t("eye_exp_wiring");
+#ifdef EVO_OCEAN_EYE
+    struct W { int sensor, weight; };
+    const std::vector<std::vector<W>> wirings = {
+        {{EYE_LEFT_PROX, 8192}, {EYE_LEFT_CON, -8192}, {EYE_RIGHT_PROX, -8192}, {EYE_RIGHT_CON, 8192}},   // the audit's
+        {{EYE_LEFT_PROX, 8192}, {EYE_LEFT_CON, -6144}, {EYE_RIGHT_PROX, -8192}, {EYE_RIGHT_CON, 6144}},
+        {{EYE_RIGHT_PROX, 8192}},                                    // one slot (opponent pairs: both sides)
+        {{EYE_LEFT_SIZE, -8192}, {EYE_RIGHT_SIZE, 8192}},
+        {{EYE_LEFT_CON, 4096}, {EYE_RIGHT_PROX, 8192}, {EYE_RIGHT_SIZE, -4096}, {EYE_AHEAD_PROX, 8192}},
+    };
+    long compared = 0;
+    int auditClass[2] = {-1, -1};   // eyeCode 0, 1
+    for (int code = 0; code <= 7; ++code) {
+        OceanWorld w;
+        std::string err;
+        const std::string cfg =
+            R"({"eye":1,"eyeOnly":1,"steerFrame":1,"perceptionRadius":100,"eyeCode":)" + std::to_string(code) + "}";
+        if (!t.expect(ofp::initWorld(w, 1802, 1920, 1080, 240.0f, 0, cfg.c_str(), err), "init: %s", err.c_str())) continue;
+        double x[4][ocean::kEyeInputs], vf[3];
+        foodSceneInputs(w, 7, x, vf);
+        RandomGen sceneRng;
+        const OceanWorld tmpl = behavTemplate(w, 7, sceneRng);
+        Probe pr{tmpl, sceneRng};
+        for (std::size_t k = 0; k < wirings.size(); ++k) {
+            Fish f;
+            for (const W& g : wirings[k]) f.genome.push_back(mkGene(true, g.sensor, STEER_X, g.weight));
+            const RandomGen keep = rng;
+            f.init({960.0f, 540.0f}, 120.0f);
+            rng = keep;
+            buildNeuralNet(f.genome, f.nnet);
+            std::vector<EyePath> paths;
+            const FishWiring fw = wiringOf(f.nnet, x, vf, paths);
+            float aL[NUM_ACTIONS], aR[NUM_ACTIONS];
+            pr.act(f, {1.0f, 0.0f}, 1, 2, aL);   // food on the left
+            pr.act(f, {1.0f, 0.0f}, 1, 3, aR);   // on the right
+            ++compared;
+            t.expect(std::abs(std::tanh(fw.gL) - aL[STEER_X]) < 1e-5 && std::abs(std::tanh(fw.gR) - aR[STEER_X]) < 1e-5,
+                     "eyeCode %d, wiring %zu: gains (%.5f, %.5f) but STEER_X (%.5f, %.5f) = tanh of (%.5f, %.5f)", code, k, fw.gL,
+                     fw.gR, (double)aL[STEER_X], (double)aR[STEER_X], std::atanh((double)aL[STEER_X]),
+                     std::atanh((double)aR[STEER_X]));
+            if (k == 0 && code <= 1) {
+                auditClass[code] = fw.hclass;
+                t.note("the audit's fixture, eyeCode %d: %s, gains (%+.3f, %+.3f), STEER_X food left %+.3f / right %+.3f", code,
+                       kHClass[fw.hclass], fw.gL, fw.gR, (double)aL[STEER_X], (double)aR[STEER_X]);
+            }
+        }
+    }
+    t.expect(auditClass[0] == 3 && auditClass[1] == 4, "the audit's fixture: %s under eyeCode 0 (want bi_toward), %s under 1 (want bi_away)",
+             auditClass[0] >= 0 ? kHClass[auditClass[0]] : "?", auditClass[1] >= 0 ? kHClass[auditClass[1]] : "?");
+    t.note("%ld wirings x encodings: the classifier's gains == the fish's STEER_X (tanh), food left and right", compared);
+#endif
+}
+
 #ifndef OCEAN_TESTS_NO_SHIM
+// tools/ocean_probe.cpp builds its world as oc_init does (probeInitWorld):
+// the shared clamps (clampOceanSimConfig), then the checks. perceptionRadius
+// 0 used to reach SpatialGrid::init unclamped (a division by zero, infinity
+// cast to int) although the shim stores 1. For each config: the stored radius
+// is the shim's, both neighbour grids' geometry is finite, and the probe's
+// world == the shim's, section by section (the rng included).
+void testProbe() {
+    Test t("probe");
+    struct C { const char* cfg; bool e1; float radius; };
+    const C cs[] = {
+        {R"({"perceptionRadius":0})", false, 1.0f},
+        {R"({"perceptionRadius":0.25,"interactRadius":0,"pickupRadius":0})", false, 1.0f},
+        {nullptr, false, 100.0f},                                   // applyOceanDefaults
+        {R"({"perceptionRadius":0})", true, 1.0f},                  // --e1: the preset first
+    };
+    for (const C& c : cs) {
+        OceanWorld pw;
+        const std::string perr = probeInitWorld(pw, 1401, 1920, 1080, 240.0, 120, c.e1, c.cfg);
+        const char* name = c.cfg ? c.cfg : "{}";
+        if (!t.expect(perr.empty(), "the probe refused %s%s: %s", name, c.e1 ? " --e1" : "", perr.c_str())) continue;
+        const ofp::Fingerprint pf = ofp::fingerprint(pw);   // before oc_init reseeds the shared rng
+        // The shim's world: the preset merged under the cfg for --e1.
+        std::string shimCfg = c.cfg ? c.cfg : "";
+        if (c.e1) {
+            shimCfg = kE1PresetJson;
+            shimCfg.back() = ',';
+            shimCfg += std::string(c.cfg).substr(1);
+        }
+        const int initOk = oc_init(1401, 1920, 1080, 240.0, 120, shimCfg.empty() ? nullptr : shimCfg.c_str());
+        if (!t.expect(initOk == 1, "oc_init refused %s: %s", shimCfg.c_str(), oc_last_error())) continue;
+        t.expect(pw.cfg.perceptionRadius == c.radius && g_world->cfg.perceptionRadius == c.radius,
+                 "%s: perceptionRadius stored %.9g by the probe, %.9g by the shim (expected %.9g)", name,
+                 (double)pw.cfg.perceptionRadius, (double)g_world->cfg.perceptionRadius, (double)c.radius);
+        {   // both neighbour grids (the fish's SpatialGrid, the OceanFoodGrid)
+            const SpatialGrid& g = ofp::field<ofp::peek::OwCreatureGrid>(pw);
+            const OceanFoodGrid& fg = ofp::field<ofp::peek::OwFoodGrid>(pw);
+            const float invs[2] = {ofp::field<ofp::peek::SgInvCell>(g), ofp::field<ofp::peek::FgInvCell>(fg)};
+            const int colss[2] = {ofp::field<ofp::peek::SgCols>(g), ofp::field<ofp::peek::FgCols>(fg)};
+            const int rowss[2] = {ofp::field<ofp::peek::SgRows>(g), ofp::field<ofp::peek::FgRows>(fg)};
+            for (int k = 0; k < 2; ++k)
+                t.expect(std::isfinite(invs[k]) && invs[k] > 0.0f && colss[k] > 0 && rowss[k] > 0,
+                         "%s: probe grid 1/cell %.9g, %d x %d cells", name, (double)invs[k], colss[k], rowss[k]);
+        }
+        const ofp::Fingerprint sf = ofp::fingerprint(*g_world);
+        t.expect(pf == sf, "%s%s: the probe's world != the shim's (cfg %d geo %d rng %d)", name, c.e1 ? " --e1" : "",
+                 pf.cfg == sf.cfg, pf.geo == sf.geo, pf.rng == sf.rng);
+    }
+}
+
 // ocean_tests --accepts SEED STEPS [ocean_parity_driver args]: would the page
 // accept this harness case? oc_init with the case's world and cfg JSON, then
-// oc_set_param for each --set. wasm/ocean_parity.sh asks this of every case,
-// so "extreme but valid" means valid to the shim, not just to the driver.
-int acceptsMain(int argc, char** argv) {
-    if (argc < 4) { std::printf("usage: --accepts SEED STEPS [driver args]\n"); return 2; }
+// oc_set_param for each --set in the order the driver applies them: by step
+// (before step S + 1, after S steps), the argument order kept within a step;
+// a change at S >= STEPS is never applied, so it is not asked either. (It used
+// to ask them in argument order: --set minSpeed=200@10 --set maxSpeed=300@5,
+// which the driver runs, was refused for minSpeed 200 > the default
+// maxSpeed 150.) wasm/ocean_parity.sh asks this of every case, so "extreme
+// but valid" means valid to the shim, not just to the driver. argv as main's
+// (argv[1] = "--accepts"); 0 accepted, 1 refused, 2 bad arguments; msg says why.
+int acceptsCase(int argc, char** argv, std::string& msg) {
+    if (argc < 4) { msg = "usage: --accepts SEED STEPS [driver args]"; return 2; }
     const unsigned seed = (unsigned)std::strtoul(argv[2], nullptr, 10);
+    const long steps = std::strtol(argv[3], nullptr, 10);
     int W = 1920, H = 1080, pop = 300;
     double depth = 240.0;
     const char* cfg = nullptr;
-    std::vector<std::pair<std::string, double>> sets;
+    struct Change { std::string name; double value; long step; };
+    std::vector<Change> sets;
     for (int i = 4; i < argc; ++i) {
         auto is = [&](const char* k) { return std::strcmp(argv[i], k) == 0 && i + 1 < argc; };
         if (is("--w")) W = std::atoi(argv[++i]);
@@ -3974,24 +4482,71 @@ int acceptsMain(int argc, char** argv) {
         else if (is("--depth")) depth = std::atof(argv[++i]);
         else if (is("--pop")) pop = std::atoi(argv[++i]);
         else if (is("--cfg")) cfg = argv[++i];
-        else if (is("--set")) {
+        else if (is("--set")) {   // NAME=VALUE@STEP, parsed as the driver's parseSet
             const char* s = argv[++i];
             const char* eq = std::strchr(s, '=');
-            if (!eq) { std::printf("bad --set %s\n", s); return 2; }
-            sets.emplace_back(std::string(s, eq - s), std::strtod(eq + 1, nullptr));
+            const char* at = std::strrchr(s, '@');
+            if (!eq || !at || at < eq || eq == s) { msg = std::string("bad --set ") + s + " (NAME=VALUE@STEP)"; return 2; }
+            const long step = std::strtol(at + 1, nullptr, 10);
+            if (step < 0) { msg = std::string("bad --set ") + s + " (a negative step)"; return 2; }
+            sets.push_back({std::string(s, eq - s), std::strtod(eq + 1, nullptr), step});
         }
         else if (is("--every") || is("--dump") || is("--dump-step") || is("--expect") || is("--logs")) ++i;
         else if (!std::strcmp(argv[i], "--capture") || !std::strcmp(argv[i], "--trace") || !std::strcmp(argv[i], "--sparse")) {}
-        else { std::printf("unknown driver argument %s\n", argv[i]); return 2; }
+        else { msg = std::string("unknown driver argument ") + argv[i]; return 2; }
     }
-    if (!oc_init(seed, W, H, depth, pop, cfg)) { std::printf("refused by oc_init: %s\n", oc_last_error()); return 1; }
-    for (const auto& s : sets)
-        if (!oc_set_param(s.first.c_str(), s.second)) {
-            std::printf("refused by oc_set_param(%s, %g): %s\n", s.first.c_str(), s.second, oc_last_error());
+    std::stable_sort(sets.begin(), sets.end(), [](const Change& a, const Change& b) { return a.step < b.step; });
+    if (!oc_init(seed, W, H, depth, pop, cfg)) { msg = std::string("refused by oc_init: ") + oc_last_error(); return 1; }
+    for (const Change& s : sets) {
+        if (s.step >= steps) continue;   // after the run's last step: the driver never applies it
+        if (!oc_set_param(s.name.c_str(), s.value)) {
+            char buf[120];
+            std::snprintf(buf, sizeof buf, "refused by oc_set_param(%s, %g) at step %ld: ", s.name.c_str(), s.value, s.step);
+            msg = buf + std::string(oc_last_error());
             return 1;
         }
-    std::printf("accepted\n");
+    }
+    msg = "accepted";
     return 0;
+}
+int acceptsMain(int argc, char** argv) {
+    std::string msg;
+    const int rc = acceptsCase(argc, argv, msg);
+    std::printf("%s\n", msg.c_str());
+    return rc;
+}
+
+// The preflight above asks a case's live changes in the driver's order. The
+// audit's sequence over 20 steps, minSpeed 200 at step 10 after maxSpeed 300
+// at step 5, is accepted in BOTH argument orders; swapped in time (minSpeed
+// first) it is refused; changes in one step keep their argument order; a
+// change at or after STEPS is not applied and so not asked; a malformed or
+// negative-step --set is an argument error.
+void testPreflight() {
+    Test t("preflight");
+    struct C { std::vector<std::string> args; int rc; const char* what; };
+    const C cs[] = {
+        {{"1", "20", "--set", "minSpeed=200@10", "--set", "maxSpeed=300@5"}, 0, "valid in time, minSpeed listed first"},
+        {{"1", "20", "--set", "maxSpeed=300@5", "--set", "minSpeed=200@10"}, 0, "valid in time, maxSpeed listed first"},
+        {{"1", "20", "--set", "minSpeed=200@5", "--set", "maxSpeed=300@10"}, 1, "minSpeed 200 at step 5 > maxSpeed 150"},
+        {{"1", "20", "--set", "maxSpeed=300@5", "--set", "minSpeed=200@5"}, 0, "one step, argument order: maxSpeed first"},
+        {{"1", "20", "--set", "minSpeed=200@5", "--set", "maxSpeed=300@5"}, 1, "one step, argument order: minSpeed first"},
+        {{"1", "20", "--set", "maxSpeed=1e30@20"}, 0, "a change at step 20 of 20 is never applied"},
+        {{"1", "20", "--set", "maxSpeed=1e30@19"}, 1, "a change at step 19 of 20 is applied (and refused)"},
+        {{"1", "20", "--cfg", R"({"predatorCount":2})", "--set", "kBuoy=3@12", "--set", "pitchMax=0.2@3", "--set", "minSpeed=200@15",
+          "--set", "maxSpeed=250@14"}, 0, "four changes, out of argument order"},
+        {{"1", "20", "--set", "maxSpeed=300"}, 2, "no @STEP"},
+        {{"1", "20", "--set", "maxSpeed=300@-1"}, 2, "a negative step"},
+    };
+    for (const C& c : cs) {
+        std::vector<std::string> args = {"ocean_tests", "--accepts"};
+        args.insert(args.end(), c.args.begin(), c.args.end());
+        std::vector<char*> av;
+        for (std::string& a : args) av.push_back(a.data());
+        std::string msg;
+        const int rc = acceptsCase((int)av.size(), av.data(), msg);
+        t.expect(rc == c.rc, "%s: rc %d, expected %d (%s)", c.what, rc, c.rc, msg.c_str());
+    }
 }
 #endif
 
@@ -4177,10 +4732,12 @@ int main(int argc, char** argv) {
     ot::testSenseRef();
     ot::testFoodGrid();
     ot::testFoodLife();
+    ot::testRemovedNonFinite();
     ot::testReproducible();
     ot::testRadii();
 #ifndef OCEAN_TESTS_NO_SHIM
     ot::testReset();
+    ot::testProbe();
 #endif
     ot::testPredatorEconomy();
     ot::testPairingGates();
@@ -4207,6 +4764,7 @@ int main(int argc, char** argv) {
 #ifndef OCEAN_TESTS_NO_SHIM
     ot::testRanges();
     ot::testShimInts();
+    ot::testShimBools();
 #endif
     ot::testE1Hash();
     ot::testLazyWaves();
@@ -4217,8 +4775,13 @@ int main(int argc, char** argv) {
     // E1 with the eye build's features, and their keys through the shim
 #ifndef OCEAN_TESTS_NO_SHIM
     ot::testVisionKeys();
+    ot::testPreflight();
 #endif
     ot::testEyeE1();
+#ifdef EVO_OCEAN_EYE
+    ot::testEyeExpProbe();   // the eye experiment's own probes (tools/ocean_eye_exp.cpp)
+    ot::testEyeExpWiring();
+#endif
     // the appearance genome (cosmetic): tests/ocean_appearance_tests.hpp
     ot::testAppearanceGallery();
     ot::testAppearanceStream();

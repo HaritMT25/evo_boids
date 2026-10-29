@@ -443,13 +443,15 @@ async function imports() {
         const r = HO.withCString(M, JSON.stringify(cfg), p => M._oc_init(1, 1920, 1080, 240, 300, p));
         ok(!r && HO.cString(M, M._oc_last_error()) !== '', JSON.stringify(cfg) + ' refused: ' + HO.cString(M, M._oc_last_error()));
     }
-    /* Classic's switches are read only as JSON booleans, anything else passed
-     * over: in a 150 x 150 world toroidal true is refused (sight 100 is too
-     * wide to wrap), toroidal 1 is not — it runs with walls. So the page itself
-     * refuses a switch that is not true / false (importWorld). */
-    const t = HO.withCString(M, '{"toroidal":true}', p => M._oc_init(1, 150, 150, 240, 50, p));
-    const one = HO.withCString(M, '{"toroidal":1}', p => M._oc_init(1, 150, 150, 240, 50, p));
-    ok(t === 0 && one === 1, 'the engine passes over {"toroidal":1} (runs it with walls): the page must refuse it');
+    /* Classic's switches used to be read only as JSON booleans, anything else
+     * passed over ({"toroidal":1} ran with walls while the sheet showed it on).
+     * The engine now refuses a switch that is not true / false (ocean_config.hpp
+     * readOceanJson), and the page refuses it before that (importWorld). */
+    const one = HO.withCString(M, '{"toroidal":1}', p => M._oc_init(1, 1920, 1080, 240, 50, p));
+    const why = HO.cString(M, M._oc_last_error());
+    const yes = HO.withCString(M, '{"toroidal":true}', p => M._oc_init(1, 1920, 1080, 240, 50, p));
+    ok(one === 0 && /toroidal/.test(why) && yes === 1,
+       'the engine refuses {"toroidal":1} ("' + why + '") and takes {"toroidal":true}');
     ok(CFG.KEYS.eyeCode[1].max === 31, 'the eye-code field runs 0..31 (the engine\'s eyeCodeValid; cloak bits 8 and 16)');
     const neg = HO.withCString(M, JSON.stringify({ kBuoy: -0.5 }), p => M._oc_init(1, 1920, 1080, 240, 300, p));
     ok(neg === 1 && CFG.NEG_ON_RESTART.kBuoy, 'kBuoy -0.5 starts a new world (so the sheet keeps it for a Restart)');

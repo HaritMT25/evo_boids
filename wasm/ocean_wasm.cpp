@@ -180,15 +180,9 @@ void familyColor(std::uint64_t id, std::uint8_t* out) {
 // The defensive clamps main.cpp applies (copied from wasm/evo_wasm.cpp) minus
 // its min/max swaps: Ocean refuses a reversed speed or genome-length pair
 // (configOk) instead of reordering it, so a live change to one bound can never
-// silently move the other.
-void clampConfig(SimConfig& c) {
-    if (c.perceptionRadius < 1.0f) c.perceptionRadius = 1.0f;
-    if (c.maxNeighbors < 0) c.maxNeighbors = 0;
-    if (c.maxNeighbors > MAX_TOPOLOGICAL_NEIGHBORS) c.maxNeighbors = MAX_TOPOLOGICAL_NEIGHBORS;
-    if (c.predatorMinPopulation < 0) c.predatorMinPopulation = 0;
-    if (c.predatorMinPopulation > 2000) c.predatorMinPopulation = 2000;
-    if (c.predatorMaxPopulation < 0) c.predatorMaxPopulation = 0;
-}
+// silently move the other. Shared with the harness and the probe
+// (ocean_world.hpp clampOceanSimConfig).
+void clampConfig(SimConfig& c) { clampOceanSimConfig(c); }
 
 // Every refusal oc_init and oc_set_param share, on the config exactly as the
 // engine will hold it (after the JSON's double -> float / int conversion and

@@ -768,13 +768,9 @@ inline void dumpState(const OceanWorld& w, std::FILE* out) {
 // tests/ocean_tests.cpp checks that this path and the shim's give the same
 // fingerprints.
 inline void clampConfigLikeShim(SimConfig& c) {
-    // (No min/max swaps: the shim refuses a reversed pair instead.)
-    if (c.perceptionRadius < 1.0f) c.perceptionRadius = 1.0f;
-    if (c.maxNeighbors < 0) c.maxNeighbors = 0;
-    if (c.maxNeighbors > MAX_TOPOLOGICAL_NEIGHBORS) c.maxNeighbors = MAX_TOPOLOGICAL_NEIGHBORS;
-    if (c.predatorMinPopulation < 0) c.predatorMinPopulation = 0;
-    if (c.predatorMinPopulation > 2000) c.predatorMinPopulation = 2000;
-    if (c.predatorMaxPopulation < 0) c.predatorMaxPopulation = 0;
+    // The shim's own clamps, shared (no min/max swaps: the shim refuses a
+    // reversed pair instead).
+    clampOceanSimConfig(c);
 }
 
 // Returns false with `err` set on a malformed JSON or an invalid Ocean config.

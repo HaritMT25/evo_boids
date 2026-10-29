@@ -203,6 +203,23 @@
 #include "ocean_math.hpp"
 #include "fish.hpp"
 
+// The defensive clamps every Ocean entry point applies to the SimConfig half
+// after reading the cfg JSON and before checking or using it: oc_init /
+// oc_set_param (wasm/ocean_wasm.cpp clampConfig), the harness's world builder
+// and live --set (tools/ocean_fingerprint.hpp clampConfigLikeShim), the probe
+// (tools/ocean_probe.cpp). Main.cpp's clamps minus its min / max swaps (the
+// Ocean refuses a reversed pair instead). perceptionRadius is the neighbour
+// grids' cell size, so it must be >= 1: at 0 SpatialGrid::init divided by
+// zero and cast the infinity to int.
+inline void clampOceanSimConfig(SimConfig& c) {
+    if (c.perceptionRadius < 1.0f) c.perceptionRadius = 1.0f;
+    if (c.maxNeighbors < 0) c.maxNeighbors = 0;
+    if (c.maxNeighbors > MAX_TOPOLOGICAL_NEIGHBORS) c.maxNeighbors = MAX_TOPOLOGICAL_NEIGHBORS;
+    if (c.predatorMinPopulation < 0) c.predatorMinPopulation = 0;
+    if (c.predatorMinPopulation > 2000) c.predatorMinPopulation = 2000;
+    if (c.predatorMaxPopulation < 0) c.predatorMaxPopulation = 0;
+}
+
 struct OceanFood {
     Vec2  pos;
     float depth = 0.0f;

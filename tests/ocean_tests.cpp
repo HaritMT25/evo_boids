@@ -67,6 +67,11 @@
 //                 prints, rng included, taken BEFORE the shim runs: an extra
 //                 draw in oc_step fails); a fresh world re-inited replays, a
 //                 reused one keeps exactly frame / ids / totals (asserted)
+//   probe         tools/ocean_probe.cpp's world (probeInitWorld) == the shim's
+//                 (oc_init), every section, for perceptionRadius 0 / 0.25 /
+//                 the default and with --e1: a radius below 1 stored as 1 (the
+//                 grids' cell size; 0 used to divide by zero in SpatialGrid),
+//                 both neighbour grids' geometry finite
 //   pred_econ     fixtures: burn = metabolism + predatorMoveCost·speed² (or
 //                 moveCost when < 0), a fixed predatorMeal vs the prey's
 //                 reserves, death at predatorMaxAge — bit for bit
@@ -195,6 +200,8 @@
 #ifndef OCEAN_TESTS_NO_SHIM
 #include "../wasm/ocean_wasm.cpp"
 #endif
+#define OCEAN_PROBE_NO_MAIN
+#include "../tools/ocean_probe.cpp"   // probeInitWorld (the "probe" check)
 
 namespace ot {
 
@@ -4034,6 +4041,51 @@ void testEyeE1() {
 }
 
 #ifndef OCEAN_TESTS_NO_SHIM
+// tools/ocean_probe.cpp builds its world as oc_init does (probeInitWorld):
+// the shared clamps (clampOceanSimConfig), then the checks. perceptionRadius
+// 0 used to reach SpatialGrid::init unclamped (a division by zero, infinity
+// cast to int) although the shim stores 1. For each config: the stored radius
+// is the shim's, both neighbour grids' geometry is finite, and the probe's
+// world == the shim's, section by section (the rng included).
+void testProbe() {
+    Test t("probe");
+    struct C { const char* cfg; bool e1; float radius; };
+    const C cs[] = {
+        {R"({"perceptionRadius":0})", false, 1.0f},
+        {R"({"perceptionRadius":0.25,"interactRadius":0,"pickupRadius":0})", false, 1.0f},
+        {nullptr, false, 100.0f},                                   // applyOceanDefaults
+        {R"({"perceptionRadius":0})", true, 1.0f},                  // --e1: the preset first
+    };
+    for (const C& c : cs) {
+        OceanWorld pw;
+        const std::string perr = probeInitWorld(pw, 1401, 1920, 1080, 240.0, 120, c.e1, c.cfg);
+        const char* name = c.cfg ? c.cfg : "{}";
+        if (!t.expect(perr.empty(), "the probe refused %s%s: %s", name, c.e1 ? " --e1" : "", perr.c_str())) continue;
+        const ofp::Fingerprint pf = ofp::fingerprint(pw);   // before oc_init reseeds the shared rng
+        // The shim's world: the preset merged under the cfg for --e1.
+        std::string shimCfg = c.cfg ? c.cfg : "";
+        if (c.e1) {
+            shimCfg = kE1PresetJson;
+            shimCfg.back() = ',';
+            shimCfg += std::string(c.cfg).substr(1);
+        }
+        const int initOk = oc_init(1401, 1920, 1080, 240.0, 120, shimCfg.empty() ? nullptr : shimCfg.c_str());
+        if (!t.expect(initOk == 1, "oc_init refused %s: %s", shimCfg.c_str(), oc_last_error())) continue;
+        t.expect(pw.cfg.perceptionRadius == c.radius && g_world->cfg.perceptionRadius == c.radius,
+                 "%s: perceptionRadius stored %.9g by the probe, %.9g by the shim (expected %.9g)", name,
+                 (double)pw.cfg.perceptionRadius, (double)g_world->cfg.perceptionRadius, (double)c.radius);
+        for (const SpatialGrid* g : {&ofp::field<ofp::peek::OwCreatureGrid>(pw), &ofp::field<ofp::peek::OwFoodGrid>(pw)}) {
+            const float inv = ofp::field<ofp::peek::SgInvCell>(*g);
+            const int cols = ofp::field<ofp::peek::SgCols>(*g), rows = ofp::field<ofp::peek::SgRows>(*g);
+            t.expect(std::isfinite(inv) && inv > 0.0f && cols > 0 && rows > 0, "%s: probe grid 1/cell %.9g, %d x %d cells", name,
+                     (double)inv, cols, rows);
+        }
+        const ofp::Fingerprint sf = ofp::fingerprint(*g_world);
+        t.expect(pf == sf, "%s%s: the probe's world != the shim's (cfg %d geo %d rng %d)", name, c.e1 ? " --e1" : "",
+                 pf.cfg == sf.cfg, pf.geo == sf.geo, pf.rng == sf.rng);
+    }
+}
+
 // ocean_tests --accepts SEED STEPS [ocean_parity_driver args]: would the page
 // accept this harness case? oc_init with the case's world and cfg JSON, then
 // oc_set_param for each --set. wasm/ocean_parity.sh asks this of every case,
@@ -4253,6 +4305,7 @@ int main(int argc, char** argv) {
     ot::testRadii();
 #ifndef OCEAN_TESTS_NO_SHIM
     ot::testReset();
+    ot::testProbe();
 #endif
     ot::testPredatorEconomy();
     ot::testPairingGates();

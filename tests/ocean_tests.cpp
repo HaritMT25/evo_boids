@@ -212,6 +212,13 @@
 #endif
 #define OCEAN_PROBE_NO_MAIN
 #include "../tools/ocean_probe.cpp"   // probeInitWorld (the "probe" check)
+#ifdef EVO_OCEAN_EYE
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"   // the tool's own entry points
+#define OCEAN_EYE_EXP_NO_MAIN
+#include "../tools/ocean_eye_exp.cpp"   // its behavioural probe and wiring classifier (eye_exp)
+#pragma GCC diagnostic pop
+#endif
 
 namespace ot {
 
@@ -4183,6 +4190,64 @@ void testEyeE1() {
     }
 }
 
+// tools/ocean_eye_exp.cpp's behavioural probe (eye build), on fish whose
+// steering is known exactly: the only wire is hidden neuron 0 (undriven:
+// 0.5) -> STEER_X, so STEER_X = tanh(0.5 w) in every scene. base_abs is the
+// mean over the 8 headings of |the lateral steer with nothing in view|, base_x
+// its signed mean. World frame (steerFrame 0): the lateral part of a steady
+// world-x push is STEER_X · right.x, which changes sign around the headings:
+// base_x ~ 0 and base_abs = |STEER_X| · mean |right.x| (base_abs used to be
+// |base_x|, ~0 here). Own frame (steerFrame 1): base_abs = base_x = STEER_X.
+void testEyeExpProbe() {
+    Test t("eye_exp_probe");
+#ifdef EVO_OCEAN_EYE
+    for (int frame = 0; frame < 2; ++frame) {
+        OceanWorld w;
+        std::string err;
+        if (!t.expect(ofp::initWorld(w, 1801, 1920, 1080, 240.0f, 0,
+                                     frame ? R"({"eye":1,"eyeOnly":1,"steerFrame":1})" : R"({"eye":1,"eyeOnly":1})", err),
+                      "init: %s", err.c_str()))
+            continue;
+        RandomGen sceneRng;
+        const OceanWorld tmpl = behavTemplate(w, 7, sceneRng);
+        Probe pr{tmpl, sceneRng};
+        Fish f;
+        f.genome = {mkGene(false, 0, STEER_X, 6000)};
+        const RandomGen keep = rng;
+        f.init({960.0f, 540.0f}, 120.0f);
+        rng = keep;
+        buildNeuralNet(f.genome, f.nnet);
+        float acts[NUM_ACTIONS];
+        pr.act(f, {1.0f, 0.0f}, 0, 0, acts);
+        const float sx = acts[STEER_X];
+        double idx[kBehavIdx];
+        behaveOne(pr, f, frame == 1, idx);
+        Behav b;
+        addBehav(b, idx);
+        double want = 0.0, wantX = 0.0;
+        for (int h = 0; h < 8; ++h) {   // behaveOne's headings and lateral component
+            const float a = 6.2831853f * (float)h / 8 + 0.3f;
+            const float rx = -evomath::sinf(a);
+            const float lat = frame ? sx : sx * rx;
+            want += std::abs(lat) / 8.0;
+            wantX += lat / 8.0;
+        }
+        const char* fr = frame ? "own frame" : "world frame";
+        t.expect(std::abs(sx - std::tanh(0.5 * 6000.0 / 8192.0)) < 1e-5, "%s: STEER_X %.6f, expected tanh(0.5 w)", fr, (double)sx);
+        t.expect(std::abs(b.base_abs - want) < 1e-6 && std::abs(b.base_x - wantX) < 1e-6,
+                 "%s: base_abs %.6f base_x %.6f, expected %.6f %.6f", fr, b.base_abs, b.base_x, want, wantX);
+        if (frame == 0)
+            t.expect(std::abs(b.base_x) < 1e-5 && b.base_abs > 0.6 * sx, "world frame: base_x %.6f (want ~0), base_abs %.6f (want > 0)",
+                     b.base_x, b.base_abs);
+        else
+            t.expect(std::abs(b.base_abs - sx) < 1e-6 && std::abs(b.base_x - sx) < 1e-6, "own frame: base_abs %.6f base_x %.6f, want %.6f",
+                     b.base_abs, b.base_x, (double)sx);
+        t.note("%s, steady STEER_X %.4f: base_abs %.4f, base_x %.4f (|base_x|, the old base_abs: %.4f)", fr, (double)sx,
+               b.base_abs, b.base_x, std::abs(idx[12]));
+    }
+#endif
+}
+
 #ifndef OCEAN_TESTS_NO_SHIM
 // tools/ocean_probe.cpp builds its world as oc_init does (probeInitWorld):
 // the shared clamps (clampOceanSimConfig), then the checks. perceptionRadius
@@ -4544,6 +4609,9 @@ int main(int argc, char** argv) {
     ot::testPreflight();
 #endif
     ot::testEyeE1();
+#ifdef EVO_OCEAN_EYE
+    ot::testEyeExpProbe();   // the eye experiment's own probes (tools/ocean_eye_exp.cpp)
+#endif
     std::printf("OCEAN TESTS: %d passed, %d failed\n", ot::g_passed, ot::g_failed);
     return ot::g_failed ? 1 : 0;
 }

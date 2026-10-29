@@ -66,7 +66,10 @@
 //            minus nothing (appended columns; the food / predator indices are
 //            unchanged by them: every scene starts from the same state and rng)
 //   base_abs  |lateral steer with nothing in view| (per fish, mean over the 8
-//            headings): a turning bias in empty space; base_x the signed mean
+//            headings of the absolute value): a turning bias, or any steady
+//            sideways push, in empty space; base_x the signed mean (a steady
+//            world-frame steer has base_x ~ 0 — its body-frame part changes sign
+//            around the headings — and base_abs > 0)
 //   food_r / food_l  each side alone vs nothing: lateral steer with food on the
 //            right minus nothing / nothing minus with food on the left (+ =
 //            toward it; food_h = food_r + food_l); fish_r / fish_l likewise for
@@ -267,8 +270,9 @@ struct Behav {
 };
 // behaveOne's indices: 8 food / predator, 4 conspecific, then 12 the lateral
 // steer with nothing in view, 13 / 14 food right / left vs nothing, 15 / 16 the
-// conspecific right / left vs nothing (+ = toward it)
-constexpr int kBehavIdx = 17;
+// conspecific right / left vs nothing (+ = toward it), 17 |the lateral steer
+// with nothing in view| (each heading's absolute value: base_abs)
+constexpr int kBehavIdx = 18;
 
 // What one fish does (its 3rd-step actions) in a held scene. kind: 0 nothing,
 // 1 food, 2 predator, 3 a conspecific; sector 0..5 = ahead, behind, left,
@@ -276,7 +280,8 @@ constexpr int kBehavIdx = 17;
 struct Probe {
     const OceanWorld& tmpl;
     RandomGen sceneRng;
-    void act(const Fish& base, Vec2 heading, int kind, int sector, float out[NUM_ACTIONS]) {
+    // sensOut (optional): the 3rd step's NUM_SENSES inputs too.
+    void act(const Fish& base, Vec2 heading, int kind, int sector, float out[NUM_ACTIONS], float* sensOut = nullptr) {
         OceanWorld w = tmpl;
         const Vec2 P = {0.5f * (float)w.width, 0.5f * (float)w.height};
         const float Z = 0.5f * w.D;
@@ -337,8 +342,39 @@ struct Probe {
         }
         rng = keep;
         std::memcpy(out, w.creatures[0].lastActions, sizeof(float) * NUM_ACTIONS);
+        if (sensOut) std::memcpy(sensOut, w.creatures[0].lastSensors, sizeof(float) * NUM_SENSES);
     }
 };
+
+// The behavioural test's world: quiet, eye-only, the full eye (the cloaks
+// cleared), still water, with the run's own motion settings; and the rng its
+// scenes draw from. The world's rng is left as it was.
+OceanWorld behavTemplate(const OceanWorld& w, unsigned seed, RandomGen& sceneRng) {
+    OceanWorld tmpl;
+    tmpl.cfg = w.cfg;
+    tmpl.cfg.targetFood = 0; tmpl.cfg.foodSpawnBase = 0; tmpl.cfg.foodSpawnAmp = 0;
+    tmpl.cfg.minPopulation = 0; tmpl.cfg.maxPopulation = 0;
+    tmpl.cfg.predatorCount = 0; tmpl.cfg.predatorEconomy = false; tmpl.cfg.predatorMinPopulation = 0;
+    tmpl.cfg.metabolicRate = 0; tmpl.cfg.moveCost = 0; tmpl.cfg.geneCost = 0; tmpl.cfg.maxAge = 1e9f;
+    tmpl.cfg.currentStrength = 0; tmpl.cfg.foodPatches = 0; tmpl.cfg.foodDrift = false;
+    tmpl.cfg.captureActivations = true;
+    tmpl.ocfg = w.ocfg;
+    // Still water: no food lifetime (a held item must not age out before it is
+    // seen, whatever the run's foodLife) and no E1 flow (waves / a deep current
+    // would keep the CURRENT_* inputs live although currentStrength is 0).
+    tmpl.ocfg.foodLife = 0.0f;
+    tmpl.ocfg.waveSpeed = 0.0f;
+    tmpl.ocfg.deepCurrent = false;
+    tmpl.ocfg.eye = 1;
+    tmpl.ocfg.eyeOnly = 1;
+    tmpl.ocfg.eyeCode &= ~(kEyeCodeNoFish | kEyeCodeNoFood);   // the full eye (see the header)
+    const RandomGen keep = rng;
+    rng.seed(seed * 7919u + 17u);
+    tmpl.init(w.width, w.height, w.D, 0);
+    sceneRng = rng;
+    rng = keep;
+    return tmpl;
+}
 
 // One fish's indices, averaged over 8 headings. lat = steer along the body's
 // right axis (world-frame STEER_X/Y projected; triangular motion or steerFrame 1:
@@ -371,6 +407,7 @@ void behaveOne(Probe& pr, const Fish& base, bool bodyFrame, double idx[kBehavIdx
         idx[9] += cd[5][STEER_Z] - cd[4][STEER_Z];
         idx[10] += cd[0][SPEED_ADJUST] - none[SPEED_ADJUST];
         idx[12] += lat(none);
+        idx[17] += std::abs(lat(none));
         idx[13] += lat(fd[3]) - lat(none);
         idx[14] += lat(none) - lat(fd[2]);
         idx[15] += lat(cd[3]) - lat(none);
@@ -396,7 +433,7 @@ void addBehav(Behav& b, const double idx[kBehavIdx]) {
     b.pos_pred_spd += idx[5] > 0.05; b.pos_pred_v += idx[4] > 0.05;
     b.fish_h += idx[8]; b.fish_v += idx[9]; b.fish_spd += idx[10]; b.react_fish += idx[11];
     b.pos_fish_h += idx[8] > 0.05;
-    b.base_abs += std::abs(idx[12]); b.base_x += idx[12];
+    b.base_abs += idx[17]; b.base_x += idx[12];   // mean |lat| per heading (|mean lat| let headings cancel)
     b.food_r += idx[13]; b.food_l += idx[14]; b.fish_r += idx[15]; b.fish_l += idx[16];
     const bool r = idx[13] > 0.05, l = idx[14] > 0.05;
     b.pos_food_both += r && l;
@@ -418,29 +455,12 @@ void writeBehavRow(std::FILE* f, const char* arm, unsigned seed, const char* who
 }
 
 void behaviouralTest(const OceanWorld& w, const char* arm, unsigned seed, const std::string& path) {
-    // A quiet eye-only world with the run's own motion settings.
-    OceanWorld tmpl;
-    tmpl.cfg = w.cfg;
-    tmpl.cfg.targetFood = 0; tmpl.cfg.foodSpawnBase = 0; tmpl.cfg.foodSpawnAmp = 0;
-    tmpl.cfg.minPopulation = 0; tmpl.cfg.maxPopulation = 0;
-    tmpl.cfg.predatorCount = 0; tmpl.cfg.predatorEconomy = false; tmpl.cfg.predatorMinPopulation = 0;
-    tmpl.cfg.metabolicRate = 0; tmpl.cfg.moveCost = 0; tmpl.cfg.geneCost = 0; tmpl.cfg.maxAge = 1e9f;
-    tmpl.cfg.currentStrength = 0; tmpl.cfg.foodPatches = 0; tmpl.cfg.foodDrift = false;
-    tmpl.cfg.captureActivations = true;
-    tmpl.ocfg = w.ocfg;
-    // Still water: no food lifetime (a held item must not age out before it is
-    // seen, whatever the run's foodLife) and no E1 flow (waves / a deep current
-    // would keep the CURRENT_* inputs live although currentStrength is 0).
-    tmpl.ocfg.foodLife = 0.0f;
-    tmpl.ocfg.waveSpeed = 0.0f;
-    tmpl.ocfg.deepCurrent = false;
-    tmpl.ocfg.eye = 1;
-    tmpl.ocfg.eyeOnly = 1;
-    tmpl.ocfg.eyeCode &= ~(kEyeCodeNoFish | kEyeCodeNoFood);   // the full eye (see the header)
-    const RandomGen keep = rng;
-    rng.seed(seed * 7919u + 17u);
-    tmpl.init(w.width, w.height, w.D, 0);
-    Probe pr{tmpl, rng};
+    // A quiet eye-only world with the run's own motion settings. (Every scene
+    // saves and restores the world's rng itself, and the random genomes have
+    // their own stream: nothing below reads the world's rng.)
+    RandomGen sceneRng;
+    const OceanWorld tmpl = behavTemplate(w, seed, sceneRng);
+    Probe pr{tmpl, sceneRng};
     RandomGen genRng;
     genRng.seed(seed * 104729u + 3u);
     Behav evo, rnd;
@@ -457,7 +477,6 @@ void behaviouralTest(const OceanWorld& w, const char* arm, unsigned seed, const 
         behaveOne(pr, f, tri, idx);
         addBehav(rnd, idx);
     }
-    rng = keep;
     std::FILE* out = std::fopen(path.c_str(), "w");
     if (!out) { std::fprintf(stderr, "cannot write %s\n", path.c_str()); return; }
     std::fprintf(out, "arm,seed,genomes,n,food_h,food_v,food_spd,pred_h,pred_v,pred_spd,react_food,react_pred,"
@@ -713,6 +732,7 @@ double median(std::vector<double> v) {
 
 }  // namespace
 
+#ifndef OCEAN_EYE_EXP_NO_MAIN   // tests/ocean_tests.cpp (eye build) includes this file without it
 int main(int argc, char** argv) {
     unsigned seed = 1;
     long steps = 100000, every = 10000, evolve = 30000;
@@ -920,3 +940,4 @@ int main(int argc, char** argv) {
     }
     return 0;
 }
+#endif  // OCEAN_EYE_EXP_NO_MAIN

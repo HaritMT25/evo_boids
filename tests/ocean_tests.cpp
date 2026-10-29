@@ -4248,6 +4248,71 @@ void testEyeExpProbe() {
 #endif
 }
 
+// tools/ocean_eye_exp.cpp's wiring classifier (eye build) against the engine.
+// For fish wired directly from eye inputs to STEER_X (steerFrame 1: + = a push
+// to the right; direct wires, so STEER_X = tanh(the summed input · weight)),
+// the gains it computes for food on the left / right (gL, gR: the path gains
+// times the inputs that food produces in the run's encoding) must give the
+// STEER_X the fish really makes in those scenes, for every encoding 0..7. The
+// Codex audit's fixture (perceptionRadius 100, D 240; left PROX +1, left CON
+// -1, right PROX -1, right CON +1) is bi_away under eyeCode 1 (faded
+// contrast: both turns away from food) and bi_toward under eyeCode 0; the
+// classifier used the code-0 inputs for every code, so it said bi_toward for
+// both.
+void testEyeExpWiring() {
+    Test t("eye_exp_wiring");
+#ifdef EVO_OCEAN_EYE
+    struct W { int sensor, weight; };
+    const std::vector<std::vector<W>> wirings = {
+        {{EYE_LEFT_PROX, 8192}, {EYE_LEFT_CON, -8192}, {EYE_RIGHT_PROX, -8192}, {EYE_RIGHT_CON, 8192}},   // the audit's
+        {{EYE_LEFT_PROX, 8192}, {EYE_LEFT_CON, -6144}, {EYE_RIGHT_PROX, -8192}, {EYE_RIGHT_CON, 6144}},
+        {{EYE_RIGHT_PROX, 8192}},                                    // one slot (opponent pairs: both sides)
+        {{EYE_LEFT_SIZE, -8192}, {EYE_RIGHT_SIZE, 8192}},
+        {{EYE_LEFT_CON, 4096}, {EYE_RIGHT_PROX, 8192}, {EYE_RIGHT_SIZE, -4096}, {EYE_AHEAD_PROX, 8192}},
+    };
+    long compared = 0;
+    int auditClass[2] = {-1, -1};   // eyeCode 0, 1
+    for (int code = 0; code <= 7; ++code) {
+        OceanWorld w;
+        std::string err;
+        const std::string cfg =
+            R"({"eye":1,"eyeOnly":1,"steerFrame":1,"perceptionRadius":100,"eyeCode":)" + std::to_string(code) + "}";
+        if (!t.expect(ofp::initWorld(w, 1802, 1920, 1080, 240.0f, 0, cfg.c_str(), err), "init: %s", err.c_str())) continue;
+        double x[4][ocean::kEyeInputs], vf[3];
+        foodSceneInputs(w, 7, x, vf);
+        RandomGen sceneRng;
+        const OceanWorld tmpl = behavTemplate(w, 7, sceneRng);
+        Probe pr{tmpl, sceneRng};
+        for (std::size_t k = 0; k < wirings.size(); ++k) {
+            Fish f;
+            for (const W& g : wirings[k]) f.genome.push_back(mkGene(true, g.sensor, STEER_X, g.weight));
+            const RandomGen keep = rng;
+            f.init({960.0f, 540.0f}, 120.0f);
+            rng = keep;
+            buildNeuralNet(f.genome, f.nnet);
+            std::vector<EyePath> paths;
+            const FishWiring fw = wiringOf(f.nnet, x, vf, paths);
+            float aL[NUM_ACTIONS], aR[NUM_ACTIONS];
+            pr.act(f, {1.0f, 0.0f}, 1, 2, aL);   // food on the left
+            pr.act(f, {1.0f, 0.0f}, 1, 3, aR);   // on the right
+            ++compared;
+            t.expect(std::abs(std::tanh(fw.gL) - aL[STEER_X]) < 1e-5 && std::abs(std::tanh(fw.gR) - aR[STEER_X]) < 1e-5,
+                     "eyeCode %d, wiring %zu: gains (%.5f, %.5f) but STEER_X (%.5f, %.5f) = tanh of (%.5f, %.5f)", code, k, fw.gL,
+                     fw.gR, (double)aL[STEER_X], (double)aR[STEER_X], std::atanh((double)aL[STEER_X]),
+                     std::atanh((double)aR[STEER_X]));
+            if (k == 0 && code <= 1) {
+                auditClass[code] = fw.hclass;
+                t.note("the audit's fixture, eyeCode %d: %s, gains (%+.3f, %+.3f), STEER_X food left %+.3f / right %+.3f", code,
+                       kHClass[fw.hclass], fw.gL, fw.gR, (double)aL[STEER_X], (double)aR[STEER_X]);
+            }
+        }
+    }
+    t.expect(auditClass[0] == 3 && auditClass[1] == 4, "the audit's fixture: %s under eyeCode 0 (want bi_toward), %s under 1 (want bi_away)",
+             auditClass[0] >= 0 ? kHClass[auditClass[0]] : "?", auditClass[1] >= 0 ? kHClass[auditClass[1]] : "?");
+    t.note("%ld wirings x encodings: the classifier's gains == the fish's STEER_X (tanh), food left and right", compared);
+#endif
+}
+
 #ifndef OCEAN_TESTS_NO_SHIM
 // tools/ocean_probe.cpp builds its world as oc_init does (probeInitWorld):
 // the shared clamps (clampOceanSimConfig), then the checks. perceptionRadius
@@ -4611,6 +4676,7 @@ int main(int argc, char** argv) {
     ot::testEyeE1();
 #ifdef EVO_OCEAN_EYE
     ot::testEyeExpProbe();   // the eye experiment's own probes (tools/ocean_eye_exp.cpp)
+    ot::testEyeExpWiring();
 #endif
     std::printf("OCEAN TESTS: %d passed, %d failed\n", ot::g_passed, ot::g_failed);
     return ot::g_failed ? 1 : 0;

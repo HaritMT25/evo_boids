@@ -505,14 +505,24 @@ void behaviouralTest(const OceanWorld& w, const char* arm, unsigned seed, const 
 //                 food" whatever the channel; CON wired so also turns AWAY from
 //                 predators, whose CON is < 0)
 //   bi_away       both sides, gL > 0 > gR;   bi_same  both sides, same sign
-// where gS = Σ_feature G[S][f][STEER_X] · v_f, v = what a food item 50 away
-// at mid-depth gives each feature (PROX 1 − 50/R, SIZE 4/54, CON 1 − L(D/2)):
-// the turn food on that side would cause. hc_PROX / hc_SIZE / hc_CON: the same
-// class on one feature alone. hdom: the feature with the largest summed |G| to
-// STEER_X over both lateral sectors (raw weights); hdom_food: weighted by v.
-// The VERTICAL class likewise from up (−) / down (+) to STEER_Z (+ = deeper).
-// (With eyeCode bit 1, opponent pairs, the RIGHT slot is right − left: a
-// right_only fish steers both ways; the experiment's codes do not set it.)
+// where gS = Σ_input G[input][STEER_X] · x_S[input]: the turn food on side S
+// would cause, with x_S = the 18 eye inputs one food item 50 away at
+// mid-depth on side S really produces in this run's encoding (eyeCode; read
+// from the engine in a held scene of the behavioural test's quiet world, the
+// cloaks cleared as there: what the fish would see of food). eyeCode 0 lights
+// only side S's sector (PROX 1 − 50/R, SIZE 4/54, CON 1 − L(D/2)); faded
+// contrast (bit 1) makes CON = PROX · (1 − L), summed sectors (4) squash each
+// feature to x / (1 + |x|), opponent pairs (2) put the food in both lateral
+// slots (left + right, right − left) — so the same wires can turn toward
+// food in one encoding and away in another (the classes used to take the
+// code-0 values whatever the run's code). hc_PROX / hc_SIZE / hc_CON: the
+// same class on one feature alone (that feature's inputs only). hdom: the
+// feature with the largest summed |G| to STEER_X over both lateral sectors
+// (raw weights); hdom_food: weighted by the feature's food value (vf: its
+// mean |x| on the side that sees the food). The VERTICAL class likewise from
+// up (−) / down (+) to STEER_Z (+ = deeper), with food above / below.
+// left_only / right_only are topology (which sector's inputs have a path):
+// with opponent pairs a right_only fish steers both ways (gL, gR say how).
 //
 // File (CSV-like, the first field says the row kind):
 //   # comment lines (run, cfg, the column lists)
@@ -586,15 +596,42 @@ struct FishWiring {
     double gL = 0, gR = 0, gU = 0, gD = 0;
 };
 
+// The eye inputs (index 3·sector + feature) one food item 50 units from a fish
+// at mid-depth produces, in w's encoding: x[0] food on the left, x[1] on the
+// right, x[2] above, x[3] below (heading +x; the behavioural test's quiet
+// world, cloaks cleared). vf[f]: feature f's mean |input| over the two
+// lateral scenes' own sectors. The world's rng is left as it was.
+void foodSceneInputs(const OceanWorld& w, unsigned seed, double x[4][ocean::kEyeInputs], double vf[3]) {
+    RandomGen sceneRng;
+    const OceanWorld tmpl = behavTemplate(w, seed, sceneRng);
+    Probe pr{tmpl, sceneRng};
+    Fish viewer;   // no wiring: only its eye matters
+    const RandomGen keep = rng;
+    viewer.init({0.5f * (float)w.width, 0.5f * (float)w.height}, 0.5f * w.D);
+    rng = keep;
+    buildNeuralNet(viewer.genome, viewer.nnet);
+    const int sectors[4] = {2, 3, 4, 5};   // Probe's: left, right, up, down
+    float acts[NUM_ACTIONS], sens[NUM_SENSES];
+    for (int k = 0; k < 4; ++k) {
+        pr.act(viewer, {1.0f, 0.0f}, 1, sectors[k], acts, sens);
+        for (int i = 0; i < ocean::kEyeInputs; ++i) x[k][i] = (double)sens[ocean::kEyeFirst + i];
+    }
+    for (int f = 0; f < 3; ++f) vf[f] = 0.5 * (std::abs(x[0][3 * 2 + f]) + std::abs(x[1][3 * 3 + f]));
+}
+
 // The class of a sector pair (neg side, pos side) on dump action a, over the
-// features in [f0, f1), food-weighted by v.
-int pairClass(const FishWiring& fw, int sNeg, int sPos, int a, int f0, int f1, const double v[3], double& gN,
-              double& gP) {
+// features in [f0, f1): gN / gP = the gains times the inputs food on the neg /
+// pos side produces (xNeg, xPos: every sector's, see foodSceneInputs).
+int pairClass(const FishWiring& fw, int sNeg, int sPos, int a, int f0, int f1, const double xNeg[],
+              const double xPos[], double& gN, double& gP) {
     gN = gP = 0.0;
     bool n = false, p = false;
+    for (int s = 0; s < ocean::kEyeSectors; ++s)
+        for (int f = f0; f < f1; ++f) {
+            gN += fw.G[s][f][a] * xNeg[3 * s + f];
+            gP += fw.G[s][f][a] * xPos[3 * s + f];
+        }
     for (int f = f0; f < f1; ++f) {
-        gN += fw.G[sNeg][f][a] * v[f];
-        gP += fw.G[sPos][f][a] * v[f];
         n = n || fw.any[sNeg][f][a];
         p = p || fw.any[sPos][f][a];
     }
@@ -606,7 +643,8 @@ int pairClass(const FishWiring& fw, int sNeg, int sPos, int a, int f0, int f1, c
     return 5;
 }
 
-FishWiring wiringOf(const NeuralNet& nn, const double v[3], std::vector<EyePath>& paths) {
+FishWiring wiringOf(const NeuralNet& nn, const double x[4][ocean::kEyeInputs], const double vf[3],
+                    std::vector<EyePath>& paths) {
     FishWiring fw;
     eyePaths(nn, paths, fw.truncated);
     fw.paths = (long)paths.size();
@@ -619,15 +657,15 @@ FishWiring wiringOf(const NeuralNet& nn, const double v[3], std::vector<EyePath>
         if (a == 2) ++fw.spdPaths;
     }
     double gn, gp;
-    fw.hclass = pairClass(fw, 2, 3, 0, 0, 3, v, fw.gL, fw.gR);
-    fw.vclass = pairClass(fw, 4, 5, 1, 0, 3, v, fw.gU, fw.gD);
-    for (int f = 0; f < 3; ++f) fw.hcf[f] = pairClass(fw, 2, 3, 0, f, f + 1, v, gn, gp);
+    fw.hclass = pairClass(fw, 2, 3, 0, 0, 3, x[0], x[1], fw.gL, fw.gR);
+    fw.vclass = pairClass(fw, 4, 5, 1, 0, 3, x[2], x[3], fw.gU, fw.gD);
+    for (int f = 0; f < 3; ++f) fw.hcf[f] = pairClass(fw, 2, 3, 0, f, f + 1, x[0], x[1], gn, gp);
     double best = 0, bestFood = 0, bestV = 0;
     for (int f = 0; f < 3; ++f) {
         const double h = std::abs(fw.G[2][f][0]) + std::abs(fw.G[3][f][0]);
         const double z = std::abs(fw.G[4][f][1]) + std::abs(fw.G[5][f][1]);
         if (h > best) { best = h; fw.hdom = f; }
-        if (h * v[f] > bestFood) { bestFood = h * v[f]; fw.hdomFood = f; }
+        if (h * vf[f] > bestFood) { bestFood = h * vf[f]; fw.hdomFood = f; }
         if (z > bestV) { bestV = z; fw.vdom = f; }
     }
     return fw;
@@ -635,22 +673,27 @@ FishWiring wiringOf(const NeuralNet& nn, const double v[3], std::vector<EyePath>
 
 struct WiringDump {
     std::FILE* f = nullptr;
-    double v[3] = {};        // a food item's PROX / SIZE / CON at 50 units, mid-depth
+    double x[4][ocean::kEyeInputs] = {};   // the eye inputs food 50 away gives, left / right / above / below
+    double vf[3] = {};                      // PROX / SIZE / CON's food value (foodSceneInputs)
     RandomGen rndRng;        // the random genomes' own stream
     std::vector<EyePath> paths;
 
     bool open(const std::string& path, const OceanWorld& w, const char* arm, unsigned seed, const char* cfgJson) {
         f = std::fopen(path.c_str(), "w");
         if (!f) return false;
-        const float R = w.cfg.perceptionRadius;
-        v[0] = 1.0 - 50.0 / R;
-        v[1] = ocean::kEyeFoodSize / (ocean::kEyeFoodSize + 50.0);
-        v[2] = ocean::eyeContrast(ocean::kEyeFoodBright, 0.5f * w.D);
+        foodSceneInputs(w, seed, x, vf);   // in this run's encoding (eyeCode)
         rndRng.seed(seed * 40503u + 29u);
         std::fprintf(f, "# ocean_eye_exp wiring dump: arm %s seed %u eye %d eyeOnly %d eyeCode %d steerFrame %d cfg %s\n",
                      arm, seed, w.ocfg.eye, w.ocfg.eyeOnly, w.ocfg.eyeCode, w.ocfg.steerFrame, cfgJson ? cfgJson : "{}");
-        std::fprintf(f, "# food-weighting v: PROX %.4f SIZE %.4f CON %.4f; paths to STEER_X / STEER_Z / SPEED_ADJUST, <= %d hidden hops\n",
-                     v[0], v[1], v[2], kMaxHops);
+        std::fprintf(f, "# food-weighting vf: PROX %.4f SIZE %.4f CON %.4f; paths to STEER_X / STEER_Z / SPEED_ADJUST, <= %d hidden hops\n",
+                     vf[0], vf[1], vf[2], kMaxHops);
+        const char* const scene[4] = {"left", "right", "above", "below"};
+        for (int k = 0; k < 4; ++k) {   // the inputs the classes weight the gains by
+            std::fprintf(f, "# food %s (eyeCode %d, cloaks cleared):", scene[k], w.ocfg.eyeCode & ~kEyeCodeCloaks);
+            for (int s = 0; s < ocean::kEyeSectors; ++s)
+                std::fprintf(f, " %s %.4f/%.4f/%.4f", kSectorNames[s], x[k][3 * s], x[k][3 * s + 1], x[k][3 * s + 2]);
+            std::fputc('\n', f);
+        }
         std::fprintf(f, "#S,step,who,n,h_none,h_left_only,h_right_only,h_bi_toward,h_bi_away,h_bi_same,"
                         "con_bi_toward,prox_bi_toward,size_bi_toward,hdom_PROX,hdom_SIZE,hdom_CON,direct_lr,"
                         "v_none,v_up_only,v_down_only,v_bi_toward,v_bi_away,v_bi_same,genome_len_mean\n");
@@ -686,7 +729,7 @@ struct WiringDump {
         long idx = 0;
         for (const Fish& c : w.creatures) {
             if (!c.alive) continue;
-            const FishWiring fw = wiringOf(c.nnet, v, paths);
+            const FishWiring fw = wiringOf(c.nnet, x, vf, paths);
             evo.add(fw, c.genome.size());
             std::fprintf(f, "F,%ld,%ld,%llu,%llu,%u,%zu,%zu,%ld,%ld,%s,%s,%s,%.5g,%.5g,%s,%s,%s", step, idx,
                          (unsigned long long)c.id, (unsigned long long)c.lineageId, (unsigned)c.generation,
@@ -713,7 +756,7 @@ struct WiringDump {
             NeuralNet nn;
             buildNeuralNet(g, nn);
             std::vector<EyePath> rp;
-            rnd.add(wiringOf(nn, v, rp), g.size());
+            rnd.add(wiringOf(nn, x, vf, rp), g.size());
             ++idx;
         }
         evo.write(f, step, "evolved");

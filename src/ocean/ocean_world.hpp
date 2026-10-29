@@ -1716,18 +1716,25 @@ private:
                 eyeSee(eye, fwd, rht, dx, dy, dz, d2, other.eyeSize, other.eyeCon, R);
             }
         }
-        auto look = [&](const OceanFoodGrid::Entry& e) {   // e: the item's grid entry (its payload == food[e.index])
-            float dx = e.pos.x - c.pos.x;
-            float dy = e.pos.y - c.pos.y;
-            if (cfg.toroidal) { dx = wrapDx(dx); dy = wrapDy(dy); }
-            const float dz = e.depth - c.depth;
-            const float d2 = dx * dx + dy * dy + dz * dz;
+        // e: the item's grid entry (its payload == food[e.index]); the offset
+        // and d² as computeSensors' smell takes them (see there).
+        auto look = [&](const OceanFoodGrid::Entry& e, float dx, float dy, float dz, float d2) {
             if (d2 > R2) return;
             eyeSee(eye, fwd, rht, dx, dy, dz, d2, ocean::kEyeFoodSize, e.eyeCon, R);
         };
         if (!(ocfg.eyeCode & kEyeCodeNoFood)) {
-            if (cfg.toroidal) foodGrid_.forEachInRadiusWrapped(c.pos, R, look);
-            else              foodGrid_.forEachInRadius(c.pos, R, look);
+            if (cfg.toroidal) {
+                foodGrid_.forEachInRadiusWrapped(c.pos, R, [&](const OceanFoodGrid::Entry& e) {
+                    const float dx = wrapDx(e.pos.x - c.pos.x), dy = wrapDy(e.pos.y - c.pos.y);
+                    const float dz = e.depth - c.depth;
+                    look(e, dx, dy, dz, dx * dx + dy * dy + dz * dz);
+                });
+            } else {
+                foodGrid_.forEachInRadius(c.pos, R, [&](const OceanFoodGrid::Entry& e, float dx, float dy, float q2) {
+                    const float dz = e.depth - c.depth;
+                    look(e, dx, dy, dz, q2 + dz * dz);
+                });
+            }
         }
         for (std::size_t k = 0; k < predators.size(); ++k) {
             const OceanPredator& p = predators[k];
@@ -1910,13 +1917,9 @@ private:
         float foodD2 = std::numeric_limits<float>::infinity();
         int foodCount = 0;
         // e: the item's grid entry, whose depth / size / eyeCon are food[e.index]'s
-        // (copied at this step's build; food does not change in the per-fish phase).
-        auto smell = [&](const OceanFoodGrid::Entry& e) {
-            float dx = e.pos.x - c.pos.x;
-            float dy = e.pos.y - c.pos.y;
-            if (cfg.toroidal) { dx = wrapDx(dx); dy = wrapDy(dy); }
-            const float dz = e.depth - c.depth;
-            const float d2 = dx * dx + dy * dy + dz * dz;
+        // (copied at this step's build; food does not change in the per-fish
+        // phase); (dx, dy, dz) its offset, d2 = dx·dx + dy·dy + dz·dz.
+        auto smell = [&](const OceanFoodGrid::Entry& e, float dx, float dy, float dz, float d2) {
             if (d2 > R2) return;
 #ifdef EVO_OCEAN_EYE
             // The eye sees every item within R (size does not hide it; unless cloaked) ...
@@ -1935,8 +1938,24 @@ private:
                 }
             }
         };
-        if (cfg.toroidal) foodGrid_.forEachInRadiusWrapped(c.pos, R, smell);
-        else              foodGrid_.forEachInRadius(c.pos, R, smell);
+        if (cfg.toroidal) {
+            // The grid tests each image against its translated centre; the offset
+            // is the wrapped difference from c.pos (they round differently, so
+            // both stay: tests/ocean_sense_tests.hpp, "wrapped filter").
+            foodGrid_.forEachInRadiusWrapped(c.pos, R, [&](const OceanFoodGrid::Entry& e) {
+                const float dx = wrapDx(e.pos.x - c.pos.x), dy = wrapDy(e.pos.y - c.pos.y);
+                const float dz = e.depth - c.depth;
+                smell(e, dx, dy, dz, dx * dx + dy * dy + dz * dz);
+            });
+        } else {
+            // Bounded: the grid's own offset and q2 = dx·dx + dy·dy, taken against
+            // the query centre c.pos (the very values the offset here was), so
+            // q2 + dz·dz is the same left-to-right sum; its 2-D test q2 <= R² stays.
+            foodGrid_.forEachInRadius(c.pos, R, [&](const OceanFoodGrid::Entry& e, float dx, float dy, float q2) {
+                const float dz = e.depth - c.depth;
+                smell(e, dx, dy, dz, q2 + dz * dz);
+            });
+        }
         sensors[NEAREST_FOOD_DX] = foodDx;
         sensors[NEAREST_FOOD_DY] = foodDy;
         sensors[NEAREST_FOOD_DZ] = foodDz;

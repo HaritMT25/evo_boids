@@ -425,8 +425,15 @@ void testFoodGrid() {
                             t.expect(same, "entry %d's payload is not its item's", e.index);
                             ++entries;
                         };
+                        // bounded: the visitor also gets the 2-D test's offset and q2 (bit for bit)
+                        auto fbq = [&](const OceanFoodGrid::Entry& e, float dx, float dy, float q2) {
+                            const float ex = e.pos.x - c.x, ey = e.pos.y - c.y;
+                            t.expect(sameBits(dx, ex) && sameBits(dy, ey) && sameBits(q2, ex * ex + ey * ey) && q2 <= r * r,
+                                     "entry %d: offset / q2 handed over are not the 2-D test's", e.index);
+                            fb(e);
+                        };
                         if (wrapped) { sg.forEachInRadiusWrapped(c, r, fa); fg.forEachInRadiusWrapped(c, r, fb); }
-                        else         { sg.forEachInRadius(c, r, fa);        fg.forEachInRadius(c, r, fb); }
+                        else         { sg.forEachInRadius(c, r, fa);        fg.forEachInRadius(c, r, fbq); }
                         bool same = va.size() == vb.size();
                         for (std::size_t k = 0; same && k < va.size(); ++k)
                             same = va[k].first == vb[k].first && sameBits(va[k].second.x, vb[k].second.x) &&

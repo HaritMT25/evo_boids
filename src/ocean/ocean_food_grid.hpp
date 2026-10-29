@@ -115,8 +115,10 @@ public:
     }
 
     // SpatialGrid::forEachInRadius / forEachInRadiusWrapped, handing the visitor
-    // the whole entry: f(const Entry&) for exactly the entries those visit, in
-    // the same order.
+    // the whole entry, for exactly the entries those visit, in the same order:
+    // bounded, f(entry, dx, dy, q2) with the 2-D test's own offset from the query
+    // centre (dx = e.pos.x - center.x, dy likewise) and q2 = dx * dx + dy * dy,
+    // the sum it compared (q2 <= r²); wrapped, f(entry).
     template <class F>
     void forEachInRadius(Vec2 center, float radius, F&& f) const {
         const float r2 = radius * radius;
@@ -129,9 +131,10 @@ public:
             const Entry* e   = entries_.data() + start_[rowBase + minCx];
             const Entry* end = entries_.data() + start_[rowBase + maxCx + 1];
             for (; e != end; ++e) {
-                float dx = e->pos.x - center.x;
-                float dy = e->pos.y - center.y;
-                if (dx * dx + dy * dy <= r2) f(*e);
+                const float dx = e->pos.x - center.x;
+                const float dy = e->pos.y - center.y;
+                const float q2 = dx * dx + dy * dy;
+                if (q2 <= r2) f(*e, dx, dy, q2);
             }
         }
     }

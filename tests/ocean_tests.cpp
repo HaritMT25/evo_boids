@@ -4708,6 +4708,7 @@ void testFlowLanes() {
 
 #include "ocean_appearance_tests.hpp"
 #include "ocean_sense_tests.hpp"
+#include "ocean_step_tests.hpp"
 
 int main(int argc, char** argv) {
 #ifndef OCEAN_TESTS_NO_SHIM
@@ -4731,6 +4732,7 @@ int main(int argc, char** argv) {
     ot::testSenseEdges();   // tests/ocean_sense_tests.hpp: the scans' edges, pinned
     ot::testSenseRef();
     ot::testFoodGrid();
+    ot::testStepEdges();    // tests/ocean_step_tests.hpp: the movement's arithmetic, pinned
     ot::testFoodLife();
     ot::testRemovedNonFinite();
     ot::testReproducible();

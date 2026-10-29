@@ -947,6 +947,97 @@ static void feedForward(RefNet& nnet, const float sensors[], float actions[]) {
 
 }  // namespace oracle
 
+// The same oracle, compared by BIT PATTERN (float == cannot tell +0 from -0),
+// on random nets fed edge values (+-0, subnormals, the largest floats, so
+// infinities and NaN arise too) with a quarter of the weights 0; and fixtures
+// where a reformulated accumulator or activation would differ:
+//   * a sink whose only product is -0 (sensor -1 x weight 0): +0 + -0 = +0, so
+//     the action reads +0 (an accumulator started from the product reads -0);
+//   * a zero-weight edge into a hidden neuron: it is driven, so its output
+//     becomes tanh(+0) = +0, not its fixed 0.5;
+//   * an action with no edge: +0;
+//   * a recurrent chain (sensor -> hidden 0 -> hidden 1): hidden 1 reads hidden
+//     0's OLD output (0.5 on the first call), and the next call carries the new
+//     state (repeated calls are how interaction votes run the net again).
+static void test_feedforward_bits() {
+    std::printf("feedForward: bit for bit, edge values and fixtures...\n");
+    auto bits = [](float f) { std::uint32_t u; std::memcpy(&u, &f, 4); return u; };
+    auto gene = [](bool srcSensor, int src, bool sinkAction, int sink, int weight) {
+        Gene g;
+        g.sourceType = srcSensor ? SOURCE_SENSOR : SOURCE_NEURON;
+        g.sourceNum = (uint16_t)src;
+        g.sinkType = sinkAction ? SINK_ACTION : SINK_NEURON;
+        g.sinkNum = (uint16_t)sink;
+        g.weight = (int16_t)weight;
+        return g;
+    };
+    // Runs both nets over `steps` inputs; counts output words whose bits differ.
+    auto compare = [&](const Genome& g, const std::vector<std::vector<float>>& inputs) {
+        oracle::RefNet ref;
+        NeuralNet opt;
+        oracle::build(g, ref);
+        buildNeuralNet(g, opt);
+        int bad = 0;
+        for (const auto& in : inputs) {
+            float actRef[NUM_ACTIONS], actOpt[NUM_ACTIONS];
+            oracle::feedForward(ref, in.data(), actRef);
+            feedForward(opt, in.data(), actOpt);
+            for (int k = 0; k < NUM_ACTIONS; ++k) bad += bits(actRef[k]) != bits(actOpt[k]);
+            for (int n = 0; n < MAX_INTERNAL_NEURONS; ++n) bad += bits(ref.neurons[n].output) != bits(opt.neurons[n].output);
+        }
+        return bad;
+    };
+    rng.seed(20261029u);
+    static const float kEdge[] = {0.0f, -0.0f, 1e-40f, -1e-40f, 1.17549435e-38f, -1.17549435e-38f,
+                                  3.4e38f, -3.4e38f, 1.0f, -1.0f, 0.5f, -0.5f};
+    const int kEdges = (int)(sizeof kEdge / sizeof kEdge[0]);
+    int mism = 0, nets = 0;
+    for (int t = 0; t < 400; ++t) {
+        Genome g = makeRandomGenome();
+        for (Gene& x : g)
+            if (rng.uint(3) == 0) x.weight = 0;
+        std::vector<std::vector<float>> inputs(5, std::vector<float>(NUM_SENSES));
+        for (auto& in : inputs)
+            for (float& s : in) s = (rng.uint(1) == 0) ? kEdge[rng.uint((uint32_t)kEdges - 1)] : rng.range(-1.0f, 1.0f);
+        mism += compare(g, inputs);
+        ++nets;
+    }
+    CHECK(nets == 400);
+    CHECK(mism == 0);
+
+    // Fixtures (net, input, the expected bits).
+    {
+        std::vector<std::vector<float>> in(1, std::vector<float>(NUM_SENSES, 0.0f));
+        in[0][0] = -1.0f;
+        const Genome g = {gene(true, 0, true, 0, 0), gene(true, 0, false, 3, 0)};
+        NeuralNet n;
+        buildNeuralNet(g, n);
+        float act[NUM_ACTIONS];
+        feedForward(n, in[0].data(), act);
+        CHECK(bits(act[0]) == 0x00000000u);          // +0 + (-1 x 0 = -0) = +0
+        CHECK(bits(act[1]) == 0x00000000u);          // no edge
+        CHECK(n.neurons[3].driven && bits(n.neurons[3].output) == 0x00000000u);   // driven by a 0 weight
+        CHECK(!n.neurons[4].driven && n.neurons[4].output == 0.5f);              // undriven: fixed
+        CHECK(compare(g, in) == 0);
+    }
+    {
+        std::vector<std::vector<float>> in(3, std::vector<float>(NUM_SENSES, 0.0f));
+        in[1][0] = 0.75f;
+        const Genome g = {gene(true, 0, false, 0, 8192), gene(false, 0, false, 1, 8192), gene(false, 1, true, 2, 8192)};
+        NeuralNet n;
+        buildNeuralNet(g, n);
+        float act[NUM_ACTIONS];
+        feedForward(n, in[0].data(), act);
+        CHECK(bits(n.neurons[0].output) == bits(evomath::tanhf(0.0f)));
+        CHECK(bits(n.neurons[1].output) == bits(evomath::tanhf(0.5f)));   // hidden 0's OLD output
+        CHECK(bits(act[2]) == bits(evomath::tanhf(0.5f)));                // hidden 1's old 0.5
+        feedForward(n, in[1].data(), act);
+        CHECK(bits(n.neurons[0].output) == bits(evomath::tanhf(0.75f)));
+        CHECK(bits(n.neurons[1].output) == bits(evomath::tanhf(evomath::tanhf(0.0f))));
+        CHECK(compare(g, in) == 0);
+    }
+}
+
 static void test_feedforward_equivalence() {
     std::printf("feedForward: flattened == original, bit for bit...\n");
     rng.seed(20260725u);
@@ -3723,6 +3814,7 @@ int main() {
     test_exact_shortcuts();
     test_genome_and_net();
     test_feedforward_equivalence();
+    test_feedforward_bits();
     test_fast_tanh();
     test_topological_neighbors();
     test_checkpoint();

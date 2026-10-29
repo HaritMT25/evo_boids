@@ -1806,10 +1806,13 @@ private:
 #endif
 
         // ---- neighbours: (x, y) grid candidates, kept if within R in 3-D ----
+        // The step's flags, read once per fish (a config change takes effect
+        // between steps, never inside one).
+        const bool tor = cfg.toroidal;
         std::vector<int>& neighbors = neighbors_;
         neighbors.clear();
-        if (cfg.toroidal) creatureGrid_.queryRadiusWrapped(c.pos, R, neighbors);
-        else              creatureGrid_.queryRadius(c.pos, R, neighbors);
+        if (tor) creatureGrid_.queryRadiusWrapped(c.pos, R, neighbors);
+        else     creatureGrid_.queryRadius(c.pos, R, neighbors);
 
         float avgDx = 0, avgDy = 0, avgDz = 0, avgHx = 0, avgHy = 0;
         float nearestDist = R;
@@ -1832,7 +1835,7 @@ private:
                 const FishHot& other = hot_[ni];
                 float dx = other.pos.x - c.pos.x;
                 float dy = other.pos.y - c.pos.y;
-                if (cfg.toroidal) { dx = wrapDx(dx); dy = wrapDy(dy); }
+                if (tor) { dx = wrapDx(dx); dy = wrapDy(dy); }
                 const float dz = other.depth - c.depth;
                 const float d2 = dx * dx + dy * dy + dz * dz;
                 if (d2 > R2) continue;
@@ -1852,7 +1855,7 @@ private:
                 const FishHot& other = hot_[ni];
                 float dx = other.pos.x - c.pos.x;
                 float dy = other.pos.y - c.pos.y;
-                if (cfg.toroidal) { dx = wrapDx(dx); dy = wrapDy(dy); }
+                if (tor) { dx = wrapDx(dx); dy = wrapDy(dy); }
                 const float dz = other.depth - c.depth;
                 const float d2 = dx * dx + dy * dy + dz * dz;
                 if (d2 > R2) continue;
@@ -1899,7 +1902,7 @@ private:
             const float sim = kernel::writeNearestSensors(c, nearest, sensors);
             float dx = nearest.pos.x - c.pos.x;
             float dy = nearest.pos.y - c.pos.y;
-            if (cfg.toroidal) { dx = wrapDx(dx); dy = wrapDy(dy); }
+            if (tor) { dx = wrapDx(dx); dy = wrapDy(dy); }
             sensors[GENETIC_SIM_FWD] = (dx * fwd.x + dy * fwd.y > 0) ? sim : 0.5f;
         } else {
             kernel::clearNearestSensors(sensors);
@@ -1916,6 +1919,10 @@ private:
         float foodDx = 0, foodDy = 0, foodDz = 0, foodDist = R;
         float foodD2 = std::numeric_limits<float>::infinity();
         int foodCount = 0;
+        // The mouth gate, once per fish: its flag, and the size limit (the very
+        // product kMouth · bodySize the test took per item).
+        const bool mouthGate = ocfg.mouthGate;
+        const float mouthMax = ocfg.kMouth * c.bodySize;
         // e: the item's grid entry, whose depth / size / eyeCon are food[e.index]'s
         // (copied at this step's build; food does not change in the per-fish
         // phase); (dx, dy, dz) its offset, d2 = dx·dx + dy·dy + dz·dz.
@@ -1926,7 +1933,7 @@ private:
             if constexpr (Eye) { if (eyeFood) eyeSee(eye, fwd, rht, dx, dy, dz, d2, ocean::kEyeFoodSize, e.eyeCon, R); }
 #endif
             // ... the smell senses only what this fish could swallow.
-            if (ocfg.mouthGate && e.size > ocfg.kMouth * c.bodySize) return;   // E1: not food for me
+            if (mouthGate && e.size > mouthMax) return;   // E1: not food for me
             ++foodCount;
             if (d2 < foodD2) {
                 const float dist = std::sqrt(d2);
@@ -1938,7 +1945,7 @@ private:
                 }
             }
         };
-        if (cfg.toroidal) {
+        if (tor) {
             // The grid tests each image against its translated centre; the offset
             // is the wrapped difference from c.pos (they round differently, so
             // both stay: tests/ocean_sense_tests.hpp, "wrapped filter").

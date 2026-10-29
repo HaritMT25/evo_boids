@@ -20,8 +20,10 @@
 //     worker, on the page after) N further steps are bit-identical to an
 //     uninterrupted run with the same edits at the same frames (a fingerprint
 //     of every oc_* export: positions, depths, bodies, colours, ids, food,
-//     predators, stats, the summary, every family line, and oc_inspect of
-//     every fish: its numbers, hidden neurons and wiring);
+//     predators, stats, the summary, every family line, the appearance
+//     genome's rows (its owner-bound side array lives in module memory and
+//     must come across whole), and oc_inspect of every fish: its numbers,
+//     hidden neurons and wiring);
 //   * Randomize (web/ocean_config.js draw) against oc_init at small and
 //     default world sizes, and the refusals of imported values the sheet
 //     would otherwise round or drop.
@@ -81,6 +83,10 @@ function fingerprint(M) {
     put(Float32Array, M._oc_food_depth(), fc);
     put(Float32Array, M._oc_predator_data(), pc * 3);
     put(Float32Array, M._oc_predator_depth(), pc);
+    if (M._oc_creature_appearance) {   /* the appearance genome: its owner-bound side array, in module memory */
+        h.update(Buffer.from(new Int32Array([M._oc_appearance_count(), M._oc_appearance_flags(), M._oc_appearance_broken()]).buffer));
+        put(Float32Array, M._oc_creature_appearance(), M._oc_appearance_count() * M._oc_appearance_stride());
+    }
     h.update(Buffer.from(new Float64Array(HO.f64(M, M._oc_summary(), M._oc_summary_len())).buffer));
     const k = M._oc_families(1 << 20);
     h.update(Buffer.from(new Float64Array(HO.f64(M, M._oc_families_data(), 2 * k)).buffer));
@@ -94,6 +100,13 @@ function fingerprint(M) {
         put(Float32Array, M._oc_inspect_conns(), M._oc_inspect_conn_count() * 5);
     }
     return h.digest('hex');
+}
+/* the appearance genome rows of this sync, with their count and state */
+function appRows(M) {
+    M._oc_sync();
+    const n = M._oc_appearance_count();
+    return { n, flags: M._oc_appearance_flags(), broken: M._oc_appearance_broken(),
+             rows: n ? Array.from(new Float32Array(HO.buffer(M), M._oc_creature_appearance(), n * M._oc_appearance_stride())) : [] };
 }
 /* compare a and b over `steps` further steps, one at a time */
 function sameFor(a, b, steps) {
@@ -231,6 +244,12 @@ async function roundTrip(label, cfg) {
     const s3 = await w.wait(isType('set'), 'the maxSpeed reply');
     ok(s3.ok, 'maxSpeed 140 applied in the worker at frame ' + s3.frame);
     edits.push([s3.frame, 'maxSpeed', 140]);
+    if (cfg.patternMutation === undefined && W._oc_creature_appearance && label !== 'the default world') {
+        w.send({ cmd: 'set', key: 'patternMutation', value: 0.1 });   /* an appearance knob, live in Turbo */
+        const s4 = await w.wait(isType('set'), 'the patternMutation reply');
+        ok(s4.ok, 'patternMutation 0.1 (the appearance genome) applied in the worker at frame ' + s4.frame);
+        edits.push([s4.frame, 'patternMutation', 0.1]);
+    }
     await w.wait(statsAt(s3.frame + 600), 'frame ' + (s3.frame + 600));
     ok(grown === 4, 'the worker\'s memory grew inside oc_summary and oc_families while sampling (' + grown + ' times, now ' + memMB(W) + ' MiB)');
     const rows = w.rows();
@@ -252,6 +271,13 @@ async function roundTrip(label, cfg) {
     HO.take(page, back.mem, "the page's");
     const backFrame = frame(page);
     ok(backFrame > s3.frame, 'the page took the world back at frame ' + backFrame + ' (' + back.totalSteps + ' Turbo steps)');
+    if (page._oc_creature_appearance) {
+        const a = appRows(page), b = appRows(W);   /* the worker, stopped: its world is the image */
+        ok(a.n > 0 && a.n === page._oc_creature_count() && !a.broken && a.flags === b.flags && a.n === b.n &&
+           a.rows.length === b.rows.length && a.rows.every((v, i) => Object.is(v, b.rows[i])),
+           'the appearance genome came across whole: ' + a.n + ' fish x ' + page._oc_appearance_stride() + ' floats, flags ' + a.flags +
+           ', bit-identical to the worker\'s, its side array still bound (broken 0)');
+    }
     page._oc_step(45);
     setParam(page, 'metabolicRate', 1.6); edits.push([frame(page), 'metabolicRate', 1.6]);
     page._oc_step(15);

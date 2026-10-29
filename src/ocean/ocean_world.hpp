@@ -948,12 +948,14 @@ private:
     };
     struct PendingSignal { bool wants = false; Vec2 pos; };
     struct Candidate { float distSq, dx, dy, dz; int index; };
+    struct FoodSeen { float dx, dy, dz, d2; int k; };   // a food item within R: its offset, d², grid slot
 
     SpatialGrid creatureGrid_;
     OceanFoodGrid foodGrid_;   // SpatialGrid's layout and queries + each item's depth / size / eyeCon
     std::vector<FishHot> hot_;
     std::vector<PendingSignal> pending_;
     std::vector<int> neighbors_, nearbyFood_, nearby_, near_;
+    std::vector<FoodSeen> foodSeen_;   // foodWithin's list (scratch, one fish at a time)
     CurrentField current_;
     std::vector<Vec2> foodPatches_;
     std::vector<float> foodPatchDepth_;   // foodDepthMode 1: one depth per patch
@@ -1688,6 +1690,41 @@ private:
         }
     }
 
+    // The bounded food scan (cfg.toroidal off): every item within R of fish c
+    // in 3-D, in the grid's visit order, as foodSeen_[0, n) — offset, d², grid
+    // slot. One pass over the query's rows of cells (the grid's own runs, in its
+    // order) takes each candidate's offset from c.pos, the query centre (dx =
+    // x − c.pos.x, as the grid's 2-D test takes it), q2 = dx·dx + dy·dy (that
+    // test's sum), dz, and d2 = q2 + dz·dz (dx·dx + dy·dy + dz·dz, the same
+    // left-to-right sum); it writes the record and advances the list exactly
+    // when the grid's 2-D test (q2 <= R²) and the 3-D test (!(d2 > R²): a NaN d²
+    // passes, as it always has) both hold — no branch on either (each passes a
+    // random-looking third to half of the time: a mispredict on a large share of
+    // candidates). The kept records are what the grid's visitor saw, in its
+    // order, with its arithmetic.
+    int foodWithin(const Fish& c, float R) {
+        const int total = foodGrid_.entryCount();
+        if ((int)foodSeen_.size() < total) foodSeen_.resize(total);   // a write per candidate, < total of them
+        FoodSeen* out = foodSeen_.data();
+        const float* fx = foodGrid_.xs();
+        const float* fy = foodGrid_.ys();
+        const float* fz = foodGrid_.depths();
+        const float R2 = R * R;
+        const float px = c.pos.x, py = c.pos.y, pz = c.depth;
+        int n = 0;
+        foodGrid_.forEachRun(c.pos, R, [&](int b, int e) {
+            for (int k = b; k < e; ++k) {
+                const float dx = fx[k] - px, dy = fy[k] - py;
+                const float q2 = dx * dx + dy * dy;
+                const float dz = fz[k] - pz;
+                const float d2 = q2 + dz * dz;
+                out[n] = {dx, dy, dz, d2, k};
+                n += (int)(q2 <= R2) & (int)!(d2 > R2);
+            }
+        });
+        return n;
+    }
+
 #ifdef EVO_OCEAN_EYE
     // Eye-only mode: the eye's half of computeSensors' neighbour, food and
     // predator loops — the same queries, every object within R in the same
@@ -1733,11 +1770,10 @@ private:
                     const float dz = fz[k] - c.depth;
                     look(k, dx, dy, dz, dx * dx + dy * dy + dz * dz);
                 });
-            } else {
-                foodGrid_.forEachInRadius(c.pos, R, [&](int k, float dx, float dy, float q2) {
-                    const float dz = fz[k] - c.depth;
-                    look(k, dx, dy, dz, q2 + dz * dz);
-                });
+            } else {   // foodWithin's list: the items within R, in the grid's visit order
+                const int n = foodWithin(c, R);
+                const FoodSeen* s = foodSeen_.data();
+                for (int j = 0; j < n; ++j) look(s[j].k, s[j].dx, s[j].dy, s[j].dz, s[j].d2);
             }
         }
         for (std::size_t k = 0; k < predators.size(); ++k) {
@@ -1966,13 +2002,14 @@ private:
                 smell(k, dx, dy, dz, dx * dx + dy * dy + dz * dz);
             });
         } else {
-            // Bounded: the grid's own offset and q2 = dx·dx + dy·dy, taken against
-            // the query centre c.pos (the very values the offset here was), so
-            // q2 + dz·dz is the same left-to-right sum; its 2-D test q2 <= R² stays.
-            foodGrid_.forEachInRadius(c.pos, R, [&](int k, float dx, float dy, float q2) {
-                const float dz = fz[k] - c.depth;
-                smell(k, dx, dy, dz, q2 + dz * dz);
-            });
+            // Bounded: foodWithin's list — the items within R in the grid's visit
+            // order, with the grid's own offset and q2 = dx·dx + dy·dy (taken
+            // against the query centre c.pos, the very values the offset here
+            // was), so d² = q2 + dz·dz is the same left-to-right sum; the grid's
+            // 2-D test stays. smell's d2 > R² test is then always false.
+            const int n = foodWithin(c, R);
+            const FoodSeen* s = foodSeen_.data();
+            for (int j = 0; j < n; ++j) smell(s[j].k, s[j].dx, s[j].dy, s[j].dz, s[j].d2);
         }
         sensors[NEAREST_FOOD_DX] = foodDx;
         sensors[NEAREST_FOOD_DY] = foodDy;

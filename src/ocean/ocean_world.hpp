@@ -1711,9 +1711,36 @@ private:
         const float* fz = foodGrid_.depths();
         const float R2 = R * R;
         const float px = c.pos.x, py = c.pos.y, pz = c.depth;
+        // Four candidates at a time (GCC / Clang vector extensions: SSE2 on
+        // x86-64, SIMD128 under -msimd128): lane j runs candidate k + j's very
+        // operations — IEEE single −, × and + in the same tree, no FMA
+        // (-ffp-contract=off) and no relaxed SIMD — so its values are the scalar
+        // loop's bits; the comparisons give 0 / −1 masks (the literal q2 <= R²
+        // and !(d2 > R²)), and the lanes are written and kept one by one in lane
+        // order, as the scalar loop would. The rest of a run (< 4) is scalar.
+        typedef float v4f __attribute__((vector_size(16)));
+        typedef int v4i __attribute__((vector_size(16)));
+        const v4f PX = {px, px, px, px}, PY = {py, py, py, py}, PZ = {pz, pz, pz, pz};
+        const v4f RR = {R2, R2, R2, R2};
         int n = 0;
         foodGrid_.forEachRun(c.pos, R, [&](int b, int e) {
-            for (int k = b; k < e; ++k) {
+            int k = b;
+            for (; k + 4 <= e; k += 4) {
+                v4f X, Y, Z;
+                std::memcpy(&X, fx + k, sizeof X);
+                std::memcpy(&Y, fy + k, sizeof Y);
+                std::memcpy(&Z, fz + k, sizeof Z);
+                const v4f dx = X - PX, dy = Y - PY;
+                const v4f q2 = dx * dx + dy * dy;
+                const v4f dz = Z - PZ;
+                const v4f d2 = q2 + dz * dz;
+                const v4i keep = (q2 <= RR) & ~(d2 > RR);   // −1 = kept
+                for (int j = 0; j < 4; ++j) {
+                    out[n] = {dx[j], dy[j], dz[j], d2[j], k + j};
+                    n -= keep[j];
+                }
+            }
+            for (; k < e; ++k) {
                 const float dx = fx[k] - px, dy = fy[k] - py;
                 const float q2 = dx * dx + dy * dy;
                 const float dz = fz[k] - pz;

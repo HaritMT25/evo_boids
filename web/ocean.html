@@ -313,6 +313,8 @@
   @keyframes card-in { from { opacity: 0; transform: translateY(12px); } }
   .fc-head { display: flex; align-items: center; gap: 12px; padding: 10px 6px 6px 12px; }
   #iportrait { width: 56px; height: 40px; flex: none; }
+  #iswatch { display: block; width: 100%; height: 22px; margin: 6px 0 2px; border-radius: 4px; image-rendering: auto; }
+  #iswatch[hidden] { display: none; }
   .fc-title { flex: 1; min-width: 0; }
   #ititle { font-size: 16px; font-weight: 650; line-height: 1.2; }
   #isub { font-size: 13px; color: var(--ink-3); }
@@ -754,6 +756,7 @@
       <button id="iexpand" class="icon-btn" aria-expanded="false" title="Show its brain"><svg class="i"><use href="#i-chevron"/></svg><span class="sr">brain</span></button>
       <button id="iclose" class="icon-btn" aria-label="close"><svg class="i"><use href="#i-close"/></svg></button>
     </div>
+    <canvas id="iswatch" hidden title="its skin pattern: the flank, head on the left, back on top (unlit)"></canvas>
     <div class="fc-stats">
       <div class="stat"><div class="k">Energy</div><div class="v" id="ienergyv">–</div><div class="bar" id="ienergy"><i></i><span class="tick"></span></div></div>
       <div class="stat"><div class="k">Age</div><div class="v" id="iagev">–</div><div class="bar" id="iage"><i></i></div></div>
@@ -812,8 +815,8 @@
           <span class="ctl"><input id="followLight" class="switch" type="checkbox" role="switch" checked aria-label="flashlight while following"></span>
         </div>
         <div class="field" id="f_colourBrain">
-          <span><span class="name"><span class="lt">Colour by brain similarity</span></span><span class="desc">Off (the default): each family line has its own colour, the same one it has in the dashboards. On: a fish's colour comes from its genome, so similar brains look alike.</span></span>
-          <span class="ctl"><input id="colourBrain" class="switch" type="checkbox" role="switch" aria-label="colour by brain similarity"></span>
+          <span><span class="name"><span class="lt">Fish colours</span></span><span class="desc">Family (the default): each family line has its own colour, the same one it has in the dashboards. Brain: a fish's colour comes from its genome, so similar brains look alike. Appearance: each fish's own inherited skin pattern and body shape.</span></span>
+          <span class="ctl"><select id="colourMode" aria-label="fish colours"><option value="family">Family</option><option value="brain">Brain</option><option value="appearance">Appearance</option></select></span>
         </div>
         <p id="modeline"></p>
         <h3>Save &amp; load</h3>
@@ -884,6 +887,7 @@
     };
   </script>
   <script src="ocean_handoff.js"></script>
+  <script src="ocean_appearance.js"></script>
   <script src="ocean_scene.js"></script>
   <script src="ocean_config.js"></script>
   <script src="charts.js"></script>

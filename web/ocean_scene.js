@@ -26,6 +26,13 @@
  *   - the flashlight (setFlashlight, viewer only): a cone of clear light from
  *     the camera onto the followed fish or the point it looks at; inside it
  *     the fish, food and sand show their true colours (BEAM_FN)
+ *   - the appearance genome (setAppearance; web/ocean_appearance.js): with it
+ *     on and the snapshot carrying s.app (oc_creature_appearance's 63 floats
+ *     per fish), every fish is drawn from its own genes: the M1 deformable
+ *     body (shape, fins, barbels) skinned with pattern law 3, lit and fogged
+ *     exactly like the plain fish, in one instanced draw (plus one for the
+ *     barbels when a fish has any, and the shadow). appearanceParity() is
+ *     the GPU == CPU check of the pattern law (the gallery's K12)
  *
  * Every fish is a faceted low-poly body bent along the six spine points the
  * core exports; the floor below catches its shadow and slow caustic light.
@@ -245,6 +252,160 @@
     "varying vec3 vWorld; varying float vLift;",
     "void main() { gl_FragColor = vec4(0.008, 0.04, 0.05, uAlpha * (1.0 - 0.7 * vLift) * (1.0 - fogOf(vWorld))); }"
   ].join("\n");
+
+  /* ---- the appearance genome's fish (web/ocean_appearance.js: EvoAppearance) ----
+   * The same spine, tail beat, pitch, lighting, depth, fog, selection and
+   * flashlight as FISH_VS / FISH_FS; every gene comes from uGenes (a fish's
+   * 63 floats in 16 RGBA32F texels, fetched by gl_InstanceID): the body is
+   * the M1 template deformed by the 30 shape genes and its skin is pattern
+   * law 3 from the 33 pattern floats, at the vertex's canonical material
+   * site, evaluated before the bend and the swim, so the pattern never
+   * slides. 7 vertex attributes. The legacy base / countershade / fin tint stage is not
+   * applied here (the genes carry their own). */
+  function appearanceShaders(EA) {
+    var G = EA.GLSL;
+    var CORE = [
+      "attribute vec4 aT; attribute vec4 aPattern;",
+      "attribute vec4 iA; attribute vec4 iB; attribute vec4 iC;",
+      "attribute vec4 iBody;",  /* radius, height, highlight, ember */
+      "attribute vec4 iX;",     /* pitch (vz), tail-beat phase, lambda, 0 */
+      "uniform vec2 uHalf; uniform float uTime; uniform float uWag; uniform float uPxPerUnit;",
+      G.COMMON,
+      G.GENES,
+      G.MORPH,
+      "vec2 seg(int i) {",
+      "  if (i <= 0) return iA.xy; if (i == 1) return iA.zw; if (i == 2) return iB.xy;",
+      "  if (i == 3) return iB.zw; if (i == 4) return iC.xy; return iC.zw;",
+      "}",
+      "vec2 spine(float s) {",
+      "  if (s <= 0.0) return seg(0) + (seg(0) - seg(1)) * (-s);",
+      "  if (s >= 5.0) return seg(5) + (seg(5) - seg(4)) * (s - 5.0);",
+      "  int i = int(floor(s)); float t = s - float(i);",
+      "  vec2 p0 = seg(max(i - 1, 0)), p1 = seg(i), p2 = seg(min(i + 1, 5)), p3 = seg(min(i + 2, 5));",
+      "  float t2 = t * t, t3 = t2 * t;",
+      "  return 0.5 * ((2.0 * p1) + (-p0 + p2) * t + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2",
+      "              + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3);",
+      "}",
+      /* fishWorld with the deformed rest point geo (body radii; x = lambda·u along
+       * the spine): the extrapolation past the spine's ends is bounded, not
+       * clamped to the legacy template's [-.5, 1.6] (long fins and barbels) */
+      "vec3 appWorld(vec3 geo) {",
+      "  float R = iBody.x, u = geo.x / iX.z;",
+      "  float s = clamp(u, -1.5, 3.0) * 5.0;",
+      "  vec2 c = spine(s);",
+      "  vec2 f = spine(s - 0.15) - spine(s + 0.15);",
+      "  float fl = length(f);",
+      "  f = fl > 1e-4 ? f / fl : vec2(1.0, 0.0);",
+      "  vec2 side = vec2(-f.y, f.x);",
+      "  float wag = sin(uTime * 7.5 + iX.y * 6.2831 - u * 4.5) * uWag * smoothstep(0.1, 1.3, u) * R * 0.3;",
+      "  vec2 p = c + side * (geo.y * R + wag);",
+      "  float along = length(c - seg(0)) * (s < 0.0 ? -1.0 : 1.0);",
+      "  float lift = along * clamp(iX.x, -1.2, 1.2);",
+      "  return vec3(p.x - uHalf.x, iBody.y + geo.z * R + lift, p.y - uHalf.y);",
+      "}",
+      /* the barbels' screen-space minimum half-width (0.7 px), in body radii */
+      "float minWidth() {",
+      "  vec3 head = vec3(iA.x - uHalf.x, iBody.y, iA.y - uHalf.y);",
+      "  return 0.7 * max(1.0, length(cameraPosition - head)) / max(1e-3, iBody.x * uPxPerUnit);",
+      "}"
+    ].join("\n");
+    var vs = [
+      CORE, G.VARY, G.DECODE,
+      "varying vec3 vWorld; varying vec4 vMatV; flat varying vec4 vPart;",
+      "void main() {",
+      "  fetchGenes(gl_InstanceID);",
+      "  patternDecode(GT[0], GT[1], GT[2], GT[3], GT[4], GT[5], GT[6], GT[7].xyz, vec2(GT[7].w, GT[8].x), iX.z);",
+      "  Morph M = mDecode(iX.z);",
+      "  vec3 geo, mat; float mar;",
+      "  mBuild(M, aT, aPattern, uTime, uWag, minWidth(), geo, mat, mar);",
+      "  vec3 w = appWorld(geo);",
+      "  vWorld = w; vMatV = vec4(mat, mar); vPart = vec4(aPattern.x, aPattern.z, iBody.z, iBody.w);",
+      "  gl_Position = projectionMatrix * viewMatrix * vec4(w, 1.0);",
+      "}"
+    ].join("\n");
+    var fs = [
+      "uniform vec3 uLight; uniform float uTime; uniform vec3 uSelect;",
+      FOG_FN, DEPTH_FN, BEAM_FN,
+      G.COMMON, G.VARY, G.SKIN,
+      "varying vec3 vWorld; varying vec4 vMatV; flat varying vec4 vPart;",
+      "void main() {",
+      "  int fin = int(vPart.x + 0.5);",
+      /* the material site: body (t, θ, ρ) and barbels (root t, θ) use v = .5(1 − ρ sin θ) */
+      "  bool bodyLike = fin == 0 || fin == 7;",
+      "  float sn = (fin == 0 ? vMatV.z : 1.0) * sin(vMatV.y);",
+      "  float u = vMatV.x;",
+      "  float v = bodyLike ? 0.5 * (1.0 - sn) : vMatV.y;",
+      "  float zL = bodyLike ? sn * pProfileH(u) : 0.0;",
+      "  vec3 base = patternSkinM(u, v, zL, fin == 7 ? 0 : fin, vMatV.w);",
+      "  if (fin == 7) base = mix(base, patternBase(u, v), pS(0.0, 1.0, vMatV.z));",
+      "  vec3 N = normalize(cross(dFdx(vWorld), dFdy(vWorld)));",
+      "  vec3 V = normalize(cameraPosition - vWorld);",
+      "  if (dot(N, V) < 0.0) N = -N;",
+      "  float diff = max(dot(N, uLight), 0.0);",
+      "  vec3 amb = mix(vec3(0.07, 0.13, 0.14), vec3(0.36, 0.48, 0.46), 0.5 + 0.5 * N.y);",
+      "  vec3 col = base * (amb + diff * vec3(1.0, 0.96, 0.86) * 0.92);",
+      "  float rim = pow(1.0 - max(dot(N, V), 0.0), 3.0);",
+      "  col += rim * mix(base, vec3(0.6, 1.0, 0.92), 0.55) * 0.35;",
+      "  vec3 clear = col;",
+      "  col = underwaterAt(col, vWorld.y);",
+      "  vec3 add = vec3(0.0);",
+      "  float vSel = vPart.z;",
+      "  if (fin == 4) {",
+      "    col = vec3(0.02, 0.03, 0.03);",
+      "    col += pow(max(dot(reflect(-uLight, N), V), 0.0), 20.0) * 0.8;",
+      "    clear = col;",
+      "  }",
+      "  if (vSel > 0.75) add += uSelect * (0.16 + 0.55 * rim);",
+      "  else if (vSel > 0.25) add += uSelect * 0.4 * rim;",
+      "  col += add;",
+      "  vec3 murky = mix(col, uFog, fogOf(vWorld));",
+      "  float bk = beamOf(vWorld);",
+      "  if (bk > 0.0) {",
+      "    clear = (clear + add) * (1.0 + 0.2 * max(dot(N, -uBeamDir), 0.0));",
+      "    murky = mix(murky, clear, bk);",
+      "  }",
+      "  gl_FragColor = vec4(murky, 1.0);",
+      "}"
+    ].join("\n");
+    var shadowVs = [
+      CORE,
+      "uniform vec3 uLight; uniform float uFloorY; uniform float uDepth;",
+      "varying vec3 vWorld; varying float vLift;",
+      "void main() {",
+      "  fetchGenes(gl_InstanceID);",
+      "  Morph M = mDecode(iX.z);",
+      "  vec3 geo, mat; float mar;",
+      "  mBuild(M, aT, aPattern, uTime, uWag, minWidth(), geo, mat, mar);",
+      "  vec3 w = appWorld(geo);",
+      "  vec3 s = w - uLight * ((w.y - uFloorY) / uLight.y);",
+      "  s.y = uFloorY + 0.8;",
+      "  vWorld = s;",
+      "  vLift = clamp((w.y - uFloorY) / uDepth, 0.0, 1.0);",
+      "  gl_Position = projectionMatrix * viewMatrix * vec4(s, 1.0);",
+      "}"
+    ].join("\n");
+    /* the GPU == CPU check: one canonical flank chart (u, v in [0, 1]²) per
+     * instance in its own cell of a float target, unlit and unfiltered
+     * (uIntrinsic = 1), against EvoAppearance.flankAt */
+    var chartVs = [
+      "attribute vec4 iG0; attribute vec4 iG1; attribute vec4 iG2; attribute vec4 iG3;",
+      "attribute vec4 iG4; attribute vec4 iG5; attribute vec4 iG6; attribute vec4 iCol; attribute vec4 iX;",
+      "attribute vec4 iCell;",   /* the cell's x0, y0, w, h in NDC */
+      G.COMMON, G.VARY, G.DECODE,
+      "varying vec2 vUV;",
+      "void main() {",
+      "  patternDecode(iG0, iG1, iG2, iG3, iG4, iG5, iG6, iCol.xyz, iX.yz, iX.w);",
+      "  vUV = position.xy;",
+      "  gl_Position = vec4(iCell.xy + position.xy * iCell.zw, 0.0, 1.0);",
+      "}"
+    ].join("\n");
+    var chartFs = [
+      G.COMMON, G.VARY, G.SKIN,
+      "varying vec2 vUV;",
+      "void main() { float u = vUV.x, v = vUV.y; gl_FragColor = vec4(patternSkinM(u, v, pProfileH(u) * (1.0 - 2.0 * v), 0, 1000.0), 1.0); }"
+    ].join("\n");
+    return { vs: vs, fs: fs, shadowVs: shadowVs, chartVs: chartVs, chartFs: chartFs };
+  }
 
   var FLOOR_VS = [
     "varying vec3 vWorld;",
@@ -755,6 +916,113 @@
     }
     var fish = Kind(false), preds = Kind(true);
 
+    /* The appearance genome's fish (setAppearance; null without
+     * web/ocean_appearance.js or float textures): the M1 template at two
+     * qualities (medium; coarse while the tank's detail is below 3), the
+     * barbel strips as a second instanced draw sharing every instance
+     * attribute, and the 30 shape genes per fish in a RGBA32F texture
+     * (8 texels a fish, 512 wide). Rebuilt only when it has to grow. */
+    var EA = window.EvoAppearance || null;
+    var appWant = false, appStatus = EA ? "ready" : "web/ocean_appearance.js not loaded";
+    var appKind = null;
+    function AppKind() {
+      var sh = appearanceShaders(EA);
+      var tpls = { medium: EA.buildTemplate("medium"), coarse: EA.buildTemplate("coarse") };
+      var barbTpl = EA.buildBarbels("medium");
+      var U = beamUniforms({
+        uHalf: common.uHalf, uTime: common.uTime, uFog: common.uFog, uFogDensity: common.uFogDensity,
+        uLight: common.uLight, uWag: fishUniforms.uWag, uSelect: fishUniforms.uSelect,
+        uDepth: common.uDepth, uLightOn: common.uLightOn, uL0: common.uL0, uKWater: common.uKWater,
+        uIntrinsic: { value: 0 }, uPxPerUnit: { value: 500 },
+        uGenes: { value: null }, uRingT: { value: new Float32Array(16) }, uRingN: { value: 0 }, uHalfRing: { value: 4 }
+      });
+      var mat = new THREE.ShaderMaterial({ vertexShader: sh.vs, fragmentShader: sh.fs, uniforms: U, side: THREE.DoubleSide });
+      var shadowU = { uHalf: common.uHalf, uTime: common.uTime, uWag: fishUniforms.uWag, uLight: common.uLight,
+                      uFloorY: common.uFloorY, uDepth: common.uDepth, uFog: common.uFog, uFogDensity: common.uFogDensity,
+                      uAlpha: shadowMat.uniforms.uAlpha, uPxPerUnit: U.uPxPerUnit,
+                      uGenes: U.uGenes, uRingT: U.uRingT, uRingN: U.uRingN, uHalfRing: U.uHalfRing };
+      var shMat = new THREE.ShaderMaterial({ vertexShader: sh.shadowVs, fragmentShader: SHADOW_FS, uniforms: shadowU,
+                                             transparent: true, depthWrite: true, depthFunc: THREE.LessDepth, side: THREE.DoubleSide });
+      var self = { cap: 0, n: 0, lod: "", attrs: null, geo: null, bgeo: null, mesh: null, bmesh: null, shadow: null,
+                   tex: null, texData: null, mat: mat, shaders: sh, barbels: false, tpls: tpls, barbTpl: barbTpl };
+      var INST = ["iA", "iB", "iC", "iBody", "iX"];
+      function geometry(tpl, at) {
+        var g = new THREE.InstancedBufferGeometry();
+        var p3 = new Float32Array(tpl.verts * 3);
+        for (var i = 0; i < tpl.verts; i++) { p3[3 * i] = tpl.pos[4 * i]; p3[3 * i + 1] = tpl.pos[4 * i + 1]; p3[3 * i + 2] = tpl.pos[4 * i + 2]; }
+        g.setAttribute("position", new THREE.BufferAttribute(p3, 3));   /* for three's bookkeeping; the shader reads aT */
+        g.setAttribute("aT", new THREE.BufferAttribute(tpl.pos, 4));
+        g.setAttribute("aPattern", new THREE.BufferAttribute(tpl.pat, 4));
+        g.setIndex(tpl.idx);
+        INST.forEach(function (name) { g.setAttribute(name, at[name]); });
+        g.instanceCount = 0;
+        return g;
+      }
+      function setRings(tpl) {
+        for (var i = 0; i < 16; i++) U.uRingT.value[i] = i < tpl.ringT.length ? tpl.ringT[i] : 0;
+        U.uRingN.value = tpl.ringT.length; U.uHalfRing.value = tpl.half;
+      }
+      function build(cap, lod) {
+        var at = {};
+        INST.forEach(function (name) {
+          var a = new THREE.InstancedBufferAttribute(new Float32Array(cap * 4), 4);
+          a.setUsage(THREE.DynamicDrawUsage);
+          at[name] = a;
+        });
+        var g = geometry(tpls[lod], at), bg = barbTpl ? geometry(barbTpl, at) : null;
+        var rows = Math.ceil(cap * 16 / 512);   /* 16 texels a fish */
+        var data = new Float32Array(512 * rows * 4);
+        /* RGBA32F, nearest, no mipmaps (three's RGBAFormat 1023, FloatType 1015,
+         * NearestFilter 1003: the trimmed bundle does not export the names) */
+        var tex = new THREE.DataTexture(data, 512, rows, 1023, 1015);
+        tex.magFilter = tex.minFilter = 1003;
+        tex.generateMipmaps = false;
+        tex.needsUpdate = true;
+        if (self.geo) {
+          self.geo.dispose(); if (self.bgeo) self.bgeo.dispose(); self.tex.dispose();
+          self.mesh.geometry = g; self.shadow.geometry = g;
+          if (self.bmesh && bg) self.bmesh.geometry = bg;
+        } else {
+          self.mesh = new THREE.Mesh(g, mat);
+          self.shadow = new THREE.Mesh(g, shMat);
+          self.mesh.frustumCulled = self.shadow.frustumCulled = false;
+          self.shadow.renderOrder = 1; self.mesh.renderOrder = 2;
+          scene.add(self.shadow); scene.add(self.mesh);
+          if (bg) {
+            self.bmesh = new THREE.Mesh(bg, mat);
+            self.bmesh.frustumCulled = false; self.bmesh.renderOrder = 2;
+            scene.add(self.bmesh);
+          }
+        }
+        U.uGenes.value = tex;
+        setRings(tpls[lod]);
+        self.geo = g; self.bgeo = bg; self.attrs = at; self.cap = cap; self.lod = lod; self.tex = tex; self.texData = data;
+      }
+      self.ensure = function (n, lod) {
+        if (n <= self.cap && lod === self.lod) return;
+        var cap = Math.max(256, self.cap);
+        while (cap < n) cap *= 2;
+        build(cap, lod);
+      };
+      self.commit = function (n, barbels) {
+        self.n = n;
+        self.geo.instanceCount = n;
+        if (self.bgeo) self.bgeo.instanceCount = n;
+        Object.keys(self.attrs).forEach(function (name) {
+          var a = self.attrs[name];
+          a.clearUpdateRanges();
+          a.addUpdateRange(0, n * 4);
+          a.needsUpdate = true;
+        });
+        self.tex.needsUpdate = true;
+        self.mesh.visible = n > 0;
+        self.shadow.visible = n > 0 && quality >= 2;
+        if (self.bmesh) self.bmesh.visible = n > 0 && !!barbels && self.lod === "medium";
+      };
+      self.hide = function () { if (self.mesh) { self.mesh.visible = self.shadow.visible = false; if (self.bmesh) self.bmesh.visible = false; } };
+      return self;
+    }
+
     /* food: glowing plankton */
     var foodGeo = new THREE.BufferGeometry(), foodCap = 0;
     var foodMat = new THREE.ShaderMaterial({
@@ -1107,7 +1375,65 @@
      * else keyed off the fish id as in the shallow tank */
     var heights = null;
     var SX = new Float64Array(6), SY = new Float64Array(6);
+    /* Is this snapshot drawn from the appearance genome? (on, the module
+     * exports it, one row per fish, and the kind could be built) */
+    function appearanceDrawn(s) {
+      if (!appWant || !EA || !s.app || s.app.length < s.n * EA.STRIDE) return false;
+      if (!appKind) {
+        try { appKind = AppKind(); appStatus = "drawing"; }
+        catch (e) { appStatus = "unavailable: " + (e && e.message || e); EA = null; console.warn("evo_boids: appearance renderer", e); return false; }
+      }
+      return true;
+    }
+    function fillApp(s, selIdx, hovIdx) {
+      var n = s.n, lod = quality >= 3 ? "medium" : "coarse";
+      appKind.ensure(n, lod);
+      var at = appKind.attrs;
+      var A = at.iA.array, B = at.iB.array, Cc = at.iC.array, BODY = at.iBody.array, X = at.iX.array;
+      var T = appKind.texData, R = s.app, ST = EA.STRIDE, MO = EA.MO;
+      var segs = s.segs, body = s.body, ids = s.ids, depth = s.depth, vz = s.vz;
+      if (!heights || heights.length < n) heights = new Float32Array(Math.max(n, 2048));
+      var xs = SX, ys = SY, barbels = false;
+      for (var c = 0; c < n; c++) {
+        var b = 12 * c, px = segs[b], py = segs[b + 1], o = 4 * c, r = ST * c;
+        xs[0] = px; ys[0] = py;
+        for (var k = 1; k < 6; k++) {
+          var x = segs[b + 2 * k], y = segs[b + 2 * k + 1];
+          if (x - px > halfW) x -= W; else if (px - x > halfW) x += W;
+          if (y - py > halfH) y -= H; else if (py - y > halfH) y += H;
+          xs[k] = x; ys[k] = y; px = x; py = y;
+        }
+        A[o] = xs[0]; A[o + 1] = ys[0]; A[o + 2] = xs[1]; A[o + 3] = ys[1];
+        B[o] = xs[2]; B[o + 1] = ys[2]; B[o + 2] = xs[3]; B[o + 3] = ys[3];
+        Cc[o] = xs[4]; Cc[o + 1] = ys[4]; Cc[o + 2] = xs[5]; Cc[o + 3] = ys[5];
+        var id = ids ? ids[c] : c;
+        var hgt = depth ? -depth[c] : (hash01(id * 1.7 + 3.1) - 0.5) * 8;
+        heights[c] = hgt;
+        var size = body ? body[2 * c] : 1, elong = body ? body[2 * c + 1] : 1;
+        BODY[o] = 4.6 * bodyScale(size);
+        BODY[o + 1] = hgt;
+        BODY[o + 2] = c === selIdx ? 1 : (c === hovIdx ? 0.5 : 0);
+        BODY[o + 3] = 0;
+        var t = vz ? vz[c] : 0;
+        X[o] = t === t ? t : 0; X[o + 1] = hash01(id);
+        X[o + 2] = 20 * size * elong / BODY[o];   /* lambda: body length / radius */
+        X[o + 3] = 0;
+        var to = 64 * c;   /* 16 texels: the 63 genes, one zero */
+        for (var j = 0; j < ST; j++) T[to + j] = R[r + j];
+        T[to + 63] = 0;
+        if (R[r + MO + 26] > 0.2) barbels = true;
+      }
+      var tanHalf = Math.tan(camera.fov * Math.PI / 360);
+      appKind.mat.uniforms.uPxPerUnit.value = ch / (2 * tanHalf);
+      appKind.commit(n, barbels);
+    }
     function fillFish(s, selIdx, hovIdx) {
+      if (appearanceDrawn(s)) {
+        fillApp(s, selIdx, hovIdx);
+        fish.commit(0);
+        return;
+      }
+      if (appKind) appKind.hide();
       var n = s.n;
       fish.ensure(n);
       var A = fish.attrs.iA.array, B = fish.attrs.iB.array, Cc = fish.attrs.iC.array;
@@ -1441,6 +1767,86 @@
       causticReady = true;
     }, { timeout: 1200 });
 
+    /* GPU == CPU (the gallery's K12): each row's canonical flank chart,
+     * rendered unlit and unfiltered (uIntrinsic = 1) into a float target and
+     * read back, against the CPU mirror EvoAppearance.flankAt at every pixel
+     * centre. Raw WebGL2 on three's context (the same GLSL as the fish, with
+     * its own prefix; three's state is reset after). Returns the error
+     * statistics (max over r, g, b per pixel). Display code only. */
+    function appearanceParity(rows, lams, cellW, cellH) {
+      if (!EA) return { error: appStatus };
+      var gl = renderer.getContext();
+      if (!gl.getExtension("EXT_color_buffer_float")) return { error: "no float render targets (EXT_color_buffer_float)" };
+      var sh = appearanceShaders(EA);
+      var pre = "#version 300 es\nprecision highp float;\nprecision highp int;\n";
+      function compile(type, src) {
+        var o = gl.createShader(type); gl.shaderSource(o, src); gl.compileShader(o);
+        if (!gl.getShaderParameter(o, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(o));
+        return o;
+      }
+      var prog = gl.createProgram();
+      gl.attachShader(prog, compile(gl.VERTEX_SHADER, pre + "#define attribute in\n#define varying out\nin vec3 position;\n" + sh.chartVs));
+      gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, pre + "#define varying in\nout highp vec4 pcFrag;\n#define gl_FragColor pcFrag\n" + sh.chartFs));
+      gl.linkProgram(prog);
+      if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) return { error: gl.getProgramInfoLog(prog) };
+      var n = rows.length, cols = Math.min(8, n), nr = Math.ceil(n / cols);
+      var w = cellW || 96, h = cellH || 48, TW = cols * w, TH = nr * h;
+      var tex = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, TW, TH, 0, gl.RGBA, gl.FLOAT, null);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      var fb = gl.createFramebuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+      var vao = gl.createVertexArray(); gl.bindVertexArray(vao);
+      var bufs = [];
+      function attr(name, data, size, divisor) {
+        var loc = gl.getAttribLocation(prog, name);
+        if (loc < 0) return;
+        var b = gl.createBuffer(); bufs.push(b);
+        gl.bindBuffer(gl.ARRAY_BUFFER, b); gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+        gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, size, gl.FLOAT, false, 0, 0); gl.vertexAttribDivisor(loc, divisor);
+      }
+      attr("position", new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 1, 0]), 3, 0);
+      var names = ["iG0", "iG1", "iG2", "iG3", "iG4", "iG5", "iG6", "iCol", "iX", "iCell"], arr = {};
+      names.forEach(function (nm) { arr[nm] = new Float32Array(n * 4); });
+      for (var k = 0; k < n; k++) {
+        var R = rows[k], o = 4 * k;
+        for (var q = 0; q < 7; q++) for (var c = 0; c < 4; c++) arr["iG" + q][o + c] = R[4 * q + c];
+        arr.iCol[o] = R[28]; arr.iCol[o + 1] = R[29]; arr.iCol[o + 2] = R[30]; arr.iCol[o + 3] = 0;
+        arr.iX[o] = 0; arr.iX[o + 1] = R[31]; arr.iX[o + 2] = R[32]; arr.iX[o + 3] = lams[k];
+        var cx = k % cols, cy = Math.floor(k / cols);
+        arr.iCell[o] = -1 + 2 * cx / cols; arr.iCell[o + 1] = -1 + 2 * cy / nr; arr.iCell[o + 2] = 2 / cols; arr.iCell[o + 3] = 2 / nr;
+      }
+      names.forEach(function (nm) { attr(nm, arr[nm], 4, 1); });
+      gl.useProgram(prog);
+      gl.uniform1f(gl.getUniformLocation(prog, "uIntrinsic"), 1);
+      gl.viewport(0, 0, TW, TH);
+      gl.disable(gl.DEPTH_TEST); gl.disable(gl.BLEND); gl.disable(gl.SCISSOR_TEST); gl.disable(gl.CULL_FACE);
+      gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
+      gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, n);
+      var px = new Float32Array(TW * TH * 4);
+      gl.readPixels(0, 0, TW, TH, gl.RGBA, gl.FLOAT, px);
+      gl.bindVertexArray(null); gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.deleteVertexArray(vao); bufs.forEach(function (b) { gl.deleteBuffer(b); });
+      gl.deleteFramebuffer(fb); gl.deleteTexture(tex); gl.deleteProgram(prog);
+      renderer.resetState();
+      var errs = [], sum = 0, maxErr = 0, over = 0, out = [0, 0, 0], worst = "";
+      for (k = 0; k < n; k++) {
+        var D = EA.decode(rows[k], lams[k]), x0 = (k % cols) * w, y0 = Math.floor(k / cols) * h;
+        for (var j = 0; j < h; j++) for (var i = 0; i < w; i++) {
+          EA.flankAt(D, (i + 0.5) / w, (j + 0.5) / h, out);
+          var p = ((y0 + j) * TW + x0 + i) * 4;
+          var e = Math.max(Math.abs(px[p] - out[0]), Math.abs(px[p + 1] - out[1]), Math.abs(px[p + 2] - out[2]));
+          errs.push(e); sum += e; if (e > 0.002) over++;
+          if (e > maxErr) { maxErr = e; worst = "row " + k + " u " + ((i + 0.5) / w).toFixed(3) + " v " + ((j + 0.5) / h).toFixed(3); }
+        }
+      }
+      errs.sort(function (a, b) { return a - b; });
+      return { fish: n, samples: errs.length, maxErr: maxErr, meanErr: sum / errs.length, p99: errs[Math.floor(errs.length * 0.99)],
+               p999: errs[Math.floor(errs.length * 0.999)], over002: over / errs.length, worst: worst };
+    }
+
     function setQuality(q) {
       q = Math.max(1, Math.min(3, q | 0));
       if (q === quality) return false;
@@ -1538,6 +1944,15 @@
       setReducedMotion: function (on) { reduced = !!on; fishUniforms.uWag.value = reduced ? 0 : 1; },
       /* the flashlight: clear light on the followed fish, or where the camera
        * looks (aimBeam). Viewer only: nothing here reaches the simulation. */
+      /* the appearance genome (web/ocean_appearance.js): draw each fish from
+       * its 63 appearance floats (s.app) instead of the family / brain colour */
+      setAppearance: function (on) { appWant = !!on; },
+      appearance: function () {
+        return { want: appWant, drawing: !!(appWant && appKind && appKind.mesh && appKind.mesh.visible),
+                 status: appStatus, lod: appKind ? appKind.lod : "", verts: appKind ? appKind.tpls[appKind.lod || "medium"].verts : 0,
+                 barbels: !!(appKind && appKind.bmesh && appKind.bmesh.visible) };
+      },
+      appearanceParity: function (rows, lams, cellW, cellH) { return appearanceParity(rows, lams, cellW, cellH); },
       setFlashlight: function (on) { beamWant = !!on; },
       flashlight: function () { return beamWant; },
       flashlightLevel: function () { return beamAmt; },

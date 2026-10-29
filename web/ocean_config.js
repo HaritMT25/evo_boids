@@ -51,7 +51,11 @@
     lightEnabled: [false], L0: [1, { step: 0.1, min: 0, max: 100 }], kWater: [0.006, { step: 0.001, min: 0, max: 1 }],
     sizeDrift: [false], sizeFight: [false], mouthGate: [false], kMouth: [2, { step: 0.1, min: 0.01 }],
     steerFrame: [0, { options: ["World x / y (Classic's)", "The fish's own frame"] }],
-    eye: [0, { bit: true }], eyeOnly: [0, { bit: true }], eyeCode: [0, { step: 1, min: 0, max: 31, int: true }]
+    eye: [0, { bit: true }], eyeOnly: [0, { bit: true }], eyeCode: [0, { step: 1, min: 0, max: 31, int: true }],
+    appearance: [3, { options: ["Off", "Skin patterns only", "Body shapes only", "Patterns and body shapes"] }],
+    patternMutation: [0.025, { step: 0.005, min: 0, max: 0.25 }], patternPhaseMutation: [0.03, { step: 0.005, min: 0, max: 0.25 }],
+    patternNovelProbability: [0.05, { step: 0.01, min: 0, max: 0.25 }],
+    morphologyMutation: [0.025, { step: 0.005, min: 0, max: 0.25 }], morphologyNovelProbability: [0.05, { step: 0.01, min: 0, max: 0.25 }]
   };
 
   /* oc_set_param's whitelist: these apply at once */
@@ -63,7 +67,8 @@
    "maxPopulation", "minPopulation", "targetFood", "foodSpawnBase", "foodSpawnAmp", "foodEnergy",
    "metabolicRate", "moveCost", "geneCost", "maxAge", "reproEnergy", "newbornEnergy",
    "mutationMultiplier", "minSpeed", "maxSpeed", "predatorMinPopulation", "predatorMaxPopulation",
-   "predatorTraitMutation"].forEach(function (k) { LIVE[k] = 1; });
+   "predatorTraitMutation", "patternMutation", "patternPhaseMutation", "patternNovelProbability",
+   "morphologyMutation", "morphologyNovelProbability"].forEach(function (k) { LIVE[k] = 1; });
   /* oc_set_param changes a running world only to values >= 0, while a new
    * world (oc_init) takes these live keys below 0 too: kBuoy in [-1000, 1000],
    * foodSpawnBase / foodSpawnAmp in [-1e4, 1e4], the energies and ages any
@@ -91,7 +96,9 @@
       ["Energy and age", ["metabolicRate", "moveCost", "geneCost", "maxAge", "reproEnergy", "newbornEnergy"]],
       ["Genes", ["mutationMultiplier", "genomeInitMin", "genomeInitMax", "genomeMinLength", "genomeMaxLength"]],
       ["Who can breed", ["reproMaxDistance", "reproSoftWidth", "reproGracePeriod"]],
-      ["Bodies", ["bodyMutation", "buoyMutation"]]] },
+      ["Bodies", ["bodyMutation", "buoyMutation"]],
+      ["Appearance (looks only)", ["appearance", "patternMutation", "patternPhaseMutation", "patternNovelProbability",
+                                   "morphologyMutation", "morphologyNovelProbability"]]] },
     { id: "predators", title: "Predators", groups: [
       ["Predators", ["predatorCount", "predatorEconomy"]],
       ["Hunting", ["predatorSpeed", "predatorPerception", "predatorCaptureRadius", "predatorCooldown"]],
@@ -143,7 +150,9 @@
     lightEnabled: "Light field", L0: "Surface light", kWater: "Light fall-off",
     sizeDrift: "Small fish drift more", sizeFight: "Big fish fight harder", mouthGate: "Mouth size limits food",
     kMouth: "Mouth size ×",
-    steerFrame: "Steering frame", eye: "Compound eye", eyeOnly: "See only through the eye", eyeCode: "Eye encoding"
+    steerFrame: "Steering frame", eye: "Compound eye", eyeOnly: "See only through the eye", eyeCode: "Eye encoding",
+    appearance: "Appearance genes", patternMutation: "Pattern mutation", patternPhaseMutation: "Pattern layout drift",
+    patternNovelProbability: "New pattern traits", morphologyMutation: "Shape mutation", morphologyNovelProbability: "New shape traits"
   };
   var HINTS = {
     maxPopulation: "0 = none", minPopulation: "founders added below this",
@@ -152,13 +161,16 @@
     predatorMaxAge: "0 = until it starves", predatorMinPopulation: "0 = off; put back below this",
     predatorMaxPopulation: "0 = none", currentDrift: "0 = a still pattern", fastTanh: "changes the numbers",
     foodLife: "0 = until eaten", depth: "0 = surface", kBuoy: "per second", waveSpeed: "0 = still",
-    cHold: "× metabolism when scaled", cPress: "× metabolism when scaled", eyeCode: "bits 1, 2, 4; cloaks 8, 16"
+    cHold: "× metabolism when scaled", cPress: "× metabolism when scaled", eyeCode: "bits 1, 2, 4; cloaks 8, 16",
+    patternMutation: "± per gene", morphologyMutation: "± per gene", patternPhaseMutation: "± per birth",
+    patternNovelProbability: "chance per trait group", morphologyNovelProbability: "chance per trait group"
   };
   /* what one press of − / + changes */
   var BTN_STEP = {
     seed: 1, population: 50, depth: 20, predatorCount: 1, foodPatches: 1, currentStrength: 5,
     targetFood: 100, foodSpawnBase: 1, foodSpawnAmp: 0.5, foodEnergy: 0.5, foodPatchRadius: 10, pickupRadius: 2,
     foodLife: 5, foodDepthSpread: 5,
+    patternMutation: 0.005, patternPhaseMutation: 0.005, patternNovelProbability: 0.01, morphologyMutation: 0.005, morphologyNovelProbability: 0.01,
     metabolicRate: 0.1, moveCost: 0.00001, geneCost: 0.001, maxAge: 10, reproEnergy: 1, newbornEnergy: 1,
     maxPopulation: 50, minPopulation: 10, minSpeed: 5, maxSpeed: 5, maxTurnRate: 0.5,
     perceptionRadius: 5, interactRadius: 2, maxNeighbors: 1, mutationMultiplier: 0.1,
@@ -255,12 +267,18 @@
     sizeFight: { d: "A fish's fighting strength grows with its size squared. Applies live.", t: "try: on with evolving bodies" },
     mouthGate: { d: "A fish can eat a food item only if the food is no bigger than mouth size × its own size. Applies live.", t: "try: on with evolving bodies" },
     kMouth: { d: "Mouth size, as a multiple of body size (the mouth gate). Applies live.", t: "try: 2 (the default)" },
+    appearance: { d: "Every fish carries inherited looks: a skin pattern (colours, stripes, bars, spots, mazes, countershading, an eye bar, a shoulder spot, an eyespot, pale fin edges) and a body shape (depth, width, head, snout, tail, fins, barbels). A child gets each trait group from one parent, the mean of both, or now and then a new trait, plus a little mutation. Nothing in the simulation reads them: they change no fish's life, so the run is the same with them on or off. Shown with Fish colours: Appearance. Restart to apply.", t: "try: patterns and body shapes, then Appearance in View" },
+    patternMutation: { d: "How far each pattern gene of a newborn may move from what it inherited (uniform ±). Applies live, to fish born from now on.", t: "try: 0.025-0.1" },
+    patternPhaseMutation: { d: "How far a newborn's pattern layout (where its spots and stripes sit) may drift from its first parent's, so families keep recognisable layouts. Applies live.", t: "try: 0.03" },
+    patternNovelProbability: { d: "The chance that a newborn gets a brand-new trait for one group of pattern genes (a colour, the field's balance, orientation, a landmark ...) instead of a parent's. Keeps variety from fading. Applies live.", t: "try: 0.05" },
+    morphologyMutation: { d: "How far each body-shape gene of a newborn may move from what it inherited (uniform ±). Applies live.", t: "try: 0.025-0.1" },
+    morphologyNovelProbability: { d: "The chance that a newborn gets a brand-new trait for one group of shape genes (body, head, tail, a fin, barbels, eyes) instead of a parent's. Applies live.", t: "try: 0.05" },
     steerFrame: { d: "Which way STEER_X / STEER_Y push: in world x / y (Classic's, and the food senses' frame), or in the fish's own frame (STEER_X turns it right or left, STEER_Y along its heading), so a sense in its own frame can turn it toward what it senses. Fast-swims-straight already turns by STEER_X and ignores this. Applies live.", t: "try: the fish's own frame, for the 3-D senses" },
     eye: { d: "The compound eye: six sectors around the fish (ahead, behind, left, right, up, down), each reporting the nearest thing in it by nearness, apparent size and contrast. Only in the eye build of the module. Applies live.", t: "try: on in the eye build" },
     eyeOnly: { d: "Turn off the labelled senses the eye replaces (food direction, neighbours, the predator bearing, ...): the fish see only through the eye (or, with it off, nothing outside their own body). Eye build only. Applies live.", t: "try: on with the eye, to see what evolves from sight alone" },
     eyeCode: { d: "The eye's encoding, a sum of bits (0 to 31): 1 faded contrast, 2 opponent pairs (left + right and right − left, ...), 4 every object in a sector instead of the nearest; and two cloaks: 8 the eye ignores other fish (it still sees predators), 16 the eye ignores food (the labelled senses still see both). Eye build only. Applies live.", t: "try: 0, then 2; 16 to see whether food-finding needs the eye" },
     governor: { d: "When frames take too long: first run fewer steps per frame, then draw the tank with less detail. Never changes the simulation itself.", t: "try: on; off to see the uncapped run (it may stutter)" },
-    colourBrain: { d: "Off: each family line (every fish descended from the same starting fish) has its own colour, the one it has in the dashboards. On: the colour comes from the genome's wiring, so similar brains look alike.", t: "try: off to follow families, on to see what their brains converged on" },
+    colourBrain: { d: "Family: each family line (every fish descended from the same starting fish) has its own colour, the one it has in the dashboards. Brain: the colour comes from the genome's wiring, so similar brains look alike. Appearance: each fish's own skin pattern and body shape, inherited from its two parents with a little mutation; it is only looks: nothing in the simulation reads it.", t: "try: family to follow lines, brain to see what their brains converged on, appearance to watch patterns pass down" },
     followLight: { d: "While you follow a fish (F), a flashlight shows it and its surroundings in clear light: true colours, no depth fade, no water tint. The dock's flashlight button (L) turns it on anywhere. Drawing only: the fish never see it.", t: "try: on (the default)" }
   };
 

@@ -33,7 +33,7 @@
  *      portrait screen) &cfg={"key":value,...} (SimConfig + OceanConfig keys,
  *      as oc_init takes them; the settings show them) &speed=1 (steps per
  *      frame) &e1=1 (the E1 physics preset, oc_e1_preset, under &cfg)
- *      &colour=brain|family &guide=0|1 &intro=1 (web/guide.js)
+ *      &colour=family|brain|appearance &guide=0|1 &intro=1 (web/guide.js)
  *      ?mock=1 loads ocean_mock.js from beside the page instead of the engine
  *      (a JS stand-in for page development, not part of web/).
  *      The link's setup goes to oc_init as it is; one it refuses stops the
@@ -156,7 +156,7 @@
    * the run on exactly). Throws with this page's memory not overwritten. */
   function takeMemory(src) { HO.take(M, src, "the page's"); }
 
-  var W = 0, H = 0, D = 0, statsLen = 0, HAS_VZ = false, HAS_EYE = false;
+  var W = 0, H = 0, D = 0, statsLen = 0, HAS_VZ = false, HAS_EYE = false, HAS_APP = false;
   var LIGHT = { on: false, L0: 1, k: 0 };
   function readLight() {
     var on = has("oc_light_enabled") && !!M._oc_light_enabled();
@@ -273,6 +273,7 @@
    * every Turbo hand-off */
   function applyDisplaySwitches() {
     if (has("oc_set_colour_mode")) M._oc_set_colour_mode(colourBrain ? 0 : 1);
+    if (scene && scene.setAppearance) scene.setAppearance(colourMode === "appearance");
     if (has("oc_set_capture")) M._oc_set_capture(selectedId !== null ? 1 : 0);
   }
 
@@ -754,6 +755,7 @@
       predDepth: new Float32Array(buf, M._oc_predator_depth(), pc),
       stats: new Float64Array(buf, M._oc_stats(), statsLen),
       vz: HAS_VZ ? new Float32Array(buf, M._oc_creature_vz(), n) : null,
+      app: appearanceView(buf, n),
       curActive: false, curGrid: null, curCols: 0, curRows: 0
     };
   }
@@ -762,12 +764,22 @@
    * name list, a C string): the same buffers (only oc_sync and a new world
    * rewrite them, and both drop the snapshot), on the live memory */
   function fresh(s) {
-    if (!s || s.buf === heap()) return s;
+    if (!s || s.buf === heap()) return s;   /* (the appearance rows: a view of this sync's too) */
     var t = snapshot();
     t.selIdx = s.selIdx;
     if (!HAS_VZ) t.vz = s.vz;   /* the estimate lives in JS */
     if (lastS === s) lastS = t;
     return t;
+  }
+  /* The appearance genome (oc_creature_appearance: 63 floats a fish, COSMETIC),
+   * when this module exports it in a layout and laws web/ocean_appearance.js
+   * knows, one row per fish of this sync; else null (the tank then draws the
+   * family / brain colours). Views are made fresh after every sync. */
+  function appearanceView(buf, n) {
+    if (!HAS_APP || n <= 0 || M._oc_appearance_count() !== n) return null;
+    var p = M._oc_creature_appearance();
+    if (!p || (p & 3) || p + n * 63 * 4 > buf.byteLength) return null;
+    return new Float32Array(buf, p, n * 63);
   }
   /* Without oc_creature_vz: each fish's pitch from how its depth changed over
    * the distance its head swam since the last frame, smoothed, keyed by id. */
@@ -809,7 +821,7 @@
   var selectedId = null, wantFollow = false, everSelected = false;
   var animT = 0, lastNow = 0;
   var fpsFrames = 0, fpsT = 0, fps = 0;
-  var governorOn = true, colourBrain = false;
+  var governorOn = true, colourBrain = false, colourMode = "family";
   var summary = null, summaryT = 0;   /* oc_summary, refreshed twice a second for the readout */
   function speed() { return SPEEDS[speedIdx]; }
   function stepsThisFrame() {
@@ -1091,6 +1103,18 @@
     g.beginPath(); g.arc(-6.2 * k / 1.2, -1.2, 1.1, 0, Math.PI * 2); g.fill();
     g.setTransform(1, 0, 0, 1, 0, 0);
   }
+  /* The card's swatch: the fish's skin pattern on its flank (unlit, from its
+   * appearance genes; web/ocean_appearance.js), when the module exports it. */
+  var swatchEl = el("iswatch");
+  function drawSwatch(s, idx, size, elong) {
+    var EA = window.EvoAppearance;
+    if (!swatchEl || !EA || !s.app) { if (swatchEl) swatchEl.hidden = true; return; }
+    var W = 96, H = 24, row = s.app.subarray(63 * idx, 63 * idx + 63);
+    swatchEl.width = W; swatchEl.height = H;
+    var ctx = swatchEl.getContext("2d");
+    ctx.putImageData(new ImageData(EA.flankImage(row, EA.lambdaOf(size, elong), W, H), W, H), 0, 0);
+    swatchEl.hidden = false;
+  }
   /* oc_inspect(idx) right after the sync: its numbers, then the card */
   function inspect(idx) {
     if (!has("oc_inspect")) return null;
@@ -1115,7 +1139,7 @@
     var info = f.info, id = Math.round(info[0]);
     var rgb = [s.colors[3 * idx], s.colors[3 * idx + 1], s.colors[3 * idx + 2]];
     var pkey = id + "|" + rgb.join() + "|" + info[4].toFixed(2) + "|" + info[5].toFixed(2);
-    if (cardFor !== pkey) { cardFor = pkey; drawPortrait(rgb, info[4], info[5]); }
+    if (cardFor !== pkey) { cardFor = pkey; drawPortrait(rgb, info[4], info[5]); drawSwatch(s, idx, info[4], info[5]); }
     cardText("ititle", "Fish #" + id);
     cardText("isub", "Generation " + Math.round(info[6]) + " · family #" + Math.round(info[7]) + " · " + Math.round(info[11]) + " genes" +
              (cfgVal("bodyModel") ? " · body " + info[4].toFixed(2) + " × " + info[5].toFixed(2) : ""));
@@ -1721,17 +1745,22 @@
     this.blur();
   });
   el("followLight").checked = followLight;
-  /* Fish colour: by family line (the default) or by brain similarity. The
-   * choice is shared with Classic (the same key and ?colour=). Display only. */
+  /* Fish colour: by family line (the default), by brain similarity, or the
+   * fish's own appearance genome (skin pattern and body shape; the Ocean
+   * only). Family / brain is shared with Classic (the same key and ?colour=);
+   * Classic reads "appearance" as family. Display only. */
   (function () {
     var want = P.get("colour"), saved = store("evo_boids.colourBy");
-    if (want !== "brain" && want !== "family") want = saved === "brain" ? "brain" : "family";
+    if (want !== "brain" && want !== "family" && want !== "appearance")
+      want = saved === "brain" || saved === "appearance" ? saved : "family";
+    colourMode = want;
     colourBrain = want === "brain";
-    el("colourBrain").checked = colourBrain;
+    el("colourMode").value = colourMode;
   })();
-  el("colourBrain").addEventListener("change", function () {
-    colourBrain = this.checked;
-    store("evo_boids.colourBy", colourBrain ? "brain" : "family");
+  el("colourMode").addEventListener("change", function () {
+    colourMode = this.value === "brain" || this.value === "appearance" ? this.value : "family";
+    colourBrain = colourMode === "brain";
+    store("evo_boids.colourBy", colourMode);
     if (M) applyDisplaySwitches();
     updateModeline();
     this.blur();
@@ -1739,7 +1768,8 @@
   function updateModeline() {
     el("modeline").textContent = "Running the single-threaded Ocean module, reproducible from the seed" +
       (HAS_EYE ? " (the eye build)" : "") + ". Drawing: the 3D tank" + (scene ? ", detail " + scene.quality() + " of 3" : "") +
-      (colourBrain ? ", coloured by brain" : ", coloured by family") + ".";
+      (colourMode === "appearance" ? (HAS_APP ? ", each fish drawn from its appearance genes" : ", coloured by family (this module has no appearance genes)")
+       : colourBrain ? ", coloured by brain" : ", coloured by family") + ".";
   }
   setPaused(false);
   changeSpeed(0);
@@ -1854,6 +1884,7 @@
     compact: function () { return true; },
     has3D: function () { return true; },
     colourByBrain: function () { return colourBrain; },
+    colourMode: function () { return colourMode; },
     startTurbo: function () { if (M && turboState === "live") enterTurbo(); },
     setDrawer: setDrawer,
     setSheetTab: setSheetTab,
@@ -1890,6 +1921,11 @@
     if (!HO) throw new Error("ocean_handoff.js did not load");
     if (!M._malloc) throw new Error("the module does not export _malloc/_free");
     HAS_VZ = has("oc_creature_vz");
+    /* the appearance genome: the exports, a layout and laws this page renders (web/ocean_appearance.js) */
+    HAS_APP = ["oc_creature_appearance", "oc_appearance_count", "oc_appearance_abi", "oc_appearance_stride",
+               "oc_pattern_law", "oc_morphology_law"].every(has) && !!window.EvoAppearance &&
+              M._oc_appearance_abi() === EvoAppearance.LAWS.abi && M._oc_appearance_stride() === EvoAppearance.STRIDE &&
+              M._oc_pattern_law() === EvoAppearance.LAWS.patternLaw && M._oc_morphology_law() === EvoAppearance.LAWS.morphLaw;
     HAS_EYE = has("oc_has_eye") && !!M._oc_has_eye();
     if (!HAS_EYE) ["eye", "eyeOnly", "eyeCode"].forEach(function (k) {
       var i = el("o_" + k); if (i) i.disabled = true;
@@ -1921,6 +1957,7 @@
     detail0 = scene.quality();
     scene.setWorld(W, H, D);
     scene.setLight(LIGHT);
+    if (scene.setAppearance) scene.setAppearance(colourMode === "appearance");
     labelHist();
     wireInput();
     updateInsets();

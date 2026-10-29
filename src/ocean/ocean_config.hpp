@@ -138,6 +138,25 @@ struct OceanConfig {
     // The world's first stock gets ages spread evenly over [0, foodLife) so it
     // does not all vanish at once. No draws.
     float foodLife        = 0.0f;
+
+    // ---- the appearance genome (src/ocean/appearance_model.hpp): COSMETIC ----
+    // Every fish carries 63 appearance floats (31 skin-pattern genes + 2
+    // maternal phases + 30 body-shape genes), built for founders and inherited
+    // by offspring from each fish's own counter-based stream — never the
+    // simulation's rng — and read by nothing the step computes. ON by default:
+    // it changes no trajectory, draw or counter (the harness's app_off_*
+    // twins), and the page renders it.
+    //   appearance: bit 1 = patterns (P1), bit 2 = body shapes (M1); 3 = both,
+    //     0 = off (no records, nothing exported). Set at init only: a live
+    //     change is refused (the same value is a no-op).
+    // The inheritance knobs apply to offspring constructed from then on (live).
+    // Each in [0, 0.25]:
+    int   appearance                 = 3;
+    float patternMutation            = 0.025f;   // ± jitter on every pattern gene
+    float patternPhaseMutation       = 0.030f;   // ± drift of the maternal phases
+    float patternNovelProbability    = 0.050f;   // per pattern group: a new founder allele
+    float morphologyMutation         = 0.025f;   // ± jitter on every shape gene
+    float morphologyNovelProbability = 0.050f;   // per shape group: a new founder allele
 };
 
 // Does this build have the compound eye's sensors?
@@ -234,6 +253,12 @@ inline bool readOceanConfig(const jsonm::Value& o, OceanConfig& c, std::string* 
     readInt("eyeCode", c.eyeCode);
     readInt("steerFrame", c.steerFrame);
     c.foodLife    = o.floatOr("foodLife", c.foodLife);
+    readInt("appearance", c.appearance);
+    c.patternMutation            = o.floatOr("patternMutation", c.patternMutation);
+    c.patternPhaseMutation       = o.floatOr("patternPhaseMutation", c.patternPhaseMutation);
+    c.patternNovelProbability    = o.floatOr("patternNovelProbability", c.patternNovelProbability);
+    c.morphologyMutation         = o.floatOr("morphologyMutation", c.morphologyMutation);
+    c.morphologyNovelProbability = o.floatOr("morphologyNovelProbability", c.morphologyNovelProbability);
     using ocean_cfg_detail::readBool;
     return readBool(o, "deepCurrent", c.deepCurrent, err) &&
            readBool(o, "lightEnabled", c.lightEnabled, err) &&
@@ -282,7 +307,7 @@ inline bool isSimConfigIntKey(const std::string& k) {
 // {"eye":0.5} or {"eyeCode":1e300} is refused with that message, not stored.
 // (foodDepthMode keeps its own 0 / 1 / -1 read; its ranges, and these keys',
 // are oceanConfigError's.)
-inline constexpr const char* kOceanIntKeys[] = {"foodDepthMode", "eye", "eyeOnly", "eyeCode", "steerFrame"};
+inline constexpr const char* kOceanIntKeys[] = {"foodDepthMode", "eye", "eyeOnly", "eyeCode", "steerFrame", "appearance"};
 inline bool isOceanIntKey(const std::string& k) {
     for (const char* i : kOceanIntKeys) if (k == i) return true;
     return false;
@@ -313,6 +338,36 @@ inline bool readOceanJson(const char* json, SimConfig& sc, OceanConfig& oc, std:
     if (const jsonm::Value* o = root.find("config"))
         if (!readOceanConfig(*o, oc, &err)) return false;
     return true;
+}
+
+// The appearance keys (cosmetic; appearance_model.hpp): appearance a bit set in
+// [0, 3], each inheritance knob in [0, 0.25] (NaN fails).
+inline std::string oceanAppearanceConfigError(const OceanConfig& c) {
+    if (c.appearance < 0 || c.appearance > 3)
+        return "appearance must be 0..3 (bits: 1 skin patterns, 2 body shapes)";
+    const struct { const char* name; float v; } k[] = {
+        {"patternMutation", c.patternMutation}, {"patternPhaseMutation", c.patternPhaseMutation},
+        {"patternNovelProbability", c.patternNovelProbability}, {"morphologyMutation", c.morphologyMutation},
+        {"morphologyNovelProbability", c.morphologyNovelProbability},
+    };
+    for (const auto& e : k)
+        if (!(e.v >= 0.0f && e.v <= 0.25f)) {
+            char buf[160];
+            std::snprintf(buf, sizeof buf, "%s must be in [0, 0.25] (got %g)", e.name, (double)e.v);
+            return buf;
+        }
+    return "";
+}
+
+// True when every appearance inheritance knob holds its default, bit for bit
+// (the harness prints the appearance section only when appearance is on or
+// one of these is not at its default).
+inline bool oceanAppearanceKnobsAtDefaults(const OceanConfig& c) {
+    const OceanConfig d;
+    auto same = [](float a, float b) { return std::memcmp(&a, &b, sizeof a) == 0; };
+    return same(c.patternMutation, d.patternMutation) && same(c.patternPhaseMutation, d.patternPhaseMutation) &&
+           same(c.patternNovelProbability, d.patternNovelProbability) && same(c.morphologyMutation, d.morphologyMutation) &&
+           same(c.morphologyNovelProbability, d.morphologyNovelProbability);
 }
 
 // "" when every knob is inside its range, else which one is not and why. The
@@ -358,6 +413,7 @@ inline std::string oceanConfigError(const OceanConfig& c) {
                                           " 8 the eye ignores fish, 16 the eye ignores food)")
                             : std::string("eyeCode") + noEye;
     if (c.steerFrame != 0 && c.steerFrame != 1) return "steerFrame must be 0 or 1";
+    if (const std::string a = oceanAppearanceConfigError(c); !a.empty()) return a;
     return "";
 }
 

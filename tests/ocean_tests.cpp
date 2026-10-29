@@ -282,6 +282,7 @@ int addFish(OceanWorld& w, Vec2 pos, float z, std::vector<Gene> genome, float bo
     f.bodyBuoy = bodyBuoy;
     w.creatures.push_back(std::move(f));
     w.markFounder(w.creatures.back());
+    w.attachFounderAppearance();   // the appearance side array stays bound (no draws)
     return (int)w.creatures.size() - 1;
 }
 
@@ -4145,6 +4146,8 @@ void testFlowLanes() {
 }
 }  // namespace ot
 
+#include "ocean_appearance_tests.hpp"
+
 int main(int argc, char** argv) {
 #ifndef OCEAN_TESTS_NO_SHIM
     if (argc > 1 && std::strcmp(argv[1], "--accepts") == 0) return ot::acceptsMain(argc, argv);
@@ -4207,6 +4210,18 @@ int main(int argc, char** argv) {
     ot::testVisionKeys();
 #endif
     ot::testEyeE1();
+    // the appearance genome (cosmetic): tests/ocean_appearance_tests.hpp
+    ot::testAppearanceGallery();
+    ot::testAppearanceStream();
+    ot::testAppearanceBuild();
+    ot::testAppearanceOwner();
+    ot::testAppearanceNeutral();
+    ot::testAppearanceDiversity();
+    ot::testAppearanceHash();
+    ot::testAppearanceEval();
+#ifndef OCEAN_TESTS_NO_SHIM
+    ot::testAppearanceShim();
+#endif
     std::printf("OCEAN TESTS: %d passed, %d failed\n", ot::g_passed, ot::g_failed);
     return ot::g_failed ? 1 : 0;
 }

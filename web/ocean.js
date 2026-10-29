@@ -126,46 +126,28 @@
       if (!simd) return Promise.reject(new Error("this browser has no WebAssembly SIMD, which the simulation needs (Chrome 91+, Firefox 89+ or Safari 16.4+)"));
     }
     var js = abs(MOCK ? A.mock : A.ocean), wasm = abs(A.oceanWasm);
-    moduleUrls = { js: js, wasm: wasm };
+    moduleUrls = { js: js, wasm: wasm, handoff: abs(A.handoff || "ocean_handoff.js") };
     return loadScript(js).then(function () {
       if (typeof createEvoOcean !== "function") throw new Error(js + " loaded but defines no createEvoOcean()");
       return createEvoOcean({ locateFile: function (path) { return path.slice(-5) === ".wasm" ? wasm : path; } });
     });
   }
 
-  var M = null;
-  function heap() { return M.wasmMemory ? M.wasmMemory.buffer : M.HEAPU8.buffer; }
-  function u8() { return new Uint8Array(heap()); }
+  var M = null, HO = window.EvoOceanHandoff;
+  /* The memory as it is now, strings in and out: web/ocean_handoff.js's, which
+   * never read the module's own cached views (a Turbo hand-off grows the
+   * memory from outside, and those stay behind until the module grows it
+   * itself). */
+  function heap() { return HO.buffer(M); }
   function has(fn) { return !!M && typeof M["_" + fn] === "function"; }
-  function withCString(str, fn) {
-    if (!str) return fn(0);
-    var bytes = new TextEncoder().encode(str), ptr = M._malloc(bytes.length + 1);
-    var h = u8(); h.set(bytes, ptr); h[ptr + bytes.length] = 0;
-    try { return fn(ptr); } finally { M._free(ptr); }
-  }
-  function cString(ptr) {
-    if (!ptr) return "";
-    if (M.UTF8ToString) return M.UTF8ToString(ptr);
-    var h = u8(), end = ptr;
-    while (h[end]) end++;
-    return new TextDecoder().decode(h.subarray(ptr, end));
-  }
+  function withCString(str, fn) { return HO.withCString(M, str, fn); }
+  function cString(ptr) { return HO.cString(M, ptr); }
   function lastError() { return M._oc_last_error ? cString(M._oc_last_error()) : "(no oc_last_error)"; }
-  /* Take a whole memory image of this same module (the Turbo hand-off): grow
-   * to its size through the allocator, so the module's own views follow, copy
-   * it in, zero the rest (as fresh pages are). web/ocean_worker.js says why
-   * this carries the run on exactly. */
-  function takeMemory(src) {
-    var need = src.byteLength, have = heap().byteLength;
-    if (have < need) {
-      var p = M._malloc(need - have + 65536);
-      if (p) M._free(p);
-      if (heap().byteLength < need) throw new Error("could not grow the page's memory to " + need + " bytes");
-    }
-    var dst = u8();
-    dst.set(new Uint8Array(src));
-    if (dst.length > need) dst.fill(0, need);
-  }
+  /* Take a whole memory image of this same module (the Turbo hand-off): grown
+   * to its size by exactly the pages missing, copied in, the rest zeroed
+   * (web/ocean_handoff.js take(); web/ocean_worker.js says why this carries
+   * the run on exactly). Throws with this page's memory not overwritten. */
+  function takeMemory(src) { HO.take(M, src, "the page's"); }
 
   var W = 0, H = 0, D = 0, statsLen = 0, HAS_VZ = false, HAS_EYE = false;
   var LIGHT = { on: false, L0: 1, k: 0 };
@@ -1690,6 +1672,7 @@
     var missing = REQUIRED.filter(function (f) { return typeof M["_" + f] !== "function"; });
     if (missing.length) throw new Error("the module lacks exports: " + missing.join(", "));
     if (!M.wasmMemory && !M.HEAPU8) throw new Error("the module exposes neither wasmMemory nor HEAPU8");
+    if (!HO) throw new Error("ocean_handoff.js did not load");
     if (!M._malloc) throw new Error("the module does not export _malloc/_free");
     HAS_VZ = has("oc_creature_vz");
     HAS_EYE = has("oc_has_eye") && !!M._oc_has_eye();

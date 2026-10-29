@@ -876,11 +876,12 @@
      * the engine, used only with ?mock=1 and never shipped in web/. */
     window.EVO_ASSETS = {
       ocean: "evo_ocean.js", oceanWasm: "evo_ocean.wasm",
-      worker: "ocean_worker.js",
+      worker: "ocean_worker.js", handoff: "ocean_handoff.js",
       mock: "ocean_mock.js",
       three: "vendor/three.bundle.min.js"
     };
   </script>
+  <script src="ocean_handoff.js"></script>
   <script src="ocean_scene.js"></script>
   <script src="ocean_config.js"></script>
   <script src="charts.js"></script>

@@ -9,33 +9,42 @@
  * is the same in every instance. So a byte copy of the memory, from the page
  * to here and back, carries the run on exactly, step for step (no checkpoint
  * format needed; the Ocean has none). The receiving memory is grown to the
- * sender's size first (through the module's own allocator, so its heap views
- * follow) and anything past the sender's end is zeroed, as fresh pages are.
+ * sender's size first and anything past the sender's end is zeroed, as fresh
+ * pages are (web/ocean_handoff.js take(), shared with the page).
  *
  * Protocol:
- *   in : {cmd:'start', js, wasm, mem: ArrayBuffer, recEvery, famK}
- *        -> load the module (once), take the memory, run in chunks
+ *   in : {cmd:'start', js, wasm, handoff, mem: ArrayBuffer, recEvery, famK}
+ *        -> load the module and web/ocean_handoff.js (once), take the
+ *           memory, run in chunks. A start always begins afresh.
  *   in : {cmd:'set', key, value}   -> oc_set_param (a live setting, mid-Turbo)
  *   in : {cmd:'rec', every}        -> the dashboards' sampling interval
  *   in : {cmd:'stop'}              -> finish the chunk, post the memory back
+ *   in : {cmd:'resume'}            -> the page could not take the memory
+ *                                     back: carry on running this world
  *   out: {type:'stats', frame, pop, food, pred, stepsPerSec, totalSteps} ~4x/s
  *   out: {type:'rec', rows}        -> dashboard samples (web/ocean_dash.js row())
- *   out: {type:'set', key, value, ok, error}
+ *   out: {type:'set', key, value, ok, error, frame}  (frame: the world's frame
+ *        it applied at; every 'set' gets one, ok false when nothing runs)
  *   out: {type:'memory', mem: ArrayBuffer, totalSteps}
- *   out: {type:'error', message}
+ *   out: {type:'error', message, totalSteps, mem?} — the run stopped. mem:
+ *        the world as far as it got, when it is whole (the throw did not come
+ *        out of oc_step part-way through a step); without it, only the page's
+ *        own copy (the world as Turbo took it) is left. Either way this worker
+ *        is done: the page terminates it and starts a fresh one next time.
  * The step is oc_step's fixed dt: no wall-clock time reaches the world. */
-var M = null, modulePromise = null;
-var running = false, stopRequested = false;
+var M = null, H = null, modulePromise = null;
+var running = false, stopRequested = false, owns = false, stepping = false, session = 0;
 var chunkSteps = 60, totalSteps = 0, samples = [], lastStats = 0;
 var recEvery = 60, famK = 8, rows = [];
 var pump = new MessageChannel();   /* not throttled like timers in a background tab */
-pump.port1.onmessage = runChunk;
-function scheduleChunk() { pump.port2.postMessage(0); }
+pump.port1.onmessage = function (e) { if (e.data === session) guarded(runChunk); };
+function scheduleChunk() { pump.port2.postMessage(session); }
 
-function heap() { return M.wasmMemory ? M.wasmMemory.buffer : M.HEAPU8.buffer; }
+function heap() { return H.buffer(M); }
 function ensureModule(msg) {
   if (!modulePromise) {
-    importScripts(msg.js);
+    importScripts(msg.handoff, msg.js);
+    H = self.EvoOceanHandoff;
     modulePromise = createEvoOcean({
       locateFile: function (p) { return p.slice(-5) === ".wasm" ? msg.wasm : p; },
       mainScriptUrlOrBlob: msg.js
@@ -43,63 +52,71 @@ function ensureModule(msg) {
   }
   return modulePromise;
 }
-/* Take a whole memory image: grow to its size through the allocator (so the
- * module's views follow), copy it in, zero the rest. */
-function takeMemory(src) {
-  var need = src.byteLength, have = heap().byteLength;
-  if (have < need) {
-    var p = M._malloc(need - have + 65536);
-    if (p) M._free(p);
-    if (heap().byteLength < need) throw new Error("could not grow the worker's memory to " + need + " bytes");
+function statsLen() { return M._oc_stats_len(); }
+
+/* Something threw: stop, and hand the page what can be saved. The world is
+ * whole unless the throw came out of oc_step (a trap or an abort part-way
+ * through a step); the read-only exports and oc_set_param (which changes the
+ * config only once it has passed every check) leave it as it was. */
+function fail(err, what) {
+  var whole = owns && !stepping;
+  running = false; stopRequested = false; stepping = false; session++;
+  var msg = { type: "error", message: what + ": " + String(err && err.message || err), totalSteps: totalSteps };
+  var transfer = [];
+  if (whole) {
+    try { postRows(); msg.mem = heap().slice(0); transfer.push(msg.mem); } catch (e) { delete msg.mem; }
   }
-  var dst = new Uint8Array(heap());
-  dst.set(new Uint8Array(src));
-  if (dst.length > need) dst.fill(0, need);
+  rows = [];
+  owns = false;
+  postMessage(msg, transfer);
 }
-function cString(ptr) { return ptr ? M.UTF8ToString(ptr) : ""; }
+function guarded(fn) { try { fn(); } catch (err) { fail(err, "Turbo stopped"); } }
 
 onmessage = function (e) {
   var msg = e.data || {};
   if (msg.cmd === "start") {
-    if (running) return;
+    running = false; stopRequested = false; owns = false; session++;
     recEvery = msg.recEvery || 60;
     famK = msg.famK || 8;
-    var p;
+    var my = session, p;
     try { p = ensureModule(msg); }
     catch (err) { postMessage({ type: "error", message: "the Ocean module did not load: " + err }); return; }
     p.then(function () {
-      try { takeMemory(msg.mem); }
+      if (my !== session) return;   /* a newer start took over */
+      try { H.take(M, msg.mem, "the worker's"); }
       catch (err) { postMessage({ type: "error", message: String(err && err.message || err) }); return; }
+      owns = true;
       totalSteps = 0; samples = []; chunkSteps = 60; lastStats = 0; rows = [];
-      running = true; stopRequested = false;
-      postStats(performance.now());   /* the page flips to 'turbo' on the first stats */
-      scheduleChunk();
+      running = true;
+      guarded(function () { postStats(performance.now()); });   /* the page flips to 'turbo' on the first stats */
+      if (running) scheduleChunk();
     }, function (err) { postMessage({ type: "error", message: "the Ocean module did not load: " + err }); });
   } else if (msg.cmd === "stop") {
-    stopRequested = true;   /* honoured at the next chunk boundary */
+    if (running) stopRequested = true;   /* honoured at the next chunk boundary */
+    else if (owns) guarded(finishStop);
+    else postMessage({ type: "error", message: "Turbo was not running" });
+  } else if (msg.cmd === "resume") {
+    if (!owns || running) return;
+    running = true; stopRequested = false; session++; samples = []; chunkSteps = 60;
+    guarded(function () { postStats(performance.now()); });
+    if (running) scheduleChunk();
   } else if (msg.cmd === "rec") {
     recEvery = msg.every || recEvery;
   } else if (msg.cmd === "set") {
-    if (!M) return;
-    var key = String(msg.key), ok = 0, n = M.lengthBytesUTF8(key) + 1, ptr = M._malloc(n);
-    M.stringToUTF8(key, ptr, n);
-    ok = M._oc_set_param(ptr, +msg.value);
-    M._free(ptr);
-    postMessage({ type: "set", key: key, value: +msg.value, ok: !!ok, error: ok ? "" : cString(M._oc_last_error()) });
+    var key = String(msg.key), value = +msg.value;
+    if (!M || !owns) { postMessage({ type: "set", key: key, value: value, ok: false, error: "Turbo is not running" }); return; }
+    try {
+      var ok = H.withCString(M, key, function (ptr) { return M._oc_set_param(ptr, value); });
+      postMessage({ type: "set", key: key, value: value, ok: !!ok, error: ok ? "" : H.cString(M, M._oc_last_error()),
+                    frame: frameNow() });
+    } catch (err) { fail(err, "Turbo stopped on a live setting"); }
   }
 };
 
 /* the frame counter, from the stats (oc_stats needs an oc_sync) */
-function frameNow() { M._oc_sync(); return new Float64Array(heap(), M._oc_stats(), M._oc_stats_len())[1]; }
-/* one dashboard sample: the same row web/ocean_dash.js builds on the page */
-function sample() {
-  M._oc_sync();
-  var st = Array.prototype.slice.call(new Float64Array(heap(), M._oc_stats(), M._oc_stats_len()));
-  var su = Array.prototype.slice.call(new Float64Array(heap(), M._oc_summary(), M._oc_summary_len()));
-  var k = M._oc_families(famK);
-  var fam = Array.prototype.slice.call(new Float64Array(heap(), M._oc_families_data(), 2 * k));
-  rows.push({ st: st, su: su, fam: fam });
-}
+function frameNow() { M._oc_sync(); return H.f64(M, M._oc_stats(), statsLen())[1]; }
+/* one dashboard sample: the same row the page records (web/ocean_handoff.js row()) */
+function sample() { M._oc_sync(); rows.push(H.row(M, famK, statsLen())); }
 function runChunk() {
   if (!running) return;
   if (stopRequested) { finishStop(); return; }
@@ -110,7 +127,9 @@ function runChunk() {
   while (left > 0) {
     var toNext = recEvery - (f % recEvery);
     var n = Math.min(left, toNext);
+    stepping = true;
     M._oc_step(n);
+    stepping = false;
     left -= n; f += n;
     if (f % recEvery === 0) sample();
   }

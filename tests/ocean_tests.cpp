@@ -46,6 +46,8 @@
 //   sense_edges   the food / neighbour scans' edges, bit for bit, and sense_ref:
 //   sense_ref     randomized scenes against their definition (both in
 //                 tests/ocean_sense_tests.hpp, which lists what they pin)
+//   food_grid     OceanFoodGrid == SpatialGrid: the same lists and visits, and
+//                 each entry's payload is its item's
 //   food_life     foodLife: an item goes on the step its age reaches foodLife;
 //                 off, none do; the first stock's ages spread; draws unchanged
 //   reproducible  same seed twice -> identical fingerprints; another seed and a
@@ -1811,7 +1813,7 @@ void testReproducible() {
     { float& c = ofp::field<pk::CfCore>(ofp::field<pk::OwCurrent>(w)); const float keep = c; bump(c); only("the eddy core", &FP::cur); c = keep; }
     { float& d = ofp::field<pk::OwPatchDepth>(w)[1]; const float keep = d; bump(d); only("a food-patch depth", &FP::geo); d = keep; }
     { float& x = ofp::field<pk::OwPatches>(w)[2].x; const float keep = x; bump(x); only("a food-patch centre", &FP::geo); x = keep; }
-    { float& ic = ofp::field<pk::SgInvCell>(ofp::field<pk::OwFoodGrid>(w)); const float keep = ic; bump(ic);
+    { float& ic = ofp::field<pk::FgInvCell>(ofp::field<pk::OwFoodGrid>(w)); const float keep = ic; bump(ic);
       only("the food grid's cell size", &FP::geo); ic = keep; }
     { bool& tor = ofp::field<pk::SigToroidal>(w.signals); tor = !tor; only("the signal grid's wrap flag", &FP::geo); tor = !tor; }
     { int& wc = ofp::field<pk::SigWrapCols>(w.signals); ++wc; only("the signal grid's seam period", &FP::geo); --wc; }
@@ -4173,6 +4175,7 @@ int main(int argc, char** argv) {
     ot::testEyeCode();
     ot::testSenseEdges();   // tests/ocean_sense_tests.hpp: the scans' edges, pinned
     ot::testSenseRef();
+    ot::testFoodGrid();
     ot::testFoodLife();
     ot::testReproducible();
     ot::testRadii();

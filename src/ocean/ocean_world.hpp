@@ -216,6 +216,7 @@
 #include "ocean_math.hpp"
 #include "fish.hpp"
 #include "appearance_model.hpp"
+#include "ocean_food_grid.hpp"
 
 struct OceanFood {
     Vec2  pos;
@@ -715,7 +716,7 @@ public:
             if (c.alive) creatureGrid_.insert(c.pos, i);
         }
         for (int i = 0; i < numFood; ++i)
-            if (food[i].alive) foodGrid_.insert(food[i].pos, i);
+            if (food[i].alive) foodGrid_.insert(food[i], i);
         creatureGrid_.build();
         foodGrid_.build();
 
@@ -949,7 +950,7 @@ private:
     struct Candidate { float distSq, dx, dy, dz; int index; };
 
     SpatialGrid creatureGrid_;
-    SpatialGrid foodGrid_;
+    OceanFoodGrid foodGrid_;   // SpatialGrid's layout and queries + each item's depth / size / eyeCon
     std::vector<FishHot> hot_;
     std::vector<PendingSignal> pending_;
     std::vector<int> neighbors_, nearbyFood_, nearby_, near_;
@@ -1715,14 +1716,14 @@ private:
                 eyeSee(eye, fwd, rht, dx, dy, dz, d2, other.eyeSize, other.eyeCon, R);
             }
         }
-        auto look = [&](int fi, Vec2 fp) {
-            float dx = fp.x - c.pos.x;
-            float dy = fp.y - c.pos.y;
+        auto look = [&](const OceanFoodGrid::Entry& e) {   // e: the item's grid entry (its payload == food[e.index])
+            float dx = e.pos.x - c.pos.x;
+            float dy = e.pos.y - c.pos.y;
             if (cfg.toroidal) { dx = wrapDx(dx); dy = wrapDy(dy); }
-            const float dz = food[fi].depth - c.depth;
+            const float dz = e.depth - c.depth;
             const float d2 = dx * dx + dy * dy + dz * dz;
             if (d2 > R2) return;
-            eyeSee(eye, fwd, rht, dx, dy, dz, d2, ocean::kEyeFoodSize, food[fi].eyeCon, R);
+            eyeSee(eye, fwd, rht, dx, dy, dz, d2, ocean::kEyeFoodSize, e.eyeCon, R);
         };
         if (!(ocfg.eyeCode & kEyeCodeNoFood)) {
             if (cfg.toroidal) foodGrid_.forEachInRadiusWrapped(c.pos, R, look);
@@ -1908,19 +1909,21 @@ private:
         float foodDx = 0, foodDy = 0, foodDz = 0, foodDist = R;
         float foodD2 = std::numeric_limits<float>::infinity();
         int foodCount = 0;
-        auto smell = [&](int fi, Vec2 fp) {
-            float dx = fp.x - c.pos.x;
-            float dy = fp.y - c.pos.y;
+        // e: the item's grid entry, whose depth / size / eyeCon are food[e.index]'s
+        // (copied at this step's build; food does not change in the per-fish phase).
+        auto smell = [&](const OceanFoodGrid::Entry& e) {
+            float dx = e.pos.x - c.pos.x;
+            float dy = e.pos.y - c.pos.y;
             if (cfg.toroidal) { dx = wrapDx(dx); dy = wrapDy(dy); }
-            const float dz = food[fi].depth - c.depth;
+            const float dz = e.depth - c.depth;
             const float d2 = dx * dx + dy * dy + dz * dz;
             if (d2 > R2) return;
 #ifdef EVO_OCEAN_EYE
             // The eye sees every item within R (size does not hide it; unless cloaked) ...
-            if constexpr (Eye) { if (eyeFood) eyeSee(eye, fwd, rht, dx, dy, dz, d2, ocean::kEyeFoodSize, food[fi].eyeCon, R); }
+            if constexpr (Eye) { if (eyeFood) eyeSee(eye, fwd, rht, dx, dy, dz, d2, ocean::kEyeFoodSize, e.eyeCon, R); }
 #endif
             // ... the smell senses only what this fish could swallow.
-            if (ocfg.mouthGate && food[fi].size > ocfg.kMouth * c.bodySize) return;   // E1: not food for me
+            if (ocfg.mouthGate && e.size > ocfg.kMouth * c.bodySize) return;   // E1: not food for me
             ++foodCount;
             if (d2 < foodD2) {
                 const float dist = std::sqrt(d2);

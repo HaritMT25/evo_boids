@@ -38,6 +38,10 @@
 //                 visit order and its 2-D test (bounded, and the nine clipped
 //                 images), the 3-D test, the mouth gate, the strict nearest, the
 //                 topological (d², index) cut, the eye's nearest / summed bins
+//   food_grid     OceanFoodGrid (src/ocean/ocean_food_grid.hpp) against
+//                 SpatialGrid itself: the same index lists and the same visits
+//                 in the same order, bounded and wrapped, and each entry's
+//                 payload equal to its item's
 //
 // The viewer is creatures[0] in every reference scene: it senses before any
 // fish has moved, so every candidate is where the scene put it.
@@ -339,6 +343,105 @@ inline constexpr EyeMode kEyeModes[] = {{0, 0, 0, "plain"}};
 #endif
 
 }  // namespace sense
+
+// OceanFoodGrid (src/ocean/ocean_food_grid.hpp) against SpatialGrid itself:
+// random items (NaN, negative, beyond the world, on cell edges and on W / H,
+// duplicates) in several world / cell sizes (partial last cells), random
+// queries (inside, on edges, outside; radii 0 .. 1.3 cells), bounded and
+// wrapped, each grid built twice (clear() and capacity reuse): the same index
+// lists (queryRadius*), the same (index, position) visits in the same order
+// (forEachInRadius*), and every visited entry carries its item's depth, size
+// (and eyeCon).
+void testFoodGrid() {
+    using sense::sameBits;
+    Test t("food_grid");
+    std::uint32_t s = 0x2545f491u;
+    auto next = [&]() { s ^= s << 13; s ^= s >> 17; s ^= s << 5; return s; };
+    auto pick = [&](int n) { return (int)(next() % (std::uint32_t)n); };
+    auto unit = [&]() { return (float)(next() >> 8) * (1.0f / 16777216.0f); };
+    struct G { int W, H; float cell; };
+    const G gs[] = {{1920, 1080, 100.0f}, {1950, 1030, 100.0f}, {100, 100, 1.0f},
+                    {2560, 1440, 80.0f},  {640, 480, 37.5f},    {300, 200, 300.0f}};
+    long lists = 0, visits = 0, entries = 0;
+    for (const G& g : gs) {
+        const float W = (float)g.W, H = (float)g.H;
+        auto coord = [&](float span) -> float {
+            switch (pick(8)) {
+                case 0: return g.cell * (float)pick((int)(span / g.cell) + 2);   // a cell edge
+                case 1: return pick(2) ? span : 0.0f;
+                case 2: return -0.1f * span * unit();
+                case 3: return span * (1.0f + 0.1f * unit());
+                case 4: return pick(50) ? span * unit() : std::numeric_limits<float>::quiet_NaN();
+                default: return span * unit();
+            }
+        };
+        for (int rep = 0; rep < 12; ++rep) {
+            SpatialGrid sg;
+            OceanFoodGrid fg;
+            sg.init(g.W, g.H, g.cell);
+            fg.init(g.W, g.H, g.cell);
+            for (int build = 0; build < 2; ++build) {
+                const int n = pick(500);
+                std::vector<OceanFood> items(n);
+                for (int i = 0; i < n; ++i) {
+                    OceanFood& f = items[i];
+                    if (i > 0 && pick(10) == 0) f = items[pick(i)];   // a duplicate
+                    else {
+                        f.pos = {coord(W), coord(H)};
+                        f.depth = 240.0f * unit();
+                        f.size = 0.5f + 2.0f * unit();
+#ifdef EVO_OCEAN_EYE
+                        f.eyeCon = unit() - 0.5f;
+#endif
+                    }
+                }
+                sg.clear();
+                fg.clear();
+                for (int i = 0; i < n; ++i) { sg.insert(items[i].pos, i); fg.insert(items[i], i); }
+                sg.build();
+                fg.build();
+                for (int q = 0; q < 40; ++q) {
+                    const Vec2 c = {coord(W), coord(H)};
+                    if (std::isnan(c.x) || std::isnan(c.y)) continue;
+                    const float radii[] = {0.0f, 0.5f * g.cell, g.cell, 1.3f * g.cell, 24.0f, g.cell * unit()};
+                    float r = radii[pick(6)];
+                    for (int wrapped = 0; wrapped < 2; ++wrapped) {
+                        if (wrapped) r = std::min(r, 0.49f * std::min(W, H));   // the wrapped query's bound
+                        std::vector<int> a, b;
+                        if (wrapped) { sg.queryRadiusWrapped(c, r, a); fg.queryRadiusWrapped(c, r, b); }
+                        else         { sg.queryRadius(c, r, a);        fg.queryRadius(c, r, b); }
+                        t.expect(a == b, "%dx%d cell %g: query (%g, %g) r %g %s: %zu vs %zu indices", g.W, g.H, g.cell, c.x, c.y,
+                                 r, wrapped ? "wrapped" : "bounded", a.size(), b.size());
+                        ++lists;
+                        std::vector<std::pair<int, Vec2>> va, vb;
+                        auto fa = [&](int i, Vec2 p) { va.push_back({i, p}); };
+                        auto fb = [&](const OceanFoodGrid::Entry& e) {
+                            vb.push_back({e.index, e.pos});
+                            const OceanFood& f = items[e.index];
+                            bool same = sameBits(e.depth, f.depth) && sameBits(e.size, f.size);
+#ifdef EVO_OCEAN_EYE
+                            same = same && sameBits(e.eyeCon, f.eyeCon);
+#endif
+                            t.expect(same, "entry %d's payload is not its item's", e.index);
+                            ++entries;
+                        };
+                        if (wrapped) { sg.forEachInRadiusWrapped(c, r, fa); fg.forEachInRadiusWrapped(c, r, fb); }
+                        else         { sg.forEachInRadius(c, r, fa);        fg.forEachInRadius(c, r, fb); }
+                        bool same = va.size() == vb.size();
+                        for (std::size_t k = 0; same && k < va.size(); ++k)
+                            same = va[k].first == vb[k].first && sameBits(va[k].second.x, vb[k].second.x) &&
+                                   sameBits(va[k].second.y, vb[k].second.y);
+                        t.expect(same, "%dx%d cell %g: visit (%g, %g) r %g %s differs (%zu vs %zu)", g.W, g.H, g.cell, c.x, c.y, r,
+                                 wrapped ? "wrapped" : "bounded", va.size(), vb.size());
+                        ++visits;
+                    }
+                }
+            }
+        }
+    }
+    t.note("%ld index lists and %ld visit sequences equal to SpatialGrid's; %ld entries' payloads checked", lists, visits,
+           entries);
+}
 
 void testSenseEdges() {
     using namespace sense;

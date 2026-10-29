@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#071f20">
 <meta name="description" content="Fish with tiny neural networks evolve in your browser. Nothing scores them: the ones that find food and partners leave children.">
-<title>evo_boids</title>
+<title>evo_boids · 2-D Classic</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230b1d1f'/%3E%3Cpath d='M6 16c4-6 11-7 16-3l4-4v14l-4-4c-5 4-12 3-16-3z' fill='%23b6e64a'/%3E%3Ccircle cx='11' cy='15' r='1.4' fill='%230b1d1f'/%3E%3C/svg%3E">
 <style>
   /* ---------- tokens ---------- */
@@ -144,7 +144,7 @@
   #topbar > * { pointer-events: auto; }
   #readout {
     display: inline-flex; align-items: center; gap: 10px;
-    min-height: 44px; max-width: calc(100vw - 132px);
+    min-height: 44px; max-width: calc(100vw - 132px - var(--worlds-w) - 8px);
     padding: 0 14px 0 10px;
     border-radius: 999px;
     font-size: 13px; color: var(--ink-2); text-align: left;
@@ -159,6 +159,36 @@
   /* the frame budget changed this run: it no longer replays from its seed */
   #ro-gov { width: 8px; height: 8px; flex: none; border-radius: 50%; background: var(--ember); }
   #ro-gov[hidden] { display: none; }
+  /* The two worlds, the same switch on both pages (web/ocean.html has its
+   * twin): 3-D Ocean, the world with depth, and 2-D Classic, this flat world
+   * (the tank view and the flat view, in the settings, are two pictures of
+   * it). Beside the readout; the current world is not a link, so pressing it
+   * never restarts the run. */
+  :root { --worlds-w: 90px; }
+  #worlds {
+    display: inline-flex; flex: none; gap: 2px; margin-right: auto;
+    height: 44px; padding: 3px; border-radius: 999px;
+    font-size: 13px; font-weight: 600; line-height: 1;
+  }
+  @media (pointer: coarse) { #worlds { height: 50px; } }   /* 44 px to tap */
+  /* a phone: the frame rate stays in the live numbers' panel */
+  @media (max-width: 479px) { #readout .ro-rate { display: none; } }
+  #worlds .seg {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 0 9px; border-radius: 999px;
+    color: var(--ink-2); text-decoration: none; white-space: nowrap;
+    transition: background-color 150ms var(--ease), color 150ms var(--ease);
+  }
+  #worlds a.seg:hover { background: var(--surface-3); color: var(--ink); }
+  #worlds .seg[aria-current] { cursor: default; }
+  #worlds .w3[aria-current] { background: oklch(0.70 0.11 235 / 0.24); color: oklch(0.84 0.09 235); }
+  #worlds .w2[aria-current] { background: var(--plankton-soft); color: var(--plankton); }
+  #worlds .long { display: none; }
+  @media (min-width: 760px) {
+    :root { --worlds-w: 196px; }
+    #worlds .seg { padding: 0 13px; }
+    #worlds .long { display: inline; }
+  }
   #tools { display: flex; gap: 6px; padding: 0; border-radius: 999px; }
   #tools .icon-btn { width: 48px; height: 48px; }
 
@@ -645,9 +675,13 @@
       <span class="sep" aria-hidden="true"></span>
       <span><b id="ro-fish" class="num">–</b> fish</span>
       <span>gen <b id="ro-gen" class="num">–</b></span>
-      <span><b id="ro-fps" class="num">–</b> fps</span>
+      <span class="ro-rate"><b id="ro-fps" class="num">–</b> fps</span>
       <span id="ro-gov" hidden title="the frame budget changed this run: it no longer replays from its seed"><span class="sr">governed run</span></span>
     </button>
+    <nav id="worlds" class="chip-surface" aria-label="world">
+      <a class="seg w3" id="to3d" href="ocean.html" title="3-D Ocean: fish that sense depth and steer in it (opens here; this run stops)">3-D<span class="long"> Ocean</span></a>
+      <span class="seg w2" aria-current="page" title="2-D Classic: the original flat world (this page; its tank and flat views are in the settings)">2-D<span class="long"> Classic</span></span>
+    </nav>
     <div id="tools" class="chip-surface">
       <button id="dashbtn" class="icon-btn" aria-label="dashboards: charts of this run" aria-expanded="false" title="Dashboards"><svg class="i"><use href="#i-chart"/></svg></button>
       <button id="menubtn" class="icon-btn" aria-label="settings" aria-expanded="false" aria-controls="drawer" title="Settings"><svg class="i"><use href="#i-sliders"/></svg></button>
@@ -710,7 +744,7 @@
         </div>
         <h3>View</h3>
         <div class="field" id="f_view3d">
-          <span><span class="name"><span class="lt">Tank view (3D)</span></span><span class="desc">The same world as a 3D picture, the default. Off: the flat view, which shows the world as the simulation sees it, as the native app does.</span></span>
+          <span><span class="name"><span class="lt">Tank view</span></span><span class="desc">This 2-D world drawn as a tank in perspective, the default. Off: the flat view, which shows the world as the simulation sees it, as the native app does. The world with real depth is the 3-D Ocean, at the top.</span></span>
           <span class="ctl"><input id="view3d" class="switch" type="checkbox" role="switch" aria-label="tank view"></span>
         </div>
         <div class="field" id="f_fishShape">
@@ -731,8 +765,7 @@
         <h3>Defaults</h3>
         <button id="advreset" class="btn ghost" style="margin-top:8px">Reset every setting</button>
         <p id="credit">evo_boids © 2026 Harit Tarwani ·
-          <a href="https://creativecommons.org/licenses/by-nc/4.0/" target="_blank" rel="noopener noreferrer">CC BY-NC 4.0</a><br>
-          <a id="oceanlink" href="ocean.html">3-D Ocean</a> · the same fish, steering in depth</p>
+          <a href="https://creativecommons.org/licenses/by-nc/4.0/" target="_blank" rel="noopener noreferrer">CC BY-NC 4.0</a></p>
       </section>
       <!-- the other panels are built by renderer.js (SETTINGS_TABS) -->
     </div>

@@ -26,13 +26,16 @@
  *   - the flashlight (setFlashlight, viewer only): a cone of clear light from
  *     the camera onto the followed fish or the point it looks at; inside it
  *     the fish, food and sand show their true colours (BEAM_FN)
- *   - the appearance genome (setAppearance; web/ocean_appearance.js): with it
- *     on and the snapshot carrying s.app (oc_creature_appearance's 63 floats
- *     per fish), every fish is drawn from its own genes: the M1 deformable
- *     body (shape, fins, barbels) skinned with pattern law 3, lit and fogged
- *     exactly like the plain fish, in one instanced draw (plus one for the
- *     barbels when a fish has any, and the shadow). appearanceParity() is
- *     the GPU == CPU check of the pattern law (the gallery's K12)
+ *   - the appearance genome (web/ocean_appearance.js): whenever the snapshot
+ *     carries s.app (oc_creature_appearance's 63 floats per fish), every fish
+ *     is drawn in its own inherited body: the M1 deformable template (shape,
+ *     fins, barbels), lit and fogged exactly like the plain fish, in one
+ *     instanced draw (plus one for the barbels when a fish has any, and the
+ *     shadow). setAppearance(on) picks its skin: on, pattern law 3 from its
+ *     genes; off, its family / brain colour (s.colors) with the plain fish's
+ *     darker back, pale belly and paler fins. Without s.app the plain fish
+ *     mesh is drawn instead. appearanceParity() is the GPU == CPU check of
+ *     the pattern law (the gallery's K12)
  *
  * Every fish is a faceted low-poly body bent along the six spine points the
  * core exports; the floor below catches its shadow and slow caustic light.
@@ -261,15 +264,23 @@
    * law 3 from the 33 pattern floats, at the vertex's canonical material
    * site, evaluated before the bend and the swim, so the pattern never
    * slides. 7 vertex attributes. The legacy base / countershade / fin tint stage is not
-   * applied here (the genes carry their own). */
+   * applied to the skin (the genes carry their own).
+   * uColourBy = 1 (the page's Family / Brain colours) keeps the body and
+   * swaps only the skin: the fish's family / brain colour, packed 0xRRGGBB in
+   * iX.w (exact in a float: < 2^24) and passed on in the flat vPart.w (no
+   * extra attribute or varying), through the plain fish's base stage (darker
+   * back, pale belly, paler fins) at the legacy template's height, (1 − 2v)
+   * times the canonical profile, which equals FISH_FS's vOy on a neutral
+   * body. The lighting, eyes, selection, fog and flashlight are shared. */
   function appearanceShaders(EA) {
     var G = EA.GLSL;
     var CORE = [
       "attribute vec4 aT; attribute vec4 aPattern;",
       "attribute vec4 iA; attribute vec4 iB; attribute vec4 iC;",
       "attribute vec4 iBody;",  /* radius, height, highlight, ember */
-      "attribute vec4 iX;",     /* pitch (vz), tail-beat phase, lambda, 0 */
+      "attribute vec4 iX;",     /* pitch (vz), tail-beat phase, lambda, family / brain colour 0xRRGGBB */
       "uniform vec2 uHalf; uniform float uTime; uniform float uWag; uniform float uPxPerUnit;",
+      "uniform float uColourBy;",   /* 0: the skin from the genes (pattern law 3); 1: the family / brain colour */
       G.COMMON,
       G.GENES,
       G.MORPH,
@@ -314,20 +325,33 @@
       "varying vec3 vWorld; varying vec4 vMatV; flat varying vec4 vPart;",
       "void main() {",
       "  fetchGenes(gl_InstanceID);",
-      "  patternDecode(GT[0], GT[1], GT[2], GT[3], GT[4], GT[5], GT[6], GT[7].xyz, vec2(GT[7].w, GT[8].x), iX.z);",
+      "  if (uColourBy < 0.5) patternDecode(GT[0], GT[1], GT[2], GT[3], GT[4], GT[5], GT[6], GT[7].xyz, vec2(GT[7].w, GT[8].x), iX.z);",
       "  Morph M = mDecode(iX.z);",
       "  vec3 geo, mat; float mar;",
       "  mBuild(M, aT, aPattern, uTime, uWag, minWidth(), geo, mat, mar);",
       "  vec3 w = appWorld(geo);",
-      "  vWorld = w; vMatV = vec4(mat, mar); vPart = vec4(aPattern.x, aPattern.z, iBody.z, iBody.w);",
+      /* vPart: fin, side, highlight, the packed family / brain colour (the FS reads x, z, w) */
+      "  vWorld = w; vMatV = vec4(mat, mar); vPart = vec4(aPattern.x, aPattern.z, iBody.z, iX.w);",
       "  gl_Position = projectionMatrix * viewMatrix * vec4(w, 1.0);",
       "}"
     ].join("\n");
     var fs = [
-      "uniform vec3 uLight; uniform float uTime; uniform vec3 uSelect;",
+      "uniform vec3 uLight; uniform float uTime; uniform vec3 uSelect; uniform float uColourBy;",
       FOG_FN, DEPTH_FN, BEAM_FN,
       G.COMMON, G.VARY, G.SKIN,
       "varying vec3 vWorld; varying vec4 vMatV; flat varying vec4 vPart;",
+      /* the family / brain colour (vPart.w = 0xRRGGBB) through FISH_FS's base
+       * stage; oy = the legacy template's height in body radii */
+      "vec3 colourBase(int fin, float oy) {",
+      "  float c = vPart.w;",
+      "  float r = floor(c / 65536.0);",
+      "  float g = floor((c - 65536.0 * r) / 256.0);",
+      "  vec3 base = vec3(r, g, c - 65536.0 * r - 256.0 * g) / 255.0;",
+      "  base = mix(base, base * 0.56, smoothstep(0.30, 0.85, oy) * (fin == 0 ? 1.0 : 0.0));",        /* darker back */
+      "  base = mix(base, mix(base, vec3(0.93, 0.97, 0.90), 0.5), 1.0 - smoothstep(-0.7, -0.15, oy));", /* pale belly */
+      "  if (fin != 0) base = mix(base, vec3(0.92, 0.98, 0.95), 0.22);",                              /* fins, barbels */
+      "  return base;",
+      "}",
       "void main() {",
       "  int fin = int(vPart.x + 0.5);",
       /* the material site: body (t, θ, ρ) and barbels (root t, θ) use v = .5(1 − ρ sin θ) */
@@ -336,8 +360,12 @@
       "  float u = vMatV.x;",
       "  float v = bodyLike ? 0.5 * (1.0 - sn) : vMatV.y;",
       "  float zL = bodyLike ? sn * pProfileH(u) : 0.0;",
-      "  vec3 base = patternSkinM(u, v, zL, fin == 7 ? 0 : fin, vMatV.w);",
-      "  if (fin == 7) base = mix(base, patternBase(u, v), pS(0.0, 1.0, vMatV.z));",
+      "  vec3 base;",
+      "  if (uColourBy > 0.5) base = colourBase(fin, (1.0 - 2.0 * v) * pProfileH(u));",
+      "  else {",
+      "    base = patternSkinM(u, v, zL, fin == 7 ? 0 : fin, vMatV.w);",
+      "    if (fin == 7) base = mix(base, patternBase(u, v), pS(0.0, 1.0, vMatV.z));",
+      "  }",
       "  vec3 N = normalize(cross(dFdx(vWorld), dFdy(vWorld)));",
       "  vec3 V = normalize(cameraPosition - vWorld);",
       "  if (dot(N, V) < 0.0) N = -N;",
@@ -916,14 +944,15 @@
     }
     var fish = Kind(false), preds = Kind(true);
 
-    /* The appearance genome's fish (setAppearance; null without
-     * web/ocean_appearance.js or float textures): the M1 template at two
-     * qualities (medium; coarse while the tank's detail is below 3), the
-     * barbel strips as a second instanced draw sharing every instance
-     * attribute, and the 30 shape genes per fish in a RGBA32F texture
-     * (8 texels a fish, 512 wide). Rebuilt only when it has to grow. */
+    /* The appearance genome's fish (built on the first snapshot with s.app;
+     * null without web/ocean_appearance.js or float textures): the M1
+     * template at two qualities (medium; coarse while the tank's detail is
+     * below 3), the barbel strips as a second instanced draw sharing every
+     * instance attribute, and a fish's 63 genes in a RGBA32F texture (16
+     * texels a fish, 512 wide). Rebuilt only when it has to grow. appSkin
+     * (setAppearance): the skin from the genes, else the family / brain colour. */
     var EA = window.EvoAppearance || null;
-    var appWant = false, appStatus = EA ? "ready" : "web/ocean_appearance.js not loaded";
+    var appSkin = false, appStatus = EA ? "ready" : "web/ocean_appearance.js not loaded";
     var appKind = null;
     function AppKind() {
       var sh = appearanceShaders(EA);
@@ -933,7 +962,7 @@
         uHalf: common.uHalf, uTime: common.uTime, uFog: common.uFog, uFogDensity: common.uFogDensity,
         uLight: common.uLight, uWag: fishUniforms.uWag, uSelect: fishUniforms.uSelect,
         uDepth: common.uDepth, uLightOn: common.uLightOn, uL0: common.uL0, uKWater: common.uKWater,
-        uIntrinsic: { value: 0 }, uPxPerUnit: { value: 500 },
+        uIntrinsic: { value: 0 }, uPxPerUnit: { value: 500 }, uColourBy: { value: 0 },
         uGenes: { value: null }, uRingT: { value: new Float32Array(16) }, uRingN: { value: 0 }, uHalfRing: { value: 4 }
       });
       var mat = new THREE.ShaderMaterial({ vertexShader: sh.vs, fragmentShader: sh.fs, uniforms: U, side: THREE.DoubleSide });
@@ -1375,10 +1404,11 @@
      * else keyed off the fish id as in the shallow tank */
     var heights = null;
     var SX = new Float64Array(6), SY = new Float64Array(6);
-    /* Is this snapshot drawn from the appearance genome? (on, the module
-     * exports it, one row per fish, and the kind could be built) */
+    /* Is this snapshot drawn in the fish's own bodies? (the module exports the
+     * appearance genome, one row per fish, and the kind could be built), in
+     * every colour mode; the skin is appSkin's */
     function appearanceDrawn(s) {
-      if (!appWant || !EA || !s.app || s.app.length < s.n * EA.STRIDE) return false;
+      if (!EA || !s.app || s.app.length < s.n * EA.STRIDE) return false;
       if (!appKind) {
         try { appKind = AppKind(); appStatus = "drawing"; }
         catch (e) { appStatus = "unavailable: " + (e && e.message || e); EA = null; console.warn("evo_boids: appearance renderer", e); return false; }
@@ -1391,7 +1421,7 @@
       var at = appKind.attrs;
       var A = at.iA.array, B = at.iB.array, Cc = at.iC.array, BODY = at.iBody.array, X = at.iX.array;
       var T = appKind.texData, R = s.app, ST = EA.STRIDE, MO = EA.MO;
-      var segs = s.segs, body = s.body, ids = s.ids, depth = s.depth, vz = s.vz;
+      var segs = s.segs, cols = s.colors, body = s.body, ids = s.ids, depth = s.depth, vz = s.vz;
       if (!heights || heights.length < n) heights = new Float32Array(Math.max(n, 2048));
       var xs = SX, ys = SY, barbels = false;
       for (var c = 0; c < n; c++) {
@@ -1417,7 +1447,7 @@
         var t = vz ? vz[c] : 0;
         X[o] = t === t ? t : 0; X[o + 1] = hash01(id);
         X[o + 2] = 20 * size * elong / BODY[o];   /* lambda: body length / radius */
-        X[o + 3] = 0;
+        X[o + 3] = cols ? cols[3 * c] * 65536 + cols[3 * c + 1] * 256 + cols[3 * c + 2] : 0;   /* the family / brain colour */
         var to = 64 * c;   /* 16 texels: the 63 genes, one zero */
         for (var j = 0; j < ST; j++) T[to + j] = R[r + j];
         T[to + 63] = 0;
@@ -1425,6 +1455,7 @@
       }
       var tanHalf = Math.tan(camera.fov * Math.PI / 360);
       appKind.mat.uniforms.uPxPerUnit.value = ch / (2 * tanHalf);
+      appKind.mat.uniforms.uColourBy.value = appSkin ? 0 : 1;
       appKind.commit(n, barbels);
     }
     function fillFish(s, selIdx, hovIdx) {
@@ -1944,11 +1975,15 @@
       setReducedMotion: function (on) { reduced = !!on; fishUniforms.uWag.value = reduced ? 0 : 1; },
       /* the flashlight: clear light on the followed fish, or where the camera
        * looks (aimBeam). Viewer only: nothing here reaches the simulation. */
-      /* the appearance genome (web/ocean_appearance.js): draw each fish from
-       * its 63 appearance floats (s.app) instead of the family / brain colour */
-      setAppearance: function (on) { appWant = !!on; },
+      /* the appearance genome (web/ocean_appearance.js): each fish is drawn in
+       * its own body whenever the snapshot has s.app; on, its skin is pattern
+       * law 3 from its genes, off, its family / brain colour (s.colors) */
+      setAppearance: function (on) { appSkin = !!on; },
+      /* want / skin: the skin from the genes; shapes: the inherited bodies are
+       * drawn (any colour mode); drawing: both */
       appearance: function () {
-        return { want: appWant, drawing: !!(appWant && appKind && appKind.mesh && appKind.mesh.visible),
+        var shapes = !!(appKind && appKind.mesh && appKind.mesh.visible);
+        return { want: appSkin, skin: appSkin, shapes: shapes, drawing: appSkin && shapes,
                  status: appStatus, lod: appKind ? appKind.lod : "", verts: appKind ? appKind.tpls[appKind.lod || "medium"].verts : 0,
                  barbels: !!(appKind && appKind.bmesh && appKind.bmesh.visible) };
       },

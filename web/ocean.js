@@ -180,18 +180,30 @@
   function cfgVal(key) { return Object.prototype.hasOwnProperty.call(runCfg, key) ? runCfg[key] : KEYS[key][0]; }
   /* World size for a (re)start: the native 1920 x 1080, or the same area on
    * its side on a portrait screen (the same food density and crowding, and a
-   * tank that fills a phone), unless ?w= / ?h= fix it. */
+   * tank that fills a phone), unless it is fixed: by ?w= / ?h=, or by a
+   * loaded setup's size. A Restart writes the size into the address, so a
+   * shared link is the same world on a screen the other way up. */
   var URL_W = parseFloat(P.get("w")), URL_H = parseFloat(P.get("h"));
+  function side(v) { return Math.round(Math.max(100, Math.min(20000, v))); }
+  var fixedW = isFinite(URL_W) ? side(URL_W) : null, fixedH = isFinite(URL_H) ? side(URL_H) : null;
   function isPortrait() { return innerHeight > innerWidth * 1.15; }
+  function screenWorld() { return isPortrait() ? [1080, 1920] : [1920, 1080]; }
   function fittedWorld() {
-    var p = isPortrait(), w = p ? 1080 : 1920, h = p ? 1920 : 1080;
-    if (isFinite(URL_W)) w = Math.round(Math.max(100, Math.min(20000, URL_W)));
-    if (isFinite(URL_H)) h = Math.round(Math.max(100, Math.min(20000, URL_H)));
-    return [w, h];
+    var f = screenWorld();
+    return [fixedW !== null ? fixedW : f[0], fixedH !== null ? fixedH : f[1]];
   }
+  /* "Fit the world to this screen": offered when the world has the other
+   * orientation's size (the phone turned, or a link from a screen the other
+   * way up); a size of its own (?w=300&h=300) stays as it is */
   function updateFitButton() {
-    var f = fittedWorld();
-    el("fitbtn").hidden = !M || (f[0] === W && f[1] === H) || (isFinite(URL_W) || isFinite(URL_H));
+    var f = screenWorld();
+    el("fitbtn").hidden = !M || !(W === f[1] && H === f[0]);
+  }
+  function fitToScreen() {
+    if (!M || guardTurbo()) return;
+    var w0 = fixedW, h0 = fixedH;
+    fixedW = fixedH = null;
+    if (!restart()) { fixedW = w0; fixedH = h0; }
   }
   var worldReady = false;
   function initWorld(seed, population, depth, cfg, rawCfg) {
@@ -659,12 +671,13 @@
     }
   }
   /* a Restart writes the setup into the address, so a reload or a shared
-   * link is this world */
+   * link is this world: its size too, on a screen of any shape */
   function writeUrl() {
     if (!initArgs) return;
     try {
       var u = new URL(location.href);
       u.searchParams.set("seed", String(initArgs.seed));
+      u.searchParams.set("w", String(W)); u.searchParams.set("h", String(H));
       if (initArgs.population !== KEYS.population[0]) u.searchParams.set("pop", String(initArgs.population)); else u.searchParams.delete("pop");
       if (initArgs.depth !== KEYS.depth[0]) u.searchParams.set("depth", String(initArgs.depth)); else u.searchParams.delete("depth");
       if (Object.keys(initArgs.cfg).length) u.searchParams.set("cfg", JSON.stringify(initArgs.cfg)); else u.searchParams.delete("cfg");
@@ -672,28 +685,55 @@
       history.replaceState(null, "", u);
     } catch (e) { /* file:// or a sandboxed frame */ }
   }
+  /* Save setup: the running world's — its seed, size and settings, with the
+   * live changes that applied since it started. Edits still waiting for a
+   * Restart are not in it (they are not the running world's), and it says so. */
   function saveSetup() {
     if (!initArgs) return;
     var setup = { format: "evo_ocean_setup", version: 1, seed: initArgs.seed, population: initArgs.population,
-                  depth: initArgs.depth, width: W, height: H, config: initArgs.cfg };
+                  depth: initArgs.depth, width: W, height: H, config: Object.assign({}, runCfg) };
     var url = URL.createObjectURL(new Blob([JSON.stringify(setup, null, 2)], { type: "application/json" }));
     var a = document.createElement("a");
     a.href = url; a.download = "evo_ocean_setup_seed" + initArgs.seed + ".json";
     document.body.appendChild(a); a.click(); a.remove();
     URL.revokeObjectURL(url);
-    toast("Saved this world's setup (seed " + initArgs.seed + ").");
+    var waiting = el("restart").classList.contains("pending");
+    toast("Saved this world's setup (seed " + initArgs.seed + ")" +
+          (waiting ? ". Edits waiting for a Restart are not in it: Restart first to include them." : "."));
   }
+  /* Load setup: that world from its start, at its size, exactly as saved
+   * (importWorld: a value the engine refuses is reported, and nothing
+   * changes). A setup without a size takes this screen's. */
   function loadSetup(text) {
     var s;
     try { s = JSON.parse(text); } catch (e) { showError("That file is not JSON: " + e.message); return; }
-    if (!s || s.format !== "evo_ocean_setup" || typeof s.config !== "object") { showError("That file is not an Ocean setup (Save setup makes one)."); return; }
-    resetForm();
-    if (Number.isFinite(s.seed)) setVal("seed", s.seed >>> 0);
-    if (Number.isFinite(s.population)) setVal("population", s.population);
-    if (Number.isFinite(s.depth)) setVal("depth", s.depth);
-    cfgToForm(s.config);
-    updateNeeds(); updateTabDots();
-    if (restart()) showNote("Setup loaded: seed " + getVal("seed") + ", replaying from its start.");
+    if (!s || s.format !== "evo_ocean_setup" || !s.config || typeof s.config !== "object" || Array.isArray(s.config)) {
+      showError("That file is not an Ocean setup (Save setup makes one)."); return;
+    }
+    var bad = [];
+    function arg(name, def, ok) {
+      if (s[name] === undefined || s[name] === null) return def;
+      if (!ok(s[name])) bad.push(name + " " + JSON.stringify(s[name]));
+      return s[name];
+    }
+    function whole(lo, hi) { return function (v) { return Number.isInteger(v) && v >= lo && v <= hi; }; }
+    var seed = arg("seed", KEYS.seed[0], whole(0, 4294967295)), pop = arg("population", KEYS.population[0], whole(0, 100000));
+    var depth = arg("depth", KEYS.depth[0], function (v) { return typeof v === "number" && isFinite(v); });
+    var w = arg("width", null, whole(100, 100000)), h = arg("height", null, whole(100, 100000));
+    if (bad.length) { showError("That setup can't start: " + bad.join(", ") + " (whole numbers in range)."); return; }
+    var w0 = fixedW, h0 = fixedH;
+    if (w !== null) fixedW = w;
+    if (h !== null) fixedH = h;
+    clearError();
+    var why = importWorld(seed, pop, depth, s.config);
+    if (why) {
+      fixedW = w0; fixedH = h0;
+      showError("That setup was refused: " + why);
+      return;
+    }
+    el("randnote").textContent = "";
+    writeUrl();
+    showNote("Setup loaded: seed " + (seed >>> 0) + ", " + W + " × " + H + ", replaying from its start.");
   }
 
   /* ---------------- per-frame data ---------------- */
@@ -1641,7 +1681,7 @@
   btn("replay", replay);
   btn("lightbtn", toggleLight);
   btn("viewbtn", function () { if (scene) { wantFollow = false; scene.resetView(true); } });
-  btn("fitbtn", restart);
+  btn("fitbtn", fitToScreen);
   btn("followbtn", function () {
     if (!scene) return;
     if (scene.following()) unfollow();
@@ -1930,6 +1970,7 @@
                  runCfg: Object.assign({}, runCfg), light: LIGHT, flashlight: scene.flashlight(), flashlightLevel: scene.flashlightLevel(),
                  stepMs: stepMs, fps: fps, following: scene.following(), selectedId: selectedId, selIdx: s.selIdx,
                  turbo: turboState, colourBrain: colourBrain, frame: s.stats[1],
+                 held: Object.assign({}, heldLive), fixedSize: [fixedW, fixedH],
                  stats: Array.prototype.slice.call(s.stats), depthMin: s.n ? lo : 0, depthMax: s.n ? hi : 0,
                  dashRows: dash() ? dash()._rows().length : 0 };
       }

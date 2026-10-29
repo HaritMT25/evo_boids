@@ -18,12 +18,16 @@
  *     brain (oc_set_capture keeps its senses while a fish is selected)
  *   - Turbo: web/ocean_worker.js steps a copy of the module's memory at full
  *     speed; the copy comes back on Stop, so the run carries on exactly
+ *     (web/ocean_handoff.js: the hand-off, shared with the worker)
  *   - the tour and the first-visit Turbo card (web/guide.js, steps below)
  * The flashlight (scene.setFlashlight) is drawing only: no engine call.
  *
  * Every pointer the module returns is valid until the next oc_sync / oc_init
- * (oc_inspect: until the next step or sync), and memory can grow, so typed
- * arrays are cut fresh from the heap after every call and never cached.
+ * (oc_inspect: until the next step or sync), and memory can grow — in any
+ * export that allocates (oc_summary, oc_families, oc_inspect, oc_wiring, the
+ * name lists, oc_sync itself) — so typed arrays are cut from the heap after
+ * the call that fills them, and a frame's snapshot is cut again (fresh())
+ * after anything that may have grown it.
  *
  * URL: ?seed=42 &pop=300 &depth=240 &w=1920 &h=1080 (1080 x 1920 on a
  *      portrait screen) &cfg={"key":value,...} (SimConfig + OceanConfig keys,
@@ -600,7 +604,7 @@
     var buf = heap();
     var n = M._oc_creature_count(), fc = M._oc_food_count(), pc = M._oc_predator_count();
     return {
-      n: n, fc: fc, pc: pc, selIdx: -1,
+      buf: buf, n: n, fc: fc, pc: pc, selIdx: -1,
       segs: new Float32Array(buf, M._oc_creature_segments(), n * 12),
       depth: new Float32Array(buf, M._oc_creature_depth(), n),
       ids: new Float64Array(buf, M._oc_creature_ids(), n),
@@ -614,6 +618,18 @@
       vz: HAS_VZ ? new Float32Array(buf, M._oc_creature_vz(), n) : null,
       curActive: false, curGrid: null, curCols: 0, curRows: 0
     };
+  }
+  /* s again, if anything grew the memory since it was cut (an export that
+   * allocates: the summary, the family lines, the fish card's, the wiring, a
+   * name list, a C string): the same buffers (only oc_sync and a new world
+   * rewrite them, and both drop the snapshot), on the live memory */
+  function fresh(s) {
+    if (!s || s.buf === heap()) return s;
+    var t = snapshot();
+    t.selIdx = s.selIdx;
+    if (!HAS_VZ) t.vz = s.vz;   /* the estimate lives in JS */
+    if (lastS === s) lastS = t;
+    return t;
   }
   /* Without oc_creature_vz: each fish's pitch from how its depth changed over
    * the distance its head swam since the last frame, smoothed, keyed by id. */
@@ -696,7 +712,7 @@
   }
   /* F: follow the selected fish; again (or with none): a random one */
   function follow() {
-    var s = lastS;
+    var s = fresh(lastS);
     if (!s || !s.n || turboState !== "live") return;
     var idx = !scene.following() ? indexOfId(s, selectedId) : -1;
     if (idx < 0) idx = randomFish(s, selectedId);
@@ -821,8 +837,9 @@
     if (!dirtyHud && now - hudT < 500) return;
     dirtyHud = false; hudT = now;
     if (has("oc_summary") && (!summary || now - summaryT > 450)) {
-      summary = Array.prototype.slice.call(new Float64Array(heap(), M._oc_summary(), M._oc_summary_len()));
+      summary = HO.f64(M, M._oc_summary(), M._oc_summary_len());   /* it allocates: the views after it */
       summaryT = now;
+      s = fresh(s);
     }
     var st = s.stats, g = function (k) { return STATS[k] < st.length ? st[STATS[k]] : NaN; };
     var frame = g("frame");
@@ -938,8 +955,10 @@
   }
   /* oc_inspect(idx) right after the sync: its numbers, then the card */
   function inspect(idx) {
-    if (!has("oc_inspect") || !M._oc_inspect(idx)) return null;
-    var buf = heap(), sh = brainShape(), nc = M._oc_inspect_conn_count();
+    if (!has("oc_inspect")) return null;
+    var sh = brainShape();   /* first: the name lists allocate (once) */
+    if (!M._oc_inspect(idx)) return null;
+    var buf = heap(), nc = M._oc_inspect_conn_count();   /* after oc_inspect, which allocates */
     return {
       info: new Float64Array(buf, M._oc_inspect_info(), M._oc_inspect_len()),
       sensors: new Float32Array(buf, M._oc_inspect_sensors(), sh.nS),
@@ -950,7 +969,8 @@
   }
   function updateCard(s) {
     var idx = s.selIdx, f = idx >= 0 && turboState === "live" ? inspect(idx) : null;
-    if (!f) { hideCard(); return; }
+    if (!f) { hideCard(); return s; }
+    s = fresh(s);   /* oc_inspect may have grown the memory */
     if (cardEl.hidden) showCard();
     var p = scene.project(s, idx);
     if (p) placeCard(p.x, p.y);
@@ -978,6 +998,7 @@
     cardText("ipitchv", Math.abs(deg) < 0.5 ? "level" : Math.abs(deg).toFixed(0) + "° " + (deg > 0 ? "down" : "up"));
     setBar("ipitch", 0.5 + 0.5 * Math.max(-1, Math.min(1, info[10] / (pitchMax || 0.5))), 0.5);
     if (cardExpanded) drawBrain(f);
+    return s;
   }
   function brainColor(v, a) {
     var m = Math.min(1, Math.abs(v));
@@ -1093,19 +1114,19 @@
   /* ---------------- the dashboards' recorder ---------------- */
   var sampleBucket = -1;
   function dash() { return window.EvoOceanDash || null; }
+  /* one sample of this frame's synced world: the row the Turbo worker records
+   * too (web/ocean_handoff.js row(): the stats copied before the summary and
+   * the family lines allocate) */
   function takeSample(st) {
     if (!dash() || !has("oc_summary")) return;
     var every = dash().every(), b = Math.floor(st[1] / every);
     if (b === sampleBucket) return;
     sampleBucket = b;
-    var su = Array.prototype.slice.call(new Float64Array(heap(), M._oc_summary(), M._oc_summary_len()));
-    var k = M._oc_families(dash().famK);
-    var fam = Array.prototype.slice.call(new Float64Array(heap(), M._oc_families_data(), 2 * k));
-    dash().push({ st: Array.prototype.slice.call(st), su: su, fam: fam });
+    dash().push(HO.row(M, dash().famK, statsLen));
   }
   function wiringNow() {
     if (!M || turboState !== "live" || !has("oc_wiring")) return null;
-    var n = M._oc_wiring(), sh = brainShape();
+    var sh = brainShape(), n = M._oc_wiring();   /* both allocate: the view after them */
     var data = new Float32Array(heap(), M._oc_wiring_data(), 2 * sh.nS * sh.nA);
     return { at: performance.now(), n: n, senses: sh.nS, actions: sh.nA,
              path: Array.prototype.slice.call(data, 0, sh.nS * sh.nA), direct: Array.prototype.slice.call(data, sh.nS * sh.nA),
@@ -1229,7 +1250,7 @@
     lastSteps = steps;
     M._oc_sync();
     var s = snapshot();
-    if (turboState === "live") takeSample(s.stats);
+    if (turboState === "live") { takeSample(s.stats); s = fresh(s); }
     if (!HAS_VZ) s.vz = vzEstimate(s, steps > 0);
     var ax = { f: 0, r: 0, u: 0 };
     for (var key in heldMoveKeys) ax[heldMoveKeys[key][0]] += heldMoveKeys[key][1];
@@ -1243,7 +1264,7 @@
     s.selIdx = idx;
     lastS = s;
     if (!(dash() && dash().isOpen())) scene.render(s, { animT: animT, dtSim: steps * DT, selIdx: idx });
-    updateCard(s);
+    s = updateCard(s);
     fpsFrames++;
     if (now - fpsT >= 1000) { fps = Math.round(fpsFrames * 1000 / (now - fpsT)); fpsFrames = 0; fpsT = now; dirtyHud = true; govern(now); }
     updateHud(s, now);
@@ -1329,11 +1350,12 @@
       if (!tap || e.pointerId !== tap.id) return;
       var moved = Math.hypot(e.clientX - tap.x, e.clientY - tap.y), held = performance.now() - tap.t;
       tap = null;
-      if (moved > 8 || held > 600 || !lastS || turboState !== "live") return;
-      var best = scene.pick(lastS, e.clientX, e.clientY, e.pointerType === "mouse" ? 18 : 30);
+      var s = fresh(lastS);
+      if (moved > 8 || held > 600 || !s || turboState !== "live") return;
+      var best = scene.pick(s, e.clientX, e.clientY, e.pointerType === "mouse" ? 18 : 30);
       if (best < 0 && scene.following()) return;   /* a stray tap doesn't drop a follow */
-      if (best >= 0 && scene.following() && lastS.ids[best] !== selectedId) unfollow();
-      select(best >= 0 ? lastS.ids[best] : null);
+      if (best >= 0 && scene.following() && s.ids[best] !== selectedId) unfollow();
+      select(best >= 0 ? s.ids[best] : null);
     });
     var fitTimer = 0;
     window.addEventListener("resize", function () {
@@ -1645,11 +1667,12 @@
     setDrawer: setDrawer,
     setSheetTab: setSheetTab,
     inspectSomeFish: function () {
-      if (!M || turboState !== "live" || !lastS || !lastS.n) return false;
+      var s = fresh(lastS);
+      if (!M || turboState !== "live" || !s || !s.n) return false;
       if (selectedId !== null) return true;
-      var best = scene.pick(lastS, innerWidth * 0.4, innerHeight * 0.45, 4000);
+      var best = scene.pick(s, innerWidth * 0.4, innerHeight * 0.45, 4000);
       if (best < 0) best = 0;
-      select(guideFish = lastS.ids[best]);
+      select(guideFish = s.ids[best]);
       return true;
     },
     releaseFish: function () {
@@ -1722,7 +1745,7 @@
     window.EvoOcean = {
       module: M, scene: scene,
       steepest: function (sinking) {
-        var s = lastS, best = -1, bv = 0;
+        var s = fresh(lastS), best = -1, bv = 0;
         if (!s || !s.vz) return null;
         for (var i = 0; i < s.n; i++) { var v = sinking ? s.vz[i] : Math.abs(s.vz[i]); if (v > bv) { bv = v; best = i; } }
         return best < 0 ? null : { idx: best, id: s.ids[best], vz: s.vz[best], x: s.segs[12 * best], y: s.segs[12 * best + 1],
@@ -1735,17 +1758,17 @@
         readLight();
         return !!ok;
       },
-      select: function (idx) { if (lastS && idx >= 0 && idx < lastS.n) select(lastS.ids[idx]); },
+      select: function (idx) { var s = fresh(lastS); if (s && idx >= 0 && idx < s.n) select(s.ids[idx]); },
       /* index of the deepest fish right now (-1 with none) */
       deepest: function () {
-        var s = lastS, best = -1;
+        var s = fresh(lastS), best = -1;
         if (s) for (var i = 0; i < s.n; i++) if (best < 0 || s.depth[i] > s.depth[best]) best = i;
         return best;
       },
       follow: follow,
       turbo: function () { return turboState; },
       state: function () {
-        var s = lastS;
+        var s = fresh(lastS);
         if (!s) return null;
         var lo = Infinity, hi = -Infinity;
         for (var i = 0; i < s.n; i++) { lo = Math.min(lo, s.depth[i]); hi = Math.max(hi, s.depth[i]); }

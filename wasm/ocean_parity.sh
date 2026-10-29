@@ -52,6 +52,18 @@
 # other and with the baselines, each build's unit checks run natively and
 # under node, and the r_eye_* refusals are asked of the eye build's shim.
 #
+# The appearance genome (OceanConfig::appearance, src/ocean/appearance_model.hpp)
+# is ON by default, so every case above also builds and inherits it: its own
+# fingerprint section (`app=` on every fp line, `appchain=` after `chain=`,
+# the cover line's app* counters), kept out of `all` and `chain`. It is
+# cosmetic, and this script proves that on every run: each case in APP_TWINS
+# runs again with {"appearance":0}, and its output must be the case's output
+# with every app* field removed, byte for byte (every simulation section, the
+# combined hash, the chain over every step, the counters, the final line).
+# APP_TWINS=all twins every selected case. The app_* cases cover what the
+# defaults do not: patterns only / shapes only, every inheritance knob at 0
+# and at its maximum, live knob changes, a long run.
+#
 # Bisecting a FAIL: the table names the first differing line (step and
 # sections; `chain` alone = the states differed at some step since the last
 # print and agree again). Re-run the case with --trace (every step) to find the
@@ -335,6 +347,23 @@ add eye_cloak_both_only_capture_s17 '17 3000 --capture --cfg {"eye":1,"eyeOnly":
 add eye_cloak_live_s21 '21 3000 --cfg {"predatorCount":3,"eye":1} --set eyeCode=8@500 --set eyeCode=16@1000 --set eyeOnly=1@1500 --set eyeCode=28@2000 --set eyeCode=0@2500 --expect eyeCodeMask=28 --expect eyeOnlySteps>0' \
                   "cloaks switched mid-run (oc_set_param): 0 -> 8 -> 16 -> 16 eye-only -> 28 -> 0"
 
+# ---- the appearance genome (on by default above; these cover its other settings) ----
+APPMAX='"patternMutation":0.25,"patternPhaseMutation":0.25,"patternNovelProbability":0.25,"morphologyMutation":0.25,"morphologyNovelProbability":0.25'
+APPZERO='"patternMutation":0,"patternPhaseMutation":0,"patternNovelProbability":0,"morphologyMutation":0,"morphologyNovelProbability":0'
+add app_patterns_s1 '1 3000 --cfg {"appearance":1} --expect appOffspring>0 --expect appMean>0 --expect appShapeMean=0' \
+                  "appearance 1: skin patterns only (shapes stay neutral)"
+add app_shapes_s42 '42 3000 --cfg {"appearance":2} --expect appOffspring>0 --expect appShapeMean>0 --expect appMean=0' \
+                  "appearance 2: body shapes only (patterns stay neutral)"
+add app_zero_mut_s7 "7 3000 --cfg {$APPZERO} --expect appOffspring>0 --expect appNovel=0 --expect appShapeNovel=0" \
+                  "every inheritance knob 0: copies and means only (still 160 draws a child)"
+add app_max_mut_s8 "8 3000 --cfg {$APPMAX,\"predatorCount\":3} --expect appNovel>0 --expect appShapeNovel>0" \
+                  "every inheritance knob at 0.25: clamps, crossAngle wraps, disk projections"
+add app_live_s21 '21 3000 --cfg {"predatorCount":3} --set patternMutation=0.2@500 --set patternNovelProbability=0.25@1000 --set morphologyMutation=0@1500 --set patternPhaseMutation=0.25@2000 --set appearance=3@2200 --set morphologyNovelProbability=0@2500 --expect appOffspring>0' \
+                  "the inheritance knobs changed live; appearance set to the value it has (a no-op)"
+add app_rich_toro_e1_s9 "9 3000 --cfg {$RICH,\"toroidal\":true,\"waveSpeed\":6,\"deepCurrent\":true,\"bodyModel\":true,\"sizeDrift\":true,$APPMAX} --expect appFounders>300 --expect appOffspring>0" \
+                  "max knobs + rich (reseeds, predation) + toroidal + E1 + body model"
+add app_long_s42  '42 20000 --every 500 --expect appOffspring>0' "20k steps, defaults: the genealogy over a long run"
+
 # Configs the page must REFUSE (oc_init / oc_set_param; ocean_tests --accepts
 # must exit 1): every Ocean knob has a finite range, so none of these can run.
 RNAMES=(); RARGS=()
@@ -441,6 +470,20 @@ radd r_eye_live_frac '1 10 --set eye=0.5@5'
 radd r_eye_live_code '1 10 --set eyeCode=32@5'
 radd r_eye_live_code_frac '1 10 --set eyeCode=2.5@5'
 radd r_eye_radius_sq '1 10 --cfg {"eye":1,"perceptionRadius":1e20}'
+# The appearance keys: appearance a bit set 0..3, set at init only; each knob in [0, 0.25].
+radd r_app_four     '1 10 --cfg {"appearance":4}'
+radd r_app_neg      '1 10 --cfg {"appearance":-1}'
+radd r_app_frac     '1 10 --cfg {"appearance":1.5}'
+radd r_app_huge     '1 10 --cfg {"appearance":1e300}'
+radd r_app_mut      '1 10 --cfg {"patternMutation":0.26}'
+radd r_app_phase    '1 10 --cfg {"patternPhaseMutation":-0.01}'
+radd r_app_novel    '1 10 --cfg {"patternNovelProbability":1e39}'
+radd r_app_mmut     '1 10 --cfg {"morphologyMutation":0.5}'
+radd r_app_mnovel   '1 10 --cfg {"morphologyNovelProbability":2}'
+radd r_app_live_off '1 10 --set appearance=0@5'
+radd r_app_live_two '1 10 --set appearance=2@5'
+radd r_app_live_mut '1 10 --set patternMutation=0.3@5'
+radd r_app_live_nov '1 10 --set morphologyNovelProbability=0.26@5'
 
 run_one () {  # run_one INDEX: native and wasm side by side
     local i=$1 name=${NAMES[$1]} s
@@ -607,6 +650,58 @@ for v in $VARIANTS; do
         break
     done
 done
+
+# ---- appearance is cosmetic: each twin with {"appearance":0} must be the
+# case's own output with every app* field removed, byte for byte (line 1, the
+# header, names the cfg and so differs) ----
+DEFAULT_TWINS="def_s1 gate_s29 cap_s31 x_tri_body_s9 fast_logs_s41 rich_s5 pred_s7 econ_s42 toro_bud_s43 pred_age_s23 live_s21 capture_s17 big_toro_s9 long_s42 e1_preset_s42 e1_size_s9 e1_live_s21 e1_x_big_s9 life_live_s21 eye_def_s1 eye_e1_capture_s17 eye_code7_big_s42 eye_only_exp_s3 eye_cloak_live_s21 eye_life_steer_only_s3"
+TWINS=${APP_TWINS:-$DEFAULT_TWINS}
+[ "$TWINS" = all ] && TWINS="${NAMES[*]}"
+# The case's output minus its app* fields and its app* expectations.
+app_strip () { sed -E '/^expect app/d; s/ app[A-Za-z]*=[^ ]*//g' "$1" | tail -n +2; }
+twin_args () {  # twin_args ARGS -> the same with appearance 0 in its cfg and no app* expectations
+    local a
+    a=$(printf '%s\n' "$1" | sed -E 's/ --expect app[A-Za-z]*[<>=]+[0-9]+//g')
+    if [[ $a == *'"appearance":'* ]]; then printf '%s\n' "$a" | sed -E 's/"appearance":[0-9]+/"appearance":0/'
+    elif [[ $a == *"--cfg {"* ]]; then printf '%s\n' "$a" | sed 's/--cfg {/--cfg {"appearance":0,/'
+    else printf '%s --cfg {"appearance":0}\n' "$a"; fi
+}
+NTWIN=0; TWIN_BAD=""
+declare -A ISSEL=(); for i in "${SEL[@]}"; do ISSEL[$i]=1; done
+twin_one () {  # twin_one INDEX
+    local i=$1 name=${NAMES[$1]} s
+    s=$(sfx "$name")
+    local -a A
+    read -r -a A <<< "$(twin_args "${ARGS[$i]}")"
+    "$OUT/opd_native$s" "${A[@]}" > "$OUT/$name.off.txt" 2> "$OUT/$name.off.log"; echo $? > "$OUT/$name.off.rc"
+}
+TWIN_IDX=()
+for i in "${!NAMES[@]}"; do
+    [ -n "${ISSEL[$i]:-}" ] || continue
+    for t in $TWINS; do [ "$t" = "${NAMES[$i]}" ] && TWIN_IDX+=("$i") && break; done
+done
+for i in "${TWIN_IDX[@]}"; do
+    while [ "$(jobs -rp | wc -l)" -ge "$JOBS" ]; do wait -n; done
+    twin_one "$i" &
+done
+wait
+for i in "${TWIN_IDX[@]}"; do
+    name=${NAMES[$i]}
+    if [ "$(cat "$OUT/$name.off.rc" 2>/dev/null)" != "$(cat "$OUT/$name.native.rc" 2>/dev/null)" ]; then
+        TWIN_BAD="$TWIN_BAD $name(exit)"
+    elif ! cmp -s <(app_strip "$OUT/$name.native.txt") <(app_strip "$OUT/$name.off.txt"); then
+        TWIN_BAD="$TWIN_BAD $name"
+    else
+        NTWIN=$((NTWIN + 1))
+    fi
+done
+if [ ${#TWIN_IDX[@]} -gt 0 ]; then
+    if [ -z "$TWIN_BAD" ]; then
+        echo "== appearance is cosmetic: $NTWIN of ${#TWIN_IDX[@]} case(s) with appearance off == with it on minus its app* fields (every section, all, chain, counters, final line)"
+    else
+        echo "== appearance CHANGED THE SIMULATION in:$TWIN_BAD (diff <(sed -E 's/ app[A-Za-z]*=[^ ]*//g' X.native.txt) X.off.txt in $OUT)"; FAILED=1
+    fi
+fi
 
 TESTS_OK=1
 if [ -z "${NO_TESTS:-}" ]; then

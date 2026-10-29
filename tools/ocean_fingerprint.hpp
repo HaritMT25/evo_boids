@@ -44,6 +44,21 @@
 //         never on hashes the unprepared defaults)
 //   rng   the global engine: its 624 words and its position
 //
+// and, OUTSIDE the simulation's combined hash (`all`, the chain):
+//
+//   app   the appearance genome (src/ocean/appearance_model.hpp: cosmetic,
+//         read by nothing the step computes): the schema / law / inheritance /
+//         founder / chart versions, the appearance config keys (appearance and
+//         its five inheritance knobs, every one by bit pattern), the world's
+//         flags as of init, the broken flag, the stream key, the construction
+//         counters, the record count, then per record (creature order) the
+//         creature's id, the stored owner id and all 63 floats by bit pattern.
+//         Printed (`app=`, and the driver's `appchain=`) whenever appearance is
+//         on or a knob is off its default; never mixed into `all`, so the 9
+//         simulation sections, `all` and `chain` of a run with appearance on
+//         are byte for byte those of the same run with it off — the harness's
+//         app_off_* twins check exactly that (wasm/ocean_parity.sh).
+//
 // Not hashed, by design: scratch the step rebuilds from hashed state before
 // reading it (the grids' entries, hot_, pending_, the neighbour vectors, the
 // E1 flow cache flow_ — src/ocean/ocean_flow.hpp: tables and keys derived from
@@ -68,6 +83,13 @@
 // the geo section hashes the unprepared modes until the waves are first on —
 // a change in what a format-2 baseline holds, hence the bump. Nothing else
 // moved: every other section, of every case, is what format 2 recorded.
+//
+// Format 4 (2026-10-28, the appearance genome): the `app` section above,
+// printed on every fingerprint line of a world with appearance on (the
+// default), and the appearance config keys (hashed in `app`, not `cfg`).
+// Nothing else moved: with the `app=` / `appchain=` fields and the cover
+// line's app* counters taken out, every case's output is its format-3 output
+// (the header's format number aside).
 //
 // Private state is read WITHOUT engine accessors (namespace peek below: a
 // pointer to member taken in an explicit template instantiation, where C++
@@ -100,7 +122,7 @@
 
 namespace ofp {
 
-inline constexpr int kFormatVersion = 3;
+inline constexpr int kFormatVersion = 4;
 
 // ---- private engine state, read without an accessor -------------------------
 namespace peek {
@@ -167,7 +189,8 @@ constexpr std::size_t fieldCount() {
 #define OFP_FIELDS(T, N) \
     static_assert(detail::fieldCount<T>() == (N), #T " gained or lost a field: hash it in tools/ocean_fingerprint.hpp, then update this count")
 OFP_FIELDS(SimConfig, 71);
-OFP_FIELDS(OceanConfig, 27);
+OFP_FIELDS(OceanConfig, 33);
+OFP_FIELDS(appearance::Stats, 10);   // founders, offspring, pattern[4], morph[4]
 OFP_FIELDS(AgentCore, 16 + NUM_SENSES + NUM_ACTIONS + 1);   // 14 scalars + genome + nnet, the two arrays, colour
 OFP_FIELDS(Fish, 1 + 6 + Fish::BODY_LEN);                   // base, pos .. bodyBuoy, body[]
 OFP_FIELDS(Predator, 9);
@@ -208,6 +231,7 @@ struct OceanWorld_ : WorldCommon {
     SpatialGrid creatureGrid, foodGrid; std::vector<FishHot_> hot; std::vector<Pending_> pending;
     std::vector<int> neighbors, nearbyFood, nearby, near;
     CurrentField current; std::vector<Vec2> patches; std::vector<float> patchDepth;
+    std::vector<appearance::Record> app; std::uint64_t appKey; int appFlags; bool appBroken; appearance::Stats appStats;
     WaveTrain_ waves[OceanWorld::kWaveTrains];
     oceanflow::FlowCache flow;   // scratch (see above)
 #ifdef EVO_OCEAN_EYE
@@ -279,9 +303,11 @@ struct Hasher {
 
 struct Fingerprint {
     std::uint64_t all = 0, cfg = 0, ctr = 0, fish = 0, food = 0, pred = 0, sig = 0, cur = 0, geo = 0, rng = 0;
+    std::uint64_t app = 0;   // the appearance section: NOT in `all` (see the top)
+    bool appShown = false;   // printed: appearance on, or an appearance knob off its default
     bool operator==(const Fingerprint& o) const {
         return all == o.all && cfg == o.cfg && ctr == o.ctr && fish == o.fish && food == o.food && pred == o.pred &&
-               sig == o.sig && cur == o.cur && geo == o.geo && rng == o.rng;
+               sig == o.sig && cur == o.cur && geo == o.geo && rng == o.rng && app == o.app && appShown == o.appShown;
     }
     bool operator!=(const Fingerprint& o) const { return !(*this == o); }
 };
@@ -335,6 +361,12 @@ void visitOceanConfig(const OceanConfig& c, V& v) {
 template <class V>
 void visitOceanConfigVision(const OceanConfig& c, V& v) {
     OFP_I(eye); OFP_I(eyeOnly); OFP_I(eyeCode); OFP_I(steerFrame); OFP_F(foodLife);
+}
+// The appearance keys (hashed in `app`, not `cfg`: cosmetic; see the top).
+template <class V>
+void visitOceanConfigAppearance(const OceanConfig& c, V& v) {
+    OFP_I(appearance); OFP_F(patternMutation); OFP_F(patternPhaseMutation); OFP_F(patternNovelProbability);
+    OFP_F(morphologyMutation); OFP_F(morphologyNovelProbability);
 }
 #undef OFP_F
 #undef OFP_I
@@ -523,6 +555,34 @@ inline void hashRng(Hasher& h) {
     h.i32(field<peek::MtPos>(eng));
 }
 
+// The appearance section (see the top).
+inline bool appearanceShown(const OceanWorld& w) {
+    return w.ocfg.appearance != 0 || w.appearanceInitFlags() != 0 || w.appearanceBroken() ||
+           !oceanAppearanceKnobsAtDefaults(w.ocfg);
+}
+inline void hashAppearance(Hasher& h, const OceanWorld& w) {
+    using namespace appearance;
+    h.u64((std::uint64_t)kSchema | (std::uint64_t)kPatternSchema << 8 | (std::uint64_t)kPatternLaw << 16 |
+          (std::uint64_t)kPatternInheritance << 24 | (std::uint64_t)kPatternFounder << 32 |
+          (std::uint64_t)kMorphLaw << 40 | (std::uint64_t)kMorphInheritance << 48 | (std::uint64_t)kMorphFounder << 56);
+    h.u64((std::uint64_t)kMorphChart | (std::uint64_t)kStride << 8 | (std::uint64_t)kAbi << 16);
+    visitOceanConfigAppearance(w.ocfg, h);
+    h.i32(w.appearanceInitFlags()); h.b(w.appearanceBroken()); h.u64(w.appearanceKey());
+    const Stats& st = w.appearanceStats();
+    h.u64(st.founders); h.u64(st.offspring);
+    for (std::uint64_t x : st.pattern) h.u64(x);
+    for (std::uint64_t x : st.morph) h.u64(x);
+    const auto& recs = w.appearanceRecords();
+    h.u64(recs.size());
+    for (std::size_t i = 0; i < recs.size(); ++i) {
+        h.u64(i < w.creatures.size() ? w.creatures[i].id : ~0ull);
+        h.u64(recs[i].ownerId);
+        const float* g = recs[i].genome.g;
+        for (int j = 0; j + 1 < kStride; j += 2) h.f32x2(g[j], g[j + 1]);
+        h.f32(g[kStride - 1]);
+    }
+}
+
 inline Fingerprint fingerprint(const OceanWorld& w, bool withActivations = true) {
     Fingerprint fp;
     { Hasher h; hashConfig(h, w.cfg, w.ocfg); fp.cfg = h.value(); }
@@ -544,6 +604,8 @@ inline Fingerprint fingerprint(const OceanWorld& w, bool withActivations = true)
     Hasher a;
     for (auto s : kSections) a.u64(fp.*s);
     fp.all = a.value();
+    fp.appShown = appearanceShown(w);
+    { Hasher h; hashAppearance(h, w); fp.app = h.value(); }
     return fp;
 }
 
@@ -588,6 +650,9 @@ inline long countNonFinite(const OceanWorld& w) {
     visitSimConfig(w.cfg, nf);
     visitOceanConfig(w.ocfg, nf);
     visitOceanConfigVision(w.ocfg, nf);
+    visitOceanConfigAppearance(w.ocfg, nf);
+    for (const auto& r : w.appearanceRecords())
+        for (float v : r.genome.g) f(v);
     const CurrentField& cf = field<peek::OwCurrent>(w);
     for (float v : cf.vortexState()) f(v);
     for (const Vec2& c : field<peek::CfCenters>(cf)) { f(c.x); f(c.y); }
@@ -624,7 +689,12 @@ inline std::string fingerprintLine(const char* tag, long long step, const OceanW
                   (unsigned long long)fp.fish, (unsigned long long)fp.food,
                   (unsigned long long)fp.pred, (unsigned long long)fp.sig,
                   (unsigned long long)fp.cur, (unsigned long long)fp.geo, (unsigned long long)fp.rng);
-    return buf;
+    std::string line = buf;
+    if (fp.appShown) {   // the appearance section, last (outside `all`; see the top)
+        std::snprintf(buf, sizeof buf, " app=%016llx", (unsigned long long)fp.app);
+        line += buf;
+    }
+    return line;
 }
 
 // ---- raw dump: the hashed state as text, one record per line, for diffing ----
@@ -656,6 +726,7 @@ inline void dumpState(const OceanWorld& w, std::FILE* out) {
     std::fprintf(out, "\noceanconfig");
     visitOceanConfig(w.ocfg, d);
     visitOceanConfigVision(w.ocfg, d);
+    visitOceanConfigAppearance(w.ocfg, d);
     std::fprintf(out, "\nwaves");
     for (const auto& t : field<peek::OwWaves>(w)) {
         d.db("kx", t.kx); d.db("ky", t.ky); d.db("phase", t.phase); d.db("phi", t.phi);
@@ -755,6 +826,22 @@ inline void dumpState(const OceanWorld& w, std::FILE* out) {
         std::fprintf(out, "\n");
     }
     std::fprintf(out, "rng %s\n", rng.state().c_str());
+    {   // the appearance genome (its own section, `app`)
+        const appearance::Stats& st = w.appearanceStats();
+        std::fprintf(out, "appearance flags=%d broken=%d key=%016llx records=%zu founders=%llu offspring=%llu",
+                     w.appearanceInitFlags(), (int)w.appearanceBroken(), (unsigned long long)w.appearanceKey(),
+                     w.appearanceRecords().size(), (unsigned long long)st.founders, (unsigned long long)st.offspring);
+        std::fprintf(out, " pattern=%llu/%llu/%llu/%llu morph=%llu/%llu/%llu/%llu\n",
+                     (unsigned long long)st.pattern[0], (unsigned long long)st.pattern[1], (unsigned long long)st.pattern[2],
+                     (unsigned long long)st.pattern[3], (unsigned long long)st.morph[0], (unsigned long long)st.morph[1],
+                     (unsigned long long)st.morph[2], (unsigned long long)st.morph[3]);
+        const auto& recs = w.appearanceRecords();
+        for (std::size_t i = 0; i < recs.size(); ++i) {
+            std::fprintf(out, "app %zu owner=%llu", i, (unsigned long long)recs[i].ownerId);
+            for (float v : recs[i].genome.g) std::fprintf(out, " %08x", (unsigned)bits(v));
+            std::fprintf(out, "\n");
+        }
+    }
 }
 
 // ---- the world as the page builds it (wasm/ocean_wasm.cpp, oc_init) --------

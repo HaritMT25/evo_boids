@@ -178,6 +178,22 @@
 //   * foodLife ages food after this step's drift and before the spawn;
 //   * CURRENT_FWD / LR (kept in eye-only mode) read the 3-D flow under E1;
 //   * steerFrame turns STEER_X / STEER_Y before the flow drift is added.
+//
+// The appearance genome (OceanConfig::appearance, ON by default; src/ocean/
+// appearance_model.hpp): every fish's 63 cosmetic floats — skin pattern and
+// body shape — in a side array bound to the fish by id (Fish / AgentCore are
+// unchanged). Built for a founder right after markFounder (init and the
+// minPopulation reseed), for a newborn when the append gives it its id (from
+// its two parents, the first being the maternal source), compacted with
+// `creatures` (stable, same order) after the predator phase. Each fish's
+// draws come from its own counter-based stream keyed by (world key, id), NEVER
+// from `rng`: no draw is added, removed or moved, and nothing the step reads
+// depends on it, so every trajectory is the one appearance-off gives. The
+// world key is taken at init from a copy of the seeded engine (the copy
+// advances, the engine does not). A direct structural edit of `creatures`
+// (push / erase / reorder without the side array) is detected at the next
+// step: the records are dropped and appearanceBroken() reports it (the shim
+// then exports none); attachFounderAppearance() keeps a direct append in step.
 // ----------------------------------------------------------------------------
 #ifndef EVO_WORLD_OCEAN
 #error "ocean_world.hpp needs the Ocean sensor list: compile with -DEVO_WORLD_OCEAN"
@@ -199,6 +215,7 @@
 #include "ocean_flow.hpp"
 #include "ocean_math.hpp"
 #include "fish.hpp"
+#include "appearance_model.hpp"
 
 struct OceanFood {
     Vec2  pos;
@@ -556,6 +573,7 @@ public:
 
     // Set cfg and ocfg first (ocfg.depth is overwritten by `depth`).
     void init(int w, int h, float depth, int numCreatures) {
+        appearanceInit();   // first: its key reads a COPY of the engine before any draw
         width = w;
         height = h;
         D = depth;
@@ -634,6 +652,7 @@ public:
         frame++;
         births = 0;
         deaths = 0;
+        appearanceCheck();   // the side array still matches `creatures` (else it is dropped)
 
         current_.advance(frame);
         flow_.curAdvanced = true;
@@ -733,6 +752,7 @@ public:
 
         // ---- serial phase: signals, deaths, eating, interaction --------------
         std::vector<Fish> newborns;
+        std::vector<std::uint32_t> newbornParents;   // appearance: (maternal, other) index per newborn
         const float pr2 = cfg.pickupRadius * cfg.pickupRadius;
         const float ir2 = cfg.interactRadius * cfg.interactRadius;
         for (int i = 0; i < numCreatures; ++i) {
@@ -768,7 +788,7 @@ public:
                     Fish& other = creatures[ni];
                     if (!other.alive || other.interactTimer > 0.0f) continue;
                     if (dist2(c.pos, c.depth, other.pos, other.depth) > ir2) continue;
-                    doInteraction(c, other, newborns);
+                    doInteraction(c, other, newborns, newbornParents);
                     c.interactTimer = cfg.interactCooldown;
                     other.interactTimer = cfg.interactCooldown;
                     break;
@@ -777,10 +797,12 @@ public:
         }
 
         for (auto& baby : newborns) { baby.id = nextId_++; creatures.push_back(std::move(baby)); }
+        if (appearanceOn()) appearanceAppendNewborns(newborns.size(), newbornParents);
 
         updatePredators(dt);
         if (cfg.predatorEconomy && cfg.predatorMinPopulation > 0) refillPredators();
 
+        if (appearanceOn()) appearanceCompact();   // keeps records[i] where creatures[i].alive (same order)
         creatures.erase(std::remove_if(creatures.begin(), creatures.end(),
                                        [](const Fish& c) { return !c.alive; }),
                         creatures.end());
@@ -840,7 +862,83 @@ public:
         if (n) for (int b = 0; b < ocean::kDepthBins; ++b) hist[b] /= (double)n;
     }
 
+    // ---- the appearance genome (read-only views; see the header comment) ----
+    // appearanceFlags(): the parts kept this run (OceanConfig::appearance as of
+    // init; 0 = off or broken). Records are in creature order, records[i]
+    // owned by creatures[i] (ownerId == id) at every step boundary.
+    int appearanceFlags() const { return appearanceOn() ? appFlags_ : 0; }
+    int appearanceInitFlags() const { return appFlags_; }
+    bool appearanceBroken() const { return appBroken_; }
+    std::uint64_t appearanceKey() const { return appKey_; }
+    const std::vector<appearance::Record>& appearanceRecords() const { return app_; }
+    const appearance::Stats& appearanceStats() const { return appStats_; }
+    // The side array matches `creatures` (off: it is empty).
+    bool appearanceConsistent() const {
+        if (!appearanceOn()) return app_.empty();
+        if (app_.size() != creatures.size()) return false;
+        for (std::size_t i = 0; i < app_.size(); ++i)
+            if (app_[i].ownerId != creatures[i].id) return false;
+        return true;
+    }
+    // For a caller that appends a fish to `creatures` directly (tests, tools):
+    // give creatures.back() its founder appearance (its own stream; no rng).
+    // Call after markFounder. A no-op while appearance is off.
+    void attachFounderAppearance() {
+        if (appearanceOn() && app_.size() + 1 == creatures.size()) appearanceAppendFounder();
+    }
+    // The inheritance knobs as the next offspring will use them.
+    appearance::Inheritance appearanceInheritance() const {
+        return {ocfg.patternMutation, ocfg.patternPhaseMutation, ocfg.patternNovelProbability,
+                ocfg.morphologyMutation, ocfg.morphologyNovelProbability};
+    }
+
 private:
+    // ---- the appearance genome's maintenance (cosmetic: no rng, nothing the step reads) ----
+    bool appearanceOn() const { return appFlags_ != 0 && !appBroken_; }
+    void appearanceInit() {
+        RandomGen probe = rng;   // a copy: the engine itself does not advance
+        const std::uint64_t a = probe.uint(), b = probe.uint();
+        appKey_ = appearance::mix64((a << 32) | b);
+        appFlags_ = ocfg.appearance;
+        appBroken_ = false;
+        app_.clear();
+        appStats_ = appearance::Stats{};
+    }
+    void appearanceAppendFounder() {
+        appearance::Record r;
+        r.ownerId = creatures.back().id;
+        appearance::makeFounder(appKey_, r.ownerId, appFlags_, r.genome);
+        app_.push_back(r);
+        ++appStats_.founders;
+    }
+    // The last n creatures are this step's newborns; parents[2k], [2k+1] their
+    // parents' indices (unchanged until the compaction below).
+    void appearanceAppendNewborns(std::size_t n, const std::vector<std::uint32_t>& parents) {
+        const appearance::Inheritance inh = appearanceInheritance();
+        const std::size_t first = creatures.size() - n;
+        for (std::size_t k = 0; k < n; ++k) {
+            appearance::Record r;
+            r.ownerId = creatures[first + k].id;
+            std::uint8_t modes[appearance::kPatternGroups], mmodes[appearance::kMorphGroups];
+            const appearance::Genome A = app_[parents[2 * k]].genome, B = app_[parents[2 * k + 1]].genome;
+            appearance::makeOffspring(appKey_, r.ownerId, A, B, inh, appFlags_, r.genome, modes, mmodes);
+            app_.push_back(r);
+            appStats_.count(modes, mmodes, appFlags_);
+        }
+    }
+    void appearanceCompact() {
+        std::size_t k = 0;
+        for (std::size_t i = 0; i < creatures.size(); ++i)
+            if (creatures[i].alive) app_[k++] = app_[i];
+        app_.resize(k);
+    }
+    void appearanceCheck() {
+        if (appearanceOn() && !appearanceConsistent()) {
+            appBroken_ = true;   // never re-bound or rebuilt: reported, and no longer kept
+            app_.clear();
+            app_.shrink_to_fit();
+        }
+    }
     struct FishHot {
         Vec2 pos; Vec2 vel; float depth;
 #ifdef EVO_OCEAN_EYE
@@ -858,6 +956,13 @@ private:
     CurrentField current_;
     std::vector<Vec2> foodPatches_;
     std::vector<float> foodPatchDepth_;   // foodDepthMode 1: one depth per patch
+    // The appearance genome (see the header comment). Hashed in the harness's
+    // own `app` section, outside the simulation's sections.
+    std::vector<appearance::Record> app_;   // records[i] <-> creatures[i]
+    std::uint64_t appKey_ = 0;              // the world's stream key (init)
+    int appFlags_ = 0;                      // OceanConfig::appearance at init
+    bool appBroken_ = false;                // the side array lost its owners (dropped)
+    appearance::Stats appStats_;            // records built, branches taken (statistics)
 
     // E1 wave trains: fixed modes over the world (no draws). kx, ky = K
     // (double, for θ); k, q = |K|, K/|K|; phase = the travelled ∫ω dt, kept in
@@ -1341,6 +1446,7 @@ private:
         const float z = rng.range(0.0f, D);
         creatures.push_back(makeRandomFish(pos, z, D, cfg.genomeInitMin, cfg.genomeInitMax));
         markFounder(creatures.back());
+        if (appearanceOn()) appearanceAppendFounder();
     }
 
     OceanPredator makePredator() {
@@ -1514,7 +1620,7 @@ private:
 #endif
     }
 
-    void doInteraction(Fish& c1, Fish& c2, std::vector<Fish>& newborns) {
+    void doInteraction(Fish& c1, Fish& c2, std::vector<Fish>& newborns, std::vector<std::uint32_t>& newbornParents) {
         switch (kernel::interactionVote(c1, c2)) {
         case kernel::Interaction::Share:
             kernel::shareReserves(c1, c2);
@@ -1529,6 +1635,10 @@ private:
                                                  cfg.genomeMaxLength,
                                                  cfg.mutationMultiplier,
                                                  cfg.newbornEnergy));
+                if (appearanceOn()) {   // c1, c2 are elements of `creatures` (update's serial loop)
+                    newbornParents.push_back((std::uint32_t)(&c1 - creatures.data()));
+                    newbornParents.push_back((std::uint32_t)(&c2 - creatures.data()));
+                }
                 Fish& baby = newborns.back();
                 if (cfg.toroidal) {
                     Vec2 m = { wrapCoord(c1.pos.x + 0.5f * wrapDx(c2.pos.x - c1.pos.x), (float)width),

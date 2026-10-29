@@ -37,7 +37,7 @@ SRC=(web/evo_boids.js web/evo_boids.wasm web/evo_boids_mt.js web/evo_boids_mt.wa
      web/dash_data.js web/charts.js web/dashboard.js web/scene3d.js web/vendor/three.bundle.min.js
      web/worker.js img/rocks.jpg web/index.html web/vercel.json
      web/evo_ocean.js web/evo_ocean.wasm web/ocean.js web/ocean_scene.js web/ocean.html
-     web/ocean_config.js web/ocean_dash.js web/ocean_worker.js)
+     web/ocean_config.js web/ocean_dash.js web/ocean_worker.js web/ocean_appearance.js)
 for f in "${SRC[@]}"; do
     [ -f "$f" ] || { echo "missing $f — build the modules first (wasm/build_wasm.sh, wasm/build_ocean.sh)" >&2; exit 1; }
 done
@@ -70,7 +70,7 @@ SCENE=$(publish web/scene3d.js);      THREE=$(publish web/vendor/three.bundle.mi
 OC=$(publish web/evo_ocean.js);       OC_WASM=$(publish web/evo_ocean.wasm)
 OCJS=$(publish web/ocean.js);         OCSCENE=$(publish web/ocean_scene.js)
 OCCFG=$(publish web/ocean_config.js); OCDASH=$(publish web/ocean_dash.js)
-OCWORKER=$(publish web/ocean_worker.js)
+OCWORKER=$(publish web/ocean_worker.js); OCAPP=$(publish web/ocean_appearance.js)
 
 # Classic: rewrite the EVO_ASSETS block, the <script src> tags and the
 # switch's link to the Ocean (now the root). Fails loudly if web/index.html no
@@ -121,10 +121,11 @@ out, n4 = re.subn(r'<script src="ocean_config\.js"></script>', '<script src="$OC
 out, n5 = re.subn(r'<script src="ocean_dash\.js"></script>', '<script src="$OCDASH"></script>', out, count=1)
 out, n6 = re.subn(r'<script src="charts\.js"></script>', '<script src="$CHARTS"></script>', out, count=1)
 out, n7 = re.subn(r'<script src="guide\.js"></script>', '<script src="$GUIDE"></script>', out, count=1)
-out, n8 = re.subn(r'id="to2d" href="index\.html"', 'id="to2d" href="classic.html"', out, count=1)
-out, n9 = re.subn(r'var CLASSIC_PAGE = "index\.html";', 'var CLASSIC_PAGE = "classic.html";', out, count=1)
-counts = (n1, n2, n3, n4, n5, n6, n7, n8, n9)
-assert counts == (1,) * 9, ("ocean.html changed shape", counts)
+out, n8 = re.subn(r'<script src="ocean_appearance\.js"></script>', '<script src="$OCAPP"></script>', out, count=1)
+out, n9 = re.subn(r'id="to2d" href="index\.html"', 'id="to2d" href="classic.html"', out, count=1)
+out, n10 = re.subn(r'var CLASSIC_PAGE = "index\.html";', 'var CLASSIC_PAGE = "classic.html";', out, count=1)
+counts = (n1, n2, n3, n4, n5, n6, n7, n8, n9, n10)
+assert counts == (1,) * 10, ("ocean.html changed shape", counts)
 open(sys.argv[1], "w").write(out)
 PY
 cp "$OUT/index.html" "$OUT/ocean.html"

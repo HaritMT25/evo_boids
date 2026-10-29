@@ -43,6 +43,9 @@
 //                 the food; 24 = predators only); faded contrast 0 at R;
 //                 ranges in populated worlds; 0..31 valid, live via
 //                 oc_set_param (plain build: eyeCode must stay 0)
+//   sense_edges   the food / neighbour scans' edges, bit for bit, and sense_ref:
+//   sense_ref     randomized scenes against their definition (both in
+//                 tests/ocean_sense_tests.hpp, which lists what they pin)
 //   food_life     foodLife: an item goes on the step its age reaches foodLife;
 //                 off, none do; the first stock's ages spread; draws unchanged
 //   reproducible  same seed twice -> identical fingerprints; another seed and a
@@ -4147,6 +4150,7 @@ void testFlowLanes() {
 }  // namespace ot
 
 #include "ocean_appearance_tests.hpp"
+#include "ocean_sense_tests.hpp"
 
 int main(int argc, char** argv) {
 #ifndef OCEAN_TESTS_NO_SHIM
@@ -4167,6 +4171,8 @@ int main(int argc, char** argv) {
     ot::testEye();
     ot::testEyeOnly();
     ot::testEyeCode();
+    ot::testSenseEdges();   // tests/ocean_sense_tests.hpp: the scans' edges, pinned
+    ot::testSenseRef();
     ot::testFoodLife();
     ot::testReproducible();
     ot::testRadii();

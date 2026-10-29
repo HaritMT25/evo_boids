@@ -92,6 +92,25 @@
 //         withActivations = false fingerprint), only those two arrays. A new
 //         world (oc_init / oc_reset) starts with it off; the page sets it again.
 //
+//   * The appearance genome (OceanConfig::appearance, on by default; COSMETIC:
+//     src/ocean/appearance_model.hpp), READ-ONLY, packed by oc_sync:
+//       const float* oc_creature_appearance() — oc_appearance_count() rows of
+//         oc_appearance_stride() = 63 floats, in oc_creature_segments' order:
+//         31 pattern genes, phaseU, phaseV, then 30 shape genes (offset
+//         oc_appearance_morph_offset() = 33). Count 0 and a null pointer while
+//         appearance is off, or if the side array lost its owners (a direct
+//         edit of creatures; oc_appearance_broken() = 1).
+//       oc_appearance_abi() 3, oc_appearance_schema() 3, oc_appearance_flags()
+//         (bit 1 patterns, bit 2 shapes), oc_appearance_pattern_genes() 31,
+//         oc_appearance_morph_genes() 30, oc_pattern_law() 3,
+//         oc_morphology_law() 2, oc_morphology_chart_law() 1: the page renders
+//         only a layout and laws it knows.
+//     oc_set_param takes the five inheritance knobs live (patternMutation,
+//     patternPhaseMutation, patternNovelProbability, morphologyMutation,
+//     morphologyNovelProbability, each in [0, 0.25]: offspring from then on);
+//     `appearance` itself is set by oc_init: the same value is a no-op, a
+//     change is refused (restart to apply).
+//
 // Compiled with Emscripten into web/evo_ocean.{js,wasm} by wasm/build_ocean.sh
 // (-DEVO_WORLD_OCEAN, single-threaded). The page (web/ocean.js) drives it:
 // oc_init once, then per frame oc_step(n) -> oc_sync() -> read the buffers.
@@ -128,6 +147,7 @@ std::vector<float>   g_vz;         // N: Fish::vz (pitch = atan(vz))
 std::vector<float>   g_bodyParams; // N*2: bodySize, bodyElong  (= evo_body_params)
 std::vector<uint8_t> g_colors;     // N*3: colour, by family or brain (= evo_creature_colors; g_colourMode)
 std::vector<double>  g_ids;        // N                           (= evo_creature_ids)
+std::vector<float>   g_appearance; // N*63: the appearance genome (empty while off / broken)
 std::vector<float>   g_food;       // F*2: x, y                   (= evo_food_xy)
 std::vector<float>   g_foodDepth;  // F
 std::vector<float>   g_predators;  // P*3: x, y, digestTimer      (= evo_predator_data)
@@ -353,6 +373,15 @@ EVO_EXPORT void oc_sync() {
         }
         g_ids[i] = (double)c.id;
     }
+    // The appearance genome: one 63-float row per fish, the same order (the
+    // records are bound to creatures[i] by id; checked, never re-bound).
+    g_appearance.clear();
+    if (w.appearanceFlags() != 0 && w.appearanceConsistent()) {
+        const auto& recs = w.appearanceRecords();
+        g_appearance.resize(n * appearance::kStride);
+        for (size_t i = 0; i < n; ++i)
+            std::memcpy(&g_appearance[i * appearance::kStride], recs[i].genome.g, sizeof(float) * appearance::kStride);
+    }
 
     const size_t nf = w.food.size();
     g_food.resize(nf * 2);
@@ -392,6 +421,20 @@ EVO_EXPORT const float* oc_creature_vz()       { return g_vz.data(); }   // addi
 EVO_EXPORT const float* oc_body_params()       { return g_bodyParams.data(); }
 EVO_EXPORT const uint8_t* oc_creature_colors() { return g_colors.data(); }
 EVO_EXPORT const double* oc_creature_ids()     { return g_ids.data(); }
+// The appearance genome (see ADDITIONS): valid until the next oc_sync / oc_init.
+EVO_EXPORT int oc_appearance_abi()             { return appearance::kAbi; }
+EVO_EXPORT int oc_appearance_schema()          { return appearance::kSchema; }
+EVO_EXPORT int oc_appearance_flags()           { return g_world ? g_world->appearanceFlags() : 0; }
+EVO_EXPORT int oc_appearance_broken()          { return (g_world && g_world->appearanceBroken()) ? 1 : 0; }
+EVO_EXPORT int oc_appearance_pattern_genes()   { return appearance::kPatternGenes; }
+EVO_EXPORT int oc_appearance_morph_genes()     { return appearance::kMorphGenes; }
+EVO_EXPORT int oc_appearance_morph_offset()    { return appearance::kMorphOffset; }
+EVO_EXPORT int oc_appearance_stride()          { return appearance::kStride; }
+EVO_EXPORT int oc_pattern_law()                { return appearance::kPatternLaw; }
+EVO_EXPORT int oc_morphology_law()             { return appearance::kMorphLaw; }
+EVO_EXPORT int oc_morphology_chart_law()       { return appearance::kMorphChart; }
+EVO_EXPORT int oc_appearance_count()           { return (int)(g_appearance.size() / appearance::kStride); }
+EVO_EXPORT const float* oc_creature_appearance() { return g_appearance.empty() ? nullptr : g_appearance.data(); }
 EVO_EXPORT int oc_food_count()                 { return g_world ? (int)g_world->food.size() : 0; }
 EVO_EXPORT const float* oc_food_xy()           { return g_food.data(); }
 EVO_EXPORT const float* oc_food_depth()        { return g_foodDepth.data(); }
@@ -428,6 +471,9 @@ EVO_EXPORT int oc_set_param(const char* name, double value) {
         "depthCostScaled", "sizeDrift", "sizeFight", "mouthGate", "kMouth",
         // the eye build's eye / eyeOnly / eyeCode, the steering frame, the food lifetime
         "eye", "eyeOnly", "eyeCode", "steerFrame", "foodLife",
+        // the appearance genome (cosmetic): the master key (init only, see below) and its knobs
+        "appearance", "patternMutation", "patternPhaseMutation", "patternNovelProbability",
+        "morphologyMutation", "morphologyNovelProbability",
     };
     static const char* const kOceanBool[] = {
         "deepCurrent", "lightEnabled", "depthCostScaled", "sizeDrift", "sizeFight", "mouthGate",
@@ -455,6 +501,12 @@ EVO_EXPORT int oc_set_param(const char* name, double value) {
     }
     if (isInt && !isIntValue(value)) {
         g_error = std::string(name) + " must be a whole number that fits an int";   // the JSON reader's (int) cast
+        return 0;
+    }
+    // appearance is set at init (the side array is built with the world): the
+    // value it has is a successful no-op, any other is refused.
+    if (std::strcmp(name, "appearance") == 0 && value != (double)g_world->ocfg.appearance) {
+        g_error = "appearance is set by oc_init (restart to change it)";
         return 0;
     }
     if (std::strcmp(name, "pitchMax") == 0 && !(value > 0.0)) {

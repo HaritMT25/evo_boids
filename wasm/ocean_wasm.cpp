@@ -32,7 +32,13 @@
 //     grids (cell = perceptionRadius) over 2^24 cells (oceanWorldSizeError);
 //     and (readOceanJson) an int-typed key — SimConfig's, or the Ocean's
 //     foodDepthMode, eye, eyeOnly, eyeCode, steerFrame — whose JSON number is
-//     not a whole number in int's range, before anything casts it.
+//     not a whole number in int's range, before anything casts it; and, at
+//     any occurrence, a SimConfig bool key (toroidal, bodyModel,
+//     triangularMotion, foodDrift, predatorEconomy, predatorInheritance,
+//     fastTanh) that is not true / false ({"toroidal":1} used to be passed
+//     over: the world kept its walls), or an Ocean one (deepCurrent,
+//     lightEnabled, depthCostScaled, sizeDrift, sizeFight, mouthGate) that is
+//     not true / false / 0 / 1.
 //   * oc_set_param: the Ocean keys kBuoy, pitchMax, vDrag, wallBand,
 //     buoyMutation, cHold, cPress, foodDepthSpread, the E1 keys (waveSpeed,
 //     waveBand, waveGravity, L0, kWater, kMouth, and the on/off keys

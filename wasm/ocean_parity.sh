@@ -418,6 +418,17 @@ radd r_kwater       '1 10 --cfg {"kWater":-0.1}'
 radd r_l0           '1 10 --cfg {"L0":1e39}'
 radd r_kmouth       '1 10 --cfg {"kMouth":0}'
 radd r_bool         '1 10 --cfg {"deepCurrent":2}'
+# A SimConfig switch is true / false, an Ocean one true / false / 0 / 1, at every
+# occurrence (SimConfig's reader kept the old value for anything else:
+# {"toroidal":1} ran with walls).
+radd r_bool_sim_one '1 10 --cfg {"toroidal":1}'
+radd r_bool_sim_two '1 10 --cfg {"toroidal":2}'
+radd r_bool_sim_frac '1 10 --cfg {"bodyModel":0.5}'
+radd r_bool_sim_str '1 10 --cfg {"foodDrift":"yes"}'
+radd r_bool_sim_null '1 10 --cfg {"predatorEconomy":null}'
+radd r_bool_sim_dup '1 10 --cfg {"triangularMotion":true,"triangularMotion":2}'
+radd r_bool_ocean_str '1 10 --cfg {"lightEnabled":"on"}'
+radd r_bool_ocean_dup '1 10 --cfg {"deepCurrent":true,"deepCurrent":"x"}'
 radd r_depth        '1 10 --depth 1e6'
 radd r_live_kbuoy   '1 10 --set kBuoy=1e37@5'
 radd r_live_wave    '1 10 --set waveSpeed=500@5'
@@ -619,6 +630,17 @@ if [ -n "$RC_INT" ] && [ "$RC_INT" = "$OC_INT" ]; then
     echo "== int keys: kSimConfigIntKeys == checkpoint::readConfig's intOr keys ($(echo "$OC_INT" | wc -w))"
 else
     echo "== int keys DRIFT: readConfig reads '$RC_INT', kSimConfigIntKeys lists '$OC_INT'"; GUARD_FAILED=1
+fi
+# And the bool-key check (kSimConfigBoolKeys, kOceanBoolKeys) exactly the keys
+# readConfig reads with boolOr and readOceanConfig with readBool.
+RC_BOOL=$(sed -n '/^inline void readConfig/,/^}/p' src/core/checkpoint_io.hpp | grep -o 'boolOr("[A-Za-z]*"' | sed 's/boolOr("//;s/"//' | sort | tr '\n' ' ')
+OC_BOOL=$(sed -n '/kSimConfigBoolKeys\[\] = {/,/};/p' src/ocean/ocean_config.hpp | grep -o '"[A-Za-z]*"' | tr -d '"' | sort | tr '\n' ' ')
+RO_BOOL=$(sed -n '/^inline bool readOceanConfig/,/^}/p' src/ocean/ocean_config.hpp | grep -o 'readBool(o, "[A-Za-z]*"' | sed 's/.*"\([A-Za-z]*\)"/\1/' | sort | tr '\n' ' ')
+OO_BOOL=$(sed -n '/kOceanBoolKeys\[\] = {/,/};/p' src/ocean/ocean_config.hpp | grep -o '"[A-Za-z]*"' | tr -d '"' | sort | tr '\n' ' ')
+if [ -n "$RC_BOOL" ] && [ "$RC_BOOL" = "$OC_BOOL" ] && [ -n "$RO_BOOL" ] && [ "$RO_BOOL" = "$OO_BOOL" ]; then
+    echo "== bool keys: kSimConfigBoolKeys == readConfig's boolOr keys ($(echo "$OC_BOOL" | wc -w)), kOceanBoolKeys == readOceanConfig's readBool keys ($(echo "$OO_BOOL" | wc -w))"
+else
+    echo "== bool keys DRIFT: readConfig '$RC_BOOL' vs kSimConfigBoolKeys '$OC_BOOL'; readOceanConfig '$RO_BOOL' vs kOceanBoolKeys '$OO_BOOL'"; GUARD_FAILED=1
 fi
 # Non-finite state removed within a step must still fail a run (the nf_* list).
 nfbad=""
@@ -901,7 +923,7 @@ fi
 if [ "$FAILED" = 1 ] || [ "$TESTS_OK" = 0 ] || [ "$GUARD_FAILED" = 1 ]; then
     [ "$FAILED" = 1 ] && echo "== OCEAN PARITY FAILED: bisect with --trace, then --dump-step/--dump (native vs wasm, or old vs new engine)"
     [ "$TESTS_OK" = 0 ] && echo "== OCEAN UNIT CHECKS FAILED"
-    [ "$GUARD_FAILED" = 1 ] && echo "== OCEAN CONFIG GUARDS FAILED (a bad config accepted, the E1 preset copy or the int-key list drifted, an orphan baseline, or removed non-finite state not caught)"
+    [ "$GUARD_FAILED" = 1 ] && echo "== OCEAN CONFIG GUARDS FAILED (a bad config accepted, the E1 preset copy or the int- / bool-key lists drifted, an orphan baseline, or removed non-finite state not caught)"
     exit 1
 fi
 if [ -n "${NO_TESTS:-}" ]; then

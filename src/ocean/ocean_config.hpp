@@ -314,27 +314,62 @@ inline bool isOceanIntKey(const std::string& k) {
     return false;
 }
 
+// The bool-typed SimConfig keys: checkpoint::readConfig reads each with
+// jsonm::Value::boolOr, which keeps the old value for anything but a JSON
+// bool, silently — {"toroidal":1} ran with walls while the page showed it on.
+// readOceanJson refuses any other value at every occurrence: a SimConfig
+// switch is a JSON true / false (they are restart settings, never written by
+// oc_set_param; the page refuses anything else too). The Ocean's own bool keys
+// (readOceanConfig's readBool) keep their rule — true / false or exactly the
+// number 0 / 1, the "%.9g" text oc_set_param and the harness's --set write —
+// now held at every occurrence (readBool saw only a key's first).
+// kSimConfigBoolKeys must list exactly readConfig's boolOr keys, and
+// kOceanBoolKeys readOceanConfig's readBool keys: wasm/ocean_parity.sh checks both.
+inline constexpr const char* kSimConfigBoolKeys[] = {"toroidal", "bodyModel", "triangularMotion", "foodDrift",
+                                                     "predatorEconomy", "predatorInheritance", "fastTanh"};
+inline constexpr const char* kOceanBoolKeys[] = {"deepCurrent", "lightEnabled", "depthCostScaled",
+                                                 "sizeDrift", "sizeFight", "mouthGate"};
+inline bool isSimConfigBoolKey(const std::string& k) {
+    for (const char* i : kSimConfigBoolKeys) if (k == i) return true;
+    return false;
+}
+inline bool isOceanBoolKey(const std::string& k) {
+    for (const char* i : kOceanBoolKeys) if (k == i) return true;
+    return false;
+}
+
 // A flat cfg JSON object (null / empty = nothing to change) into both configs:
 // SimConfig keys through the checkpoint reader, Ocean keys through
 // readOceanConfig. Returns false with `err` set on malformed JSON, an int key
 // (SimConfig's or the Ocean's) whose number is not a whole number in int's
-// range (checked before the reader casts it, every occurrence of the key), or
-// a bool key that is not a bool.
+// range (checked before the reader casts it, every occurrence of the key), a
+// SimConfig bool key that is not a JSON true / false, or an Ocean bool key
+// that is not true / false / 0 / 1 (every occurrence of either).
 inline bool readOceanJson(const char* json, SimConfig& sc, OceanConfig& oc, std::string& err) {
     if (!json || !json[0]) return true;
     const std::string wrapped = std::string("{\"config\":") + json + "}";
     jsonm::Value root;
     if (!jsonm::Parser::parse(wrapped, root, err)) { err = "config parse error: " + err; return false; }
+    using T = jsonm::Value::Type;
     if (const jsonm::Value* o = root.find("config"); o && o->isObject())
-        for (const auto& kv : o->obj)
-            if (kv.second.type == jsonm::Value::Type::Number &&
-                (isSimConfigIntKey(kv.first) || isOceanIntKey(kv.first)) && !isIntValue(kv.second.num)) {
+        for (const auto& kv : o->obj) {
+            const jsonm::Value& v = kv.second;
+            if (v.type == T::Number && (isSimConfigIntKey(kv.first) || isOceanIntKey(kv.first)) && !isIntValue(v.num)) {
                 char buf[160];
                 std::snprintf(buf, sizeof buf, "%s must be a whole number that fits an int (got %.17g)",
-                              kv.first.c_str(), kv.second.num);
+                              kv.first.c_str(), v.num);
                 err = buf;
                 return false;
             }
+            if (isSimConfigBoolKey(kv.first) && v.type != T::Bool) {
+                err = kv.first + " must be true / false";
+                return false;
+            }
+            if (isOceanBoolKey(kv.first) && v.type != T::Bool && !(v.type == T::Number && (v.num == 0.0 || v.num == 1.0))) {
+                err = kv.first + " must be true / false (or 0 / 1)";
+                return false;
+            }
+        }
     checkpoint::readConfig(root, sc);
     if (const jsonm::Value* o = root.find("config"))
         if (!readOceanConfig(*o, oc, &err)) return false;

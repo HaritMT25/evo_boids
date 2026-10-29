@@ -183,6 +183,11 @@
 //                 themselves accepted. (Every shim call is made before
 //                 oc_last_error() is read: as arguments of one expect() their
 //                 order was unspecified.)
+//   shim_bools    bool keys (kSimConfigBoolKeys, kOceanBoolKeys, by member): a
+//                 SimConfig switch is true / false ({"toroidal":1} used to be
+//                 ignored, the world kept walls: now refused), an Ocean one
+//                 true / false / 0 / 1; anything else refused with the key
+//                 named, every occurrence (a repeated key too), via oc_init too
 //
 //   preflight     `--accepts` asks a case's --set changes by step, as the
 //                 driver applies them (stable within a step; past STEPS not
@@ -3457,6 +3462,88 @@ void testRanges() {
     t.note("%d configs accepted, %d refused; %d runs at range ends, all finite", accepted, refused, runs);
 }
 
+// Bool keys: the shared reader's boolOr kept the old value for anything but a
+// JSON bool ({"toroidal":1} ran with walls while the page showed it on), and
+// readOceanConfig's readBool checked only a key's first occurrence. Now a
+// SimConfig switch must be true / false and an Ocean one true / false / 0 / 1
+// (its live encoding), at every occurrence; anything else is refused with the
+// key named. Every SimConfig and Ocean bool key by member (so the compiler
+// checks each is a bool and that the reader really sets it), then oc_init.
+void testShimBools() {
+    Test t("shim_bools");
+    const struct { const char* key; bool SimConfig::*m; } sims[] = {
+        {"toroidal", &SimConfig::toroidal}, {"bodyModel", &SimConfig::bodyModel},
+        {"triangularMotion", &SimConfig::triangularMotion}, {"foodDrift", &SimConfig::foodDrift},
+        {"predatorEconomy", &SimConfig::predatorEconomy}, {"predatorInheritance", &SimConfig::predatorInheritance},
+        {"fastTanh", &SimConfig::fastTanh},
+    };
+    const struct { const char* key; bool OceanConfig::*m; } oceans[] = {
+        {"deepCurrent", &OceanConfig::deepCurrent}, {"lightEnabled", &OceanConfig::lightEnabled},
+        {"depthCostScaled", &OceanConfig::depthCostScaled}, {"sizeDrift", &OceanConfig::sizeDrift},
+        {"sizeFight", &OceanConfig::sizeFight}, {"mouthGate", &OceanConfig::mouthGate},
+    };
+    t.expect(sizeof sims / sizeof sims[0] == sizeof kSimConfigBoolKeys / sizeof kSimConfigBoolKeys[0] &&
+                 sizeof oceans / sizeof oceans[0] == sizeof kOceanBoolKeys / sizeof kOceanBoolKeys[0],
+             "the bool-key lists and the member tables differ in size");
+    using Good = std::vector<std::pair<const char*, bool>>;
+    const Good simGood = {{"true", true}, {"false", false}};
+    const Good oceanGood = {{"true", true}, {"false", false}, {"1", true}, {"0", false}, {"1.0", true}, {"-0", false}};
+    std::vector<const char*> bad = {"2", "0.5", "-1", "1e300", "\"yes\"", "\"true\"", "null", "[1]", "{}"};
+    std::vector<const char*> simBad = bad;
+    for (const char* n : {"1", "0", "1.0", "-0"}) simBad.push_back(n);   // a SimConfig switch is a JSON bool
+    int accepted = 0, refused = 0;
+    // One checker for both tables: get(sc, oc) is the key's stored bool.
+    auto check = [&](const char* key, const Good& good, const std::vector<const char*>& bad, auto get, auto set) {
+        t.expect(isSimConfigBoolKey(key) || isOceanBoolKey(key), "%s is in neither bool-key list", key);
+        for (const auto& g : good) {
+            SimConfig sc;
+            OceanConfig oc;
+            set(sc, oc, !g.second);   // the opposite first: the read must set it
+            std::string err;
+            const std::string j = std::string("{\"") + key + "\":" + g.first + "}";
+            accepted += t.expect(readOceanJson(j.c_str(), sc, oc, err) && get(sc, oc) == g.second, "%s: refused or read %d (%s)",
+                                 j.c_str(), (int)get(sc, oc), err.c_str());
+        }
+        for (const char* b : bad)
+            for (int form = 0; form < 3; ++form) {   // alone, after a good occurrence, before one
+                SimConfig sc;
+                OceanConfig oc;
+                const bool before = get(sc, oc);
+                std::string err;
+                const std::string kb = std::string("\"") + key + "\":" + b, kg = std::string("\"") + key + "\":true";
+                const std::string j = "{" + (form == 0 ? kb : form == 1 ? kg + "," + kb : kb + "," + kg) + "}";
+                refused += t.expect(!readOceanJson(j.c_str(), sc, oc, err) && get(sc, oc) == before &&
+                                        err.find(key) != std::string::npos,
+                                    "%s: accepted, or the error does not name the key (%s)", j.c_str(), err.c_str());
+            }
+    };
+    for (const auto& k : sims)
+        check(k.key, simGood, simBad, [&](const SimConfig& sc, const OceanConfig&) { return sc.*k.m; },
+              [&](SimConfig& sc, OceanConfig&, bool v) { sc.*k.m = v; });
+    for (const auto& k : oceans)
+        check(k.key, oceanGood, bad, [&](const SimConfig&, const OceanConfig& oc) { return oc.*k.m; },
+              [&](SimConfig&, OceanConfig& oc, bool v) { oc.*k.m = v; });
+    // Through oc_init: the switches as JSON bools (and an Ocean one as 1) are
+    // stored; {"toroidal":1} (it used to run with walls), 2, a string, null and
+    // a bad repeat are refused, the world kept.
+    {
+        const int a = oc_init(1309, 1920, 1080, 240.0, 50, R"({"toroidal":true,"foodDrift":true,"bodyModel":false,"deepCurrent":1})");
+        t.expect(a == 1 && g_world->cfg.toroidal && g_world->cfg.foodDrift && !g_world->cfg.bodyModel && g_world->ocfg.deepCurrent,
+                 "oc_init {toroidal true, foodDrift true, bodyModel false, deepCurrent 1}: %s",
+                 a ? "not stored as on / on / off / on" : oc_last_error());
+        const ofp::Fingerprint kept = ofp::fingerprint(*g_world);
+        for (const char* c : {R"({"toroidal":1})", R"({"foodDrift":0})", R"({"toroidal":2})", R"({"predatorEconomy":"yes"})",
+                              R"({"fastTanh":null})", R"({"deepCurrent":true,"deepCurrent":"x"})",
+                              R"({"triangularMotion":true,"triangularMotion":0.5})"}) {
+            const int rc = oc_init(1310, 1920, 1080, 240.0, 50, c);
+            const std::string e = oc_last_error();
+            refused += t.expect(rc == 0 && e.find("true / false") != std::string::npos, "oc_init %s: rc %d (%s)", c, rc, e.c_str());
+        }
+        t.expect(ofp::fingerprint(*g_world) == kept, "a refused oc_init changed the world");
+    }
+    t.note("%d bool values read, %d refused (every key: alone, and repeated before / after a good value)", accepted, refused);
+}
+
 // Integer knobs and the values that reach an int conversion (the Codex
 // determinism hunt: oc_set_param wrote 2147483647 as "2.14748365e+09", an
 // undefined (int) cast in the shared JSON reader; foodSpawnBase 1e20 reached
@@ -4664,6 +4751,7 @@ int main(int argc, char** argv) {
 #ifndef OCEAN_TESTS_NO_SHIM
     ot::testRanges();
     ot::testShimInts();
+    ot::testShimBools();
 #endif
     ot::testE1Hash();
     ot::testLazyWaves();

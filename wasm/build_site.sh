@@ -1,16 +1,27 @@
 #!/bin/bash
 # build_site.sh — assemble the static demo site in dist/ for Vercel.
 #
-#   dist/index.html            no-cache; references everything below by hash
-#   dist/ocean.html            the 3-D Ocean (web/ocean.html: its own engine
-#                              web/evo_ocean.{js,wasm}, single-threaded, and
-#                              Turbo worker; it shares charts.js, guide.js and
-#                              the three.js bundle with the Classic page),
-#                              no-cache, the same hashed references
+#   dist/index.html            the landing page: the 3-D Ocean (web/ocean.html:
+#                              its own engine web/evo_ocean.{js,wasm},
+#                              single-threaded, and Turbo worker; it shares
+#                              charts.js, guide.js and the three.js bundle with
+#                              Classic). no-cache; references everything below
+#                              by hash
+#   dist/ocean.html            the same page, for the links from before it
+#                              moved to the root
+#   dist/classic.html          2-D Classic (web/index.html: the threaded and
+#                              single-threaded modules), no-cache, hashed
+#                              references. An old Classic link to the root
+#                              (/?view=flat, /?threads=0, ...) is sent here by
+#                              the Ocean page's head (web/ocean.html says which)
 #   dist/assets/NAME.HASH.EXT  every script, wasm and image, content-hashed,
 #                              served with a one-year immutable cache
 #   dist/vercel.json           headers: COOP/COEP (cross-origin isolation for
-#                              the threaded module), wasm MIME, caching
+#                              Classic's threaded module), wasm MIME, caching
+#
+# web/ keeps its own names (index.html is Classic, ocean.html the Ocean), so
+# wasm/serve.py serves it as before; the 3-D | 2-D switch's links and the
+# Ocean's redirect are rewritten here for the site's names.
 #
 # Static output only: no build step on Vercel, no serverless functions.
 # Does NOT compile anything — build the modules first:
@@ -61,9 +72,10 @@ OCJS=$(publish web/ocean.js);         OCSCENE=$(publish web/ocean_scene.js)
 OCCFG=$(publish web/ocean_config.js); OCDASH=$(publish web/ocean_dash.js)
 OCWORKER=$(publish web/ocean_worker.js)
 
-# Rewrite the EVO_ASSETS block and the <script src> tags. Fails loudly if
-# index.html no longer has the shape this expects.
-python3 - "$OUT/index.html" <<PY
+# Classic: rewrite the EVO_ASSETS block, the <script src> tags and the
+# switch's link to the Ocean (now the root). Fails loudly if web/index.html no
+# longer has the shape this expects.
+python3 - "$OUT/classic.html" <<PY
 import re, sys
 src = open("web/index.html").read()
 assets = '''window.EVO_ASSETS = {
@@ -83,16 +95,17 @@ out, n7 = re.subn(r'<script src="dash_data\.js"></script>', '<script src="$DDATA
 out, n8 = re.subn(r'<script src="charts\.js"></script>', '<script src="$CHARTS"></script>', out, count=1)
 out, n9 = re.subn(r'<script src="dashboard\.js"></script>', '<script src="$DASH"></script>', out, count=1)
 out, n10 = re.subn(r'<script src="scene3d\.js"></script>', '<script src="$SCENE"></script>', out, count=1)
-counts = (n1, n2, n3, n4, n5, n6, n7, n8, n9, n10)
-assert counts == (1,) * 10, ("index.html changed shape", counts)
+out, n11 = re.subn(r'id="to3d" href="ocean\.html"', 'id="to3d" href="./"', out, count=1)
+counts = (n1, n2, n3, n4, n5, n6, n7, n8, n9, n10, n11)
+assert counts == (1,) * 11, ("index.html changed shape", counts)
 open(sys.argv[1], "w").write(out)
 PY
 
-# The Ocean page: its EVO_ASSETS block and its six <script src> tags. ocean.js
-# loads the engine (ocean / oceanWasm) and starts the Turbo worker (worker)
-# from these, ocean_scene.js the three bundle. (mock: ?mock=1's stand-in,
-# never published.)
-python3 - "$OUT/ocean.html" <<PY
+# The Ocean page: its EVO_ASSETS block, its six <script src> tags, and
+# Classic's name in the switch and in the old-link redirect. ocean.js loads the
+# engine (ocean / oceanWasm) and starts the Turbo worker (worker) from these,
+# ocean_scene.js the three bundle. (mock: ?mock=1's stand-in, never published.)
+python3 - "$OUT/index.html" <<PY
 import re, sys
 src = open("web/ocean.html").read()
 assets = '''window.EVO_ASSETS = {
@@ -108,10 +121,13 @@ out, n4 = re.subn(r'<script src="ocean_config\.js"></script>', '<script src="$OC
 out, n5 = re.subn(r'<script src="ocean_dash\.js"></script>', '<script src="$OCDASH"></script>', out, count=1)
 out, n6 = re.subn(r'<script src="charts\.js"></script>', '<script src="$CHARTS"></script>', out, count=1)
 out, n7 = re.subn(r'<script src="guide\.js"></script>', '<script src="$GUIDE"></script>', out, count=1)
-counts = (n1, n2, n3, n4, n5, n6, n7)
-assert counts == (1,) * 7, ("ocean.html changed shape", counts)
+out, n8 = re.subn(r'id="to2d" href="index\.html"', 'id="to2d" href="classic.html"', out, count=1)
+out, n9 = re.subn(r'var CLASSIC_PAGE = "index\.html";', 'var CLASSIC_PAGE = "classic.html";', out, count=1)
+counts = (n1, n2, n3, n4, n5, n6, n7, n8, n9)
+assert counts == (1,) * 9, ("ocean.html changed shape", counts)
 open(sys.argv[1], "w").write(out)
 PY
+cp "$OUT/index.html" "$OUT/ocean.html"
 
 cp web/vercel.json "$OUT/vercel.json"
 

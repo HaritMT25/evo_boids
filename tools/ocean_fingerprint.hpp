@@ -217,7 +217,13 @@ OFP_FIELDS(repro::Edge, 2);
 namespace mirror {
 struct SignalGrid_ { int w, h, cell, cols, rows, wrapCols, wrapRows; bool tor; std::vector<std::uint8_t> g; };
 struct SpatialGrid_ { int w, h, cols, rows; float inv; std::vector<int> start, cursor, staged, entries; };
-struct OceanFoodGrid_ { int w, h, cols, rows; float inv; std::vector<int> start, cursor, staged, entries; };   // entries: scratch
+struct OceanFoodGrid_ {   // the entries (x .. index) are scratch
+    int w, h, cols, rows; float inv; std::vector<int> start, cursor, staged; std::vector<float> x, y, z, size;
+#ifdef EVO_OCEAN_EYE
+    std::vector<float> con;
+#endif
+    std::vector<int> index;
+};
 struct CurrentField_ { CurrentField::Mode m; std::vector<int> vort, centers; float s, core; int w, h; float eps, om, a, t; };
 struct Mt_ { std::uint32_t x[624]; int p; };
 struct WaveTrain_ { double kx, ky, phase, phi; float k, qx, qy, frac; };

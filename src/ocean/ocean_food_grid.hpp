@@ -6,6 +6,9 @@
 // depth, its size (OceanFood::size, the mouth gate's) and, in the eye build, its
 // eyeCon — copied once, at the step's grid build, so the smell and the eye read
 // the entry they are visiting instead of food[index] at a scattered address.
+// The entries are stored field by field (one array per field, all in the grid's
+// cell order: slot k of every array is entry k), so a scan over a row of cells
+// reads each field contiguously.
 //
 // Why the copies are the values: food is not moved, changed, added or removed
 // between the grid build and the end of the per-fish phase (drift, ageing and
@@ -29,16 +32,6 @@
 
 class OceanFoodGrid {
 public:
-    struct Entry {
-        Vec2  pos;      // the position given to insert()
-        float depth;    // the item's depth, size and (eye build) contrast, as at the build
-        float size;
-#ifdef EVO_OCEAN_EYE
-        float eyeCon;
-#endif
-        int   index;    // its index in OceanWorld::food
-    };
-
     void init(int width, int height, float cellSize) {
         width_   = width;
         height_  = height;
@@ -49,7 +42,7 @@ public:
         start_.assign(cells + 1, 0);
         cursor_.assign(cells, 0);
         staged_.clear();
-        entries_.clear();
+        resizeEntries(0);
     }
 
     // Forget the entries but keep every array's capacity.
@@ -63,15 +56,16 @@ public:
         if (std::isnan(pos.x) || std::isnan(pos.y)) return;
         int cx = clampCol(static_cast<int>(pos.x * invCell_));
         int cy = clampRow(static_cast<int>(pos.y * invCell_));
-        Entry e;
-        e.pos = pos;
-        e.depth = f.depth;
-        e.size = f.size;
+        Staged s;
+        s.pos = pos;
+        s.depth = f.depth;
+        s.size = f.size;
 #ifdef EVO_OCEAN_EYE
-        e.eyeCon = f.eyeCon;
+        s.eyeCon = f.eyeCon;
 #endif
-        e.index = index;
-        staged_.push_back({e, cy * cols_ + cx});
+        s.index = index;
+        s.cell = cy * cols_ + cx;
+        staged_.push_back(s);
     }
 
     // Count per cell, prefix-sum into each cell's start, place in insertion order.
@@ -83,9 +77,31 @@ public:
             start_[c + 1] += start_[c];
             cursor_[c] = start_[c];
         }
-        entries_.resize(staged_.size());
-        for (const Staged& s : staged_) entries_[cursor_[s.cell]++] = s.e;
+        resizeEntries(staged_.size());
+        for (const Staged& s : staged_) {
+            const int k = cursor_[s.cell]++;
+            x_[k] = s.pos.x;
+            y_[k] = s.pos.y;
+            z_[k] = s.depth;
+            size_[k] = s.size;
+#ifdef EVO_OCEAN_EYE
+            con_[k] = s.eyeCon;
+#endif
+            index_[k] = s.index;
+        }
     }
+
+    // The entries by slot (cell order): the position given to insert(), the
+    // payload as at the build, the item's index in OceanWorld::food.
+    const float* xs() const { return x_.data(); }
+    const float* ys() const { return y_.data(); }
+    const float* depths() const { return z_.data(); }
+    const float* sizes() const { return size_.data(); }
+#ifdef EVO_OCEAN_EYE
+    const float* eyeCons() const { return con_.data(); }
+#endif
+    const int* indices() const { return index_.data(); }
+    int entryCount() const { return (int)index_.size(); }
 
     // SpatialGrid::queryRadius / queryRadiusWrapped: the indices, in scan order.
     void queryRadius(Vec2 center, float radius, std::vector<int>& results) const {
@@ -96,81 +112,70 @@ public:
         collect(center.x, center.y, radius * radius, minCx, maxCx, minCy, maxCy, results);
     }
     void queryRadiusWrapped(Vec2 center, float radius, std::vector<int>& results) const {
-        static const int order[9][2] = {
-            {0, 0}, {-1, -1}, {-1, 0}, {-1, 1}, {0, -1}, {0, 1}, {1, -1}, {1, 0}, {1, 1}};
-        const float r2 = radius * radius;
-        const float W = static_cast<float>(width_), H = static_cast<float>(height_);
-        for (const auto& im : order) {
-            const float cx0 = center.x + im[0] * W;
-            const float cy0 = center.y + im[1] * H;
-            const float lox = cx0 - radius, hix = cx0 + radius;
-            const float loy = cy0 - radius, hiy = cy0 + radius;
-            if (hix < 0.0f || lox >= W || hiy < 0.0f || loy >= H) continue;
-            const int minCx = clampCol(static_cast<int>(std::max(lox, 0.0f) * invCell_));
-            const int maxCx = clampCol(static_cast<int>(std::min(hix, W) * invCell_));
-            const int minCy = clampRow(static_cast<int>(std::max(loy, 0.0f) * invCell_));
-            const int maxCy = clampRow(static_cast<int>(std::min(hiy, H) * invCell_));
-            collect(cx0, cy0, r2, minCx, maxCx, minCy, maxCy, results);
-        }
+        forEachImage(center, radius, [&](float cx0, float cy0, int minCx, int maxCx, int minCy, int maxCy) {
+            collect(cx0, cy0, radius * radius, minCx, maxCx, minCy, maxCy, results);
+        });
     }
 
     // SpatialGrid::forEachInRadius / forEachInRadiusWrapped, handing the visitor
-    // the whole entry, for exactly the entries those visit, in the same order:
-    // bounded, f(entry, dx, dy, q2) with the 2-D test's own offset from the query
-    // centre (dx = e.pos.x - center.x, dy likewise) and q2 = dx * dx + dy * dy,
-    // the sum it compared (q2 <= r²); wrapped, f(entry).
+    // the slot of each entry those visit, in the same order: bounded,
+    // f(k, dx, dy, q2) with the 2-D test's own offset from the query centre
+    // (dx = x[k] - center.x, dy likewise) and q2 = dx * dx + dy * dy, the sum it
+    // compared (q2 <= r²); wrapped, f(k).
     template <class F>
     void forEachInRadius(Vec2 center, float radius, F&& f) const {
         const float r2 = radius * radius;
-        int minCx = clampCol(static_cast<int>((center.x - radius) * invCell_));
-        int maxCx = clampCol(static_cast<int>((center.x + radius) * invCell_));
-        int minCy = clampRow(static_cast<int>((center.y - radius) * invCell_));
-        int maxCy = clampRow(static_cast<int>((center.y + radius) * invCell_));
-        for (int cy = minCy; cy <= maxCy; ++cy) {
-            const std::size_t rowBase = static_cast<std::size_t>(cy) * cols_;
-            const Entry* e   = entries_.data() + start_[rowBase + minCx];
-            const Entry* end = entries_.data() + start_[rowBase + maxCx + 1];
-            for (; e != end; ++e) {
-                const float dx = e->pos.x - center.x;
-                const float dy = e->pos.y - center.y;
+        const float* X = x_.data();
+        const float* Y = y_.data();
+        forEachRun(center, radius, [&](int b, int e) {
+            for (int k = b; k < e; ++k) {
+                const float dx = X[k] - center.x;
+                const float dy = Y[k] - center.y;
                 const float q2 = dx * dx + dy * dy;
-                if (q2 <= r2) f(*e, dx, dy, q2);
+                if (q2 <= r2) f(k, dx, dy, q2);
             }
-        }
+        });
     }
     template <class F>
     void forEachInRadiusWrapped(Vec2 center, float radius, F&& f) const {
-        static const int order[9][2] = {
-            {0, 0}, {-1, -1}, {-1, 0}, {-1, 1}, {0, -1}, {0, 1}, {1, -1}, {1, 0}, {1, 1}};
         const float r2 = radius * radius;
-        const float W = static_cast<float>(width_), H = static_cast<float>(height_);
-        for (const auto& im : order) {
-            const float cx0 = center.x + im[0] * W;
-            const float cy0 = center.y + im[1] * H;
-            const float lox = cx0 - radius, hix = cx0 + radius;
-            const float loy = cy0 - radius, hiy = cy0 + radius;
-            if (hix < 0.0f || lox >= W || hiy < 0.0f || loy >= H) continue;
-            const int minCx = clampCol(static_cast<int>(std::max(lox, 0.0f) * invCell_));
-            const int maxCx = clampCol(static_cast<int>(std::min(hix, W) * invCell_));
-            const int minCy = clampRow(static_cast<int>(std::max(loy, 0.0f) * invCell_));
-            const int maxCy = clampRow(static_cast<int>(std::min(hiy, H) * invCell_));
+        const float* X = x_.data();
+        const float* Y = y_.data();
+        forEachImage(center, radius, [&](float cx0, float cy0, int minCx, int maxCx, int minCy, int maxCy) {
             for (int cy = minCy; cy <= maxCy; ++cy) {
                 const std::size_t rowBase = static_cast<std::size_t>(cy) * cols_;
-                const Entry* e   = entries_.data() + start_[rowBase + minCx];
-                const Entry* end = entries_.data() + start_[rowBase + maxCx + 1];
-                for (; e != end; ++e) {
-                    const float dx = e->pos.x - cx0;
-                    const float dy = e->pos.y - cy0;
-                    if (dx * dx + dy * dy <= r2) f(*e);
+                const int e = start_[rowBase + maxCx + 1];
+                for (int k = start_[rowBase + minCx]; k < e; ++k) {
+                    const float dx = X[k] - cx0;
+                    const float dy = Y[k] - cy0;
+                    if (dx * dx + dy * dy <= r2) f(k);
                 }
             }
+        });
+    }
+    // The bounded query's cell rectangle, row by row: f(b, e) for the slots
+    // [b, e) of each row's run of cells (SpatialGrid::forEachInRadius's runs,
+    // before its 2-D test), top row first.
+    template <class F>
+    void forEachRun(Vec2 center, float radius, F&& f) const {
+        const int minCx = clampCol(static_cast<int>((center.x - radius) * invCell_));
+        const int maxCx = clampCol(static_cast<int>((center.x + radius) * invCell_));
+        const int minCy = clampRow(static_cast<int>((center.y - radius) * invCell_));
+        const int maxCy = clampRow(static_cast<int>((center.y + radius) * invCell_));
+        for (int cy = minCy; cy <= maxCy; ++cy) {
+            const std::size_t rowBase = static_cast<std::size_t>(cy) * cols_;
+            f(start_[rowBase + minCx], start_[rowBase + maxCx + 1]);
         }
     }
 
 private:
     struct Staged {
-        Entry e;
-        int   cell;
+        Vec2  pos;
+        float depth, size;
+#ifdef EVO_OCEAN_EYE
+        float eyeCon;
+#endif
+        int   index, cell;
     };
 
     int   width_   = 0;
@@ -178,13 +183,48 @@ private:
     int   cols_    = 0;
     int   rows_    = 0;
     float invCell_ = 1.0f;
-    std::vector<int>    start_;    // cells + 1: cell c is entries_[start_[c], start_[c + 1])
+    std::vector<int>    start_;    // cells + 1: cell c is slots [start_[c], start_[c + 1])
     std::vector<int>    cursor_;   // build() scratch, one per cell
     std::vector<Staged> staged_;   // this step's inserts, in insertion order
-    std::vector<Entry>  entries_;  // the same entries, ordered by cell
+    // The entries, by slot (ordered by cell): position, payload, index.
+    std::vector<float>  x_, y_, z_, size_;
+#ifdef EVO_OCEAN_EYE
+    std::vector<float>  con_;
+#endif
+    std::vector<int>    index_;
 
     int clampCol(int c) const { return c < 0 ? 0 : (c >= cols_ ? cols_ - 1 : c); }
     int clampRow(int r) const { return r < 0 ? 0 : (r >= rows_ ? rows_ - 1 : r); }
+
+    void resizeEntries(std::size_t n) {
+        x_.resize(n); y_.resize(n); z_.resize(n); size_.resize(n);
+#ifdef EVO_OCEAN_EYE
+        con_.resize(n);
+#endif
+        index_.resize(n);
+    }
+
+    // SpatialGrid's wrapped query: the nine images in its order, each query
+    // rect translated, clipped against the world and skipped when empty;
+    // f(cx0, cy0, minCx, maxCx, minCy, maxCy) per image kept.
+    template <class F>
+    void forEachImage(Vec2 center, float radius, F&& f) const {
+        static const int order[9][2] = {
+            {0, 0}, {-1, -1}, {-1, 0}, {-1, 1}, {0, -1}, {0, 1}, {1, -1}, {1, 0}, {1, 1}};
+        const float W = static_cast<float>(width_), H = static_cast<float>(height_);
+        for (const auto& im : order) {
+            const float cx0 = center.x + im[0] * W;
+            const float cy0 = center.y + im[1] * H;
+            const float lox = cx0 - radius, hix = cx0 + radius;
+            const float loy = cy0 - radius, hiy = cy0 + radius;
+            if (hix < 0.0f || lox >= W || hiy < 0.0f || loy >= H) continue;
+            const int minCx = clampCol(static_cast<int>(std::max(lox, 0.0f) * invCell_));
+            const int maxCx = clampCol(static_cast<int>(std::min(hix, W) * invCell_));
+            const int minCy = clampRow(static_cast<int>(std::max(loy, 0.0f) * invCell_));
+            const int maxCy = clampRow(static_cast<int>(std::min(hiy, H) * invCell_));
+            f(cx0, cy0, minCx, maxCx, minCy, maxCy);
+        }
+    }
 
     // SpatialGrid::collect: every candidate's index written, the cursor advanced
     // on a hit.
@@ -201,12 +241,11 @@ private:
         std::size_t n = 0;
         for (int cy = minCy; cy <= maxCy; ++cy) {
             const std::size_t rowBase = static_cast<std::size_t>(cy) * cols_;
-            const Entry* e   = entries_.data() + start_[rowBase + minCx];
-            const Entry* end = entries_.data() + start_[rowBase + maxCx + 1];
-            for (; e != end; ++e) {
-                const float dx = e->pos.x - x0;
-                const float dy = e->pos.y - y0;
-                out[n] = e->index;
+            const int e = start_[rowBase + maxCx + 1];
+            for (int k = start_[rowBase + minCx]; k < e; ++k) {
+                const float dx = x_[k] - x0;
+                const float dy = y_[k] - y0;
+                out[n] = index_[k];
                 n += (dx * dx + dy * dy <= r2);
             }
         }

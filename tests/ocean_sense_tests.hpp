@@ -415,22 +415,23 @@ void testFoodGrid() {
                         ++lists;
                         std::vector<std::pair<int, Vec2>> va, vb;
                         auto fa = [&](int i, Vec2 p) { va.push_back({i, p}); };
-                        auto fb = [&](const OceanFoodGrid::Entry& e) {
-                            vb.push_back({e.index, e.pos});
-                            const OceanFood& f = items[e.index];
-                            bool same = sameBits(e.depth, f.depth) && sameBits(e.size, f.size);
+                        auto fb = [&](int k) {   // slot k: its position, index and payload
+                            const int i = fg.indices()[k];
+                            vb.push_back({i, Vec2{fg.xs()[k], fg.ys()[k]}});
+                            const OceanFood& f = items[i];
+                            bool same = sameBits(fg.depths()[k], f.depth) && sameBits(fg.sizes()[k], f.size);
 #ifdef EVO_OCEAN_EYE
-                            same = same && sameBits(e.eyeCon, f.eyeCon);
+                            same = same && sameBits(fg.eyeCons()[k], f.eyeCon);
 #endif
-                            t.expect(same, "entry %d's payload is not its item's", e.index);
+                            t.expect(same, "entry %d's payload is not its item's", i);
                             ++entries;
                         };
                         // bounded: the visitor also gets the 2-D test's offset and q2 (bit for bit)
-                        auto fbq = [&](const OceanFoodGrid::Entry& e, float dx, float dy, float q2) {
-                            const float ex = e.pos.x - c.x, ey = e.pos.y - c.y;
+                        auto fbq = [&](int k, float dx, float dy, float q2) {
+                            const float ex = fg.xs()[k] - c.x, ey = fg.ys()[k] - c.y;
                             t.expect(sameBits(dx, ex) && sameBits(dy, ey) && sameBits(q2, ex * ex + ey * ey) && q2 <= r * r,
-                                     "entry %d: offset / q2 handed over are not the 2-D test's", e.index);
-                            fb(e);
+                                     "slot %d: offset / q2 handed over are not the 2-D test's", k);
+                            fb(k);
                         };
                         if (wrapped) { sg.forEachInRadiusWrapped(c, r, fa); fg.forEachInRadiusWrapped(c, r, fb); }
                         else         { sg.forEachInRadius(c, r, fa);        fg.forEachInRadius(c, r, fbq); }
@@ -441,6 +442,19 @@ void testFoodGrid() {
                         t.expect(same, "%dx%d cell %g: visit (%g, %g) r %g %s differs (%zu vs %zu)", g.W, g.H, g.cell, c.x, c.y, r,
                                  wrapped ? "wrapped" : "bounded", va.size(), vb.size());
                         ++visits;
+                        if (!wrapped) {   // forEachRun's runs + the 2-D test == the bounded visit
+                            std::vector<int> vr;
+                            fg.forEachRun(c, r, [&](int b, int e) {
+                                for (int k = b; k < e; ++k) {
+                                    const float dx = fg.xs()[k] - c.x, dy = fg.ys()[k] - c.y;
+                                    if (dx * dx + dy * dy <= r * r) vr.push_back(fg.indices()[k]);
+                                }
+                            });
+                            bool sameRuns = vr.size() == va.size();
+                            for (std::size_t k = 0; sameRuns && k < vr.size(); ++k) sameRuns = vr[k] == va[k].first;
+                            t.expect(sameRuns, "%dx%d cell %g: runs at (%g, %g) r %g differ from the visit", g.W, g.H, g.cell, c.x,
+                                     c.y, r);
+                        }
                     }
                 }
             }

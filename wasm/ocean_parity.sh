@@ -237,6 +237,12 @@ add life_live_s21 '21 3000 --cfg {"predatorCount":3} --set foodLife=6@600 --set 
                   "foodLife switched on / off (ages kept and hashed) / on mid-run (oc_set_param)"
 add steer_life_e1_s5 "5 3000 --cfg {\"waveSpeed\":6,\"deepCurrent\":true,\"currentStrength\":20,\"foodDrift\":true,\"depthCostScaled\":true,\"cHold\":0.05,\"cPress\":0.03,\"steerFrame\":1,\"foodLife\":8,$SV} --expect steerOwnSteps>0 --expect foodExpired>0" \
                   "E1 waves + deep current + scaled costs with own-frame steering and foodLife 8"
+# The spawn cap (targetFood·2) counts live items: food expiring in a step frees
+# its place in that step's spawn (foodCapFreed: steps that refilled such places).
+add life_cap_fixture_s1 '1 3000 --pop 0 --cfg {"minPopulation":0,"targetFood":1,"foodSpawnBase":2,"foodSpawnAmp":0,"foodLife":0.016} --expect foodExpired=5999 --expect foodCapFreed=3000' \
+                  "no fish, cap 2, 2 items/step that last one step: 2 live items every step"
+add life_cap_s3   '3 3000 --cfg {"targetFood":300,"foodSpawnBase":6,"foodSpawnAmp":0,"foodLife":10} --expect foodExpired>0 --expect foodCapFreed>0' \
+                  "foodLife 10 with the stock at its cap (targetFood 300, 6 items/step)"
 # ---- the compound-eye build (-DEVO_OCEAN_EYE: 64 sensors, its own planes) ----
 # Every case named eye_* runs in the eye build (the eye on unless it says
 # otherwise; eye_only_* / eye_blind_* = eyeOnly with the eye on / off; eye_code*

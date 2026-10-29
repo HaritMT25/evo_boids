@@ -115,7 +115,8 @@ struct Coverage {
     // The ocean-vision features (OceanConfig eye / eyeOnly / eyeCode / steerFrame /
     // foodLife). Printed in the `cover` line only when non-zero (kQuietWhenZero):
     // they are 0 in every case without those features, whose baselines were
-    // recorded before the counters existed.
+    // recorded before the counters existed (foodCapFreed: 0 in every case
+    // before life_cap_*).
     long long eyeSteps = 0;          // fish-steps that ran with the compound eye on
     long long eyeOnlySteps = 0;      // fish-steps in eye-only mode (labeled senses off)
     long long eyeCodeMask = 0;       // OR of the eyeCode bits that ran with the eye on
@@ -124,7 +125,16 @@ struct Coverage {
     long long labeledLit = 0;        // fish (captured) in eye-only mode with a labeled input != 0 (must stay 0)
     long long steerOwnSteps = 0;     // fish-steps that pushed STEER_X / STEER_Y in their own frame
     long long agesKept = 0;          // steps that began with foodLife off and a food age kept != 0
+    // Steps whose spawn refilled places that food expiring in the same step
+    // freed: the step began with S items, k expired, and S + spawned went past
+    // the cap (targetFood·2) — the spawn the cap allowed only because it counts
+    // live items (spawned = the end stock − S + k + the items fish ate).
+    long long foodCapFreed = 0;
+    long long food0_ = 0, expired0_ = 0, eaten0_ = 0;   // the step's start (before)
     void before(const OceanWorld& w) {
+        food0_ = (long long)w.food.size();
+        expired0_ = w.totalFoodExpired;
+        eaten0_ = w.totalFoodEaten;
         const float wb = std::min(w.ocfg.wallBand, 0.5f * w.D);   // the step's own band (stepFish)
         for (const Fish& c : w.creatures) {
             if (!c.alive || !(wb > 0.0f)) continue;
@@ -146,6 +156,10 @@ struct Coverage {
                 if (f.age != 0.0f) { ++agesKept; break; }
     }
     void after(const OceanWorld& w) {
+        if (const long long k = w.totalFoodExpired - expired0_; k > 0) {
+            const long long spawned = (long long)w.food.size() - food0_ + k + (w.totalFoodEaten - eaten0_);
+            foodCapFreed += (food0_ + spawned > 2LL * w.cfg.targetFood);
+        }
         popMax = std::max(popMax, (long long)w.creatures.size());
         predMax = std::max(predMax, (long long)w.predators.size());
         for (const OceanPredator& p : w.predators) {
@@ -186,14 +200,14 @@ struct Coverage {
             {"eyeSteps", eyeSteps}, {"eyeOnlySteps", eyeOnlySteps}, {"eyeCodeMask", eyeCodeMask},
             {"eyeE1Steps", eyeE1Steps}, {"eyeLit", eyeLit}, {"labeledLit", labeledLit},
             {"steerOwnSteps", steerOwnSteps}, {"foodExpired", w.totalFoodExpired},
-            {"agesKept", agesKept},
+            {"agesKept", agesKept}, {"foodCapFreed", foodCapFreed},
         };
     }
     // The counters the `cover` line leaves out while they are 0 (see above).
     static bool quietWhenZero(const std::string& k) {
         static const char* const kQuietWhenZero[] = {"eyeSteps", "eyeOnlySteps", "eyeCodeMask", "eyeE1Steps",
                                                      "eyeLit", "labeledLit", "steerOwnSteps", "foodExpired",
-                                                     "agesKept"};
+                                                     "agesKept", "foodCapFreed"};
         for (const char* q : kQuietWhenZero) if (k == q) return true;
         return false;
     }

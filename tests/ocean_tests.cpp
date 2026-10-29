@@ -44,7 +44,9 @@
 //                 ranges in populated worlds; 0..31 valid, live via
 //                 oc_set_param (plain build: eyeCode must stay 0)
 //   food_life     foodLife: an item goes on the step its age reaches foodLife;
-//                 off, none do; the first stock's ages spread; draws unchanged
+//                 off, none do; the first stock's ages spread; draws unchanged;
+//                 the spawn cap counts live items (what expires frees its place
+//                 in the same step: targetFood 1, 2 a step, foodLife dt -> 2)
 //   reproducible  same seed twice -> identical fingerprints; another seed and a
 //                 1-ulp change in any section change the hash — incl. a
 //                 vortex frequency, a food-patch depth, a grid's cell size, the
@@ -1676,6 +1678,30 @@ void testFoodLife() {
                w.totalFoodExpired);
         t.expect(w.food.size() >= 1500 && w.food.size() <= 1503, "stock %zu, expected 1500..1503", w.food.size());
         t.expect(w.totalFoodExpired >= 2000, "only %lld expired (the first stock alone is 2000)", w.totalFoodExpired);
+    }
+    // The spawn cap (targetFood·2) counts live items: what expires frees its
+    // place in the same step's spawn. No fish, targetFood 1 (cap 2), 2 items a
+    // step, each lasting one step (foodLife = dt): 2 live items after every
+    // step (the cap used to count the expired items until the end-of-step
+    // erase: one replacement a step, a stock of 1). Off: the cap holds 2.
+    for (int on = 0; on < 2; ++on) {
+        OceanWorld w;
+        std::string err;
+        const char* cfg = on ? R"({"minPopulation":0,"targetFood":1,"foodSpawnBase":2,"foodSpawnAmp":0,"foodLife":0.016})"
+                             : R"({"minPopulation":0,"targetFood":1,"foodSpawnBase":2,"foodSpawnAmp":0})";
+        if (!t.expect(ofp::initWorld(w, 30, 1920, 1080, 240.0f, 0, cfg, err), "%s refused: %s", cfg, err.c_str())) continue;
+        int wrongAt = -1;
+        std::size_t wrongStock = 0;
+        for (int s = 1; s <= 50; ++s) {
+            w.update(dt);
+            const bool allLive = std::all_of(w.food.begin(), w.food.end(), [](const OceanFood& f) { return f.alive; });
+            if ((w.food.size() != 2 || !allLive) && wrongAt < 0) { wrongAt = s; wrongStock = w.food.size(); }
+        }
+        t.expect(wrongAt < 0, "foodLife %s, cap 2, 2 items/step: stock %zu after step %d, expected 2 live items",
+                 on ? "0.016" : "off", wrongStock, wrongAt);
+        const long long wantExpired = on ? 1 + 2 * 49 : 0;   // the first item, then both every step
+        t.expect(w.totalFoodExpired == wantExpired, "foodLife %s: %lld expired in 50 steps, expected %lld",
+                 on ? "0.016" : "off", w.totalFoodExpired, wantExpired);
     }
     // Draws do not depend on foodLife (spawn cap not reached).
     {

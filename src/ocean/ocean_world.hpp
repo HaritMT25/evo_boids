@@ -175,7 +175,10 @@
 //   * a fish's look (hot_ eyeSize / eyeCon) is refreshed after it has moved,
 //     flow drift included; predators' contrast is taken before the per-fish
 //     phase (they move, and drift, after it);
-//   * foodLife ages food after this step's drift and before the spawn;
+//   * foodLife ages food after this step's drift and before the spawn, and
+//     the spawn cap (targetFood·2) counts the LIVE items: what expired this
+//     step frees its place in the same step's spawn, not only after the
+//     end-of-step erase;
 //   * CURRENT_FWD / LR (kept in eye-only mode) read the 3-D flow under E1;
 //   * steerFrame turns STEER_X / STEER_Y before the flow drift is added.
 // ----------------------------------------------------------------------------
@@ -670,17 +673,22 @@ public:
             }
         }
 
+        // Every item is alive here (the last step erased the dead ones), so
+        // food.size() - expiredNow is the live stock the spawn cap counts.
+        int expiredNow = 0;   // marked dead just below; erased at the end of the step
         if (ocfg.foodLife > 0.0f) {   // food older than foodLife is gone, eaten or not
             for (auto& f : food) {
                 if (!f.alive) continue;
                 f.age += dt;
-                if (f.age >= ocfg.foodLife) { f.alive = false; ++totalFoodExpired; }
+                if (f.age >= ocfg.foodLife) { f.alive = false; ++totalFoodExpired; ++expiredNow; }
             }
         }
 
+        // The cap is on live items: an expired one frees its place now (foodLife
+        // off: expiredNow is 0, the cap as it always was).
         float foodRate = cfg.foodSpawnBase + cfg.foodSpawnAmp * evomath::sinf(frame * 0.001f);
         for (int i = 0; i < static_cast<int>(foodRate); ++i) {
-            if (static_cast<int>(food.size()) < cfg.targetFood * 2) spawnFood();
+            if (static_cast<int>(food.size()) - expiredNow < cfg.targetFood * 2) spawnFood();
         }
 
         if (frame % 3 == 0) signals.decay();

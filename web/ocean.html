@@ -398,6 +398,8 @@
   .field.inert .name, .field.inert .ctl { opacity: 0.5; }
   .needs { grid-column: 1 / -1; font-size: 12px; color: var(--ink-3); }
   .needs:empty { display: none; }
+  .pendnote { grid-column: 1 / -1; font-size: 12px; color: var(--beam); }   /* a live value waiting: for a Restart, or for Turbo */
+  .pendnote:empty { display: none; }
 
   .stepper { display: flex; align-items: stretch; height: 40px; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--surface-2); }
   .stepper button { width: 36px; border: 0; background: none; color: var(--ink-2); display: grid; place-items: center; }

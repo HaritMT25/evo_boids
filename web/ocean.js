@@ -331,7 +331,7 @@
     if (typeof def === "boolean" || opt.bit) input.checked = v === true || v === 1;
     else input.value = String(v);
   }
-  function resetForm() { Object.keys(KEYS).forEach(function (k) { setVal(k, KEYS[k][0]); }); extraCfg = {}; }
+  function resetForm() { Object.keys(KEYS).forEach(function (k) { setVal(k, KEYS[k][0]); }); extraCfg = {}; clearFieldNotes(); }
   /* a flat cfg object into the sheet: known keys into their fields, the rest kept aside */
   function cfgToForm(cfg) {
     Object.keys(cfg || {}).forEach(function (k) {
@@ -349,24 +349,85 @@
     Object.keys(extraCfg).forEach(function (k) { if (!(k in cfg)) cfg[k] = extraCfg[k]; });
     return { seed: getVal("seed") >>> 0, population: getVal("population"), depth: getVal("depth"), cfg: cfg };
   }
+  /* ---- live settings ----
+   * A live field shows what the running world uses, or says why not:
+   *   - a value below 0: oc_set_param changes a running world only to 0 or
+   *     more; where a new world takes it (CFG.NEG_ON_RESTART: kBuoy, the
+   *     food rates, energies, ages) it waits for the Restart, marked so; for
+   *     the rest it is outside the setting's range and the field goes back
+   *   - while Turbo is starting or stopping (neither side owns the world for
+   *     that moment) it is held, marked so, and applied as soon as one does
+   *   - one the engine refuses: the field goes back to the running value,
+   *     with the engine's reason. */
+  var heldLive = {};    /* key -> value: waiting for Turbo's hand-off */
+  var inflight = [];    /* [key, value] sent to the Turbo worker, not answered yet */
+  function numOf(key, v) { return typeof v === "boolean" ? (v ? 1 : 0) : v; }
+  function valOf(key, num) { return typeof KEYS[key][0] === "boolean" ? num === 1 : num; }
+  function shown(v) { return typeof v === "boolean" ? (v ? "on" : "off") : String(v); }
+  /* the note under a field (why its value is not the running world's yet) */
+  function fieldNote(key, text) {
+    var row = el("f_" + key);
+    if (!row) return;
+    var n = row.querySelector(".pendnote");
+    if (!n && !text) return;
+    if (!n) { n = document.createElement("span"); n.className = "pendnote"; row.appendChild(n); }
+    n.textContent = text;
+  }
+  function clearFieldNotes() {
+    var notes = document.querySelectorAll(".field .pendnote");
+    for (var i = 0; i < notes.length; i++) notes[i].textContent = "";
+  }
   /* push one live knob into the running world (or the Turbo worker's) */
   function applyLive(key) {
     if (!M) return;
-    var v = getVal(key), num = typeof v === "boolean" ? (v ? 1 : 0) : v;
+    var num = numOf(key, getVal(key));
+    if (num < 0) {
+      if (CFG.NEG_ON_RESTART[key]) {
+        fieldNote(key, "Applies on Restart: a running world takes only 0 or more.");
+        setPending(true);
+        showNote((LABELS[key] || key) + " " + num + " applies on Restart (a running world takes only 0 or more).");
+      } else refuse(key, "it must be 0 or more");
+      return;
+    }
+    if (turboState === "entering" || turboState === "exiting") {
+      heldLive[key] = num;
+      fieldNote(key, turboState === "entering" ? "Applies as soon as Turbo has started." : "Applies as soon as Turbo hands the world back.");
+      return;
+    }
+    fieldNote(key, "");
+    sendLive(key, num);
+  }
+  function sendLive(key, num, quiet) {
     if (turboState === "turbo") {   /* Turbo owns the world: the worker applies it */
+      inflight.push([key, num]);
       turboWorker.postMessage({ cmd: "set", key: key, value: num });
       return;
     }
-    if (turboState !== "live") { showNote("Turbo is starting or stopping: try again in a moment."); return; }
-    if (turboState !== "live" || !has("oc_set_param")) return;
+    if (!has("oc_set_param")) return;
     var ok = withCString(key, function (p) { return M._oc_set_param(p, num); });
-    if (ok) liveApplied(key, v);
-    else showError((LABELS[key] || key) + ": " + lastError());
+    if (ok) liveApplied(key, valOf(key, num), quiet);
+    else refuse(key, lastError());
   }
-  function liveApplied(key, v) {
+  function liveApplied(key, v, quiet) {
     if (v === KEYS[key][0]) delete runCfg[key]; else runCfg[key] = v;
     if (key === "lightEnabled" || key === "L0" || key === "kWater") readLight();
-    showNote((LABELS[key] || key) + " is now " + (typeof v === "boolean" ? (v ? "on" : "off") : v) + " (live)");
+    if (!quiet) showNote((LABELS[key] || key) + " is now " + shown(v) + " (live)");
+  }
+  /* a refused live value: the field goes back to what the world runs with
+   * (keep: a newer edit of it is on its way, so the field stays) */
+  function refuse(key, why, keep) {
+    if (!keep) {
+      setVal(key, cfgVal(key));
+      fieldNote(key, "");
+      updateNeeds(); updateTabDots();
+    }
+    showError((LABELS[key] || key) + ": " + why + (keep ? "" : " (back to " + shown(cfgVal(key)) + ")"));
+  }
+  /* the held edits, now that one side owns the world */
+  function flushHeld(quiet) {
+    var held = heldLive;
+    heldLive = {};
+    Object.keys(held).forEach(function (k) { fieldNote(k, ""); sendLive(k, held[k], quiet); });
   }
 
   var tabsEl = el("tabs"), panelsEl = el("panels"), currentTab = "run";

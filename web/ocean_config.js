@@ -64,6 +64,16 @@
    "metabolicRate", "moveCost", "geneCost", "maxAge", "reproEnergy", "newbornEnergy",
    "mutationMultiplier", "minSpeed", "maxSpeed", "predatorMinPopulation", "predatorMaxPopulation",
    "predatorTraitMutation"].forEach(function (k) { LIVE[k] = 1; });
+  /* oc_set_param changes a running world only to values >= 0, while a new
+   * world (oc_init) takes these live keys below 0 too: kBuoy in [-1000, 1000],
+   * foodSpawnBase / foodSpawnAmp in [-1e4, 1e4], the energies and ages any
+   * finite value (ocean_config.hpp oceanConfigError / oceanSimConfigError,
+   * wasm/ocean_wasm.cpp configOk). The sheet keeps such a value for the next
+   * Restart, marked so; a negative value for any other live key is outside its
+   * range and the field goes back. */
+  var NEG_ON_RESTART = {};
+  ["kBuoy", "foodSpawnBase", "foodSpawnAmp", "foodEnergy", "metabolicRate", "maxAge", "reproEnergy",
+   "newbornEnergy"].forEach(function (k) { NEG_ON_RESTART[k] = 1; });
 
   /* The sheet: tabs, then groups of keys. "run" is static HTML in ocean.html. */
   var TABS = [
@@ -222,7 +232,7 @@
     predatorMaxPopulation: { d: "Predator cap: a well-fed hunter doesn't bud while this many are alive (economy on; 0 = none). Applies live.", t: "try: 15 with the default 3 s digesting time" },
     predatorInheritance: { d: "Each bud inherits its parent's speed and budding threshold (×0.5 to ×2) with a small mutation, so hunters evolve.", t: "try: on with a swimming cost, a predator lifespan and a cap" },
     predatorTraitMutation: { d: "How far a bud's traits can stray from its parent's, per trait per bud. Applies live.", t: "try: 0.1 (the default)" },
-    kBuoy: { d: "How hard a fish is pulled back toward its neutral depth, per second. Leaving neutral depth costs steering effort. Applies live (0 or more).", t: "try: 1 (the default, tuned); 0.5 lets fish wander in depth, 3 pins them" },
+    kBuoy: { d: "How hard a fish is pulled back toward its neutral depth, per second. Leaving neutral depth costs steering effort. Applies live from 0 up; a negative pull (it pushes a fish away from its neutral depth) applies on Restart.", t: "try: 1 (the default, tuned); 0.5 lets fish wander in depth, 3 pins them" },
     pitchMax: { d: "The steepest a fish can climb or dive: its vertical speed is at most this × its speed. Applies live.", t: "try: 0.5 (about 27°); 1 = 45°" },
     vDrag: { d: "Vertical drag, per second: how fast a fish's climb or dive dies away when it stops steering in depth. Applies live.", t: "try: 2 (the default); 0.5 glides, 6 stops short" },
     wallBand: { d: "Within this distance of the surface or the floor, a soft push turns a fish back into the water. Applies live.", t: "try: 12 (the default); 0 = hard walls" },

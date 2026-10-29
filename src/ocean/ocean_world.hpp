@@ -590,6 +590,7 @@ public:
         return waveTrainExactAt(i, p, d, taperAt(d));
     }
     Flow waveTrainExactAt(int i, Vec2 p, float d, const Taper& tp) const {
+        ensureWaves();   // public: it may be the first reader after the waves came on directly
         const WaveTrain& t = waves_[i];
         const float B = tp.B, Bp = tp.Bp;
         const float A = t.frac * ocfg.waveSpeed;

@@ -3737,6 +3737,32 @@ void testLazyWaves() {
     const std::uint64_t freshGeo = ofp::fingerprint(fresh).geo;
     ofp::initWorld(a, 1704, 1920, 1080, 240.0f, 80, nullptr, err);
     t.expect(unprepared(a) && ofp::fingerprint(a).geo == freshGeo, "a reused world kept its prepared waves");
+    // Every public flow reader prepares the modes when it is the first reader
+    // after the waves came on directly — the tapered overload
+    // waveTrainExactAt(i, p, d, taperAt(d)) too (it read the unprepared modes
+    // and gave zero flow). Its trains == an eagerly prepared world's, bit for
+    // bit; with the waves still off it prepares nothing and gives zero.
+    {
+        OceanWorld eager, lazy;
+        ofp::initWorld(eager, 1705, 1920, 1080, 240.0f, 0, on, err);
+        ofp::initWorld(lazy, 1705, 1920, 1080, 240.0f, 0, off, err);
+        const Vec2 p{300.0f, 400.0f};
+        const float d = 60.0f;
+        const OceanWorld::Flow z = lazy.waveTrainExactAt(0, p, d, lazy.taperAt(d));
+        t.expect(unprepared(lazy) && z.x == 0.0f && z.y == 0.0f && z.d == 0.0f,
+                 "the tapered reader with the waves off: prepared them, or gave flow");
+        lazy.ocfg.waveSpeed = 6.0f;
+        bool same = true, moving = false;
+        for (int i = 0; i < OceanWorld::kWaveTrains; ++i) {
+            const OceanWorld::Flow u = lazy.waveTrainExactAt(i, p, d, lazy.taperAt(d));   // the first reader (i = 0)
+            const OceanWorld::Flow e = eager.waveTrainExactAt(i, p, d);
+            same &= ofp::bits(u.x) == ofp::bits(e.x) && ofp::bits(u.y) == ofp::bits(e.y) && ofp::bits(u.d) == ofp::bits(e.d);
+            moving |= u.x != 0.0f || u.y != 0.0f || u.d != 0.0f;
+        }
+        t.expect(sameModes(eager, lazy) && same && moving,
+                 "the tapered reader first after the waves came on: unprepared modes or zero flow (%d %d %d)",
+                 (int)sameModes(eager, lazy), (int)same, (int)moving);
+    }
 }
 
 // The loops OceanWorld::wrapCoord replaced (capped: n counts the passes).

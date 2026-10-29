@@ -4055,33 +4055,63 @@ void testEyeE1() {
                  "mouth-gated food: eye ahead %.4f, smell dist %.4f density %.4f (expected seen, not smelled)",
                  S[EYE_AHEAD_PROX], S[NEAREST_FOOD_DIST], S[FOOD_DENSITY]);
     }
-    {   // (3) no side effects under E1 (the preset + a predator economy), eye on vs off
+    {   // (3) no side effects under E1, eye on vs off. The world is built from ONE
+        // parsed config (it used to be parsed and dropped: initQuiet built its own,
+        // economy off, metabolism 0): the E1 preset, its SimConfig half too
+        // (currentStrength 5, foodDrift), a predator economy (3 predators) and the
+        // default metabolism, which the preset's scaled depth costs multiply; no
+        // founders, food spawn or floor (unwired fish and food are added below).
+        // What the case is for is asserted before anything is compared.
         ofp::Fingerprint fp[2];
         for (int k = 0; k < 2; ++k) {
-            OceanConfig oc;
-            OceanWorld w;
-            std::string err;
             SimConfig sc;
             applyOceanDefaults(sc);
+            OceanConfig oc;
+            std::string err;
             std::string json = std::string(kE1PresetJson);
             json.back() = ',';
-            json += k ? R"("eye":1})" : R"("eye":0})";
-            if (!t.expect(readOceanJson(json.c_str(), sc, oc, err), "preset: %s", err.c_str())) break;
-            initQuiet(w, 1304, 240.0f, oc, /*capture*/ true, false, 5.0f);
-            w.cfg.foodDrift = true;
-            w.cfg.predatorCount = 3;
-            for (int j = 0; j < 300; ++j)
-                addFish(w, {rng.range(10.0f, 1910.0f), rng.range(10.0f, 1070.0f)}, rng.range(0.0f, 240.0f), {}, 0.5f);
-            for (int j = 0; j < 500; ++j) w.spawnFood();
-            for (int j = 0; j < 3; ++j) {
-                OceanPredator p;
-                p.pos = {rng.range(10.0f, 1910.0f), rng.range(10.0f, 1070.0f)};
-                p.vel = {1.0f, 0.0f};
-                p.depth = rng.range(0.0f, 240.0f);
-                w.predators.push_back(p);
+            json += R"("predatorCount":3,"predatorEconomy":true,"minPopulation":0,"targetFood":0,"foodSpawnBase":0,)"
+                    R"("foodSpawnAmp":0,"maxAge":1e9,"eye":)";
+            json += k ? "1}" : "0}";
+            if (!t.expect(readOceanJson(json.c_str(), sc, oc, err), "%s: %s", json.c_str(), err.c_str())) break;
+            clampOceanSimConfig(sc);
+            sc.captureActivations = true;
+            oc.depth = 240.0f;
+            const std::string bad = oceanConfigError(oc) + oceanSimConfigError(sc);
+            t.expect(bad.empty(), "the intended config is out of range: %s", bad.c_str());
+            t.expect(sc.predatorEconomy && sc.predatorCount == 3 && sc.metabolicRate > 0.0f && oc.depthCostScaled &&
+                         oc.cHold > 0.0f && oc.cPress > 0.0f && sc.currentStrength == 5.0f && sc.foodDrift && oc.eye == k,
+                     "eye %d: not the intended world (economy %d, %d predators, metabolism %g, scaled costs %d)", k,
+                     (int)sc.predatorEconomy, sc.predatorCount, (double)sc.metabolicRate, (int)oc.depthCostScaled);
+            OceanWorld w;
+            rng.seed(1304);
+            w.cfg = sc;
+            w.ocfg = oc;
+            w.init(1920, 1080, 240.0f, 0);   // the 3 economy predators; no founders, no food
+            for (int j = 0; j < 300; ++j) {
+                // one draw per statement: the order of a call's arguments is
+                // unspecified (g++ and clang differ), the order of statements is not
+                const float x = rng.range(10.0f, 1910.0f);
+                const float y = rng.range(10.0f, 1070.0f);
+                const float z = rng.range(0.0f, 240.0f);
+                addFish(w, {x, y}, z, {}, 0.5f);
             }
+            for (int j = 0; j < 500; ++j) w.spawnFood();
+            const float e0 = w.predators.empty() ? 0.0f : w.predators[0].energy;
             for (int s = 0; s < 300; ++s) w.update(0.016f);
             t.expect(w.flowE1(), "the E1 flow is off");
+            // The economy and the metabolism really ran: a meal, a bud or a predator
+            // death, and the fish spent energy.
+            const long long econ = w.totalDeathsPredation + w.totalPredatorBirths + w.totalPredatorDeathsStarvation +
+                                   w.totalPredatorDeathsAge;
+            float spent = 0.0f;
+            for (const Fish& c : w.creatures) spent = std::max(spent, 30.0f - c.foodReserves);
+            t.expect(econ > 0 && spent > 0.0f && !w.predators.empty() && w.predators[0].energy != e0,
+                     "eye %d: the economy / metabolism did not run (%lld events, most spent %g)", k, econ, (double)spent);
+            if (k == 1)
+                t.note("unwired E1 world + predator economy, 300 steps: %lld meals, %lld predator births, %lld starved, "
+                       "%lld fish births, eye on == eye off", w.totalDeathsPredation, w.totalPredatorBirths,
+                       w.totalDeathsStarvation, w.totalBirths);
             fp[k] = ofp::fingerprint(w, /*withActivations*/ false);
         }
         t.expect(fp[0].ctr == fp[1].ctr && fp[0].fish == fp[1].fish && fp[0].food == fp[1].food &&

@@ -400,6 +400,8 @@
   .field.inert .name, .field.inert .ctl { opacity: 0.5; }
   .needs { grid-column: 1 / -1; font-size: 12px; color: var(--ink-3); }
   .needs:empty { display: none; }
+  .pendnote { grid-column: 1 / -1; font-size: 12px; color: var(--beam); }   /* a live value waiting: for a Restart, or for Turbo */
+  .pendnote:empty { display: none; }
 
   .stepper { display: flex; align-items: stretch; height: 40px; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--surface-2); }
   .stepper button { width: 36px; border: 0; background: none; color: var(--ink-2); display: grid; place-items: center; }
@@ -879,11 +881,12 @@
      * the engine, used only with ?mock=1 and never shipped in web/. */
     window.EVO_ASSETS = {
       ocean: "evo_ocean.js", oceanWasm: "evo_ocean.wasm",
-      worker: "ocean_worker.js",
+      worker: "ocean_worker.js", handoff: "ocean_handoff.js",
       mock: "ocean_mock.js",
       three: "vendor/three.bundle.min.js"
     };
   </script>
+  <script src="ocean_handoff.js"></script>
   <script src="ocean_appearance.js"></script>
   <script src="ocean_scene.js"></script>
   <script src="ocean_config.js"></script>

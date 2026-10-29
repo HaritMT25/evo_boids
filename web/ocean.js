@@ -18,12 +18,16 @@
  *     brain (oc_set_capture keeps its senses while a fish is selected)
  *   - Turbo: web/ocean_worker.js steps a copy of the module's memory at full
  *     speed; the copy comes back on Stop, so the run carries on exactly
+ *     (web/ocean_handoff.js: the hand-off, shared with the worker)
  *   - the tour and the first-visit Turbo card (web/guide.js, steps below)
  * The flashlight (scene.setFlashlight) is drawing only: no engine call.
  *
  * Every pointer the module returns is valid until the next oc_sync / oc_init
- * (oc_inspect: until the next step or sync), and memory can grow, so typed
- * arrays are cut fresh from the heap after every call and never cached.
+ * (oc_inspect: until the next step or sync), and memory can grow — in any
+ * export that allocates (oc_summary, oc_families, oc_inspect, oc_wiring, the
+ * name lists, oc_sync itself) — so typed arrays are cut from the heap after
+ * the call that fills them, and a frame's snapshot is cut again (fresh())
+ * after anything that may have grown it.
  *
  * URL: ?seed=42 &pop=300 &depth=240 &w=1920 &h=1080 (1080 x 1920 on a
  *      portrait screen) &cfg={"key":value,...} (SimConfig + OceanConfig keys,
@@ -32,7 +36,10 @@
  *      &colour=family|brain|appearance &guide=0|1 &intro=1 (web/guide.js)
  *      ?mock=1 loads ocean_mock.js from beside the page instead of the engine
  *      (a JS stand-in for page development, not part of web/).
- *      A Restart writes seed / pop / depth / cfg back, so a reload keeps it.
+ *      The link's setup goes to oc_init as it is; one it refuses stops the
+ *      page with the engine's reason (and a link without it).
+ *      A Restart writes seed / pop / depth / w / h / cfg back, so a reload, or
+ *      the link on another screen, is the same world.
  *      A query with only Classic's keys (?view, ?threads, ...) goes to Classic
  *      before this runs: the site's root was Classic (ocean.html's head).
  * Keys: space pause, + / - (or arrows) steps per frame, F follow (the selected
@@ -126,46 +133,28 @@
       if (!simd) return Promise.reject(new Error("this browser has no WebAssembly SIMD, which the simulation needs (Chrome 91+, Firefox 89+ or Safari 16.4+)"));
     }
     var js = abs(MOCK ? A.mock : A.ocean), wasm = abs(A.oceanWasm);
-    moduleUrls = { js: js, wasm: wasm };
+    moduleUrls = { js: js, wasm: wasm, handoff: abs(A.handoff || "ocean_handoff.js") };
     return loadScript(js).then(function () {
       if (typeof createEvoOcean !== "function") throw new Error(js + " loaded but defines no createEvoOcean()");
       return createEvoOcean({ locateFile: function (path) { return path.slice(-5) === ".wasm" ? wasm : path; } });
     });
   }
 
-  var M = null;
-  function heap() { return M.wasmMemory ? M.wasmMemory.buffer : M.HEAPU8.buffer; }
-  function u8() { return new Uint8Array(heap()); }
+  var M = null, HO = window.EvoOceanHandoff;
+  /* The memory as it is now, strings in and out: web/ocean_handoff.js's, which
+   * never read the module's own cached views (a Turbo hand-off grows the
+   * memory from outside, and those stay behind until the module grows it
+   * itself). */
+  function heap() { return HO.buffer(M); }
   function has(fn) { return !!M && typeof M["_" + fn] === "function"; }
-  function withCString(str, fn) {
-    if (!str) return fn(0);
-    var bytes = new TextEncoder().encode(str), ptr = M._malloc(bytes.length + 1);
-    var h = u8(); h.set(bytes, ptr); h[ptr + bytes.length] = 0;
-    try { return fn(ptr); } finally { M._free(ptr); }
-  }
-  function cString(ptr) {
-    if (!ptr) return "";
-    if (M.UTF8ToString) return M.UTF8ToString(ptr);
-    var h = u8(), end = ptr;
-    while (h[end]) end++;
-    return new TextDecoder().decode(h.subarray(ptr, end));
-  }
+  function withCString(str, fn) { return HO.withCString(M, str, fn); }
+  function cString(ptr) { return HO.cString(M, ptr); }
   function lastError() { return M._oc_last_error ? cString(M._oc_last_error()) : "(no oc_last_error)"; }
-  /* Take a whole memory image of this same module (the Turbo hand-off): grow
-   * to its size through the allocator, so the module's own views follow, copy
-   * it in, zero the rest (as fresh pages are). web/ocean_worker.js says why
-   * this carries the run on exactly. */
-  function takeMemory(src) {
-    var need = src.byteLength, have = heap().byteLength;
-    if (have < need) {
-      var p = M._malloc(need - have + 65536);
-      if (p) M._free(p);
-      if (heap().byteLength < need) throw new Error("could not grow the page's memory to " + need + " bytes");
-    }
-    var dst = u8();
-    dst.set(new Uint8Array(src));
-    if (dst.length > need) dst.fill(0, need);
-  }
+  /* Take a whole memory image of this same module (the Turbo hand-off): grown
+   * to its size by exactly the pages missing, copied in, the rest zeroed
+   * (web/ocean_handoff.js take(); web/ocean_worker.js says why this carries
+   * the run on exactly). Throws with this page's memory not overwritten. */
+  function takeMemory(src) { HO.take(M, src, "the page's"); }
 
   var W = 0, H = 0, D = 0, statsLen = 0, HAS_VZ = false, HAS_EYE = false, HAS_APP = false;
   var LIGHT = { on: false, L0: 1, k: 0 };
@@ -191,18 +180,30 @@
   function cfgVal(key) { return Object.prototype.hasOwnProperty.call(runCfg, key) ? runCfg[key] : KEYS[key][0]; }
   /* World size for a (re)start: the native 1920 x 1080, or the same area on
    * its side on a portrait screen (the same food density and crowding, and a
-   * tank that fills a phone), unless ?w= / ?h= fix it. */
+   * tank that fills a phone), unless it is fixed: by ?w= / ?h=, or by a
+   * loaded setup's size. A Restart writes the size into the address, so a
+   * shared link is the same world on a screen the other way up. */
   var URL_W = parseFloat(P.get("w")), URL_H = parseFloat(P.get("h"));
+  function side(v) { return Math.round(Math.max(100, Math.min(20000, v))); }
+  var fixedW = isFinite(URL_W) ? side(URL_W) : null, fixedH = isFinite(URL_H) ? side(URL_H) : null;
   function isPortrait() { return innerHeight > innerWidth * 1.15; }
+  function screenWorld() { return isPortrait() ? [1080, 1920] : [1920, 1080]; }
   function fittedWorld() {
-    var p = isPortrait(), w = p ? 1080 : 1920, h = p ? 1920 : 1080;
-    if (isFinite(URL_W)) w = Math.round(Math.max(100, Math.min(20000, URL_W)));
-    if (isFinite(URL_H)) h = Math.round(Math.max(100, Math.min(20000, URL_H)));
-    return [w, h];
+    var f = screenWorld();
+    return [fixedW !== null ? fixedW : f[0], fixedH !== null ? fixedH : f[1]];
   }
+  /* "Fit the world to this screen": offered when the world has the other
+   * orientation's size (the phone turned, or a link from a screen the other
+   * way up); a size of its own (?w=300&h=300) stays as it is */
   function updateFitButton() {
-    var f = fittedWorld();
-    el("fitbtn").hidden = !M || (f[0] === W && f[1] === H) || (isFinite(URL_W) || isFinite(URL_H));
+    var f = screenWorld();
+    el("fitbtn").hidden = !M || !(W === f[1] && H === f[0]);
+  }
+  function fitToScreen() {
+    if (!M || guardTurbo()) return;
+    var w0 = fixedW, h0 = fixedH;
+    fixedW = fixedH = null;
+    if (!restart()) { fixedW = w0; fixedH = h0; }
   }
   var worldReady = false;
   function initWorld(seed, population, depth, cfg, rawCfg) {
@@ -212,13 +213,48 @@
     if (!ok) return false;
     initArgs = { seed: seed >>> 0, population: population, depth: depth, cfg: cfg };
     runCfg = Object.assign({}, cfg);
+    clearFieldNotes();
     afterNewWorld();
     return true;
+  }
+  /* A setup from outside the sheet (the link's, a setup file's), started as
+   * it is: oc_init sees its values themselves, so a refusal says why, and
+   * only a setup it accepts goes into the sheet, whose fields would round or
+   * drop what they can't hold (0.5 for a count, 2 for an on / off key or a
+   * choice). On a refusal nothing changes: the running world, the sheet.
+   * raw: the cfg as text instead (a ?cfg= that is not JSON). Returns "", or
+   * why not. A switch must be true or false: the engine reads Classic's
+   * switches (toroidal, bodyModel, ...) only as JSON booleans and passes over
+   * anything else, so {"toroidal":1} would run without it under a sheet
+   * showing it on. */
+  function importWorld(seed, population, depth, cfg, raw) {
+    var clean = {}, bad = [];
+    Object.keys(cfg || {}).forEach(function (k) {
+      if (ARGS[k]) return;
+      clean[k] = cfg[k];
+      if (KEYS[k] && typeof KEYS[k][0] === "boolean" && typeof cfg[k] !== "boolean")
+        bad.push(k + " must be true or false (got " + JSON.stringify(cfg[k]) + ")");
+    });
+    if (bad.length) return bad.join("; ");
+    if (!initWorld(seed, population, depth, clean, raw)) return lastError();
+    resetForm();
+    setVal("seed", seed >>> 0); setVal("population", population); setVal("depth", depth);
+    cfgToForm(clean);
+    updateNeeds(); updateTabDots(); setPending(false);
+    var odd = Object.keys(clean).filter(function (k) {
+      if (!KEYS[k]) return false;
+      var a = getVal(k), b = clean[k], bool = typeof KEYS[k][0] === "boolean" || (KEYS[k][1] || {}).bit;
+      return bool ? !!a !== !!b : a !== b;
+    });
+    if (odd.length) console.warn("ocean: the sheet shows " + odd.join(", ") + " differently from the setup it runs");
+    return "";
   }
   /* a new world (oc_init or oc_reset), or one handed back by Turbo */
   function afterNewWorld(fromTurbo) {
     var w0 = W, h0 = H, d0 = D;
     readWorld();
+    M._oc_sync();         /* the last snapshot's views are the old world's: */
+    lastS = snapshot();   /* the new world's now, not at the next frame */
     if (scene && (W !== w0 || H !== h0 || D !== d0)) { scene.setWorld(W, H, D); labelHist(); }
     applyDisplaySwitches();
     estPrev.n = 0;
@@ -346,7 +382,7 @@
     if (typeof def === "boolean" || opt.bit) input.checked = v === true || v === 1;
     else input.value = String(v);
   }
-  function resetForm() { Object.keys(KEYS).forEach(function (k) { setVal(k, KEYS[k][0]); }); extraCfg = {}; }
+  function resetForm() { Object.keys(KEYS).forEach(function (k) { setVal(k, KEYS[k][0]); }); extraCfg = {}; clearFieldNotes(); }
   /* a flat cfg object into the sheet: known keys into their fields, the rest kept aside */
   function cfgToForm(cfg) {
     Object.keys(cfg || {}).forEach(function (k) {
@@ -364,24 +400,85 @@
     Object.keys(extraCfg).forEach(function (k) { if (!(k in cfg)) cfg[k] = extraCfg[k]; });
     return { seed: getVal("seed") >>> 0, population: getVal("population"), depth: getVal("depth"), cfg: cfg };
   }
+  /* ---- live settings ----
+   * A live field shows what the running world uses, or says why not:
+   *   - a value below 0: oc_set_param changes a running world only to 0 or
+   *     more; where a new world takes it (CFG.NEG_ON_RESTART: kBuoy, the
+   *     food rates, energies, ages) it waits for the Restart, marked so; for
+   *     the rest it is outside the setting's range and the field goes back
+   *   - while Turbo is starting or stopping (neither side owns the world for
+   *     that moment) it is held, marked so, and applied as soon as one does
+   *   - one the engine refuses: the field goes back to the running value,
+   *     with the engine's reason. */
+  var heldLive = {};    /* key -> value: waiting for Turbo's hand-off */
+  var inflight = [];    /* [key, value] sent to the Turbo worker, not answered yet */
+  function numOf(key, v) { return typeof v === "boolean" ? (v ? 1 : 0) : v; }
+  function valOf(key, num) { return typeof KEYS[key][0] === "boolean" ? num === 1 : num; }
+  function shown(v) { return typeof v === "boolean" ? (v ? "on" : "off") : String(v); }
+  /* the note under a field (why its value is not the running world's yet) */
+  function fieldNote(key, text) {
+    var row = el("f_" + key);
+    if (!row) return;
+    var n = row.querySelector(".pendnote");
+    if (!n && !text) return;
+    if (!n) { n = document.createElement("span"); n.className = "pendnote"; row.appendChild(n); }
+    n.textContent = text;
+  }
+  function clearFieldNotes() {
+    var notes = document.querySelectorAll(".field .pendnote");
+    for (var i = 0; i < notes.length; i++) notes[i].textContent = "";
+  }
   /* push one live knob into the running world (or the Turbo worker's) */
   function applyLive(key) {
     if (!M) return;
-    var v = getVal(key), num = typeof v === "boolean" ? (v ? 1 : 0) : v;
+    var num = numOf(key, getVal(key));
+    if (num < 0) {
+      if (CFG.NEG_ON_RESTART[key]) {
+        fieldNote(key, "Applies on Restart: a running world takes only 0 or more.");
+        setPending(true);
+        showNote((LABELS[key] || key) + " " + num + " applies on Restart (a running world takes only 0 or more).");
+      } else refuse(key, "it must be 0 or more");
+      return;
+    }
+    if (turboState === "entering" || turboState === "exiting") {
+      heldLive[key] = num;
+      fieldNote(key, turboState === "entering" ? "Applies as soon as Turbo has started." : "Applies as soon as Turbo hands the world back.");
+      return;
+    }
+    fieldNote(key, "");
+    sendLive(key, num);
+  }
+  function sendLive(key, num, quiet) {
     if (turboState === "turbo") {   /* Turbo owns the world: the worker applies it */
+      inflight.push([key, num]);
       turboWorker.postMessage({ cmd: "set", key: key, value: num });
       return;
     }
-    if (turboState !== "live") { showNote("Turbo is starting or stopping: try again in a moment."); return; }
-    if (turboState !== "live" || !has("oc_set_param")) return;
+    if (!has("oc_set_param")) return;
     var ok = withCString(key, function (p) { return M._oc_set_param(p, num); });
-    if (ok) liveApplied(key, v);
-    else showError((LABELS[key] || key) + ": " + lastError());
+    if (ok) liveApplied(key, valOf(key, num), quiet);
+    else refuse(key, lastError());
   }
-  function liveApplied(key, v) {
+  function liveApplied(key, v, quiet) {
     if (v === KEYS[key][0]) delete runCfg[key]; else runCfg[key] = v;
     if (key === "lightEnabled" || key === "L0" || key === "kWater") readLight();
-    showNote((LABELS[key] || key) + " is now " + (typeof v === "boolean" ? (v ? "on" : "off") : v) + " (live)");
+    if (!quiet) showNote((LABELS[key] || key) + " is now " + shown(v) + " (live)");
+  }
+  /* a refused live value: the field goes back to what the world runs with
+   * (keep: a newer edit of it is on its way, so the field stays) */
+  function refuse(key, why, keep) {
+    if (!keep) {
+      setVal(key, cfgVal(key));
+      fieldNote(key, "");
+      updateNeeds(); updateTabDots();
+    }
+    showError((LABELS[key] || key) + ": " + why + (keep ? "" : " (back to " + shown(cfgVal(key)) + ")"));
+  }
+  /* the held edits, now that one side owns the world */
+  function flushHeld(quiet) {
+    var held = heldLive;
+    heldLive = {};
+    Object.keys(held).forEach(function (k) { fieldNote(k, ""); sendLive(k, held[k], quiet); });
   }
 
   var tabsEl = el("tabs"), panelsEl = el("panels"), currentTab = "run";
@@ -563,7 +660,7 @@
   }
   function randomize() {
     if (!M || guardTurbo()) return;
-    var pick = CFG.draw(Math.random, KEYS.population[0], e1Preset());
+    var pick = CFG.draw(Math.random, KEYS.population[0], e1Preset(), fittedWorld());   /* the size it will start at */
     resetForm();
     Object.keys(pick.set).forEach(function (k) { setVal(k, pick.set[k]); });
     setVal("population", pick.population);
@@ -576,12 +673,13 @@
     }
   }
   /* a Restart writes the setup into the address, so a reload or a shared
-   * link is this world */
+   * link is this world: its size too, on a screen of any shape */
   function writeUrl() {
     if (!initArgs) return;
     try {
       var u = new URL(location.href);
       u.searchParams.set("seed", String(initArgs.seed));
+      u.searchParams.set("w", String(W)); u.searchParams.set("h", String(H));
       if (initArgs.population !== KEYS.population[0]) u.searchParams.set("pop", String(initArgs.population)); else u.searchParams.delete("pop");
       if (initArgs.depth !== KEYS.depth[0]) u.searchParams.set("depth", String(initArgs.depth)); else u.searchParams.delete("depth");
       if (Object.keys(initArgs.cfg).length) u.searchParams.set("cfg", JSON.stringify(initArgs.cfg)); else u.searchParams.delete("cfg");
@@ -589,28 +687,55 @@
       history.replaceState(null, "", u);
     } catch (e) { /* file:// or a sandboxed frame */ }
   }
+  /* Save setup: the running world's — its seed, size and settings, with the
+   * live changes that applied since it started. Edits still waiting for a
+   * Restart are not in it (they are not the running world's), and it says so. */
   function saveSetup() {
     if (!initArgs) return;
     var setup = { format: "evo_ocean_setup", version: 1, seed: initArgs.seed, population: initArgs.population,
-                  depth: initArgs.depth, width: W, height: H, config: initArgs.cfg };
+                  depth: initArgs.depth, width: W, height: H, config: Object.assign({}, runCfg) };
     var url = URL.createObjectURL(new Blob([JSON.stringify(setup, null, 2)], { type: "application/json" }));
     var a = document.createElement("a");
     a.href = url; a.download = "evo_ocean_setup_seed" + initArgs.seed + ".json";
     document.body.appendChild(a); a.click(); a.remove();
     URL.revokeObjectURL(url);
-    toast("Saved this world's setup (seed " + initArgs.seed + ").");
+    var waiting = el("restart").classList.contains("pending");
+    toast("Saved this world's setup (seed " + initArgs.seed + ")" +
+          (waiting ? ". Edits waiting for a Restart are not in it: Restart first to include them." : "."));
   }
+  /* Load setup: that world from its start, at its size, exactly as saved
+   * (importWorld: a value the engine refuses is reported, and nothing
+   * changes). A setup without a size takes this screen's. */
   function loadSetup(text) {
     var s;
     try { s = JSON.parse(text); } catch (e) { showError("That file is not JSON: " + e.message); return; }
-    if (!s || s.format !== "evo_ocean_setup" || typeof s.config !== "object") { showError("That file is not an Ocean setup (Save setup makes one)."); return; }
-    resetForm();
-    if (Number.isFinite(s.seed)) setVal("seed", s.seed >>> 0);
-    if (Number.isFinite(s.population)) setVal("population", s.population);
-    if (Number.isFinite(s.depth)) setVal("depth", s.depth);
-    cfgToForm(s.config);
-    updateNeeds(); updateTabDots();
-    if (restart()) showNote("Setup loaded: seed " + getVal("seed") + ", replaying from its start.");
+    if (!s || s.format !== "evo_ocean_setup" || !s.config || typeof s.config !== "object" || Array.isArray(s.config)) {
+      showError("That file is not an Ocean setup (Save setup makes one)."); return;
+    }
+    var bad = [];
+    function arg(name, def, ok) {
+      if (s[name] === undefined || s[name] === null) return def;
+      if (!ok(s[name])) bad.push(name + " " + JSON.stringify(s[name]));
+      return s[name];
+    }
+    function whole(lo, hi) { return function (v) { return Number.isInteger(v) && v >= lo && v <= hi; }; }
+    var seed = arg("seed", KEYS.seed[0], whole(0, 4294967295)), pop = arg("population", KEYS.population[0], whole(0, 100000));
+    var depth = arg("depth", KEYS.depth[0], function (v) { return typeof v === "number" && isFinite(v); });
+    var w = arg("width", null, whole(100, 100000)), h = arg("height", null, whole(100, 100000));
+    if (bad.length) { showError("That setup can't start: " + bad.join(", ") + " (whole numbers in range)."); return; }
+    var w0 = fixedW, h0 = fixedH;
+    if (w !== null) fixedW = w;
+    if (h !== null) fixedH = h;
+    clearError();
+    var why = importWorld(seed, pop, depth, s.config);
+    if (why) {
+      fixedW = w0; fixedH = h0;
+      showError("That setup was refused: " + why);
+      return;
+    }
+    el("randnote").textContent = "";
+    writeUrl();
+    showNote("Setup loaded: seed " + (seed >>> 0) + ", " + W + " × " + H + ", replaying from its start.");
   }
 
   /* ---------------- per-frame data ---------------- */
@@ -619,7 +744,7 @@
     var buf = heap();
     var n = M._oc_creature_count(), fc = M._oc_food_count(), pc = M._oc_predator_count();
     return {
-      n: n, fc: fc, pc: pc, selIdx: -1,
+      buf: buf, n: n, fc: fc, pc: pc, selIdx: -1,
       segs: new Float32Array(buf, M._oc_creature_segments(), n * 12),
       depth: new Float32Array(buf, M._oc_creature_depth(), n),
       ids: new Float64Array(buf, M._oc_creature_ids(), n),
@@ -634,6 +759,18 @@
       app: appearanceView(buf, n),
       curActive: false, curGrid: null, curCols: 0, curRows: 0
     };
+  }
+  /* s again, if anything grew the memory since it was cut (an export that
+   * allocates: the summary, the family lines, the fish card's, the wiring, a
+   * name list, a C string): the same buffers (only oc_sync and a new world
+   * rewrite them, and both cut a new snapshot), on the live memory */
+  function fresh(s) {
+    if (!s || s.buf === heap()) return s;   /* (the appearance rows: a view of this sync's too) */
+    var t = snapshot();
+    t.selIdx = s.selIdx;
+    if (!HAS_VZ) t.vz = s.vz;   /* the estimate lives in JS */
+    if (lastS === s) lastS = t;
+    return t;
   }
   /* The appearance genome (oc_creature_appearance: 63 floats a fish, COSMETIC),
    * when this module exports it in a layout and laws web/ocean_appearance.js
@@ -726,7 +863,7 @@
   }
   /* F: follow the selected fish; again (or with none): a random one */
   function follow() {
-    var s = lastS;
+    var s = fresh(lastS);
     if (!s || !s.n || turboState !== "live") return;
     var idx = !scene.following() ? indexOfId(s, selectedId) : -1;
     if (idx < 0) idx = randomFish(s, selectedId);
@@ -851,8 +988,9 @@
     if (!dirtyHud && now - hudT < 500) return;
     dirtyHud = false; hudT = now;
     if (has("oc_summary") && (!summary || now - summaryT > 450)) {
-      summary = Array.prototype.slice.call(new Float64Array(heap(), M._oc_summary(), M._oc_summary_len()));
+      summary = HO.f64(M, M._oc_summary(), M._oc_summary_len());   /* it allocates: the views after it */
       summaryT = now;
+      s = fresh(s);
     }
     var st = s.stats, g = function (k) { return STATS[k] < st.length ? st[STATS[k]] : NaN; };
     var frame = g("frame");
@@ -980,8 +1118,10 @@
   }
   /* oc_inspect(idx) right after the sync: its numbers, then the card */
   function inspect(idx) {
-    if (!has("oc_inspect") || !M._oc_inspect(idx)) return null;
-    var buf = heap(), sh = brainShape(), nc = M._oc_inspect_conn_count();
+    if (!has("oc_inspect")) return null;
+    var sh = brainShape();   /* first: the name lists allocate (once) */
+    if (!M._oc_inspect(idx)) return null;
+    var buf = heap(), nc = M._oc_inspect_conn_count();   /* after oc_inspect, which allocates */
     return {
       info: new Float64Array(buf, M._oc_inspect_info(), M._oc_inspect_len()),
       sensors: new Float32Array(buf, M._oc_inspect_sensors(), sh.nS),
@@ -992,7 +1132,8 @@
   }
   function updateCard(s) {
     var idx = s.selIdx, f = idx >= 0 && turboState === "live" ? inspect(idx) : null;
-    if (!f) { hideCard(); return; }
+    if (!f) { hideCard(); return s; }
+    s = fresh(s);   /* oc_inspect may have grown the memory */
     if (cardEl.hidden) showCard();
     var p = scene.project(s, idx);
     if (p) placeCard(p.x, p.y);
@@ -1020,6 +1161,7 @@
     cardText("ipitchv", Math.abs(deg) < 0.5 ? "level" : Math.abs(deg).toFixed(0) + "° " + (deg > 0 ? "down" : "up"));
     setBar("ipitch", 0.5 + 0.5 * Math.max(-1, Math.min(1, info[10] / (pitchMax || 0.5))), 0.5);
     if (cardExpanded) drawBrain(f);
+    return s;
   }
   function brainColor(v, a) {
     var m = Math.min(1, Math.abs(v));
@@ -1135,19 +1277,19 @@
   /* ---------------- the dashboards' recorder ---------------- */
   var sampleBucket = -1;
   function dash() { return window.EvoOceanDash || null; }
+  /* one sample of this frame's synced world: the row the Turbo worker records
+   * too (web/ocean_handoff.js row(): the stats copied before the summary and
+   * the family lines allocate) */
   function takeSample(st) {
     if (!dash() || !has("oc_summary")) return;
     var every = dash().every(), b = Math.floor(st[1] / every);
     if (b === sampleBucket) return;
     sampleBucket = b;
-    var su = Array.prototype.slice.call(new Float64Array(heap(), M._oc_summary(), M._oc_summary_len()));
-    var k = M._oc_families(dash().famK);
-    var fam = Array.prototype.slice.call(new Float64Array(heap(), M._oc_families_data(), 2 * k));
-    dash().push({ st: Array.prototype.slice.call(st), su: su, fam: fam });
+    dash().push(HO.row(M, dash().famK, statsLen));
   }
   function wiringNow() {
     if (!M || turboState !== "live" || !has("oc_wiring")) return null;
-    var n = M._oc_wiring(), sh = brainShape();
+    var sh = brainShape(), n = M._oc_wiring();   /* both allocate: the view after them */
     var data = new Float32Array(heap(), M._oc_wiring_data(), 2 * sh.nS * sh.nA);
     return { at: performance.now(), n: n, senses: sh.nS, actions: sh.nA,
              path: Array.prototype.slice.call(data, 0, sh.nS * sh.nA), direct: Array.prototype.slice.call(data, sh.nS * sh.nA),
@@ -1181,38 +1323,92 @@
     el("ts-pop").textContent = t ? Math.round(t.pop).toLocaleString() : "–";
     el("ts-food").textContent = t ? Math.round(t.food).toLocaleString() : "–";
   }
+  var turboEntryCfg = null;   /* runCfg when Turbo took the world */
   function onTurboMessage(e) {
     var msg = e.data || {};
     if (msg.type === "stats") {
       turboStats = msg;
-      if (turboState === "entering") { turboState = "turbo"; updateLocks(); }
+      if (turboState === "entering") { turboState = "turbo"; updateLocks(); flushHeld(); }
       paintTurbo();
     } else if (msg.type === "rec") {
       if (dash()) dash().ingest(msg.rows);
     } else if (msg.type === "set") {
-      if (msg.ok) liveApplied(msg.key, typeof KEYS[msg.key][0] === "boolean" ? msg.value === 1 : msg.value);
-      else showError((LABELS[msg.key] || msg.key) + ": " + msg.error);
+      for (var i = 0; i < inflight.length; i++) if (inflight[i][0] === msg.key) { inflight.splice(i, 1); break; }
+      if (msg.ok) liveApplied(msg.key, valOf(msg.key, msg.value));
+      else refuse(msg.key, msg.error, inflight.some(function (f) { return f[0] === msg.key; }));
     } else if (msg.type === "memory") {
       if (turboState !== "exiting") return;
       try { takeMemory(msg.mem); }
-      catch (err) { showError("Turbo could not hand the world back: " + (err.message || err)); turboState = "live"; updateLocks(); return; }
-      turboState = "live";
-      afterNewWorld(true);
-      sampleBucket = Math.floor(M._oc_stats ? frameNow() / (dash() ? dash().every() : 60) : -1);
-      setPaused(false);
-      updateLocks();
+      catch (err) {
+        /* the worker still has the world: it carries on, nothing is lost */
+        turboWorker.postMessage({ cmd: "resume" });
+        turboState = "turbo";
+        updateLocks();
+        showError("Turbo could not hand the world back (" + (err.message || err) + "), so it keeps running. Stop it again to retry.");
+        flushHeld();
+        return;
+      }
+      turboBack();
       showNote("Turbo ran " + (msg.totalSteps || 0).toLocaleString() + " steps.");
     } else if (msg.type === "error") {
-      showError("Turbo stopped: " + (msg.message || "unknown error"));
-      turboState = "live";   /* this page still holds its last state: nothing lost */
-      updateLocks();
+      turboFailed("Turbo stopped: " + (msg.message || "unknown error"), msg.mem);
     }
   }
-  function frameNow() { M._oc_sync(); return new Float64Array(heap(), M._oc_stats(), statsLen)[1]; }
+  /* the page owns the world again (its memory: the worker's, or its own) */
+  function turboBack(quiet) {
+    turboState = "live";
+    inflight.forEach(function (f) { heldLive[f[0]] = f[1]; });   /* never answered: never applied */
+    inflight = [];
+    afterNewWorld(true);
+    sampleBucket = Math.floor(M._oc_stats ? frameNow() / (dash() ? dash().every() : 60) : -1);
+    setPaused(false);
+    updateLocks();
+    flushHeld(quiet);
+  }
+  /* The worker stopped on an error, or died. With its memory (the world was
+   * whole), the run goes on from where Turbo got it, as after a Stop.
+   * Without, from where Turbo took it: this page's own copy, untouched
+   * since; Turbo's steps are lost, and the live changes that applied in the
+   * worker are applied again here. Either way the worker is done: a fresh
+   * one runs the next Turbo. */
+  function turboFailed(why, mem) {
+    var was = turboState;
+    dropWorker();
+    if (was === "live") return;
+    var back = false;
+    if (mem && was !== "entering") {
+      try { takeMemory(mem); back = true; } catch (err) { why += "; the world it had could not come back (" + (err.message || err) + ")"; }
+    }
+    var redo = [];
+    if (!back && was !== "entering" && turboEntryCfg) {
+      var now = runCfg, before = turboEntryCfg;
+      Object.keys(Object.assign({}, now, before)).forEach(function (k) {
+        var a = Object.prototype.hasOwnProperty.call(now, k) ? now[k] : KEYS[k] && KEYS[k][0];
+        var b = Object.prototype.hasOwnProperty.call(before, k) ? before[k] : KEYS[k] && KEYS[k][0];
+        if (LIVE[k] && a !== b && !(k in heldLive)) { heldLive[k] = numOf(k, a); redo.push(LABELS[k] || k); }
+      });
+      runCfg = Object.assign({}, before);
+    }
+    turboBack(true);
+    if (!back && was !== "entering" && dash() && dash().rewind) dash().rewind(frameNow());
+    showError(why + (back ? ". The world is back where Turbo got it." :
+              was === "entering" ? "." : ". Its steps are lost: the world is back where Turbo took it" +
+              (redo.length ? ", with " + redo.join(", ") + " applied again." : ".")));
+  }
+  function dropWorker() {
+    if (!turboWorker) return;
+    turboWorker.onmessage = null;
+    turboWorker.onerror = null;
+    turboWorker.terminate();
+    turboWorker = null;
+  }
+  function frameNow() { M._oc_sync(); return HO.f64(M, M._oc_stats(), statsLen)[1]; }
   function enterTurbo() {
     if (turboState !== "live" || !M || MOCK) { if (MOCK) showNote("Turbo needs the real engine."); return; }
     turboState = "entering";
     turboStats = null;
+    turboEntryCfg = Object.assign({}, runCfg);
+    inflight = [];
     select(null);
     unfollow();
     updateLocks();
@@ -1220,13 +1416,12 @@
       turboWorker = new Worker(A.worker);
       turboWorker.onmessage = onTurboMessage;
       turboWorker.onerror = function (ev) {
-        showError("The Turbo worker failed: " + (ev.message || "could not load ocean_worker.js"));
-        turboState = "live";
-        updateLocks();
+        if (ev && ev.preventDefault) ev.preventDefault();
+        turboFailed("The Turbo worker failed: " + (ev && ev.message || "could not load ocean_worker.js"), null);
       };
     }
     var mem = heap().slice(0);
-    turboWorker.postMessage({ cmd: "start", js: moduleUrls.js, wasm: moduleUrls.wasm, mem: mem,
+    turboWorker.postMessage({ cmd: "start", js: moduleUrls.js, wasm: moduleUrls.wasm, handoff: moduleUrls.handoff, mem: mem,
                               recEvery: dash() ? dash().every() : 60, famK: dash() ? dash().famK : 8 }, [mem]);
   }
   function exitTurbo() {
@@ -1271,7 +1466,7 @@
     lastSteps = steps;
     M._oc_sync();
     var s = snapshot();
-    if (turboState === "live") takeSample(s.stats);
+    if (turboState === "live") { takeSample(s.stats); s = fresh(s); }
     if (!HAS_VZ) s.vz = vzEstimate(s, steps > 0);
     var ax = { f: 0, r: 0, u: 0 };
     for (var key in heldMoveKeys) ax[heldMoveKeys[key][0]] += heldMoveKeys[key][1];
@@ -1285,7 +1480,7 @@
     s.selIdx = idx;
     lastS = s;
     if (!(dash() && dash().isOpen())) scene.render(s, { animT: animT, dtSim: steps * DT, selIdx: idx });
-    updateCard(s);
+    s = updateCard(s);
     fpsFrames++;
     if (now - fpsT >= 1000) { fps = Math.round(fpsFrames * 1000 / (now - fpsT)); fpsFrames = 0; fpsT = now; dirtyHud = true; govern(now); }
     updateHud(s, now);
@@ -1371,11 +1566,12 @@
       if (!tap || e.pointerId !== tap.id) return;
       var moved = Math.hypot(e.clientX - tap.x, e.clientY - tap.y), held = performance.now() - tap.t;
       tap = null;
-      if (moved > 8 || held > 600 || !lastS || turboState !== "live") return;
-      var best = scene.pick(lastS, e.clientX, e.clientY, e.pointerType === "mouse" ? 18 : 30);
+      var s = fresh(lastS);
+      if (moved > 8 || held > 600 || !s || turboState !== "live") return;
+      var best = scene.pick(s, e.clientX, e.clientY, e.pointerType === "mouse" ? 18 : 30);
       if (best < 0 && scene.following()) return;   /* a stray tap doesn't drop a follow */
-      if (best >= 0 && scene.following() && lastS.ids[best] !== selectedId) unfollow();
-      select(best >= 0 ? lastS.ids[best] : null);
+      if (best >= 0 && scene.following() && s.ids[best] !== selectedId) unfollow();
+      select(best >= 0 ? s.ids[best] : null);
     });
     var fitTimer = 0;
     window.addEventListener("resize", function () {
@@ -1510,7 +1706,7 @@
   btn("replay", replay);
   btn("lightbtn", toggleLight);
   btn("viewbtn", function () { if (scene) { wantFollow = false; scene.resetView(true); } });
-  btn("fitbtn", restart);
+  btn("fitbtn", fitToScreen);
   btn("followbtn", function () {
     if (!scene) return;
     if (scene.following()) unfollow();
@@ -1694,11 +1890,12 @@
     setDrawer: setDrawer,
     setSheetTab: setSheetTab,
     inspectSomeFish: function () {
-      if (!M || turboState !== "live" || !lastS || !lastS.n) return false;
+      var s = fresh(lastS);
+      if (!M || turboState !== "live" || !s || !s.n) return false;
       if (selectedId !== null) return true;
-      var best = scene.pick(lastS, innerWidth * 0.4, innerHeight * 0.45, 4000);
+      var best = scene.pick(s, innerWidth * 0.4, innerHeight * 0.45, 4000);
       if (best < 0) best = 0;
-      select(guideFish = lastS.ids[best]);
+      select(guideFish = s.ids[best]);
       return true;
     },
     releaseFish: function () {
@@ -1710,6 +1907,7 @@
 
   /* ---------------- start ---------------- */
   buildHist();
+  var linkRefused = false;   /* oc_init refused the link's ?cfg= / ?e1=1 */
   splashSay(MOCK ? "Starting the ocean (mock engine)…" : "Starting the ocean…");
   var sceneReady = window.EvoOceanScene ? EvoOceanScene.load() : Promise.reject(new Error("ocean_scene.js missing"));
   Promise.all([loadModule().catch(function (e) {
@@ -1721,6 +1919,7 @@
     var missing = REQUIRED.filter(function (f) { return typeof M["_" + f] !== "function"; });
     if (missing.length) throw new Error("the module lacks exports: " + missing.join(", "));
     if (!M.wasmMemory && !M.HEAPU8) throw new Error("the module exposes neither wasmMemory nor HEAPU8");
+    if (!HO) throw new Error("ocean_handoff.js did not load");
     if (!M._malloc) throw new Error("the module does not export _malloc/_free");
     HAS_VZ = has("oc_creature_vz");
     /* the appearance genome: the exports, a layout and laws this page renders (web/ocean_appearance.js) */
@@ -1733,21 +1932,22 @@
       var i = el("o_" + k); if (i) i.disabled = true;
       var row = el("f_" + k); if (row) row.querySelectorAll(".stepper button").forEach(function (b) { b.disabled = true; });
     });
-    /* the URL's world into the sheet: ?seed / ?pop / ?depth, ?cfg (JSON; one
-     * that is not goes to oc_init as it is, so it says why), ?e1=1 under it */
+    /* the URL's world: ?seed / ?pop / ?depth, ?cfg (JSON; one that is not
+     * goes to oc_init as it is, so it says why), ?e1=1 under it. The setup
+     * goes to oc_init as it is (importWorld), and into the sheet only once
+     * accepted: a value the sheet would round or drop is refused with the
+     * engine's reason, not quietly changed. */
     var rawCfg = P.get("cfg") || "", userCfg = {}, badCfg = false;
     if (rawCfg) { try { userCfg = JSON.parse(rawCfg); if (!userCfg || typeof userCfg !== "object" || Array.isArray(userCfg)) badCfg = true; } catch (e) { badCfg = true; } }
     if (E1 && !has("oc_e1_preset")) throw new Error("?e1=1 needs oc_e1_preset: rebuild web/evo_ocean (wasm/build_ocean.sh)");
     var cfg0 = badCfg ? {} : Object.assign({}, E1 ? e1Preset() : {}, userCfg);
     var num = function (key, def, lo, hi) { var v = parseFloat(P.get(key)); return isFinite(v) ? Math.max(lo, Math.min(hi, v)) : def; };
-    setVal("seed", num("seed", KEYS.seed[0], 0, 4294967295) >>> 0);
-    setVal("population", Math.round(num("pop", KEYS.population[0], 0, 100000)));
-    setVal("depth", num("depth", KEYS.depth[0], 10, 100000));
-    cfgToForm(cfg0);
-    updateNeeds(); updateTabDots();
-    var f = readForm();
-    if (!initWorld(f.seed, f.population, f.depth, f.cfg, badCfg ? rawCfg : undefined))
-      throw new Error("oc_init failed: " + lastError());
+    var refused = importWorld(num("seed", KEYS.seed[0], 0, 4294967295) >>> 0, Math.round(num("pop", KEYS.population[0], 0, 100000)),
+                              num("depth", KEYS.depth[0], 10, 100000), cfg0, badCfg ? rawCfg : undefined);
+    if (refused) {
+      linkRefused = !!(rawCfg || E1);
+      throw new Error("This link's settings were refused: " + refused);
+    }
     scene = EvoOceanScene.create(canvas, {
       tankDepth: D,
       coarse: coarseMQ.matches,
@@ -1776,7 +1976,7 @@
     window.EvoOcean = {
       module: M, scene: scene,
       steepest: function (sinking) {
-        var s = lastS, best = -1, bv = 0;
+        var s = fresh(lastS), best = -1, bv = 0;
         if (!s || !s.vz) return null;
         for (var i = 0; i < s.n; i++) { var v = sinking ? s.vz[i] : Math.abs(s.vz[i]); if (v > bv) { bv = v; best = i; } }
         return best < 0 ? null : { idx: best, id: s.ids[best], vz: s.vz[best], x: s.segs[12 * best], y: s.segs[12 * best + 1],
@@ -1789,17 +1989,17 @@
         readLight();
         return !!ok;
       },
-      select: function (idx) { if (lastS && idx >= 0 && idx < lastS.n) select(lastS.ids[idx]); },
+      select: function (idx) { var s = fresh(lastS); if (s && idx >= 0 && idx < s.n) select(s.ids[idx]); },
       /* index of the deepest fish right now (-1 with none) */
       deepest: function () {
-        var s = lastS, best = -1;
+        var s = fresh(lastS), best = -1;
         if (s) for (var i = 0; i < s.n; i++) if (best < 0 || s.depth[i] > s.depth[best]) best = i;
         return best;
       },
       follow: follow,
       turbo: function () { return turboState; },
       state: function () {
-        var s = lastS;
+        var s = fresh(lastS);
         if (!s) return null;
         var lo = Infinity, hi = -Infinity;
         for (var i = 0; i < s.n; i++) { lo = Math.min(lo, s.depth[i]); hi = Math.max(hi, s.depth[i]); }
@@ -1808,6 +2008,7 @@
                  runCfg: Object.assign({}, runCfg), light: LIGHT, flashlight: scene.flashlight(), flashlightLevel: scene.flashlightLevel(),
                  stepMs: stepMs, fps: fps, following: scene.following(), selectedId: selectedId, selIdx: s.selIdx,
                  turbo: turboState, colourBrain: colourBrain, frame: s.stats[1],
+                 held: Object.assign({}, heldLive), fixedSize: [fixedW, fixedH],
                  stats: Array.prototype.slice.call(s.stats), depthMin: s.n ? lo : 0, depthMax: s.n ? hi : 0,
                  dashRows: dash() ? dash()._rows().length : 0 };
       }
@@ -1822,6 +2023,13 @@
   }).catch(function (e) {
     var why = String(e && e.message || e);
     splashSay("The 3-D Ocean could not start.\n" + why, true);
+    if (linkRefused) {   /* the same link without its settings */
+      var u = new URL(location.href), a = document.createElement("a");
+      u.searchParams.delete("cfg"); u.searchParams.delete("e1");
+      a.href = u.href; a.id = "splashplain"; a.className = "btn";
+      a.textContent = "Open it with the default settings";
+      el("splashstate").parentNode.appendChild(a);
+    }
     console.error("ocean: " + why);
   });
 })();

@@ -51,7 +51,7 @@
     lightEnabled: [false], L0: [1, { step: 0.1, min: 0, max: 100 }], kWater: [0.006, { step: 0.001, min: 0, max: 1 }],
     sizeDrift: [false], sizeFight: [false], mouthGate: [false], kMouth: [2, { step: 0.1, min: 0.01 }],
     steerFrame: [0, { options: ["World x / y (Classic's)", "The fish's own frame"] }],
-    eye: [0, { bit: true }], eyeOnly: [0, { bit: true }], eyeCode: [0, { step: 1, min: 0, max: 7, int: true }],
+    eye: [0, { bit: true }], eyeOnly: [0, { bit: true }], eyeCode: [0, { step: 1, min: 0, max: 31, int: true }],
     appearance: [3, { options: ["Off", "Skin patterns only", "Body shapes only", "Patterns and body shapes"] }],
     patternMutation: [0.025, { step: 0.005, min: 0, max: 0.25 }], patternPhaseMutation: [0.03, { step: 0.005, min: 0, max: 0.25 }],
     patternNovelProbability: [0.05, { step: 0.01, min: 0, max: 0.25 }],
@@ -69,6 +69,16 @@
    "mutationMultiplier", "minSpeed", "maxSpeed", "predatorMinPopulation", "predatorMaxPopulation",
    "predatorTraitMutation", "patternMutation", "patternPhaseMutation", "patternNovelProbability",
    "morphologyMutation", "morphologyNovelProbability"].forEach(function (k) { LIVE[k] = 1; });
+  /* oc_set_param changes a running world only to values >= 0, while a new
+   * world (oc_init) takes these live keys below 0 too: kBuoy in [-1000, 1000],
+   * foodSpawnBase / foodSpawnAmp in [-1e4, 1e4], the energies and ages any
+   * finite value (ocean_config.hpp oceanConfigError / oceanSimConfigError,
+   * wasm/ocean_wasm.cpp configOk). The sheet keeps such a value for the next
+   * Restart, marked so; a negative value for any other live key is outside its
+   * range and the field goes back. */
+  var NEG_ON_RESTART = {};
+  ["kBuoy", "foodSpawnBase", "foodSpawnAmp", "foodEnergy", "metabolicRate", "maxAge", "reproEnergy",
+   "newbornEnergy"].forEach(function (k) { NEG_ON_RESTART[k] = 1; });
 
   /* The sheet: tabs, then groups of keys. "run" is static HTML in ocean.html. */
   var TABS = [
@@ -151,7 +161,7 @@
     predatorMaxAge: "0 = until it starves", predatorMinPopulation: "0 = off; put back below this",
     predatorMaxPopulation: "0 = none", currentDrift: "0 = a still pattern", fastTanh: "changes the numbers",
     foodLife: "0 = until eaten", depth: "0 = surface", kBuoy: "per second", waveSpeed: "0 = still",
-    cHold: "× metabolism when scaled", cPress: "× metabolism when scaled", eyeCode: "bits 1, 2, 4",
+    cHold: "× metabolism when scaled", cPress: "× metabolism when scaled", eyeCode: "bits 1, 2, 4; cloaks 8, 16",
     patternMutation: "± per gene", morphologyMutation: "± per gene", patternPhaseMutation: "± per birth",
     patternNovelProbability: "chance per trait group", morphologyNovelProbability: "chance per trait group"
   };
@@ -234,7 +244,7 @@
     predatorMaxPopulation: { d: "Predator cap: a well-fed hunter doesn't bud while this many are alive (economy on; 0 = none). Applies live.", t: "try: 15 with the default 3 s digesting time" },
     predatorInheritance: { d: "Each bud inherits its parent's speed and budding threshold (×0.5 to ×2) with a small mutation, so hunters evolve.", t: "try: on with a swimming cost, a predator lifespan and a cap" },
     predatorTraitMutation: { d: "How far a bud's traits can stray from its parent's, per trait per bud. Applies live.", t: "try: 0.1 (the default)" },
-    kBuoy: { d: "How hard a fish is pulled back toward its neutral depth, per second. Leaving neutral depth costs steering effort. Applies live (0 or more).", t: "try: 1 (the default, tuned); 0.5 lets fish wander in depth, 3 pins them" },
+    kBuoy: { d: "How hard a fish is pulled back toward its neutral depth, per second. Leaving neutral depth costs steering effort. Applies live from 0 up; a negative pull (it pushes a fish away from its neutral depth) applies on Restart.", t: "try: 1 (the default, tuned); 0.5 lets fish wander in depth, 3 pins them" },
     pitchMax: { d: "The steepest a fish can climb or dive: its vertical speed is at most this × its speed. Applies live.", t: "try: 0.5 (about 27°); 1 = 45°" },
     vDrag: { d: "Vertical drag, per second: how fast a fish's climb or dive dies away when it stops steering in depth. Applies live.", t: "try: 2 (the default); 0.5 glides, 6 stops short" },
     wallBand: { d: "Within this distance of the surface or the floor, a soft push turns a fish back into the water. Applies live.", t: "try: 12 (the default); 0 = hard walls" },
@@ -266,7 +276,7 @@
     steerFrame: { d: "Which way STEER_X / STEER_Y push: in world x / y (Classic's, and the food senses' frame), or in the fish's own frame (STEER_X turns it right or left, STEER_Y along its heading), so a sense in its own frame can turn it toward what it senses. Fast-swims-straight already turns by STEER_X and ignores this. Applies live.", t: "try: the fish's own frame, for the 3-D senses" },
     eye: { d: "The compound eye: six sectors around the fish (ahead, behind, left, right, up, down), each reporting the nearest thing in it by nearness, apparent size and contrast. Only in the eye build of the module. Applies live.", t: "try: on in the eye build" },
     eyeOnly: { d: "Turn off the labelled senses the eye replaces (food direction, neighbours, the predator bearing, ...): the fish see only through the eye (or, with it off, nothing outside their own body). Eye build only. Applies live.", t: "try: on with the eye, to see what evolves from sight alone" },
-    eyeCode: { d: "The eye's encoding, a sum of bits: 1 faded contrast, 2 opponent pairs (left + right and right − left, ...), 4 every object in a sector instead of the nearest. Eye build only. Applies live.", t: "try: 0, then 2" },
+    eyeCode: { d: "The eye's encoding, a sum of bits (0 to 31): 1 faded contrast, 2 opponent pairs (left + right and right − left, ...), 4 every object in a sector instead of the nearest; and two cloaks: 8 the eye ignores other fish (it still sees predators), 16 the eye ignores food (the labelled senses still see both). Eye build only. Applies live.", t: "try: 0, then 2; 16 to see whether food-finding needs the eye" },
     governor: { d: "When frames take too long: first run fewer steps per frame, then draw the tank with less detail. Never changes the simulation itself.", t: "try: on; off to see the uncapped run (it may stutter)" },
     colourBrain: { d: "Family: each family line (every fish descended from the same starting fish) has its own colour, the one it has in the dashboards. Brain: the colour comes from the genome's wiring, so similar brains look alike. Appearance: each fish's own skin pattern and body shape, inherited from its two parents with a little mutation; it is only looks: nothing in the simulation reads it.", t: "try: family to follow lines, brain to see what their brains converged on, appearance to watch patterns pass down" },
     followLight: { d: "While you follow a fish (F), a flashlight shows it and its surroundings in clear light: true colours, no depth fade, no water tint. The dock's flashlight button (L) turns it on anywhere. Drawing only: the fish never see it.", t: "try: on (the default)" }
@@ -332,11 +342,30 @@
   };
   var PREDATOR_SPEED = 110;
   function round(v, step) { return +(Math.round(v / step) * step).toFixed(6); }
+  /* Wrap-around senses need every radius under half the world's smaller side
+   * (src/ocean/ocean_world.hpp radiusError: the grid's wrapped query), the
+   * fish's long probe (30) among them. */
+  var TORUS_RADII = ["perceptionRadius", "interactRadius", "pickupRadius", "predatorPerception", "predatorCaptureRadius"];
+  var LONG_PROBE_RADIUS = 30;
+  function fitTorus(set, labels, side) {
+    var lim = side / 2;   /* a radius r fits when 2r < side */
+    if (!(LONG_PROBE_RADIUS < lim)) {   /* not even the probe: walls */
+      delete set.toroidal;
+      labels.splice(labels.indexOf("wrap-around senses"), 1);
+      return;
+    }
+    var cap = Math.ceil(lim) - 1, cut = [];
+    TORUS_RADII.forEach(function (k) {
+      if ((k in set ? set[k] : KEYS[k][0]) >= lim) { set[k] = cap; cut.push(LABELS[k].toLowerCase()); }
+    });
+    if (cut.length) labels.push(cut.join(", ") + " cut to " + cap + " to fit the wrap-around");
+  }
 
-  /* rand: () => [0, 1); e1: the E1 preset as an object.
+  /* rand: () => [0, 1); e1: the E1 preset as an object; size: [width,
+   * height] of the world it will start (radii are kept to what it allows).
    * -> { population, set: {key: value}, labels: [...] }; every key left out
    * stays at its default. */
-  function draw(rand, basePop, e1) {
+  function draw(rand, basePop, e1, size) {
     function chance(p) { return rand() < p; }
     function pick(a) { return a[Math.floor(rand() * a.length)]; }
     function range(key) { var r = RANGES[key]; return round(r[0] + (r[1] - r[0]) * rand(), r[2]); }
@@ -439,9 +468,10 @@
       if (chance(CHANCE.grace)) set.reproGracePeriod = 60;
       labels.push("picky partners (match gate " + set.reproMaxDistance + ")");
     }
+    if (set.toroidal && size) fitTorus(set, labels, Math.min(size[0], size[1]));
     return { population: population, set: set, labels: labels };
   }
 
-  root.EvoOceanConfig = { KEYS: KEYS, LIVE: LIVE, TABS: TABS, LABELS: LABELS, HINTS: HINTS, BTN_STEP: BTN_STEP,
-                          TIPS: TIPS, RANGES: RANGES, CHANCE: CHANCE, draw: draw };
+  root.EvoOceanConfig = { KEYS: KEYS, LIVE: LIVE, NEG_ON_RESTART: NEG_ON_RESTART, TABS: TABS, LABELS: LABELS, HINTS: HINTS,
+                          BTN_STEP: BTN_STEP, TIPS: TIPS, RANGES: RANGES, CHANCE: CHANCE, draw: draw };
 })(typeof window !== "undefined" ? window : globalThis);

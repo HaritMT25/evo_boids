@@ -3487,6 +3487,7 @@ void testShimBools() {
         {"deepCurrent", &OceanConfig::deepCurrent}, {"lightEnabled", &OceanConfig::lightEnabled},
         {"depthCostScaled", &OceanConfig::depthCostScaled}, {"sizeDrift", &OceanConfig::sizeDrift},
         {"sizeFight", &OceanConfig::sizeFight}, {"mouthGate", &OceanConfig::mouthGate},
+        {"walls", &OceanConfig::walls},
     };
     t.expect(sizeof sims / sizeof sims[0] == sizeof kSimConfigBoolKeys / sizeof kSimConfigBoolKeys[0] &&
                  sizeof oceans / sizeof oceans[0] == sizeof kOceanBoolKeys / sizeof kOceanBoolKeys[0],
@@ -4756,6 +4757,10 @@ void testFlowLanes() {
 
 #include "ocean_appearance_tests.hpp"
 
+namespace ot {
+#include "ocean_walls_tests.hpp"   // the glass walls (uses this file's helpers)
+}  // namespace ot
+
 int main(int argc, char** argv) {
 #ifndef OCEAN_TESTS_NO_SHIM
     if (argc > 1 && std::strcmp(argv[1], "--accepts") == 0) return ot::acceptsMain(argc, argv);
@@ -4839,6 +4844,16 @@ int main(int argc, char** argv) {
 #ifndef OCEAN_TESTS_NO_SHIM
     ot::testAppearanceShim();
 #endif
+    // the glass walls: tests/ocean_walls_tests.hpp
+#ifndef OCEAN_TESTS_NO_SHIM
+    ot::testWallsConfig();
+#endif
+    ot::testWallFlow();
+    ot::testWallContainment();
+    ot::testWallPlacement();
+    ot::testWallTransport();
+    ot::testWallSensing();
+    ot::testWallDraws();
     std::printf("OCEAN TESTS: %d passed, %d failed\n", ot::g_passed, ot::g_failed);
     return ot::g_failed ? 1 : 0;
 }

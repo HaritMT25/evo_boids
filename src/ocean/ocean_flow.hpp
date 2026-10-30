@@ -238,7 +238,193 @@ struct Eddy {
     float signScale = 0.0f;       // sign · strength / core · e^{1/2}, as velocityAt forms it
 };
 
+// ============================================================================
+// Glass walls (OceanConfig::walls): the wall-compatible flow's tables. Only
+// OceanWorld's wall evaluators read anything below; the periodic tables above
+// are untouched.
+//
+// Eddies: the streamfunction of one vortex, psi = a c² G(u), u = r² / 2c²,
+// G(u) = −∫_u^16 g(s) ds with g the radial table's own factor (radial above).
+// g is linear on each table cell, so G is its exact integral there (a
+// quadratic): dG/du = g in every cell, and (−∂y psi, ∂x psi) is the vortex's
+// velocity a g(u) (−dy, dx) exactly as the table gives it. The node values
+// are accumulated from the cutoff down in double. G = 0 (and g = 0) from
+// u = 16 on: C¹ there.
+// ============================================================================
+struct RadialIntTable {
+    float G[kRadialCells + 1];
+    RadialIntTable() {
+        const float* E = radialTable().E;
+        const double Ec = (double)E[kRadialCells];
+        double acc = 0.0;   // G(u_j) = −Σ_{k >= j} ∫ over cell k
+        G[kRadialCells] = 0.0f;
+        for (int j = kRadialCells - 1; j >= 0; --j) {
+            acc -= (0.5 * ((double)E[j] + (double)E[j + 1]) - Ec) / (double)kRadialPerUnit;
+            G[j] = (float)acc;
+        }
+    }
+};
+inline const RadialIntTable& radialIntTable() {
+    static const RadialIntTable t;
+    return t;
+}
+// g(u) and G(u) for 0 <= u < 16; false (both 0: no contribution) otherwise.
+// g is radial()'s value, bit for bit.
+inline bool radialPsi(const float* E, const float* G, float u, float& g, float& Gu) {
+    if (!(u >= 0.0f && u < kRadialCut)) return false;
+    const float s = u * kRadialPerUnit;
+    const int i = (int)s;
+    const float t = s - (float)i;
+    const float de = E[i + 1] - E[i];
+    g = (E[i] + t * de) - E[kRadialCells];
+    Gu = G[i] + (t * ((E[i] - E[kRadialCells]) + (0.5f * t) * de)) * (1.0f / kRadialPerUnit);
+    return true;
+}
+
+// ---- double-precision cos / sin from IEEE operations only (table builds) ----
+// Cody–Waite reduction by π/2 (two-part constant) to |r| <= π/4, then Taylor
+// series through r^19 / r^20 (truncation < 1e-19 there): only +, −, ×, ÷ and
+// floor, so every build gives the same bits (libm's cos / sin need not).
+inline void cosSinD(double a, double& c, double& s) {
+    constexpr double kP1 = 1.5707963267948966, kP2 = 6.123233995736766e-17;   // π/2 = kP1 + kP2
+    const double q = std::floor(a / kP1 + 0.5);
+    const double r = (a - q * kP1) - q * kP2, r2 = r * r;
+    // sin r = r (1 − r²/(2·3) (1 − r²/(4·5) (1 − ...))), cos r = 1 − r²/(1·2) (1 − r²/(3·4) (...))
+    double sn = 1.0, cs = 1.0;
+    for (int k = 19; k >= 3; k -= 2) sn = 1.0 - r2 / ((double)k * (double)(k - 1)) * sn;
+    sn = r * sn;
+    for (int k = 20; k >= 2; k -= 2) cs = 1.0 - r2 / ((double)k * (double)(k - 1)) * cs;
+    switch ((((long long)q % 4) + 4) % 4) {
+        case 0:  c = cs;  s = sn;  break;
+        case 1:  c = -sn; s = cs;  break;
+        case 2:  c = -cs; s = -sn; break;
+        default: c = sn;  s = -cs; break;
+    }
+}
+
+// ---- quintic cells in monomial form: value, slope, curvature ----------------
+// A cell holds p(t) = a0 + a1 t + a2 t² + a3 t³ + a4 t⁴ + a5 t⁵ (t in [0, 1]),
+// the quintic Hermite interpolant of the node values, slopes and second
+// derivatives at both ends, its coefficients solved in DOUBLE and stored as
+// floats. p, p', p'' are evaluated from the same coefficients by Horner, each
+// a sum of terms of the result's own size (the Hermite cell form
+// v0 + h01·dv + ... formed p'' — O(w²) — out of O(w) terms and lost three
+// digits to cancellation: 2e-4 of the vertical wave flow). One polynomial for
+// all three, so a field built from p, p', p'' (the wall waves) is the curl of
+// an interpolated potential: divergence-free for the interpolant itself.
+struct Cell5V { v4f a0, a1, a2, a3, a4, a5; };   // a mode per lane
+struct Eval5V { v4f p, d, s; };                   // value, d/dt, d²/dt²
+inline Eval5V eval5(float tf, const Cell5V& c) {
+    const v4f t = splat(tf);
+    Eval5V e;
+    e.p = ((((c.a5 * t + c.a4) * t + c.a3) * t + c.a2) * t + c.a1) * t + c.a0;
+    e.d = (((splat(5.0f) * c.a5 * t + splat(4.0f) * c.a4) * t + splat(3.0f) * c.a3) * t + splat(2.0f) * c.a2) * t + c.a1;
+    e.s = ((splat(20.0f) * c.a5 * t + splat(12.0f) * c.a4) * t + splat(6.0f) * c.a3) * t + splat(2.0f) * c.a2;
+    return e;
+}
+
+// ---- the wall waves' modes (Neumann cosines) --------------------------------
+// Each periodic train (m, n) (kWaveModes) becomes a QUADRATURE PAIR of
+// standing modes, cos(μπx/W) cos(νπy/H): the primary (μa, νa) = (2|m|, 2|n|),
+// the same wavelength and k as the periodic train, with cos(φ0 − phase), and
+// its neighbour (μa + 1, νa ± 1) (νb = νa for n = 0, νa + 1 for n > 0, νa − 1
+// for n < 0: the sign of n picks the diagonal) with sin(φ0 − phase). Each
+// mode is a Neumann eigenfunction (zero normal derivative at x = 0, W and
+// y = 0, H, odd μ / ν too), and each is the curl of its own vector potential,
+// so the pair is divergence-free exactly and has no normal flow through any
+// face; in the interior their relative phase advances across the tank, so the
+// water orbits like the travelling wave it replaces, and near the glass it
+// sloshes (a single standing mode would slosh everywhere). (The pairs follow
+// the Gemini Argon answer q14; the per-mode construction is the walls design's
+// and Argon's alike.) Modes: (12, 0) + (13, 0), (4, 6) + (5, 7), (8, 4) + (9, 3).
+inline constexpr int wallModeA(int train, int axis) {
+    return 2 * (kWaveModes[train][axis] < 0 ? -kWaveModes[train][axis] : kWaveModes[train][axis]);
+}
+inline constexpr int wallModeB(int train, int axis) {
+    return axis == 0 ? wallModeA(train, 0) + 1
+                     : (kWaveModes[train][1] > 0 ? wallModeA(train, 1) + 1
+                                                 : kWaveModes[train][1] < 0 ? wallModeA(train, 1) - 1 : wallModeA(train, 1));
+}
+static_assert(wallModeA(0, 0) == 12 && wallModeB(0, 0) == 13 && wallModeB(0, 1) == 0 && wallModeB(1, 1) == 7 &&
+                  wallModeB(2, 1) == 3,
+              "the wall waves' quadrature pairs");
+
+// cos(μπ·u/N) on cell j (u in [j, j + 1]) as a quintic: the node values,
+// slopes −w·sin (per unit t) and second derivatives −w²·cos (per unit t²) at
+// both ends, w = πμ/N, from the integer node phases (μ·j mod 2N half-turns)
+// by cosSinD, all in double; then the coefficients (a0 = v0, a1 = m0,
+// a2 = c0/2, and a3..a5 from the far end's three conditions) in double. The
+// slopes at the tank's two ends (j = 0, j + 1 = N) are sin(0) = sin(μπ) = 0:
+// pinned to exactly 0 (the evaluator pins the faces' slopes too, since the
+// sum at t = 1 is the end slope only to rounding).
+inline void wallCell(int mu, int j, int N, double a[6]) {
+    auto nodeAngle = [&](int jj) { return kTwoPi * (double)(((long long)mu * jj) % (2LL * N)) / (2.0 * N); };
+    const double w = kTwoPi * (double)mu / (2.0 * N);
+    double c0, s0, c1, s1;
+    cosSinD(nodeAngle(j), c0, s0);
+    cosSinD(nodeAngle(j + 1), c1, s1);
+    if (j == 0) s0 = 0.0;
+    if (j + 1 == N) s1 = 0.0;
+    const double m0 = -w * s0, m1 = -w * s1, k0 = -w * w * c0, k1 = -w * w * c1;
+    const double R0 = ((c1 - c0) - m0) - 0.5 * k0, R1 = (m1 - m0) - k0, R2 = k1 - k0;
+    a[0] = c0;
+    a[1] = m0;
+    a[2] = 0.5 * k0;
+    a[3] = (10.0 * R0 - 4.0 * R1) + 0.5 * R2;
+    a[4] = (-15.0 * R0 + 7.0 * R1) - R2;
+    a[5] = (6.0 * R0 - 3.0 * R1) + 0.5 * R2;
+}
+inline void setLane5(Cell5V& c, int i, const double a[6]) {
+    c.a0[i] = (float)a[0]; c.a1[i] = (float)a[1]; c.a2[i] = (float)a[2];
+    c.a3[i] = (float)a[3]; c.a4[i] = (float)a[4]; c.a5[i] = (float)a[5];
+}
+// The x (axis 0, kXCells over W) or y (axis 1, kYCells over H) factors of
+// every wall mode: lanes = trains (lane 3 zero), A = the primaries, B = the
+// neighbours. A mode number 0 (no variation along the axis) is the constant
+// 1 with zero slope and curvature, exactly.
+struct WallAxisTable {
+    int n = 0;
+    std::vector<Cell5V> A, B;
+    explicit WallAxisTable(int axis) {
+        n = axis == 0 ? kXCells : kYCells;
+        A.assign(n, Cell5V{});
+        B.assign(n, Cell5V{});
+        for (int j = 0; j < n; ++j)
+            for (int i = 0; i < kTrains; ++i)
+                for (int ab = 0; ab < 2; ++ab) {
+                    const int mu = ab == 0 ? wallModeA(i, axis) : wallModeB(i, axis);
+                    Cell5V& c = (ab == 0 ? A : B)[j];
+                    double a[6] = {1.0, 0.0, 0.0, 0.0, 0.0, 0.0};   // mode 0: the constant 1
+                    if (mu != 0) wallCell(mu, j, n, a);
+                    setLane5(c, i, a);
+                }
+    }
+};
+inline const WallAxisTable& wallXTable() { static const WallAxisTable t(0); return t; }
+inline const WallAxisTable& wallYTable() { static const WallAxisTable t(1); return t; }
+
+// A BOUNDED cell coordinate for the wall tables: s = (v / L)·N (v / L is
+// exactly 1 at v = L, so the far face is s = N exactly: the last cell at
+// t = 1, never wrapped to the first); false outside [0, L] or not finite (the
+// exact formulas then).
+inline bool wallCellCoord(float v, double L, int N, int& j, float& t) {
+    const double s = ((double)v / L) * (double)N;
+    if (!(s >= 0.0 && s <= (double)N)) return false;
+    j = (int)s;
+    if (j > N - 1) j = N - 1;
+    t = (float)(s - (double)j);
+    return true;
+}
+
 struct FlowCache {
+    // ---- the glass walls' scratch (OceanConfig::walls; set at init / when the
+    // waves are prepared; read only by the wall evaluators) ----
+    float wallBc = 1.0f;          // the current's taper band b_c = min(max(core, 1), W/4, H/4)
+    std::vector<float> psiScale;  // per eddy: signScale · core² (the streamfunction's prefactor)
+    v4f wInvK2 = {};              // 1 / k² per train (k = the primary's, the periodic train's)
+    v4f wAmpA = {}, wAmpB = {};   // the pair's amplitude factors (see OceanWorld::prepareWaves)
+    float wxS = 0.0f, wyS = 0.0f; // cells per unit: kXCells / W, kYCells / H (float)
+
     // ---- the eddy current (CurrentField Mode::Eddies, strength > 0) ----
     bool curOn = false;           // set at init: the Ocean's eddy evaluator is in use
     bool curAdvanced = false;     // CurrentField::advance ran since init (else its centres are 0)

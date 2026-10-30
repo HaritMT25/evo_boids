@@ -21,7 +21,8 @@
 // The compound eye (eye, eyeOnly, eyeCode: the eye build -DEVO_OCEAN_EYE
 // only), own-frame steering (steerFrame) and the food lifetime (foodLife)
 // default OFF as well; off, the world is bit-identical to the one before they
-// existed.
+// existed. So do the glass walls (walls, sideWallBand, sideWallTurnRate; set
+// at init only, and never with toroidal: oceanTopologyError).
 //
 // Every knob has a finite RANGE (oceanConfigError): no accepted config can
 // make the state non-finite. The ranges are wide — every harness case and
@@ -158,6 +159,23 @@ struct OceanConfig {
     float patternNovelProbability    = 0.050f;   // per pattern group: a new founder allele
     float morphologyMutation         = 0.025f;   // ± jitter on every shape gene
     float morphologyNovelProbability = 0.050f;   // per shape group: a new founder allele
+
+    // ---- glass walls (walls_bigtank design): default OFF ---------------------
+    // walls: the four side faces x = 0, W and y = 0, H are glass. Off (the
+    // default), x / y wrap as they always did and every result is the one
+    // before this key existed. On: fish and predators turn away inside
+    // sideWallBand of a face (a bounded rotation of the heading toward the
+    // inward normal, up to sideWallTurnRate x the band depth rad/s), are
+    // clamped at contact with the outward heading component reflected; food
+    // spawns inside the tank and rides a midpoint transport that mirror-folds
+    // excursions (never projected onto the glass); the water's flow is the
+    // wall-compatible one (standing wave modes, streamfunction currents
+    // tapered to zero at the faces: no normal flow through any of the six).
+    // Needs toroidal = false (oceanTopologyError). No draws are added or
+    // moved. All three are set at init (oc_set_param refuses a change).
+    bool  walls            = false;
+    float sideWallBand     = 80.0f;   // soft-turn band per side face, units ([0, 1e5]; 0 = contact only)
+    float sideWallTurnRate = 6.0f;    // rad/s at full band depth ([0, 1000]; 0 = contact only)
 };
 
 // Does this build have the compound eye's sensors?
@@ -260,13 +278,25 @@ inline bool readOceanConfig(const jsonm::Value& o, OceanConfig& c, std::string* 
     c.patternNovelProbability    = o.floatOr("patternNovelProbability", c.patternNovelProbability);
     c.morphologyMutation         = o.floatOr("morphologyMutation", c.morphologyMutation);
     c.morphologyNovelProbability = o.floatOr("morphologyNovelProbability", c.morphologyNovelProbability);
+    c.sideWallBand     = o.floatOr("sideWallBand", c.sideWallBand);
+    c.sideWallTurnRate = o.floatOr("sideWallTurnRate", c.sideWallTurnRate);
     using ocean_cfg_detail::readBool;
     return readBool(o, "deepCurrent", c.deepCurrent, err) &&
            readBool(o, "lightEnabled", c.lightEnabled, err) &&
            readBool(o, "depthCostScaled", c.depthCostScaled, err) &&
            readBool(o, "sizeDrift", c.sizeDrift, err) &&
            readBool(o, "sizeFight", c.sizeFight, err) &&
-           readBool(o, "mouthGate", c.mouthGate, err);
+           readBool(o, "mouthGate", c.mouthGate, err) &&
+           readBool(o, "walls", c.walls, err);
+}
+
+// True when the glass-wall keys hold their defaults (walls off, both side
+// knobs bit for bit at 80 / 6): the fingerprint hashes them only otherwise,
+// so a config without them hashes exactly as before they existed.
+inline bool oceanWallsAtDefaults(const OceanConfig& c) {
+    const OceanConfig d;
+    auto same = [](float a, float b) { return std::memcmp(&a, &b, sizeof a) == 0; };
+    return c.walls == d.walls && same(c.sideWallBand, d.sideWallBand) && same(c.sideWallTurnRate, d.sideWallTurnRate);
 }
 
 // The preview's SimConfig starting point (tuned with tools/ocean_probe.cpp).
@@ -328,7 +358,7 @@ inline bool isOceanIntKey(const std::string& k) {
 inline constexpr const char* kSimConfigBoolKeys[] = {"toroidal", "bodyModel", "triangularMotion", "foodDrift",
                                                      "predatorEconomy", "predatorInheritance", "fastTanh"};
 inline constexpr const char* kOceanBoolKeys[] = {"deepCurrent", "lightEnabled", "depthCostScaled",
-                                                 "sizeDrift", "sizeFight", "mouthGate"};
+                                                 "sizeDrift", "sizeFight", "mouthGate", "walls"};
 inline bool isSimConfigBoolKey(const std::string& k) {
     for (const char* i : kSimConfigBoolKeys) if (k == i) return true;
     return false;
@@ -439,6 +469,8 @@ inline std::string oceanConfigError(const OceanConfig& c) {
         {"kWater", c.kWater, 0.0f, 1.0f},
         {"kMouth", c.kMouth, 0.01f, 100.0f},
         {"foodLife", c.foodLife, 0.0f, kOceanMaxFoodLife},
+        {"sideWallBand", c.sideWallBand, 0.0f, 100000.0f},
+        {"sideWallTurnRate", c.sideWallTurnRate, 0.0f, 1000.0f},
     };
     for (const auto& e : r)
         if (!(e.v >= e.lo && e.v <= e.hi)) {   // NaN fails both
@@ -466,6 +498,19 @@ inline std::string oceanConfigError(const OceanConfig& c) {
 
 // True when every knob is usable (oceanConfigError is empty).
 inline bool oceanConfigValid(const OceanConfig& c) { return oceanConfigError(c).empty(); }
+
+// The cross-config rule of the two topologies: glass walls (OceanConfig::walls)
+// and a toroidal world (SimConfig::toroidal: wrapped senses, the seam-aware
+// queries and midpoints) exclude each other. "" when compatible. Checked
+// wherever an Ocean config is accepted, before the world or the rng changes:
+// oc_init / oc_set_param (wasm/ocean_wasm.cpp configOk), the harness's world
+// builder and live --set (tools/ocean_fingerprint.hpp buildConfigs,
+// tools/ocean_parity_driver.cpp applySet), the probe. (OceanWorld::init
+// itself also forces toroidal off when walls are on, for direct callers.)
+inline std::string oceanTopologyError(const SimConfig& sc, const OceanConfig& oc) {
+    if (oc.walls && sc.toroidal) return "Glass walls require toroidal=false (walls and a wrapping world exclude each other)";
+    return "";
+}
 
 // The Ocean's own ranges for SimConfig keys whose extreme FINITE values break
 // the Ocean step (SimConfig itself is Classic's and stays as it is). "" when

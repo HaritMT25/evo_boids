@@ -35,6 +35,7 @@ inline std::string probeInitWorld(OceanWorld& w, unsigned seed, int W, int H, do
     oc.depth = (float)depth;
     if (!oceanConfigValid(oc)) return "bad ocean config: " + oceanConfigError(oc);
     if (const std::string se = oceanSimConfigError(sc); !se.empty()) return "bad config for the Ocean: " + se;
+    if (const std::string te = oceanTopologyError(sc, oc); !te.empty()) return "bad config for the Ocean: " + te;
     // oc_init's world checks: width / height / founders and the neighbour
     // grids' cell count (oceanWorldSizeError, before any allocation), and
     // every radius (OceanWorld::radiusError).

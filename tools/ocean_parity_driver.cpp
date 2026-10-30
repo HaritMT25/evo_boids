@@ -109,7 +109,8 @@ bool applySet(OceanWorld& w, const LiveSet& s, bool unchecked) {
     std::string err;
     if (!readOceanJson(json.c_str(), sc, oc, err)) return false;
     ofp::clampConfigLikeShim(sc);
-    if (!unchecked && (!oceanConfigValid(oc) || !oceanSimConfigError(sc).empty())) return false;
+    if (!unchecked && (!oceanConfigValid(oc) || !oceanSimConfigError(sc).empty() || !oceanTopologyError(sc, oc).empty()))
+        return false;
     if (oc.appearance != w.ocfg.appearance) return false;   // init only (oc_set_param refuses a change)
     w.cfg = sc;
     w.ocfg = oc;
@@ -163,6 +164,12 @@ struct Coverage {
     // the cap (targetFood·2) — the spawn the cap allowed only because it counts
     // live items (spawned = the end stock − S + k + the items fish ate).
     long long foodCapFreed = 0;
+    // Glass walls (OceanConfig::walls; 0 in every case without them):
+    long long wallSteps = 0;       // fish-steps that ran with walls on
+    long long wallTouch = 0;       // fish-steps that ended ON a side face (contact resolved)
+    long long predWallTouch = 0;   // predator-steps that ended on a side face
+    long long foodNearGlass = 0;   // food-item-steps ending within 1 unit of a side face
+    long long outside = 0;         // fish / body point / food / predator outside the closed tank after a step (must be 0)
     long long food0_ = 0, expired0_ = 0, eaten0_ = 0;   // the step's start (before)
     void before(const OceanWorld& w) {
         food0_ = (long long)w.food.size();
@@ -183,6 +190,7 @@ struct Coverage {
             if (w.flowE1()) eyeE1Steps += n;
         }
         if (w.ocfg.eyeOnly) eyeOnlySteps += n;
+        if (w.ocfg.walls) wallSteps += n;
         if (w.ocfg.steerFrame == 1 && !w.cfg.triangularMotion) steerOwnSteps += n;
         if (!(w.ocfg.foodLife > 0.0f))
             for (const OceanFood& f : w.food)
@@ -192,6 +200,27 @@ struct Coverage {
         if (const long long k = w.totalFoodExpired - expired0_; k > 0) {
             const long long spawned = (long long)w.food.size() - food0_ + k + (w.totalFoodEaten - eaten0_);
             foodCapFreed += (food0_ + spawned > 2LL * w.cfg.targetFood);
+        }
+        if (w.ocfg.walls) {   // containment, observed from outside the engine
+            const float W = (float)w.width, H = (float)w.height, D = w.D;
+            auto out = [&](Vec2 p) { return !(p.x >= 0.0f && p.x <= W && p.y >= 0.0f && p.y <= H); };
+            auto onFace = [&](Vec2 p) { return p.x == 0.0f || p.x == W || p.y == 0.0f || p.y == H; };
+            for (const Fish& c : w.creatures) {
+                if (!c.alive) continue;
+                outside += out(c.pos) || !(c.depth >= 0.0f && c.depth <= D);
+                for (const Vec2& b : c.body) outside += out(b);
+                wallTouch += onFace(c.pos);
+            }
+            for (const OceanFood& f : w.food) {
+                if (!f.alive) continue;
+                outside += out(f.pos) || !(f.depth >= 0.0f && f.depth <= D);
+                foodNearGlass += (f.pos.x < 1.0f || f.pos.x > W - 1.0f || f.pos.y < 1.0f || f.pos.y > H - 1.0f);
+            }
+            for (const OceanPredator& p : w.predators) {
+                if (!p.alive) continue;
+                outside += out(p.pos) || !(p.depth >= 0.0f && p.depth <= D);
+                predWallTouch += onFace(p.pos);
+            }
         }
         popMax = std::max(popMax, (long long)w.creatures.size());
         predMax = std::max(predMax, (long long)w.predators.size());
@@ -235,6 +264,8 @@ struct Coverage {
             {"steerOwnSteps", steerOwnSteps}, {"foodExpired", w.totalFoodExpired},
             {"agesKept", agesKept}, {"foodCapFreed", foodCapFreed},
             {"nonFiniteRemoved", w.totalNonFiniteRemoved},
+            {"wallSteps", wallSteps}, {"wallTouch", wallTouch}, {"predWallTouch", predWallTouch},
+            {"foodNearGlass", foodNearGlass}, {"outside", outside},
             // the appearance genome's construction (the engine's own statistics;
             // never read by the step): records built, branches taken
             {"appFounders", (long long)w.appearanceStats().founders},
@@ -254,7 +285,8 @@ struct Coverage {
                                                      "agesKept", "foodCapFreed", "nonFiniteRemoved", "appFounders",
                                                      "appOffspring", "appMean", "appCopyA", "appCopyB", "appNovel",
                                                      "appShapeMean", "appShapeCopyA", "appShapeCopyB", "appShapeNovel",
-                                                     "appBroken"};
+                                                     "appBroken", "wallSteps", "wallTouch", "predWallTouch",
+                                                     "foodNearGlass", "outside"};
         for (const char* q : kQuietWhenZero) if (k == q) return true;
         return false;
     }

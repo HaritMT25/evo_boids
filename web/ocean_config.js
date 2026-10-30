@@ -18,7 +18,12 @@
    *   an int key (JSON 0 / 1); options = a select (int value) */
   var KEYS = {
     seed: [42, { step: 1, min: 0, int: true }], population: [300, { step: 1, min: 0, int: true }],
-    depth: [240, { step: 10, min: 10 }],
+    depth: [240, { step: 10, min: 10, max: 100000 }],
+    /* the tank's size across (oc_init's width / height arguments, like depth: not cfg keys) */
+    width: [1920, { step: 10, min: 100, max: 100000, int: true }], height: [1080, { step: 10, min: 100, max: 100000, int: true }],
+    /* glass walls: the ENGINE's default is off (and so is every link and setup
+     * made before walls existed); a fresh page starts with FRESH.walls */
+    walls: [false], sideWallBand: [80, { step: 5, min: 0, max: 100000 }], sideWallTurnRate: [6, { step: 0.5, min: 0, max: 1000 }],
     toroidal: [false], bodyModel: [false],
     maxPopulation: [0, { step: 1, min: 0, int: true }], minPopulation: [50, { step: 1, min: 0, int: true }],
     minSpeed: [30], maxSpeed: [150], triangularMotion: [false], maxTurnRate: [4],
@@ -58,6 +63,33 @@
     morphologyMutation: [0.025, { step: 0.005, min: 0, max: 0.25 }], morphologyNovelProbability: [0.05, { step: 0.01, min: 0, max: 0.25 }]
   };
 
+  /* What a FRESH page starts with where it differs from the engine's defaults
+   * (a bare address: no seed / size / cfg in it, no setup loaded). A link or a
+   * setup without these keys keeps the engine's default, so an old one
+   * replays the world it was made with. */
+  var FRESH = { walls: true };
+
+  /* The "Big tank" preset (walls_bigtank design): 3840 x 2160 x 240 — four
+   * times the standard volume — with 2000 founders, glass walls, four times
+   * the food stock (9600: the standard 2400 per standard volume) and supply
+   * (12 + 8 sin: ~11.5 items a step, ~3600 energy/s, enough for ~2300 fish at
+   * metabolism 1.5), a 2000-fish birth cap, a 200-fish reseed floor (the
+   * standard 50, x4), a 48 touch radius (2.4x the encounter volume of 36, for
+   * pairing where fish are as sparse as 500 in the standard tank), no
+   * predators, and the tuned E1 water (waves, a gentle deep current, light,
+   * depth costs) with the walls' flow. wasm/ocean_parity.sh BIGTANK is this
+   * cfg verbatim (its walls_bigtank_s9 case). */
+  var BIG_TANK = {
+    width: 3840, height: 2160, depth: 240, population: 2000,
+    cfg: { walls: true, maxPopulation: 2000, minPopulation: 200, targetFood: 9600, foodSpawnBase: 12, foodSpawnAmp: 8,
+           foodEnergy: 5, interactRadius: 48, waveSpeed: 6, deepCurrent: true, currentStrength: 5, foodDrift: true,
+           lightEnabled: true, depthCostScaled: true, cHold: 0.05, cPress: 0.03 }
+  };
+  /* The tank sizes a setup may have (oc_init's own limits) */
+  var SIZE_LIMITS = { side: [100, 100000], depth: [10, 100000], population: [0, 100000] };
+  /* The standard tank, the reference volume Randomize scales a recipe from */
+  var REFERENCE = { width: 1920, height: 1080, depth: 240 };
+
   /* oc_set_param's whitelist: these apply at once */
   var LIVE = {};
   ["kBuoy", "pitchMax", "vDrag", "wallBand", "buoyMutation", "cHold", "cPress", "foodDepthSpread",
@@ -84,7 +116,8 @@
   var TABS = [
     { id: "run", title: "Run" },
     { id: "world", title: "World", groups: [
-      ["The world", ["seed", "population", "depth", "toroidal", "bodyModel"]],
+      ["The world", ["seed", "population", "width", "height", "depth", "bodyModel"]],
+      ["The tank's sides", ["walls", "sideWallBand", "sideWallTurnRate", "toroidal"]],
       ["Population limits", ["maxPopulation", "minPopulation"]],
       ["Movement", ["minSpeed", "maxSpeed", "triangularMotion", "maxTurnRate"]],
       ["Senses", ["perceptionRadius", "interactRadius", "maxNeighbors"]],
@@ -119,6 +152,8 @@
 
   var LABELS = {
     seed: "Seed", population: "Starting fish", depth: "Sea depth", toroidal: "Senses wrap around the edges",
+    width: "Tank width", height: "Tank length", walls: "Glass walls", sideWallBand: "Turn-away distance",
+    sideWallTurnRate: "Turn-away rate",
     bodyModel: "Evolving bodies",
     maxPopulation: "Population cap", minPopulation: "Reseed floor",
     minSpeed: "Slowest speed", maxSpeed: "Fastest speed", maxTurnRate: "Turn rate",
@@ -161,13 +196,14 @@
     predatorMaxAge: "0 = until it starves", predatorMinPopulation: "0 = off; put back below this",
     predatorMaxPopulation: "0 = none", currentDrift: "0 = a still pattern", fastTanh: "changes the numbers",
     foodLife: "0 = until eaten", depth: "0 = surface", kBuoy: "per second", waveSpeed: "0 = still",
+    width: "100 to 100000", height: "100 to 100000", sideWallBand: "0 = bounce off only", sideWallTurnRate: "rad/s at the glass",
     cHold: "× metabolism when scaled", cPress: "× metabolism when scaled", eyeCode: "bits 1, 2, 4; cloaks 8, 16",
     patternMutation: "± per gene", morphologyMutation: "± per gene", patternPhaseMutation: "± per birth",
     patternNovelProbability: "chance per trait group", morphologyNovelProbability: "chance per trait group"
   };
   /* what one press of − / + changes */
   var BTN_STEP = {
-    seed: 1, population: 50, depth: 20, predatorCount: 1, foodPatches: 1, currentStrength: 5,
+    seed: 1, population: 50, depth: 20, width: 160, height: 90, sideWallBand: 10, sideWallTurnRate: 1, predatorCount: 1, foodPatches: 1, currentStrength: 5,
     targetFood: 100, foodSpawnBase: 1, foodSpawnAmp: 0.5, foodEnergy: 0.5, foodPatchRadius: 10, pickupRadius: 2,
     foodLife: 5, foodDepthSpread: 5,
     patternMutation: 0.005, patternPhaseMutation: 0.005, patternNovelProbability: 0.01, morphologyMutation: 0.005, morphologyNovelProbability: 0.01,
@@ -191,7 +227,12 @@
     seed: { d: "RNG seed — the same seed and the same settings replay the run step for step.", t: "try: any uint32; keep it to reproduce a run" },
     population: { d: "Starting fish (the world reseeds below the reseed floor).", t: "try: 200-600; more than ~1500 gets slow in a browser" },
     depth: { d: "How deep the sea is, in world units (the tank is 1920 x 1080 across, or the same area on its side on a portrait screen). Fish, food and predators live anywhere from the surface to the floor.", t: "try: 240 (the default); 120 is a shallow sea, 480 a deep one" },
-    toroidal: { d: "Senses wrap across the world's sides — no walls, no sensory dead zone at the edges. Depth never wraps: the surface and the floor are real.", t: "try: on; cures the wall-hugger phenotype" },
+    toroidal: { d: "Without glass walls only: senses wrap across the world's sides, so a fish near one side senses what is near the opposite one — no sensory dead zone at the edges. Depth never wraps: the surface and the floor are real.", t: "try: on in a wrap-around world; glass walls turn it off" },
+    walls: { d: "The four sides are glass, like a real tank: fish and predators turn away as they near one and bounce off if they touch it, food stays inside, and the water's waves and currents flow along the glass, never through it. Off, the sides wrap: a fish swimming out of one comes back in through the opposite side. Restart to apply.", t: "try: on (a new page's default); off for the wrap-around world older links show" },
+    sideWallBand: { d: "Glass walls: how far from a side a fish (or predator) starts turning away from it; the closer it gets, the harder it turns. 0 = no turning: it only bounces off the glass. Restart to apply.", t: "try: 80 (the default); 30 lets fish hug the glass" },
+    sideWallTurnRate: { d: "Glass walls: how fast a fish turns away, in radians per second, right at the glass (less further out). Restart to apply.", t: "try: 6 (the default); 2 for wide arcs" },
+    width: { d: "The tank's size along x, in world units (the standard tank is 1920 x 1080). A bigger tank holds more fish at the same crowding; Big tank (on the Run tab) is a whole recipe for one. Restart to apply.", t: "try: 3840 with a length of 2160 (four times the area)" },
+    height: { d: "The tank's size along y, in world units (shown front to back in the 3-D view). Restart to apply.", t: "try: 2160 with a width of 3840" },
     bodyModel: { d: "Heritable body size and elongation: bigger = slower and costlier, longer = turns worse. The size laws (the Water (E1) tab) act on the size.", t: "try: on; founders start at 1.0 and bodies drift from births" },
     maxPopulation: { d: "Birth cap: no births while the population is at or above it (0 = none). Applies live.", t: "try: 0, or 600 to keep a big run fast" },
     minPopulation: { d: "Reseed floor: random founders are added when the population falls below it. Applies live.", t: "try: 50 (the default)" },
@@ -361,11 +402,41 @@
     if (cut.length) labels.push(cut.join(", ") + " cut to " + cap + " to fit the wrap-around");
   }
 
+  /* A drawn recipe for the standard tank, scaled once to a tank of another
+   * volume (walls_bigtank design): the fish, the food stock and supply, the
+   * reseed floor and caps, and the predators' counts by the volume ratio;
+   * distances (sight, touch, eating, patch radius) stay in world units. The
+   * engine's limits bound every scaled value. */
+  function scaleToVolume(set, population, volume, labels) {
+    if (!(volume > 0) || Math.abs(volume - 1) < 1e-9) return population;
+    function sc(key, def, lo, hi, isInt) {
+      var v = (key in set ? set[key] : def) * volume;
+      v = Math.max(lo, Math.min(hi, isInt ? Math.round(v) : round(v, 0.5)));
+      set[key] = v;
+    }
+    sc("targetFood", KEYS.targetFood[0], 0, 1000000, true);
+    sc("foodSpawnBase", KEYS.foodSpawnBase[0], -10000, 10000, false);
+    sc("foodSpawnAmp", KEYS.foodSpawnAmp[0], -10000, 10000, false);
+    sc("minPopulation", KEYS.minPopulation[0], 0, 100000, true);
+    if (set.maxPopulation > 0) sc("maxPopulation", 0, 1, 100000, true);
+    if (set.predatorCount > 0) sc("predatorCount", 0, 1, 100000, true);
+    if (set.predatorMaxPopulation > 0) sc("predatorMaxPopulation", 0, 1, 100000, true);
+    if (set.predatorMinPopulation > 0) sc("predatorMinPopulation", 0, 0, 2000, true);
+    population = Math.max(1, Math.min(100000, Math.round(population * volume)));
+    if (set.maxPopulation > 0) population = Math.min(population, set.maxPopulation);
+    labels.push("scaled to this tank's volume (x" + +volume.toFixed(2) + ")");
+    return population;
+  }
+
   /* rand: () => [0, 1); e1: the E1 preset as an object; size: [width,
-   * height] of the world it will start (radii are kept to what it allows).
+   * height] of the world it will start (radii are kept to what it allows),
+   * or [width, height, depth, walls]: the recipe is then drawn for the
+   * standard tank and scaled to that volume, and with walls (true) no
+   * wrap-around is drawn (Randomize keeps the tank's size and sides).
    * -> { population, set: {key: value}, labels: [...] }; every key left out
    * stays at its default. */
   function draw(rand, basePop, e1, size) {
+    var walls = !!(size && size[3]);
     function chance(p) { return rand() < p; }
     function pick(a) { return a[Math.floor(rand() * a.length)]; }
     function range(key) { var r = RANGES[key]; return round(r[0] + (r[1] - r[0]) * rand(), r[2]); }
@@ -443,7 +514,7 @@
       set.minSpeed = 0;
       labels.push("swimming costs energy");
     }
-    if (chance(CHANCE.toroidal)) { set.toroidal = true; labels.push("wrap-around senses"); }
+    if (chance(CHANCE.toroidal) && !walls) { set.toroidal = true; labels.push("wrap-around senses"); }
     if (chance(CHANCE.topological)) { set.maxNeighbors = range("maxNeighbors"); labels.push("each fish follows its " + set.maxNeighbors + " nearest"); }
     if (chance(CHANCE.widePerception)) { set.perceptionRadius = range("perceptionRadius"); labels.push("sight " + set.perceptionRadius); }
     if (chance(CHANCE.triangular)) {
@@ -469,9 +540,13 @@
       labels.push("picky partners (match gate " + set.reproMaxDistance + ")");
     }
     if (set.toroidal && size) fitTorus(set, labels, Math.min(size[0], size[1]));
+    if (size && size.length > 2)
+      population = scaleToVolume(set, population, (size[0] * size[1] * size[2]) / (REFERENCE.width * REFERENCE.height * REFERENCE.depth), labels);
     return { population: population, set: set, labels: labels };
   }
 
   root.EvoOceanConfig = { KEYS: KEYS, LIVE: LIVE, NEG_ON_RESTART: NEG_ON_RESTART, TABS: TABS, LABELS: LABELS, HINTS: HINTS,
-                          BTN_STEP: BTN_STEP, TIPS: TIPS, RANGES: RANGES, CHANCE: CHANCE, draw: draw };
+                          BTN_STEP: BTN_STEP, TIPS: TIPS, RANGES: RANGES, CHANCE: CHANCE, draw: draw,
+                          FRESH: FRESH, BIG_TANK: BIG_TANK, SIZE_LIMITS: SIZE_LIMITS, REFERENCE: REFERENCE,
+                          scaleToVolume: scaleToVolume };
 })(typeof window !== "undefined" ? window : globalThis);

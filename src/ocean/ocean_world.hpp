@@ -182,6 +182,28 @@
 //   * CURRENT_FWD / LR (kept in eye-only mode) read the 3-D flow under E1;
 //   * steerFrame turns STEER_X / STEER_Y before the flow drift is added.
 //
+// Glass walls (OceanConfig::walls, OFF by default — off, every result is the
+// one before the key existed; on, toroidal is off: the senses and queries do
+// not wrap, and nothing else does either). On:
+//   * the side faces x = 0, W and y = 0, H are glass. A fish's or predator's
+//     heading, once chosen (the same actions and draws), turns away inside
+//     sideWallBand of a face (wallAvoid: a bounded rotation toward the inward
+//     normal, sideWallTurnRate x the band depth rad/s); after swimming it is
+//     clamped at contact with the outward heading component reflected (speed
+//     kept), then carried by the wall flow, then contained again (the depth
+//     faces' outward pitch removed); lastMoveDir, hot_ and the body trail
+//     (held inside) follow the resolved result.
+//   * the flow is the wall-compatible one (the "glass walls" evaluators: each
+//     wave train a quadrature pair of Neumann standing modes, the current a
+//     streamfunction tapered to zero at the side faces): divergence-free, no
+//     flow through any of the six faces; every reader (food, fish, predators,
+//     CURRENT_FWD / LR, the harness) gets it.
+//   * food rides it by a midpoint transport with deterministic substeps, every
+//     excursion mirror-folded (never projected onto the glass); patch food
+//     is drawn over the patch ∩ the tank (one draw per coordinate, as open);
+//     a predator's bud is mirror-folded into the tank (the same draws).
+// No wall step draws from the rng.
+//
 // The appearance genome (OceanConfig::appearance, ON by default; src/ocean/
 // appearance_model.hpp): every fish's 63 cosmetic floats — skin pattern and
 // body shape — in a side array bound to the fish by id (Fish / AgentCore are
@@ -547,12 +569,18 @@ public:
     // above (flowExactAt), the preview's arithmetic. The public readers below
     // (flowAt, currentFlowAt, waveTrainAt, currentAt) give the field the step
     // actually uses; the *Exact* ones are the formulas, for the tests.
+    // Glass walls (OceanConfig::walls) replace every reader's field with the
+    // wall-compatible one (wallFlowFast / wallFlowExact below: standing-mode
+    // pairs, a tapered streamfunction current); off, the branches below run
+    // as they did.
     Flow flowAt(Vec2 p, float d) const {
+        if (ocfg.walls) { ensureFlow(); return wallFlowFast(p, d); }
         if (!flowE1()) return flowExactAt(p, d);
         ensureFlow();
         return flowFast(p, d);
     }
     Flow flowExactAt(Vec2 p, float d) const {
+        if (ocfg.walls) { ensureFlow(); return wallFlowExact(p, d); }
         Flow U = currentFlowExactAt(p, d);
         if (wavesOn()) {
             ensureWaves();   // (waves switched on by a direct config change, nothing read since)
@@ -570,6 +598,7 @@ public:
     // flowAt's parts (public for the divergence probes in tests/ocean_tests.cpp).
     // The current, weighted by f(d) with deepCurrent; no vertical part.
     Flow currentFlowAt(Vec2 p, float d) const {
+        if (ocfg.walls) { ensureFlow(); return wallCurrentFlow(p, d); }
         if (!flowE1()) return currentFlowExactAt(p, d);
         ensureFlow();
         return currentFlowFast(p, d);
@@ -598,11 +627,17 @@ public:
     // Wave train i alone (whatever waveSpeed is; 0 gives zero flow — so do
     // trains never prepared, which only a world whose waves were never on has).
     Flow waveTrainAt(int i, Vec2 p, float d) const {
+        if (ocfg.walls) {
+            ensureFlow();
+            Flow u[kWaveTrains];
+            return wallWavesTable(p, d, u) ? u[i] : wallTrainExactAt(i, p, d);
+        }
         if (!flowE1()) return waveTrainExactAt(i, p, d);
         ensureFlow();
         return waveTrainFast(i, p, d);
     }
     Flow waveTrainExactAt(int i, Vec2 p, float d) const {
+        if (ocfg.walls) return wallTrainExactAt(i, p, d);
         ensureWaves();
         return waveTrainExactAt(i, p, d, taperAt(d));
     }
@@ -641,6 +676,7 @@ public:
 
     // Set cfg and ocfg first (ocfg.depth is overwritten by `depth`).
     void init(int w, int h, float depth, int numCreatures) {
+        if (ocfg.walls) cfg.toroidal = false;   // glass walls never wrap (the validated paths refuse both)
         appearanceInit();   // first: its key reads a COPY of the engine before any draw
         width = w;
         height = h;
@@ -693,6 +729,8 @@ public:
             if (cfg.toroidal) {
                 f.pos = { wrapCoord(c.x + rng.range(-R, R), (float)width),
                           wrapCoord(c.y + rng.range(-R, R), (float)height) };
+            } else if (ocfg.walls) {   // inside the glass: the same draws, over the patch ∩ the tank
+                f.pos = { wallPatchDraw(c.x, R, (float)width), wallPatchDraw(c.y, R, (float)height) };
             } else {
                 f.pos = { std::clamp(c.x + rng.range(-R, R), 0.0f, (float)width),
                           std::clamp(c.y + rng.range(-R, R), 0.0f, (float)height) };
@@ -703,7 +741,8 @@ public:
         }
         if (ocfg.foodDepthMode == 1 && patch >= 0 && patch < (int)foodPatchDepth_.size()) {
             const float S = ocfg.foodDepthSpread;
-            f.depth = clampDepth(foodPatchDepth_[patch] + rng.range(-S, S));
+            f.depth = ocfg.walls ? wallPatchDraw(foodPatchDepth_[patch], S, D)
+                                 : clampDepth(foodPatchDepth_[patch] + rng.range(-S, S));
         } else {
             f.depth = rng.range(0.0f, D);
         }
@@ -730,7 +769,11 @@ public:
             advanceWaves(dt);
         }
 
-        if (flowE1()) {
+        if (ocfg.walls) {
+            ensureFlow();   // the cache for this frame / phase (read by every wall evaluator below)
+            // Glass walls: food rides the wall flow by the mirror-folding midpoint transport.
+            if (cfg.foodDrift && wallFlowOn()) wallTransportFood(dt);
+        } else if (flowE1()) {
             ensureFlow();   // the E1 cache, for this frame / phase / config (read by every flowFast below)
             // E1: food rides the 3-D flow (depth too), sampled where it is.
             if (cfg.foodDrift) {
@@ -912,6 +955,7 @@ public:
     // The 2-D current the step uses: while flowE1() with eddies, the Ocean's
     // evaluator (ocean_flow.hpp); otherwise CurrentField's own.
     Vec2 currentAt(Vec2 p) const {
+        if (ocfg.walls) { ensureFlow(); return wallCurrent(p); }   // glass walls: the tapered current
         if (!flowE1() || !flow_.curOn) return current_.velocityAt(p);
         ensureFlow();
         return eddyVelocity(p);
@@ -1091,7 +1135,24 @@ private:
             c.Ty[i] = (float)(t.ky / kk);
             c.TxS[i] = (float)(t.kx / kk * c.xScale);
             c.TyS[i] = (float)(t.ky / kk * c.yScale);
+            // The glass walls' quadrature pair (ocean_flow.hpp wallModeA / B;
+            // read only with walls on): F = −V / k² with the primary's k (the
+            // periodic train's); the neighbour (wavenumber kb) is weighted
+            // ka / kb, which makes the bulk orbit circular where one mode's
+            // slope and the other's value vanish; and an oblique pair (both
+            // mode numbers non-zero: a standing product averages cos²·cos² =
+            // 1/4 against the travelling train's 1/2) is weighted √2, so the
+            // pair's mean square speed is the periodic train's.
+            const double kbx = kTwoPi * 0.5 * (double)oceanflow::wallModeB(i, 0) / (double)width;
+            const double kby = kTwoPi * 0.5 * (double)oceanflow::wallModeB(i, 1) / (double)height;
+            const double kb = std::sqrt(kbx * kbx + kby * kby), ka = std::sqrt(kk);   // IEEE sqrt: portable
+            const double g = (kModes[i][0] != 0 && kModes[i][1] != 0) ? 1.4142135623730951 : 1.0;
+            c.wInvK2[i] = (float)(1.0 / kk);
+            c.wAmpA[i] = (float)g;
+            c.wAmpB[i] = (float)(g * ka / kb);
         }
+        c.wxS = (float)((double)oceanflow::kXCells / (double)width);
+        c.wyS = (float)((double)oceanflow::kYCells / (double)height);
         c.yRot.assign(oceanflow::kYCells, oceanflow::TrigV{});
         c.depthKeyed = false;
         c.phaseKeyed = false;
@@ -1131,6 +1192,14 @@ private:
             flow_.eddies.resize(flow_.vort.size() / CurrentField::VORTEX_FLOATS);
             for (std::size_t i = 0; i < flow_.eddies.size(); ++i)
                 flow_.eddies[i].signScale = flow_.vort[i * CurrentField::VORTEX_FLOATS + 2] * scale;
+            // The glass walls' streamfunction prefactor per eddy: psi = signScale · core² · G(u).
+            flow_.psiScale.resize(flow_.eddies.size());
+            for (std::size_t i = 0; i < flow_.eddies.size(); ++i) flow_.psiScale[i] = flow_.eddies[i].signScale * (core * core);
+        }
+        // The glass walls' current taper band (eddies and gyre alike).
+        {
+            const float core = (cfg.currentCore > 1.0f) ? cfg.currentCore : 1.0f;
+            flow_.wallBc = std::min(core, std::min(0.25f * (float)width, 0.25f * (float)height));
         }
         // The waves' part is prepareWaves' (when the waves are first on).
     }
@@ -1406,6 +1475,312 @@ private:
     // formulas (sizeDrift alone: the preview's current, unweighted).
     Flow flowStep(Vec2 p, float d) const { return flowE1() ? flowFast(p, d) : flowExactAt(p, d); }
 
+    // ---- glass walls: the wall-compatible flow (OceanConfig::walls) --------
+    // Read only with walls on; the periodic evaluators above are untouched.
+    // The current: the streamfunction psi of the same vortices (or the double
+    // gyre), tapered by Q(x, y) = χ_W(x) χ_H(y), χ_L(q) = S(q/b_c) S((L−q)/b_c),
+    // b_c = min(max(core, 1), W/4, H/4): C_w = (−∂y(Q psi), ∂x(Q psi))
+    // = Q·C + psi·(−Q_y, Q_x). Divergence-free (a curl); Q and its gradient
+    // vanish on the side faces, so the current is exactly 0 there (inside,
+    // where Q = 1, it is the periodic evaluator's eddy current bit for bit).
+    // × f(d) (deepCurrent) as before. The waves: each train's quadrature pair
+    // of Neumann modes (ocean_flow.hpp wallModeA / B), from the potential
+    // Φ = F(d) P(x, y) τ(t), F = (A / k²) e^{−kd} B(d) = −V / k²:
+    //   u_x = F' ∂x P τ,  u_y = F' ∂y P τ,  u_d = −F (∂xx P + ∂yy P) τ,
+    // τ = cos(φ0 − phase) for the primary, sin(φ0 − phase) for the neighbour
+    // (and their weights). ∇·u = F' ΔP τ − F' ΔP τ = 0; ∂x P = 0 at x = 0, W,
+    // ∂y P = 0 at y = 0, H, F = 0 at the surface and floor: no flow through
+    // any face, exactly (the tables pin the end slopes to 0; the bounded
+    // lookup puts x = W at the last cell's end, never the first's).
+    static constexpr float kPiF = 3.14159265358979f;
+    static void wallTaper(float q, float L, float b, float& chi, float& dchi) {
+        const float r1 = q / b, r2 = (L - q) / b;
+        const float s1 = smooth01(r1), s2 = smooth01(r2);
+        chi = s1 * s2;
+        dchi = (smooth01d(r1) * s2 - s1 * smooth01d(r2)) / b;
+    }
+    // The bounded current at p (2-D; ensureFlow done).
+    Vec2 wallCurrent(Vec2 p) const {
+        if (!current_.active()) return {0.0f, 0.0f};
+        Vec2 C{0.0f, 0.0f};
+        float psi = 0.0f;
+        if (flow_.curOn) {   // eddies: eddyVelocity's sum, plus the streamfunction alongside
+            const float inv2c2 = flow_.inv2c2;
+            const float* E = oceanflow::radialTable().E;
+            const float* G = oceanflow::radialIntTable().G;
+            for (std::size_t k = 0; k < flow_.eddies.size(); ++k) {
+                const oceanflow::Eddy& e = flow_.eddies[k];
+                const float dx = p.x - e.cx;
+                const float dy = p.y - e.cy;
+                float g, Gu;
+                if (!oceanflow::radialPsi(E, G, (dx * dx + dy * dy) * inv2c2, g, Gu)) continue;
+                const float f = e.signScale * g;
+                C.x += f * (-dy);
+                C.y += f * dx;
+                psi += flow_.psiScale[k] * Gu;
+            }
+        } else {   // the double gyre: CurrentField's own velocity and streamfunction
+            C = current_.velocityAt(p);
+            psi = current_.gyreStreamAt(p);
+        }
+        float cx, dcx, cy, dcy;
+        wallTaper(p.x, (float)width, flow_.wallBc, cx, dcx);
+        wallTaper(p.y, (float)height, flow_.wallBc, cy, dcy);
+        const float Q = cx * cy, Qx = dcx * cy, Qy = cx * dcy;
+        return {Q * C.x - psi * Qy, Q * C.y + psi * Qx};
+    }
+    Flow wallCurrentFlow(Vec2 p, float d) const {
+        Flow U;
+        if (current_.active()) {
+            const Vec2 c = wallCurrent(p);
+            const float f = ocfg.deepCurrent ? smooth01(2.0f * d / D) : 1.0f;
+            U.x = f * c.x;
+            U.y = f * c.y;
+        }
+        return U;
+    }
+    // cos / sin of π·mode·v / L, the angle reduced exactly in double (its
+    // cycles' fractional part); sin exactly 0 on the faces v = 0, v = L.
+    static void halfTurn(int mode, float v, double L, float& c, float& s) {
+        if (mode == 0) { c = 1.0f; s = 0.0f; return; }
+        double cyc = 0.5 * (double)mode * ((double)v / L);
+        cyc -= std::floor(cyc);
+        oceanflow::cosSin(kTwoPi * cyc, c, s);
+        if (v == 0.0f || (double)v == L) s = 0.0f;
+    }
+    // Train i's pair at (p, d) from the formulas (the tables' fallback and the
+    // tests' reference).
+    Flow wallTrainExactAt(int i, Vec2 p, float d) const {
+        ensureWaves();
+        const WaveTrain& t = waves_[i];
+        const Taper tp = taperAt(d);
+        const float A = t.frac * ocfg.waveSpeed;
+        const float E = 1.0f / (evomath::expm1f(t.k * d) + 1.0f);
+        const float ik2 = (float)(1.0 / (t.kx * t.kx + t.ky * t.ky));
+        const float F = A * ik2 * E * tp.B;
+        const float Fd = A * ik2 * E * (tp.Bp - t.k * tp.B);
+        float cp, sp;
+        oceanflow::cosSin(t.phi - t.phase, cp, sp);
+        Flow u;
+        for (int ab = 0; ab < 2; ++ab) {
+            const int mx = ab ? oceanflow::wallModeB(i, 0) : oceanflow::wallModeA(i, 0);
+            const int my = ab ? oceanflow::wallModeB(i, 1) : oceanflow::wallModeA(i, 1);
+            const float kx = (float)(kTwoPi * 0.5 * (double)mx / (double)width);
+            const float ky = (float)(kTwoPi * 0.5 * (double)my / (double)height);
+            float cx, sx, cy, sy;
+            halfTurn(mx, p.x, (double)width, cx, sx);
+            halfTurn(my, p.y, (double)height, cy, sy);
+            const float tau = (ab ? sp * flow_.wAmpB[i] : cp * flow_.wAmpA[i]);
+            const float Px = -kx * sx * cy, Py = -ky * cx * sy;
+            const float lap = -((kx * kx + ky * ky) * (cx * cy));
+            u.x += (Fd * tau) * Px;
+            u.y += (Fd * tau) * Py;
+            u.d += -(F * tau) * lap;
+        }
+        return u;
+    }
+    // The three pairs from the tables (depth pieces: the periodic trains' own;
+    // x / y: the quintic Neumann tables); false = the formulas.
+    bool wallWavesTable(Vec2 p, float d, Flow u[kWaveTrains]) const {
+        using oceanflow::v4f;
+        using oceanflow::splat;
+        const oceanflow::FlowCache& c = flow_;
+        v4f V, Vd;
+        if (!depthProfiles(d, V, Vd)) return false;
+        int ix, iy;
+        float tx, ty;
+        if (!oceanflow::wallCellCoord(p.x, (double)width, oceanflow::kXCells, ix, tx)) return false;
+        if (!oceanflow::wallCellCoord(p.y, (double)height, oceanflow::kYCells, iy, ty)) return false;
+        const oceanflow::WallAxisTable& XT = oceanflow::wallXTable();
+        const oceanflow::WallAxisTable& YT = oceanflow::wallYTable();
+        const oceanflow::Eval5V xa = oceanflow::eval5(tx, XT.A[ix]), xb = oceanflow::eval5(tx, XT.B[ix]);
+        const oceanflow::Eval5V ya = oceanflow::eval5(ty, YT.A[iy]), yb = oceanflow::eval5(ty, YT.B[iy]);
+        // ∂x, ∂y in world units; on a face its normal slope is pinned to exactly 0
+        // (sin(0) = sin(μπ) = 0: at t = 1 the Horner sum gives it only to rounding)
+        const v4f sx = splat((p.x == 0.0f || p.x == (float)width) ? 0.0f : c.wxS);
+        const v4f sy = splat((p.y == 0.0f || p.y == (float)height) ? 0.0f : c.wyS);
+        const v4f sxx = splat(c.wxS * c.wxS), syy = splat(c.wyS * c.wyS);
+        const v4f axd = xa.d * sx, bxd = xb.d * sx, ayd = ya.d * sy, byd = yb.d * sy;
+        const v4f axs = xa.s * sxx, bxs = xb.s * sxx, ays = ya.s * syy, bys = yb.s * syy;
+        const v4f cpv = {c.cp[0], c.cp[1], c.cp[2], 0.0f}, spv = {c.sp[0], c.sp[1], c.sp[2], 0.0f};
+        const v4f F = (-V) * c.wInvK2, Fd = (-Vd) * c.wInvK2;
+        const v4f ta = c.wAmpA * cpv, tb = c.wAmpB * spv;
+        const v4f FdA = Fd * ta, FdB = Fd * tb, FA = F * ta, FB = F * tb;
+        const v4f ux = FdA * (axd * ya.p) + FdB * (bxd * yb.p);
+        const v4f uy = FdA * (xa.p * ayd) + FdB * (xb.p * byd);
+        const v4f ud = -(FA * (axs * ya.p + xa.p * ays) + FB * (bxs * yb.p + xb.p * bys));
+        for (int i = 0; i < kWaveTrains; ++i) {
+            u[i].x = ux[i];
+            u[i].y = uy[i];
+            u[i].d = ud[i];
+        }
+        return true;
+    }
+    // The whole wall flow (ensureFlow done): the current, then the trains in order.
+    Flow wallFlowFast(Vec2 p, float d) const {
+        Flow U = wallCurrentFlow(p, d);
+        if (wavesOn()) {
+            Flow u[kWaveTrains];
+            if (!wallWavesTable(p, d, u))
+                for (int i = 0; i < kWaveTrains; ++i) u[i] = wallTrainExactAt(i, p, d);
+            for (int i = 0; i < kWaveTrains; ++i) {
+                U.x += u[i].x;
+                U.y += u[i].y;
+                U.d += u[i].d;
+            }
+        }
+        return U;
+    }
+    Flow wallFlowExact(Vec2 p, float d) const {
+        Flow U = wallCurrentFlow(p, d);
+        if (wavesOn())
+            for (int i = 0; i < kWaveTrains; ++i) {
+                const Flow u = wallTrainExactAt(i, p, d);
+                U.x += u.x;
+                U.y += u.y;
+                U.d += u.d;
+            }
+        return U;
+    }
+
+    // ---- glass walls: movement, contact, placement (no draws) --------------
+    // The side-wall soft turn (fish and predators): inside sideWallBand of a
+    // side face (each band capped at half the side), a heading h that points
+    // toward the wall(s) (h · a < 0, a = the inward push (p_W(x), p_H(y)),
+    // p_L(q) = max(0, 1 − q/b) − max(0, 1 − (L − q)/b)) turns toward a / |a| by
+    // at most sideWallTurnRate · max(|p_W|, |p_H|) · dt (portable atan2 / sin /
+    // cos); head-on (exactly π away), the positive way. Speed is not touched.
+    void wallAvoid(Vec2 p, Vec2& h, float dt) const {
+        auto push = [](float q, float L, float b) {
+            if (!(b > 0.0f)) return 0.0f;
+            return std::max(0.0f, 1.0f - q / b) - std::max(0.0f, 1.0f - (L - q) / b);
+        };
+        const float W = (float)width, H = (float)height;
+        const float ax = push(p.x, W, std::min(ocfg.sideWallBand, 0.5f * W));
+        const float ay = push(p.y, H, std::min(ocfg.sideWallBand, 0.5f * H));
+        if (ax == 0.0f && ay == 0.0f) return;
+        if (h.x * ax + h.y * ay >= 0.0f) return;   // along or away from the glass
+        const float maxStep = ocfg.sideWallTurnRate * std::max(std::abs(ax), std::abs(ay)) * dt;
+        if (!(maxStep > 0.0f)) return;
+        const float th = evomath::atan2f(h.y, h.x), ta = evomath::atan2f(ay, ax);
+        float dl = ta - th;
+        if (dl > kPiF) dl -= 2.0f * kPiF;
+        else if (dl <= -kPiF) dl += 2.0f * kPiF;   // (−π, π]: head-on turns positively
+        const float step = (std::abs(dl) <= maxStep) ? dl : (dl > 0.0f ? maxStep : -maxStep);
+        const float nt = th + step;
+        h = {evomath::cosf(nt), evomath::sinf(nt)};
+    }
+    // Contact with the side glass: the point clamped into [0, W] x [0, H] and
+    // an outward heading component reflected (a face reached, or touched while
+    // pointing out); x and y each, a corner both. A reflection negates one
+    // component, so |h| is unchanged. True if it touched.
+    bool wallContact(Vec2& p, Vec2& h) const {
+        const float W = (float)width, H = (float)height;
+        bool hit = false;
+        if (p.x <= 0.0f)   { p.x = 0.0f; if (h.x < 0.0f) h.x = -h.x; hit = true; }
+        else if (p.x >= W) { p.x = W;    if (h.x > 0.0f) h.x = -h.x; hit = true; }
+        if (p.y <= 0.0f)   { p.y = 0.0f; if (h.y < 0.0f) h.y = -h.y; hit = true; }
+        else if (p.y >= H) { p.y = H;    if (h.y > 0.0f) h.y = -h.y; hit = true; }
+        return hit;
+    }
+    // The body trail held inside the glass (founders and newborns are laid out
+    // behind the head, which can reach past a face; a trail point is otherwise
+    // a convex combination of points inside).
+    void containBody(Fish& c) const {
+        for (Vec2& b : c.body) {
+            b.x = std::clamp(b.x, 0.0f, (float)width);
+            b.y = std::clamp(b.y, 0.0f, (float)height);
+        }
+    }
+    // A patch coordinate inside the tank: uniform over [c − R, c + R] ∩
+    // [inset, L − inset], inset = min(1, L/4), with the one draw the open
+    // world makes; an empty intersection (a narrow patch beyond the inset)
+    // gives the nearest inset point, after the same draw.
+    static float wallPatchDraw(float c, float R, float L) {
+        const float inset = std::min(1.0f, 0.25f * L);
+        const float lo = std::max(c - R, inset), hi = std::min(c + R, L - inset);
+        if (lo <= hi) return rng.range(lo, hi);
+        (void)rng.range(0.0f, 1.0f);
+        return std::clamp(c, inset, L - inset);
+    }
+    // Food's transport substeps this step: from a bound on the wall flow's
+    // speed (the pairs' amplitudes incl. the narrow-band horizontal factor;
+    // each eddy's peak and taper correction; the gyre's) against a quarter of
+    // its shortest length scale (the wave band, the current's band and core),
+    // in [1, 16]. Config arithmetic in double (IEEE ops only): the same count
+    // on every build.
+    int wallFoodSubsteps(float dt) const {
+        double ub = 0.0, len = 1e30;
+        if (wavesOn()) {
+            const double b = std::min((double)ocfg.waveBand, 0.25 * (double)D);
+            for (const WaveTrain& t : waves_)
+                ub += 3.2 * (double)t.frac * (double)ocfg.waveSpeed * (1.0 + 1.5 / (b * (double)t.k));
+            len = std::min(len, b);
+        }
+        if (current_.active()) {
+            const double s = (double)cfg.currentStrength, bc = (double)flow_.wallBc;
+            const double core = std::max(1.0, (double)cfg.currentCore);
+            if (cfg.currentMode == 1) {
+                const double e = std::abs((double)cfg.currentGyreEps);
+                ub += s * (1.0 + 2.0 * ((double)height / (double)width) * (1.0 + 6.0 * e)) +
+                      s * ((double)height / 3.14159265358979) * 2.2 / bc;
+            } else {
+                ub += (double)cfg.currentEddies * s * (1.0 + 3.5 * core / bc);
+                len = std::min(len, core);
+            }
+            len = std::min(len, bc);
+        }
+        const double n = std::ceil(ub * (double)dt / (0.25 * len));
+        return !(n > 1.0) ? 1 : (n >= 16.0 ? 16 : (int)n);
+    }
+    void wallTransportFood(float dt) {
+        const int n = wallFoodSubsteps(dt);
+        for (auto& f : food) {
+            if (!f.alive) continue;
+#ifdef EVO_OCEAN_EYE
+            const float z0 = f.depth;
+#endif
+            wallAdvect(f.pos, f.depth, dt, n);
+#ifdef EVO_OCEAN_EYE
+            if (f.depth != z0) f.eyeCon = ocean::eyeContrast(ocean::kEyeFoodBright, f.depth);   // no draws
+#endif
+        }
+    }
+
+public:
+    // q mirror-folded into [0, L] (period 2L: r = q mod 2L, r or 2L − r):
+    // never wrapped to the opposite face, never piled onto one.
+    static float mirrorFold(float q, float L) {
+        if (q >= 0.0f && q <= L) return q;
+        if (q < 0.0f && q >= -L) return -q;
+        const float L2 = 2.0f * L;
+        if (q > L && q <= L2) return L2 - q;
+        float r = std::fmod(q, L2);   // exact
+        if (r < 0.0f) r += L2;
+        return (r <= L) ? r : L2 - r;
+    }
+    // One particle's midpoint (RK2) transport over dt in n substeps through the
+    // wall flow, frozen at this step's time (ensureFlow done); every trial and
+    // final coordinate mirror-folded into the tank. Not claimed to preserve
+    // volume exactly: tests/ocean_tests.cpp "wall_transport" checks uniform
+    // tracers for wall accumulation and convergence in n.
+    void wallAdvect(Vec2& p, float& d, float dt, int n) const {
+        const float h = dt / (float)n, hh = 0.5f * h;
+        const float W = (float)width, H = (float)height;
+        for (int k = 0; k < n; ++k) {
+            const Flow U1 = wallFlowFast(p, d);
+            const Vec2 pm = {mirrorFold(p.x + hh * U1.x, W), mirrorFold(p.y + hh * U1.y, H)};
+            const float dm = mirrorFold(d + hh * U1.d, D);
+            const Flow U2 = wallFlowFast(pm, dm);
+            p = {mirrorFold(p.x + h * U2.x, W), mirrorFold(p.y + h * U2.y, H)};
+            d = mirrorFold(d + h * U2.d, D);
+        }
+    }
+    bool wallFlowOn() const { return ocfg.walls && (current_.active() || wavesOn()); }
+    int wallFoodSubstepsNow(float dt) const { return wallFoodSubsteps(dt); }   // (tests)
+
+private:
+
 #ifdef EVO_OCEAN_EYE
     // ---- the compound eye ---------------------------------------------------
     std::vector<float> predCon_;   // per predator, this step: dark − ambient light
@@ -1519,6 +1894,7 @@ private:
                     rng.range(10.0f, (float)height - 10.0f)};
         const float z = rng.range(0.0f, D);
         creatures.push_back(makeRandomFish(pos, z, D, cfg.genomeInitMin, cfg.genomeInitMax));
+        if (ocfg.walls) containBody(creatures.back());   // its trail laid out behind it stays inside
         markFounder(creatures.back());
         if (appearanceOn()) appearanceAppendFounder();
     }
@@ -1584,6 +1960,7 @@ private:
             c.vel.y = evomath::sinf(theta);
             c.speed = std::clamp(cfg.minSpeed + drive * (effMax - cfg.minSpeed),
                                  cfg.minSpeed, effMax);
+            if (ocfg.walls) wallAvoid(c.pos, c.vel, dt);   // glass walls: the soft turn (no draws)
             c.lastMoveDir = c.vel;
             c.pos.x += c.vel.x * c.speed * dt;
             c.pos.y += c.vel.y * c.speed * dt;
@@ -1615,6 +1992,7 @@ private:
             if (vlen > 0.001f) { c.vel.x /= vlen; c.vel.y /= vlen; }
             c.speed += speedAdj * 50.0f * dt;
             c.speed = std::clamp(c.speed, cfg.minSpeed, effMax);
+            if (ocfg.walls) wallAvoid(c.pos, c.vel, dt);   // glass walls: the soft turn (no draws)
             c.lastMoveDir = c.vel;
             c.pos.x += c.vel.x * c.speed * dt;
             c.pos.y += c.vel.y * c.speed * dt;
@@ -1641,26 +2019,45 @@ private:
             c.vz = vz;
         }
 
-        if (flowE1() || ocfg.sizeDrift) {
-            // E1: carried by the 3-D flow where the fish now is; with sizeDrift
-            // a big fish by less (drag / mass ∝ 1/L). Not swimming: no speed,
-            // no move cost. Depth clamped after (the walls' vz response above
-            // stays as it was).
-            const Flow U = flowStep(c.pos, c.depth);
-            const float w = ocfg.sizeDrift ? std::min(1.0f, 1.0f / c.bodySize) : 1.0f;
-            c.pos.x = wrapCoord(c.pos.x + w * U.x * dt, (float)width);
-            c.pos.y = wrapCoord(c.pos.y + w * U.y * dt, (float)height);
-            c.depth = clampDepth(c.depth + w * U.d * dt);
-        } else if (current_.active()) {
-            Vec2 cur = current_.velocityAt(c.pos);
-            c.pos.x += cur.x * dt;
-            c.pos.y += cur.y * dt;
+        if (ocfg.walls) {
+            // Glass walls: contact after swimming (clamped, the outward heading
+            // reflected, speed kept), then the wall flow (sizeDrift-weighted as
+            // below), then the same containment again, the depth faces' outward
+            // pitch removed; lastMoveDir is the resolved heading.
+            wallContact(c.pos, c.vel);
+            if (wallFlowOn()) {
+                const Flow U = wallFlowFast(c.pos, c.depth);
+                const float w = ocfg.sizeDrift ? std::min(1.0f, 1.0f / c.bodySize) : 1.0f;
+                c.pos.x += w * U.x * dt;
+                c.pos.y += w * U.y * dt;
+                c.depth += w * U.d * dt;
+            }
+            wallContact(c.pos, c.vel);
+            if (c.depth <= 0.0f)   { c.depth = 0.0f; if (c.vz < 0.0f) c.vz = 0.0f; }
+            else if (c.depth >= D) { c.depth = D;    if (c.vz > 0.0f) c.vz = 0.0f; }
+            c.lastMoveDir = c.vel;
+        } else {
+            if (flowE1() || ocfg.sizeDrift) {
+                // E1: carried by the 3-D flow where the fish now is; with sizeDrift
+                // a big fish by less (drag / mass ∝ 1/L). Not swimming: no speed,
+                // no move cost. Depth clamped after (the walls' vz response above
+                // stays as it was).
+                const Flow U = flowStep(c.pos, c.depth);
+                const float w = ocfg.sizeDrift ? std::min(1.0f, 1.0f / c.bodySize) : 1.0f;
+                c.pos.x = wrapCoord(c.pos.x + w * U.x * dt, (float)width);
+                c.pos.y = wrapCoord(c.pos.y + w * U.y * dt, (float)height);
+                c.depth = clampDepth(c.depth + w * U.d * dt);
+            } else if (current_.active()) {
+                Vec2 cur = current_.velocityAt(c.pos);
+                c.pos.x += cur.x * dt;
+                c.pos.y += cur.y * dt;
+            }
+            // The preview's two-step wrap (`if (x < 0) x += W; if (x >= W) x -= W;`)
+            // is wrapCoord's own one-pass branch, so wrapCoord gives the same bits
+            // for every x in [-W, 2·W), and wraps a multi-span excursion too.
+            c.pos.x = wrapCoord(c.pos.x, (float)width);
+            c.pos.y = wrapCoord(c.pos.y, (float)height);
         }
-        // The preview's two-step wrap (`if (x < 0) x += W; if (x >= W) x -= W;`)
-        // is wrapCoord's own one-pass branch, so wrapCoord gives the same bits
-        // for every x in [-W, 2·W), and wraps a multi-span excursion too.
-        c.pos.x = wrapCoord(c.pos.x, (float)width);
-        c.pos.y = wrapCoord(c.pos.y, (float)height);
         hot_[i] = {c.pos, c.vel, c.depth};
 #ifdef EVO_OCEAN_EYE
         if constexpr (Eye) {
@@ -1670,6 +2067,7 @@ private:
 #endif
 
         c.updateBody();
+        if (ocfg.walls) containBody(c);
 
         kernel::stepInternalState(c, actions, dt);
         kernel::stepMetabolism(c, cfg, dt);
@@ -1722,6 +2120,7 @@ private:
                         baby.body[bi] = { m.x - baby.vel.x * bi * 4.0f,
                                           m.y - baby.vel.y * bi * 4.0f };
                 }
+                if (ocfg.walls) containBody(baby);   // the midpoint is inside; its trail too
                 kernel::inheritFromPair(baby, c1, c2, cfg);
                 const float m = ocfg.buoyMutation;
                 baby.bodyBuoy = std::clamp(0.5f * (c1.bodyBuoy + c2.bodyBuoy) + rng.range(-m, m),
@@ -1746,7 +2145,13 @@ private:
         sensors[SIGNAL0] = signals.read(c.pos);
         sensors[SIGNAL0_FWD] = signals.readInDir(c.pos, fwd) - signals.readInDir(c.pos, {-fwd.x, -fwd.y});
         sensors[SIGNAL0_LR] = signals.readInDir(c.pos, rht) - signals.readInDir(c.pos, {-rht.x, -rht.y});
-        if (flowE1()) {
+        if (ocfg.walls) {
+            // Glass walls: the wall flow's horizontal part here (0 with no current and no waves).
+            Flow U;
+            if (wallFlowOn()) U = wallFlowFast(c.pos, c.depth);
+            sensors[CURRENT_FWD] = evomath::tanhf((U.x * fwd.x + U.y * fwd.y) / 100.0f);
+            sensors[CURRENT_LR]  = evomath::tanhf((U.x * rht.x + U.y * rht.y) / 100.0f);
+        } else if (flowE1()) {
             // E1: the water's horizontal flow here (deep current × f(d) + waves).
             const Flow U = flowFast(c.pos, c.depth);
             sensors[CURRENT_FWD] = evomath::tanhf((U.x * fwd.x + U.y * fwd.y) / 100.0f);
@@ -2110,6 +2515,7 @@ private:
                 p.pitch = std::clamp(p.pitch + rng.range(-0.05f, 0.05f), -0.3f, 0.3f);
                 vr = p.pitch;
             }
+            if (ocfg.walls) wallAvoid(p.pos, dir, dt);   // glass walls: the soft turn (chase or wander alike; no draws)
             p.vel = dir;
 
             p.pos.x += dir.x * hs * speed * dt;
@@ -2117,19 +2523,34 @@ private:
             p.depth += vr * speed * dt;
             if (p.depth < 0.0f) { p.depth = 0.0f; p.pitch = std::abs(p.pitch); }
             else if (p.depth > D) { p.depth = D; p.pitch = -std::abs(p.pitch); }
-            if (flowE1()) {
-                // E1: carried by the 3-D flow (weight 1), depth clamped after.
-                const Flow U = flowFast(p.pos, p.depth);
-                p.pos.x = wrapCoord(p.pos.x + U.x * dt, (float)width);
-                p.pos.y = wrapCoord(p.pos.y + U.y * dt, (float)height);
-                p.depth = clampDepth(p.depth + U.d * dt);
-            } else if (current_.active()) {
-                const Vec2 cur = current_.velocityAt(p.pos);
-                p.pos.x += cur.x * dt;
-                p.pos.y += cur.y * dt;
+            if (ocfg.walls) {
+                // Glass walls: contact, the wall flow (weight 1), contact again;
+                // a depth face reached by the flow turns the pitch inward.
+                wallContact(p.pos, p.vel);
+                if (wallFlowOn()) {
+                    const Flow U = wallFlowFast(p.pos, p.depth);
+                    p.pos.x += U.x * dt;
+                    p.pos.y += U.y * dt;
+                    p.depth += U.d * dt;
+                }
+                wallContact(p.pos, p.vel);
+                if (p.depth <= 0.0f)   { p.depth = 0.0f; p.pitch = std::abs(p.pitch); }
+                else if (p.depth >= D) { p.depth = D;    p.pitch = -std::abs(p.pitch); }
+            } else {
+                if (flowE1()) {
+                    // E1: carried by the 3-D flow (weight 1), depth clamped after.
+                    const Flow U = flowFast(p.pos, p.depth);
+                    p.pos.x = wrapCoord(p.pos.x + U.x * dt, (float)width);
+                    p.pos.y = wrapCoord(p.pos.y + U.y * dt, (float)height);
+                    p.depth = clampDepth(p.depth + U.d * dt);
+                } else if (current_.active()) {
+                    const Vec2 cur = current_.velocityAt(p.pos);
+                    p.pos.x += cur.x * dt;
+                    p.pos.y += cur.y * dt;
+                }
+                p.pos.x = wrapPreview(p.pos.x, (float)width);
+                p.pos.y = wrapPreview(p.pos.y, (float)height);
             }
-            p.pos.x = wrapPreview(p.pos.x, (float)width);
-            p.pos.y = wrapPreview(p.pos.y, (float)height);
 
             if (bestIdx >= 0 && p.digestTimer <= 0.0f && creatures[bestIdx].alive) {
                 Fish& prey = creatures[bestIdx];
@@ -2155,13 +2576,17 @@ private:
                     if (cfg.toroidal) {
                         child.pos = { wrapCoord(p.pos.x + rng.range(-8.0f, 8.0f), (float)width),
                                       wrapCoord(p.pos.y + rng.range(-8.0f, 8.0f), (float)height) };
+                    } else if (ocfg.walls) {   // the same two draws, mirror-folded inside the glass
+                        child.pos = { mirrorFold(p.pos.x + rng.range(-8.0f, 8.0f), (float)width),
+                                      mirrorFold(p.pos.y + rng.range(-8.0f, 8.0f), (float)height) };
                     } else {
                         child.pos = { std::clamp(p.pos.x + rng.range(-8.0f, 8.0f), 0.0f, (float)width  - 1.0f),
                                       std::clamp(p.pos.y + rng.range(-8.0f, 8.0f), 0.0f, (float)height - 1.0f) };
                     }
                     const float a = rng.range(0.0f, 6.2832f);
                     child.vel    = {evomath::cosf(a), evomath::sinf(a)};
-                    child.depth  = clampDepth(p.depth + rng.range(-8.0f, 8.0f));
+                    child.depth  = ocfg.walls ? mirrorFold(p.depth + rng.range(-8.0f, 8.0f), D)
+                                              : clampDepth(p.depth + rng.range(-8.0f, 8.0f));
                     child.energy = cfg.predatorNewbornEnergy;
                     p.energy    -= cfg.predatorNewbornEnergy;
                     child.generation = p.generation + 1;

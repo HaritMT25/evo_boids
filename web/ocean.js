@@ -35,6 +35,8 @@
  *      frame) &e1=1 (the E1 physics preset, oc_e1_preset, under &cfg)
  *      &colour=appearance|family|brain (else the visitor's last choice,
  *      appearance the first time) &guide=0|1 &intro=1 (web/guide.js)
+ *      &clarity=clear|realistic|0..1 (the water's look, drawing only; else
+ *      the visitor's last choice, clear the first time; never stored)
  *      ?mock=1 loads ocean_mock.js from beside the page instead of the engine
  *      (a JS stand-in for page development, not part of web/).
  *      The link's setup goes to oc_init as it is; one it refuses stops the
@@ -544,6 +546,7 @@
     attachTip(el("f_governor"), "governor");
     attachTip(el("f_colourBrain"), "colourBrain");
     attachTip(el("f_followLight"), "followLight");
+    attachTip(el("f_clarity"), "clarity");
     var saved = store("evo_boids.ocean.tab");
     setSheetTab(saved && el("panel-" + saved) ? saved : "run");
   }
@@ -1811,6 +1814,41 @@
     updateModeline();
     this.blur();
   });
+  /* Water clarity: how murky the water is drawn (scene.setClarity; drawing
+   * only, live), 0 realistic (the Ocean's first look, kept for reference)
+   * .. 1 clear (the default). ?clarity= (clear, realistic, 0..1 or a
+   * percentage) wins and is not stored; then the visitor's own last choice
+   * (stored when they move the slider); else clear. */
+  var clarity = 1;
+  function parseClarity(v) {
+    if (v === null || v === undefined) return null;
+    v = String(v).trim().toLowerCase();
+    if (v === "clear") return 1;
+    if (v === "realistic") return 0;
+    var x = v === "" ? NaN : Number(v);
+    if (!isFinite(x)) return null;
+    if (x > 1) x /= 100;   /* a percentage */
+    return Math.max(0, Math.min(1, x));
+  }
+  function clarityLabel(u) { return u >= 1 ? "Clear" : u <= 0 ? "Realistic" : Math.round(u * 100) + " % clear"; }
+  function applyClarity() {
+    var inp = el("clarity");
+    inp.value = String(Math.round(clarity * 100));
+    inp.setAttribute("aria-valuetext", clarityLabel(clarity));
+    el("clarityval").textContent = clarityLabel(clarity);
+    if (scene && scene.setClarity) scene.setClarity(clarity);
+  }
+  (function () {
+    var want = parseClarity(P.get("clarity")), saved = parseClarity(store("evo_boids.ocean.clarity"));
+    clarity = want !== null ? want : saved !== null ? saved : 1;
+    applyClarity();
+  })();
+  el("clarity").addEventListener("input", function () {
+    clarity = Math.max(0, Math.min(1, (+this.value || 0) / 100));
+    store("evo_boids.ocean.clarity", String(clarity));
+    applyClarity();
+  });
+  el("clarity").addEventListener("pointerup", function () { this.blur(); });   /* the keys go back to the tank; arrow keys keep it */
   function updateModeline() {
     /* the world's appearance genes (bit 1 patterns, bit 2 shapes; 0 = off, or a module without them) */
     var flags = HAS_APP ? (has("oc_appearance_flags") ? M._oc_appearance_flags() : 3) : 0;
@@ -2027,6 +2065,7 @@
     updateInsets();
     updateLight();
     updateModeline();
+    applyClarity();
     if (dash()) dash().attach({
       depth: function () { return D; },
       familyColor: function (id) { return has("oc_family_color") ? M._oc_family_color(id) : 0x3b5957; },

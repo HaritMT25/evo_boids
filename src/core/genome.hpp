@@ -232,25 +232,10 @@ inline void feedForward(NeuralNet& nnet, const float sensors[], float actions[],
     }
 
     // Accumulators for both sink kinds; stack-allocated, so it stays private to
-    // each OpenMP thread with no per-call heap traffic. flat holds one
-    // contiguous run per sink (the stable counting sort in buildNeuralNet), so
-    // each run is summed in a register: it starts at +0, the accumulator's own
-    // initial value (not at the first product: +0 + -0 is +0, the product alone
-    // could be -0), adds the run's products in order, and is stored once — the
-    // same additions in the same order as accumulating into accum[sink] in
-    // memory, so the same bits, without a store and a reload per connection. A
-    // sink with no run keeps its +0.
+    // each OpenMP thread with no per-call heap traffic.
     float accum[NUM_ACTIONS + MAX_INTERNAL_NEURONS] = {};
-    const NeuralNet::FlatConn* p = nnet.flat.data();
-    const NeuralNet::FlatConn* const end = p + nnet.flat.size();
-    while (p != end) {
-        const int sink = p->sink();
-        float a = 0.0f;
-        do {
-            a += vals[p->src()] * p->w();
-            ++p;
-        } while (p != end && p->sink() == sink);
-        accum[sink] = a;
+    for (const auto& conn : nnet.flat) {
+        accum[conn.sink()] += vals[conn.src()] * conn.w();
     }
 
     if (fastTanh) {

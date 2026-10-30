@@ -44,6 +44,16 @@
  *     the pattern law (the gallery's K12); appearancePathCheck() that of the
  *     production vertex path (the gene texture's slot lookup, every body
  *     part's position and material site, the decoded pattern genes)
+ *   - glass walls (setWorld(w, h, d, {walls})): the four side panes drawn as
+ *     faint glass (brighter at grazing angles, GLASS_FS; not depth-written),
+ *     every fish vertex held inside them (a fish against a pane flattens on
+ *     it), no seam unwrapping and no wrap jumps, the snow kept inside; off,
+ *     the wrapping world as before. Any tank size: the camera's fit starts
+ *     outside the box's bounding sphere and the far plane covers the depth
+ *
+ * Big tanks: the sand, caustics and surface are world-unit procedural
+ * patterns (no bitmap stretched over the area), so their grain and ripples
+ * keep their size; the snow keeps its fixed budget of flakes.
  *
  * Every fish is a faceted low-poly body bent along the six spine points the
  * core exports; the floor below catches its shadow and slow caustic light.
@@ -78,6 +88,7 @@
     surfMirror: [0.035, 0.085, 0.09], /* ... and the mirrored water around it */
     caustic: [0.70, 0.95, 0.84],
     edge: [0.55, 0.85, 0.78],
+    glass: [0.70, 0.92, 0.90],     /* the glass walls' panes (a pale aqua sheen) */
     foodCore: [0.93, 1.0, 0.62],
     foodGlow: [0.55, 0.86, 0.18],
     current: [0.55, 0.86, 0.98],
@@ -145,6 +156,14 @@
     "attribute vec4 iBody;",  /* radius, height, highlight (1 selected, .5 hover), ember */
     "attribute vec4 iX;",     /* x: pitch as tan(angle) = vz, + = sinking (head down); yzw spare */
     "uniform vec2 uHalf;", "uniform float uTime;", "uniform float uWag;",
+    /* glass walls (1): every vertex held inside the glass, so a fish against a
+     * pane flattens on it instead of poking through (the engine holds its
+     * spine inside; this clips the body's width, fins and wag) */
+    "uniform float uWalls;",
+    "vec3 inGlass(vec3 w) {",
+    "  if (uWalls > 0.5) { w.x = clamp(w.x, -uHalf.x, uHalf.x); w.z = clamp(w.z, -uHalf.y, uHalf.y); }",
+    "  return w;",
+    "}",
     "vec2 seg(int i) {",
     "  if (i <= 0) return iA.xy; if (i == 1) return iA.zw; if (i == 2) return iB.xy;",
     "  if (i == 3) return iB.zw; if (i == 4) return iC.xy; return iC.zw;",
@@ -175,7 +194,7 @@
      * the shadow follows the tilted body */
     "  float along = length(c - seg(0)) * (s < 0.0 ? -1.0 : 1.0);",
     "  float lift = along * clamp(iX.x, -1.2, 1.2);",
-    "  return vec3(p.x - uHalf.x, iBody.y + position.z * R + lift, p.y - uHalf.y);",
+    "  return inGlass(vec3(p.x - uHalf.x, iBody.y + position.z * R + lift, p.y - uHalf.y));",
     "}"
   ].join("\n");
 
@@ -361,6 +380,7 @@
       "attribute vec4 iBody;",  /* radius, height, highlight, ember */
       "attribute vec4 iX;",     /* pitch (vz), tail-beat phase, lambda, family / brain colour 0xRRGGBB */
       "uniform vec2 uHalf; uniform float uTime; uniform float uWag; uniform float uPxPerUnit;",
+      "uniform float uWalls;",   /* glass walls: as FISH_CORE's inGlass (0 in the parity check: unset) */
       "uniform float uColourBy;",   /* 0: the skin from the genes (pattern law 3); 1: the family / brain colour */
       G.COMMON,
       G.GENES,
@@ -393,7 +413,9 @@
       "  vec2 p = c + side * (geo.y * R + wag);",
       "  float along = length(c - seg(0)) * (s < 0.0 ? -1.0 : 1.0);",
       "  float lift = along * clamp(iX.x, -1.2, 1.2);",
-      "  return vec3(p.x - uHalf.x, iBody.y + geo.z * R + lift, p.y - uHalf.y);",
+      "  vec3 w = vec3(p.x - uHalf.x, iBody.y + geo.z * R + lift, p.y - uHalf.y);",
+      "  if (uWalls > 0.5) { w.x = clamp(w.x, -uHalf.x, uHalf.x); w.z = clamp(w.z, -uHalf.y, uHalf.y); }",
+      "  return w;",
       "}",
       /* the barbels' screen-space minimum half-width (0.7 px), in body radii */
       "float minWidth() {",
@@ -705,7 +727,12 @@
     var side = [-f[1], f[0]], p = [cc[0] + side[0] * geo[1] * Rb, cc[1] + side[1] * geo[1] * Rb];
     var s0 = instSeg(inst, c, 0), along = Math.hypot(cc[0] - s0[0], cc[1] - s0[1]) * (s < 0 ? -1 : 1);
     var lift = along * Math.min(1.2, Math.max(-1.2, inst.iX[4 * c]));
-    return [p[0] - U.half[0], inst.iBody[4 * c + 1] + geo[2] * Rb + lift, p[1] - U.half[1]];
+    var w = [p[0] - U.half[0], inst.iBody[4 * c + 1] + geo[2] * Rb + lift, p[1] - U.half[1]];
+    if (U.walls) {   /* the shader's glass clamp (uWalls) */
+      w[0] = Math.min(U.half[0], Math.max(-U.half[0], w[0]));
+      w[2] = Math.min(U.half[1], Math.max(-U.half[1], w[2]));
+    }
+    return w;
   }
   function minWidthCPU(inst, c, U) {
     var hx = inst.iA[4 * c] - U.half[0], hy = inst.iBody[4 * c + 1], hz = inst.iA[4 * c + 1] - U.half[1];
@@ -984,6 +1011,32 @@
     "  gl_FragColor = vec4(uCol * (1.0 - r) * vA * 0.32, 1.0); }"
   ].join("\n");
 
+  /* the glass walls (setWorld's walls on): four side panes, faint seen
+   * face-on and brighter at grazing angles (the rim), a little fainter toward
+   * the floor and at the surface / floor seams; blended over the water and
+   * never written to the depth buffer (fish in front stay in front) */
+  var GLASS_VS = [
+    "varying vec3 vWorld; varying vec3 vN;",
+    "void main() {",
+    "  vec4 w = modelMatrix * vec4(position, 1.0);",
+    "  vWorld = w.xyz; vN = normal;",
+    "  gl_Position = projectionMatrix * viewMatrix * w;",
+    "}"
+  ].join("\n");
+  var GLASS_FS = [
+    "uniform vec3 uCol; uniform float uFloorY;",
+    "varying vec3 vWorld; varying vec3 vN;",
+    "void main() {",
+    "  vec3 v = normalize(cameraPosition - vWorld);",
+    "  float c = abs(dot(normalize(vN), v));",
+    "  float rim = pow(1.0 - c, 4.0);",
+    "  float h = clamp(vWorld.y / uFloorY, 0.0, 1.0);",
+    "  float seam = smoothstep(0.0, 6.0, -vWorld.y) * smoothstep(0.0, 6.0, vWorld.y - uFloorY);",
+    "  float a = (0.035 + 0.26 * rim) * (1.0 - 0.4 * h) * (0.4 + 0.6 * seam);",
+    "  gl_FragColor = vec4(uCol, a);",
+    "}"
+  ].join("\n");
+
   var LINE_VS = [
     "attribute float alpha;", "varying float vA;",
     "void main() { vA = alpha; gl_Position = projectionMatrix * viewMatrix * vec4(position, 1.0); }"
@@ -1124,6 +1177,7 @@
     var scene = new THREE.Scene();
     var camera = new THREE.PerspectiveCamera(FOV, 1, 4, 20000);
     var W = 1920, H = 1080, halfW = 960, halfH = 540;
+    var WALLS = false;   /* the tank's sides: glass (setWorld's opts.walls) or wrapping */
     /* the tank's depth D (sim units, the world's oc_depth_max) and its floor,
      * a little below the deepest a fish can swim */
     var TD = opts.tankDepth > 0 ? +opts.tankDepth : TANK_D;
@@ -1146,7 +1200,9 @@
       uLightOn: { value: 0 }, uL0: { value: 1 }, uKWater: { value: 0 },
       /* the flashlight (setFlashlight, BEAM_FN): its fade 0..1, axis, cone, reach */
       uBeamOn: { value: 0 }, uBeamDir: { value: new THREE.Vector3(0, -1, 0) },
-      uBeamTan: { value: 0.2 }, uBeamReach: { value: 1000 }
+      uBeamTan: { value: 0.2 }, uBeamReach: { value: 1000 },
+      /* the tank's sides: 1 = glass walls (setWorld), 0 = wrapping */
+      uWalls: { value: 0 }
     };
     function beamUniforms(u) {
       u.uBeamOn = common.uBeamOn; u.uBeamDir = common.uBeamDir;
@@ -1204,7 +1260,8 @@
     var fishUniforms = beamUniforms({
       uHalf: common.uHalf, uTime: common.uTime, uFog: common.uFog, uFogDensity: common.uFogDensity,
       uLight: common.uLight, uWag: { value: reduced ? 0 : 1 }, uSelect: { value: v3(C.select) },
-      uDepth: common.uDepth, uLightOn: common.uLightOn, uL0: common.uL0, uKWater: common.uKWater
+      uDepth: common.uDepth, uLightOn: common.uLightOn, uL0: common.uL0, uKWater: common.uKWater,
+      uWalls: common.uWalls
     });
     var fishMat = new THREE.ShaderMaterial({ vertexShader: FISH_VS, fragmentShader: FISH_FS,
                                              uniforms: fishUniforms, side: THREE.DoubleSide });
@@ -1212,7 +1269,7 @@
       vertexShader: SHADOW_VS, fragmentShader: SHADOW_FS,
       uniforms: { uHalf: common.uHalf, uTime: common.uTime, uWag: fishUniforms.uWag, uLight: common.uLight,
                   uFloorY: common.uFloorY, uDepth: common.uDepth, uFog: common.uFog, uFogDensity: common.uFogDensity,
-                  uAlpha: { value: 0.40 } },
+                  uAlpha: { value: 0.40 }, uWalls: common.uWalls },
       transparent: true, depthWrite: true, depthFunc: THREE.LessDepth, side: THREE.DoubleSide
     });
 
@@ -1292,13 +1349,14 @@
         uLight: common.uLight, uWag: fishUniforms.uWag, uSelect: fishUniforms.uSelect,
         uDepth: common.uDepth, uLightOn: common.uLightOn, uL0: common.uL0, uKWater: common.uKWater,
         uIntrinsic: { value: 0 }, uPxPerUnit: { value: 500 }, uColourBy: { value: 0 },
-        uGenes: { value: null }, uRingT: { value: new Float32Array(16) }, uRingN: { value: 0 }, uHalfRing: { value: 4 }
+        uGenes: { value: null }, uRingT: { value: new Float32Array(16) }, uRingN: { value: 0 }, uHalfRing: { value: 4 },
+        uWalls: common.uWalls
       });
       var mat = new THREE.ShaderMaterial({ vertexShader: sh.vs, fragmentShader: sh.fs, uniforms: U, side: THREE.DoubleSide });
       var shadowU = { uHalf: common.uHalf, uTime: common.uTime, uWag: fishUniforms.uWag, uLight: common.uLight,
                       uFloorY: common.uFloorY, uDepth: common.uDepth, uFog: common.uFog, uFogDensity: common.uFogDensity,
                       uAlpha: shadowMat.uniforms.uAlpha, uPxPerUnit: U.uPxPerUnit,
-                      uGenes: U.uGenes, uRingT: U.uRingT, uRingN: U.uRingN, uHalfRing: U.uHalfRing };
+                      uGenes: U.uGenes, uRingT: U.uRingT, uRingN: U.uRingN, uHalfRing: U.uHalfRing, uWalls: common.uWalls };
       var shMat = new THREE.ShaderMaterial({ vertexShader: sh.shadowVs, fragmentShader: SHADOW_FS, uniforms: shadowU,
                                              transparent: true, depthWrite: true, depthFunc: THREE.LessDepth, side: THREE.DoubleSide });
       var self = { cap: 0, n: 0, lod: "", attrs: null, geo: null, bgeo: null, mesh: null, bmesh: null, shadow: null,
@@ -1446,8 +1504,11 @@
     snow.renderOrder = 6;
     scene.add(snow);
     function placeSnow() {
+      /* a fixed budget of flakes over the tank (more area: sparser, never
+       * more); with glass walls inside the panes, clear of their 14-unit sway */
       var p = snowGeo.attributes.position.array;
-      for (var i = 0; i < SNOW; i++) { p[3 * i] = snowUnit[3 * i] * W * 1.1; p[3 * i + 2] = snowUnit[3 * i + 2] * H * 1.1; }
+      var sx = WALLS ? Math.max(0, W - 30) : W * 1.1, sz = WALLS ? Math.max(0, H - 30) : H * 1.1;
+      for (var i = 0; i < SNOW; i++) { p[3 * i] = snowUnit[3 * i] * sx; p[3 * i + 2] = snowUnit[3 * i + 2] * sz; }
       snowGeo.attributes.position.needsUpdate = true;
     }
 
@@ -1478,6 +1539,35 @@
     var currents = LineLayer(STREAKS * 2, C.current, 4);
     var trail = LineLayer(240 * 2, C.select, 5);
     var outline = LineLayer(24, C.edge, 4);   /* the glass box: top, bottom, four verticals */
+    /* the glass walls' four side panes (built by setWorld; shown with walls on) */
+    var glassGeo = new THREE.BufferGeometry();
+    glassGeo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(24 * 3), 3));
+    glassGeo.setAttribute("normal", new THREE.BufferAttribute(new Float32Array(24 * 3), 3));
+    var glassMat = new THREE.ShaderMaterial({ vertexShader: GLASS_VS, fragmentShader: GLASS_FS,
+      uniforms: { uCol: { value: v3(C.glass) }, uFloorY: common.uFloorY },
+      transparent: true, depthWrite: false, side: THREE.DoubleSide });
+    var glass = new THREE.Mesh(glassGeo, glassMat);
+    glass.frustumCulled = false;
+    glass.renderOrder = 8;   /* after the fish, the food and the snow */
+    glass.visible = false;
+    scene.add(glass);
+    function buildGlass() {
+      var P = glassGeo.attributes.position.array, N = glassGeo.attributes.normal.array, k = 0;
+      var top = -0.5, bot = FLOOR_Y + 0.6;
+      function quad(ax, az, bx, bz, nx, nz) {   /* two triangles from (a, top) to (b, bottom) */
+        var v = [[ax, top, az], [bx, top, bz], [bx, bot, bz], [ax, top, az], [bx, bot, bz], [ax, bot, az]];
+        for (var i = 0; i < 6; i++) {
+          P[3 * k] = v[i][0]; P[3 * k + 1] = v[i][1]; P[3 * k + 2] = v[i][2];
+          N[3 * k] = nx; N[3 * k + 1] = 0; N[3 * k + 2] = nz; k++;
+        }
+      }
+      quad(-halfW, -halfH, -halfW, halfH, 1, 0);
+      quad(halfW, -halfH, halfW, halfH, -1, 0);
+      quad(-halfW, -halfH, halfW, -halfH, 0, 1);
+      quad(-halfW, halfH, halfW, halfH, 0, -1);
+      glassGeo.attributes.position.needsUpdate = true;
+      glassGeo.attributes.normal.needsUpdate = true;
+    }
     var streak = new Float32Array(STREAKS * 4);   /* x, y, age, life */
     for (var si = 0; si < STREAKS; si++) streak[4 * si + 2] = streak[4 * si + 3] = 1;
 
@@ -1632,16 +1722,20 @@
     }
     /* Distance at which the whole tank fits the visible part of the canvas
      * (the canvas minus the panels' insets), found by projecting the eight
-     * corners of its box (surface and floor), aimed at its middle depth. */
+     * corners of its box (surface and floor), aimed at its middle depth. The
+     * search starts outside the box's bounding sphere (radius r: at d >=
+     * r / sin(fov/2) every corner is in front of the camera), so a big or a
+     * deep tank never starts with corners behind it. */
     function computeFit() {
-      var target = new THREE.Vector3(0, -TD / 2, 0), d = 1500, D = dir();
+      var r = Math.sqrt(halfW * halfW + halfH * halfH + 0.25 * FLOOR_Y * FLOOR_Y);
+      var target = new THREE.Vector3(0, -TD / 2, 0), d = Math.max(1500, 1.05 * r / Math.sin(FOV * Math.PI / 360)), D = dir();
       var vw = Math.max(1, cw - insets.left - insets.right), vh = Math.max(1, ch - insets.top - insets.bottom);
       var bx = insets.left + vw / 2, by = insets.top + vh / 2;
       var corners = [[-halfW, 0, -halfH], [halfW, 0, -halfH], [halfW, 0, halfH], [-halfW, 0, halfH],
                      [-halfW, FLOOR_Y, -halfH], [halfW, FLOOR_Y, -halfH], [halfW, FLOOR_Y, halfH], [-halfW, FLOOR_Y, halfH]];
       var p = new THREE.Vector3();
       var keepPos = camera.position.clone(), keepRot = camera.quaternion.clone();
-      for (var it = 0; it < 6; it++) {
+      for (var it = 0; it < 8; it++) {
         camera.position.copy(target).addScaledVector(D, d);
         camera.lookAt(target);
         camera.updateMatrixWorld();
@@ -1694,9 +1788,13 @@
       if (!userMoved && !follow) resetView(false);
     }
 
-    /* depth (optional): a new tank depth D; the floor, shading and snow follow */
-    function setWorld(w, h, depth) {
+    /* depth (optional): a new tank depth D; the floor, shading and snow follow.
+     * o.walls (optional): the sides are glass (panes drawn, fish held inside
+     * them, no seam unwrapping) or wrap; left out, the mode stays. */
+    function setWorld(w, h, depth, o) {
       W = w; H = h; halfW = w / 2; halfH = h / 2;
+      if (o && typeof o.walls === "boolean") WALLS = o.walls;
+      common.uWalls.value = WALLS ? 1 : 0;
       if (depth > 0) {
         TD = +depth; FLOOR_Y = -(TD + 14);
         common.uDepth.value = TD; common.uFloorY.value = FLOOR_Y;
@@ -1722,6 +1820,8 @@
         seg(a[0], -1, a[1], a[0], FLOOR_Y + 0.6, a[1], 0.12);
       }
       o.commit(k);
+      buildGlass();
+      glass.visible = WALLS;
       for (var s = 0; s < STREAKS; s++) streak[4 * s + 2] = streak[4 * s + 3] = 1;   /* respawn */
       trailLen = 0;
       resetView(false);
@@ -1758,8 +1858,10 @@
         xs[0] = px; ys[0] = py;
         for (var k = 1; k < 6; k++) {
           var x = segs[b + 2 * k], y = segs[b + 2 * k + 1];
-          if (x - px > halfW) x -= W; else if (px - x > halfW) x += W;
-          if (y - py > halfH) y -= H; else if (py - y > halfH) y += H;
+          if (!WALLS) {   /* the seam (glass walls have none) */
+            if (x - px > halfW) x -= W; else if (px - x > halfW) x += W;
+            if (y - py > halfH) y -= H; else if (py - y > halfH) y += H;
+          }
           xs[k] = x; ys[k] = y; px = x; py = y;
         }
         A[o] = xs[0]; A[o + 1] = ys[0]; A[o + 2] = xs[1]; A[o + 3] = ys[1];
@@ -1802,12 +1904,14 @@
       for (var c = 0; c < n; c++) {
         var b = 12 * c, px = segs[b], py = segs[b + 1];
         var o = 4 * c;
-        /* unwrap a body that straddles the world's seam */
+        /* unwrap a body that straddles the world's seam (glass walls have none) */
         xs[0] = px; ys[0] = py;
         for (var k = 1; k < 6; k++) {
           var x = segs[b + 2 * k], y = segs[b + 2 * k + 1];
-          if (x - px > halfW) x -= W; else if (px - x > halfW) x += W;
-          if (y - py > halfH) y -= H; else if (py - y > halfH) y += H;
+          if (!WALLS) {
+            if (x - px > halfW) x -= W; else if (px - x > halfW) x += W;
+            if (y - py > halfH) y -= H; else if (py - y > halfH) y += H;
+          }
           xs[k] = x; ys[k] = y; px = x; py = y;
         }
         A[o] = xs[0]; A[o + 1] = ys[0]; A[o + 2] = xs[1]; A[o + 3] = ys[1];
@@ -1966,7 +2070,7 @@
       var x = s.segs[12 * selIdx] - halfW, z = s.segs[12 * selIdx + 1] - halfH, y = fishY(s, selIdx);
       if (trailLen > 0) {
         var lx = trailPts[0], lz = trailPts[2];
-        if (Math.abs(x - lx) > halfW || Math.abs(z - lz) > halfH) trailLen = 0;   /* wrapped: start over */
+        if (!WALLS && (Math.abs(x - lx) > halfW || Math.abs(z - lz) > halfH)) trailLen = 0;   /* wrapped: start over */
       }
       if (stepped && (trailLen === 0 || Math.hypot(x - trailPts[0], y - trailPts[1], z - trailPts[2]) > 3)) {
         trailPts.copyWithin(3, 0, (TRAIL_MAX - 1) * 3);
@@ -2045,7 +2149,7 @@
         else {
           /* the target follows the fish's depth too */
           var tx = s.segs[12 * sel] - halfW, tz = s.segs[12 * sel + 1] - halfH, ty = fishY(s, sel);
-          var t = controls.target, jump = Math.abs(tx - t.x) > halfW || Math.abs(tz - t.z) > halfH;
+          var t = controls.target, jump = !WALLS && (Math.abs(tx - t.x) > halfW || Math.abs(tz - t.z) > halfH);   /* a wrap */
           var kk = jump ? 1 : 1 - Math.exp(-dt * 5);
           var dx = (tx - t.x) * kk, dz = (tz - t.z) * kk, dy = (ty - t.y) * (1 - Math.exp(-dt * 5));
           t.x += dx; t.z += dz; t.y += dy;
@@ -2062,7 +2166,7 @@
       /* near/far follow the zoom, so a close-up keeps its depth precision and
        * a far view never clips the tank */
       var cd = camera.position.distanceTo(controls.target);
-      var nearW = Math.max(1, cd * 0.02), farW = cd * 4 + Math.max(W, H) * 4;
+      var nearW = Math.max(1, cd * 0.02), farW = cd * 4 + (Math.max(W, H) + TD) * 4;   /* the depth too */
       if (Math.abs(camera.near - nearW) > nearW * 0.2 || Math.abs(camera.far - farW) > farW * 0.2) {
         camera.near = nearW; camera.far = farW;
         camera.updateProjectionMatrix();
@@ -2271,6 +2375,7 @@
     return {
       renderer: "three.js (WebGL2)",
       setWorld: setWorld,
+      walls: function () { return WALLS; },   /* the sides drawn as glass (setWorld's walls) */
       setLight: setLight,
       light: function () { return { on: common.uLightOn.value > 0.5, L0: common.uL0.value, k: common.uKWater.value }; },
       resize: resize,

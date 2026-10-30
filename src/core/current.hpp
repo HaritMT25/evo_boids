@@ -66,6 +66,21 @@ private:
 
 public:
     bool active() const { return strength_ > 0.0f; }
+    bool gyre() const { return mode_ == Mode::Gyre; }
+
+    // Mode::Gyre's streamfunction psi = A sin(pi f) sin(pi y / H), with
+    // gyreVel's own sub-expressions (its velocity is (−∂y psi, ∂x psi)); 0
+    // otherwise. Read by the Ocean's glass-wall current (it tapers psi);
+    // Classic never calls it.
+    float gyreStreamAt(Vec2 p) const {
+        if (strength_ <= 0.0f || mode_ != Mode::Gyre) return 0.0f;
+        const float xn = 2.0f * p.x / (float)w_;
+        const float s  = evomath::sinf(gyreOmega_ * gyreT_);
+        const float a  = gyreEps_ * s;
+        const float b  = 1.0f - 2.0f * gyreEps_ * s;
+        const float f  = a * xn * xn + b * xn;
+        return gyreA_ * evomath::sinf(PI * f) * evomath::sinf(PI * p.y / (float)h_);
+    }
 
     // --- Checkpoint access ---
     // The eddy field's vortices are drawn from the rng in init(), so they cannot

@@ -21,7 +21,8 @@
 // The compound eye (eye, eyeOnly, eyeCode: the eye build -DEVO_OCEAN_EYE
 // only), own-frame steering (steerFrame) and the food lifetime (foodLife)
 // default OFF as well; off, the world is bit-identical to the one before they
-// existed.
+// existed. So do the glass walls (walls, sideWallBand, sideWallTurnRate; set
+// at init only, and never with toroidal: oceanTopologyError).
 //
 // Every knob has a finite RANGE (oceanConfigError): no accepted config can
 // make the state non-finite. The ranges are wide — every harness case and
@@ -158,6 +159,23 @@ struct OceanConfig {
     float patternNovelProbability    = 0.050f;   // per pattern group: a new founder allele
     float morphologyMutation         = 0.025f;   // ± jitter on every shape gene
     float morphologyNovelProbability = 0.050f;   // per shape group: a new founder allele
+
+    // ---- glass walls (walls_bigtank design): default OFF ---------------------
+    // walls: the four side faces x = 0, W and y = 0, H are glass. Off (the
+    // default), x / y wrap as they always did and every result is the one
+    // before this key existed. On: fish and predators turn away inside
+    // sideWallBand of a face (a bounded rotation of the heading toward the
+    // inward normal, up to sideWallTurnRate x the band depth rad/s), are
+    // clamped at contact with the outward heading component reflected; food
+    // spawns inside the tank and rides a midpoint transport that mirror-folds
+    // excursions (never projected onto the glass); the water's flow is the
+    // wall-compatible one (standing wave modes, streamfunction currents
+    // tapered to zero at the faces: no normal flow through any of the six).
+    // Needs toroidal = false (oceanTopologyError). No draws are added or
+    // moved. All three are set at init (oc_set_param refuses a change).
+    bool  walls            = false;
+    float sideWallBand     = 80.0f;   // soft-turn band per side face, units ([0, 1e5]; 0 = contact only)
+    float sideWallTurnRate = 6.0f;    // rad/s at full band depth ([0, 1000]; 0 = contact only)
 };
 
 // Does this build have the compound eye's sensors?
@@ -260,13 +278,25 @@ inline bool readOceanConfig(const jsonm::Value& o, OceanConfig& c, std::string* 
     c.patternNovelProbability    = o.floatOr("patternNovelProbability", c.patternNovelProbability);
     c.morphologyMutation         = o.floatOr("morphologyMutation", c.morphologyMutation);
     c.morphologyNovelProbability = o.floatOr("morphologyNovelProbability", c.morphologyNovelProbability);
+    c.sideWallBand     = o.floatOr("sideWallBand", c.sideWallBand);
+    c.sideWallTurnRate = o.floatOr("sideWallTurnRate", c.sideWallTurnRate);
     using ocean_cfg_detail::readBool;
     return readBool(o, "deepCurrent", c.deepCurrent, err) &&
            readBool(o, "lightEnabled", c.lightEnabled, err) &&
            readBool(o, "depthCostScaled", c.depthCostScaled, err) &&
            readBool(o, "sizeDrift", c.sizeDrift, err) &&
            readBool(o, "sizeFight", c.sizeFight, err) &&
-           readBool(o, "mouthGate", c.mouthGate, err);
+           readBool(o, "mouthGate", c.mouthGate, err) &&
+           readBool(o, "walls", c.walls, err);
+}
+
+// True when the glass-wall keys hold their defaults (walls off, both side
+// knobs bit for bit at 80 / 6): the fingerprint hashes them only otherwise,
+// so a config without them hashes exactly as before they existed.
+inline bool oceanWallsAtDefaults(const OceanConfig& c) {
+    const OceanConfig d;
+    auto same = [](float a, float b) { return std::memcmp(&a, &b, sizeof a) == 0; };
+    return c.walls == d.walls && same(c.sideWallBand, d.sideWallBand) && same(c.sideWallTurnRate, d.sideWallTurnRate);
 }
 
 // The preview's SimConfig starting point (tuned with tools/ocean_probe.cpp).
@@ -328,7 +358,7 @@ inline bool isOceanIntKey(const std::string& k) {
 inline constexpr const char* kSimConfigBoolKeys[] = {"toroidal", "bodyModel", "triangularMotion", "foodDrift",
                                                      "predatorEconomy", "predatorInheritance", "fastTanh"};
 inline constexpr const char* kOceanBoolKeys[] = {"deepCurrent", "lightEnabled", "depthCostScaled",
-                                                 "sizeDrift", "sizeFight", "mouthGate"};
+                                                 "sizeDrift", "sizeFight", "mouthGate", "walls"};
 inline bool isSimConfigBoolKey(const std::string& k) {
     for (const char* i : kSimConfigBoolKeys) if (k == i) return true;
     return false;
@@ -439,6 +469,8 @@ inline std::string oceanConfigError(const OceanConfig& c) {
         {"kWater", c.kWater, 0.0f, 1.0f},
         {"kMouth", c.kMouth, 0.01f, 100.0f},
         {"foodLife", c.foodLife, 0.0f, kOceanMaxFoodLife},
+        {"sideWallBand", c.sideWallBand, 0.0f, 100000.0f},
+        {"sideWallTurnRate", c.sideWallTurnRate, 0.0f, 1000.0f},
     };
     for (const auto& e : r)
         if (!(e.v >= e.lo && e.v <= e.hi)) {   // NaN fails both
@@ -467,6 +499,36 @@ inline std::string oceanConfigError(const OceanConfig& c) {
 // True when every knob is usable (oceanConfigError is empty).
 inline bool oceanConfigValid(const OceanConfig& c) { return oceanConfigError(c).empty(); }
 
+// The cross-config rule of the two topologies: glass walls (OceanConfig::walls)
+// and a toroidal world (SimConfig::toroidal: wrapped senses, the seam-aware
+// queries and midpoints) exclude each other. "" when compatible. Checked
+// wherever an Ocean config is accepted, before the world or the rng changes:
+// oc_init / oc_set_param (wasm/ocean_wasm.cpp configOk), the harness's world
+// builder and live --set (tools/ocean_fingerprint.hpp buildConfigs,
+// tools/ocean_parity_driver.cpp applySet), the probe. (OceanWorld::init
+// itself also forces toroidal off when walls are on, for direct callers.)
+inline std::string oceanTopologyError(const SimConfig& sc, const OceanConfig& oc) {
+    if (oc.walls && sc.toroidal) return "Glass walls require toroidal=false (walls and a wrapping world exclude each other)";
+    return "";
+}
+
+// The keys a LIVE change may not touch, because the world is built with them:
+// the glass walls (walls, sideWallBand, sideWallTurnRate: bounded or not) are
+// refused whatever the value, even the one they have; appearance (its side
+// array is built with the world) is refused unless it is the value it has (a
+// no-op). "" when `key` may go on to the live checks. The one policy of every
+// live path: oc_set_param (wasm/ocean_wasm.cpp, first, before the key is even
+// looked up) and the harness's --set (tools/ocean_parity_driver.cpp applySet,
+// before the copies are read), so neither can change the world or the rng.
+inline std::string oceanRestartOnlyError(const std::string& key, double value, const OceanConfig& now) {
+    static const char* const kInitOnly[] = {"walls", "sideWallBand", "sideWallTurnRate"};
+    for (const char* k : kInitOnly)
+        if (key == k) return key + " is set by oc_init (restart to change it)";
+    if (key == "appearance" && !(value == (double)now.appearance))
+        return "appearance is set by oc_init (restart to change it)";
+    return "";
+}
+
 // The Ocean's own ranges for SimConfig keys whose extreme FINITE values break
 // the Ocean step (SimConfig itself is Classic's and stays as it is). "" when
 // every one is inside, else which one is not and why. Checked wherever an
@@ -491,11 +553,20 @@ inline bool oceanConfigValid(const OceanConfig& c) { return oceanConfigError(c).
 //     spawns (int)(base + amp·sin(·)) times; 1e20 was accepted (finite).
 //   * targetFood in [0, 1e6]: the spawn cap is targetFood·2 (int arithmetic),
 //     and init lays out targetFood items.
-//   * maxSpeed <= 2000 and predatorSpeed in [0, 2000] (defaults 150, 110): a
-//     fish moves at most 2·maxSpeed·dt per step (speedFactor <= 2), a
+//   * maxSpeed in [0.01, 2000] and predatorSpeed in [0, 2000] (defaults 150,
+//     110): a fish moves at most 2·maxSpeed·dt per step (speedFactor <= 2), a
 //     predator 2·predatorSpeed·dt — at dt 0.016 under 64, less than the
 //     smallest world (100), so the single add / subtract wraps keep positions
 //     in the world, and SpatialGrid's (int)(position / cell) stays in range.
+//     The floor 0.01 (kOceanMinMaxSpeed) keeps OWN_SPEED = speed / maxSpeed
+//     finite: a founder starts at speed 80 before its first move clamps it,
+//     and 80 / 1e-38 was +inf on the first captured step (the live-code audit
+//     of PRs #22-#25, finding 4); now OWN_SPEED <= 2700 / 0.01.
+//   * maxTurnRate in [-1e4, 1e4] (default 4; kOceanMaxTurnRate): triangular
+//     motion forms maxTurnRate · turnFactor (<= 4/3 at bodyElong 0.5), and
+//     3e38 · 4/3 overflowed to inf, then 0 · inf = NaN even with no steering
+//     (the same audit). Inside the range one step turns by at most
+//     1e4 · 4/3 · dt = 213 rad, a finite angle the portable sin / cos reduce.
 //   * every radius (perceptionRadius, interactRadius, pickupRadius,
 //     predatorPerception, predatorCaptureRadius) <= 1e6: SpatialGrid casts
 //     (centre ± radius) / cell to int, cell = perceptionRadius >= 1 (a
@@ -517,6 +588,8 @@ inline bool oceanConfigValid(const OceanConfig& c) { return oceanConfigError(c).
 // ages, the predator economy's ...), minPopulation, predatorCount and
 // foodPatches <= kOceanMaxCount.
 inline constexpr float kOceanMaxEnergy = 1000000.0f;  // |every energy knob|
+inline constexpr float kOceanMinMaxSpeed = 0.01f;     // maxSpeed's floor (OWN_SPEED = speed / maxSpeed)
+inline constexpr float kOceanMaxTurnRate = 10000.0f;  // |maxTurnRate| (× turnFactor <= 4/3)
 inline constexpr int kOceanMaxCount = 100000;        // founders, the reseed floor, predators, food patches
 inline constexpr int kOceanMaxWorldSide = 100000;    // world width / height (the depth's own ceiling too)
 inline constexpr double kOceanMaxGridCells = 16777216.0;   // per neighbour grid (2^24)
@@ -530,7 +603,8 @@ inline std::string oceanSimConfigError(const SimConfig& c) {
         {"foodPatchRadius", c.foodPatchRadius, 0.0f, 100000.0f},
         {"foodSpawnBase", c.foodSpawnBase, -10000.0f, 10000.0f},
         {"foodSpawnAmp", c.foodSpawnAmp, -10000.0f, 10000.0f},
-        {"maxSpeed", c.maxSpeed, 0.0f, 2000.0f},
+        {"maxSpeed", c.maxSpeed, kOceanMinMaxSpeed, 2000.0f},
+        {"maxTurnRate", c.maxTurnRate, -kOceanMaxTurnRate, kOceanMaxTurnRate},
         {"predatorSpeed", c.predatorSpeed, 0.0f, 2000.0f},
         {"perceptionRadius", c.perceptionRadius, 0.0f, 1000000.0f},
         {"interactRadius", c.interactRadius, 0.0f, 1000000.0f},
@@ -568,7 +642,7 @@ inline std::string oceanSimConfigError(const SimConfig& c) {
         {"reproMaxDistance", c.reproMaxDistance}, {"reproSoftWidth", c.reproSoftWidth},
         {"reproGracePeriod", c.reproGracePeriod}, {"bodyMutation", c.bodyMutation},
         {"maxAge", c.maxAge}, {"reproCooldown", c.reproCooldown},
-        {"interactCooldown", c.interactCooldown}, {"minSpeed", c.minSpeed}, {"maxTurnRate", c.maxTurnRate},
+        {"interactCooldown", c.interactCooldown}, {"minSpeed", c.minSpeed},
         {"mutationMultiplier", c.mutationMultiplier}, {"predatorCooldown", c.predatorCooldown},
         {"predatorMaxAge", c.predatorMaxAge}, {"predatorTraitMutation", c.predatorTraitMutation},
     };

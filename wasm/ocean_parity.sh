@@ -37,6 +37,17 @@
 # oc_init / oc_set_param. The harness's copy of the E1 preset is checked against
 # kE1PresetJson (src/ocean/ocean_config.hpp).
 #
+# Glass walls (OceanConfig::walls): every case before the walls_* block runs
+# them OFF (their baselines are the ones recorded before the key existed); the
+# walls_* / eye_walls_* cases turn them on and assert containment from outside
+# the engine (--expect outside=0) plus the branch they are for (wallTouch,
+# predWallTouch, foodNearGlass: the driver's cover counters, printed only when
+# non-zero). walls_bigtank_s9 is the page's Big tank preset (BIGTANK, checked
+# against web/ocean_config.js). The r_walls_* / r_wall_* / r_live_wall* configs
+# must be refused (walls + toroidal, the side knobs' ranges, live changes);
+# every r_live_* case is refused by both drivers' --set as well, the state
+# bit for bit what a run without it has.
+#
 # Direct compiler calls only: CMakeLists.txt / CMakePresets.json (Classic's
 # build) are untouched. Prereq: em++ on PATH, or ~/emsdk/emsdk_env.sh.
 #
@@ -381,6 +392,49 @@ add app_rich_toro_e1_s9 "9 3000 --cfg {$RICH,\"toroidal\":true,\"waveSpeed\":6,\
                   "max knobs + rich (reseeds, predation) + toroidal + E1 + body model"
 add app_long_s42  '42 20000 --every 500 --expect appOffspring>0' "20k steps, defaults: the genealogy over a long run"
 
+# ---- glass walls (OceanConfig::walls; every case above runs them OFF, and so
+# wraps exactly as before the key existed). Each asserts containment from
+# outside the engine (--expect outside=0: no fish, trail point, food item or
+# predator outside the closed tank after any step) and the branch it is for.
+# BIGTANK = the page's "Big tank" preset (web/ocean_config.js BIG_TANK) verbatim
+# (checked below). ----
+BIGTANK='"walls":true,"maxPopulation":2000,"minPopulation":200,"targetFood":9600,"foodSpawnBase":12,"foodSpawnAmp":8,"foodEnergy":5,"interactRadius":48,"waveSpeed":6,"deepCurrent":true,"currentStrength":5,"foodDrift":true,"lightEnabled":true,"depthCostScaled":true,"cHold":0.05,"cPress":0.03,"steerFrame":1'
+WALLX='--expect wallSteps>0 --expect outside=0'
+add walls_def_s1  "1 3000 --cfg {\"walls\":true} $WALLX --expect wallTouch>0" "glass walls, defaults: soft turns, contact, trails held inside"
+add walls_def_s999 "999 3000 --cfg {\"walls\":true} $WALLX" "glass walls, another seed"
+add walls_e1_s42  "42 3000 --cfg ${E1_PRESET%\}},\"walls\":true} $WALLX --expect wallTouch>0" \
+                  "the E1 preset in a glass tank: standing-mode pairs, tapered current, food's mirror-folded transport"
+add walls_e1_long "7 10000 --every 250 --cfg ${E1_PRESET%\}},\"walls\":true} $WALLX" "the E1 preset with walls, 10k steps"
+add walls_rich_s5 "5 3000 --cfg {$RICH,\"walls\":true} $WALLX" "rich (eddies, patches + drift, economy, topological) in a glass tank"
+add walls_econ_s42 "42 3000 --cfg {\"walls\":true,\"predatorCount\":6,\"predatorEconomy\":true,\"predatorMinPopulation\":3,\"predatorMaxPopulation\":24,\"predatorInheritance\":true} $WALLX --expect pBirths>0" \
+                  "predator economy with walls: buds mirror-folded inside (the same draws)"
+add walls_gyre_s13 "13 3000 --cfg {\"walls\":true,\"deepCurrent\":true,\"waveSpeed\":5,\"currentStrength\":40,\"currentMode\":1,\"currentGyreEps\":0.4,\"foodDrift\":true,\"maxNeighbors\":7} $WALLX" \
+                  "deep double gyre (tapered streamfunction) + waves, topological"
+add walls_patch_s11 "11 3000 --cfg {\"walls\":true,\"currentStrength\":120,\"currentEddies\":8,\"foodDrift\":true,\"foodPatches\":6,\"foodPatchRadius\":400,\"foodDepthMode\":1,\"foodDepthSpread\":200} $WALLX --expect foodNearGlass>0" \
+                  "wide food patches at patch depths (drawn over patch ∩ tank), strong eddies"
+add walls_tri_body_s9 "9 3000 --cfg {\"walls\":true,\"triangularMotion\":true,\"bodyModel\":true,\"reproMaxDistance\":16,\"reproSoftWidth\":5,\"pitchMax\":1.2} $WALLX" \
+                  "triangular motion + body model with walls"
+add walls_size_s9 "9 3000 --cfg {\"walls\":true,\"bodyModel\":true,\"sizeDrift\":true,\"sizeFight\":true,\"mouthGate\":true,\"kMouth\":1.2,\"waveSpeed\":6,\"deepCurrent\":true,\"currentStrength\":30,\"foodDrift\":true} $WALLX" \
+                  "E1 size laws (sizeDrift through the wall flow) with walls"
+add walls_capture_s17 "17 3000 --capture --cfg {\"walls\":true,\"predatorCount\":2,\"currentStrength\":50,\"foodDrift\":true} $WALLX" \
+                  "walls: every fish's sensor + action bits hashed (BOUNDARY_DIST, CURRENT_FWD / LR of the wall flow)"
+add walls_live_s21 "21 3000 --cfg {\"walls\":true,\"predatorCount\":3,\"currentStrength\":40,\"foodDrift\":true} --set waveSpeed=6@500 --set deepCurrent=1@900 --set sizeDrift=1@1200 --set waveSpeed=0@2400 $WALLX" \
+                  "walls with the E1 knobs switched live (wall waves prepared live, stopped again)"
+add walls_steer_life_s1 "1 3000 --cfg {\"walls\":true,\"steerFrame\":1,\"foodLife\":8,$SV} $WALLX --expect steerOwnSteps>0 --expect foodExpired>0" \
+                  "walls + own-frame steering + foodLife 8, sparse valuable food"
+add walls_x_band0_s3 "3 3000 --cfg {\"walls\":true,\"sideWallBand\":0,\"minSpeed\":100,\"maxSpeed\":2000,\"currentStrength\":200,\"foodDrift\":true,\"predatorCount\":3,\"predatorSpeed\":600} $WALLX --expect wallTouch>0 --expect predWallTouch>0" \
+                  "extreme: no soft band (contact only), speeds to 2000, a 200-strength current"
+add walls_x_shallow_s4 "4 3000 --depth 10 --cfg {\"walls\":true,\"waveSpeed\":100,\"waveBand\":1,\"waveGravity\":10000,\"deepCurrent\":true,\"currentStrength\":80,\"foodDrift\":true,\"predatorCount\":3,\"sideWallBand\":400,\"sideWallTurnRate\":1000} $WALLX" \
+                  "extreme: D 10, waves at their range ends (16 transport substeps), band 400, turn rate 1000"
+add walls_x_small_s6 "6 3000 --w 100 --h 100 --pop 60 --cfg {\"walls\":true,\"currentStrength\":300,\"currentMode\":1,\"currentGyreEps\":1,\"waveSpeed\":30,\"foodDrift\":true,\"targetFood\":200,\"perceptionRadius\":40,\"predatorCount\":2} $WALLX --expect wallTouch>0" \
+                  "extreme: a 100 x 100 tank, gyre 300 eps 1, waves 30"
+add walls_bigtank_s9 "9 1000 --pop 2000 --w 3840 --h 2160 --cfg {$BIGTANK} $WALLX" "the Big tank preset: 3840 x 2160 x 240, 2000 founders"
+add eye_walls_s1  "1 3000 --cfg {\"eye\":1,\"walls\":true} $WALLX --expect eyeSteps>0" "the eye with walls (non-wrapped offsets)"
+add eye_walls_e1_capture_s17 "17 3000 --capture --cfg {\"eye\":1,\"eyeCode\":7,\"walls\":true,\"waveSpeed\":6,\"deepCurrent\":true,\"currentStrength\":40,\"foodDrift\":true} $WALLX --expect eyeLit>0" \
+                  "the eye (code 7) with walls + E1 flow: food eyeCon follows its folded depth; every sensor bit hashed"
+add eye_walls_only_steer_s3 "3 5000 --cfg {$EXP,\"eye\":1,\"eyeOnly\":1,\"steerFrame\":1,\"walls\":true} $WALLX --expect eyeOnlySteps>0" \
+                  "eye-only + own frame + the experiment's economy, in a glass tank"
+
 # CI's subset (FAST=1; .github/workflows/ci.yml on every push / pull request;
 # the whole matrix runs there weekly and on demand): one or more cases of every
 # family above, the cheap ones — defaults, predators + economy, rich, the
@@ -396,7 +450,8 @@ FAST_CASES="def_s1 pred_s7 econ_s42 rich_s5 rich_toro_s7 x_steep_s3 x_deep_s8 x_
  steer_own_live_s21 life_s1 life_rich_toro_s7 life_live_s21 steer_life_e1_s5 life_cap_fixture_s1 life_cap_s3
  eye_off_s1 eye_def_s1 eye_capture_s17 eye_blind_s1 eye_only_capture_s17 eye_code7_only_capture_s17 eye_code_live_s21
  eye_e1_only_steer_life_s3 eye_cloak_both_only_capture_s17 eye_cloak_live_s21 eye_cloak_food_only_steer_l12_s3
- eye_life_steer_blind_s4 eye_x_shallow_s4 app_patterns_s1 app_shapes_s42 app_max_mut_s8 app_live_s21"
+ eye_life_steer_blind_s4 eye_x_shallow_s4 app_patterns_s1 app_shapes_s42 app_max_mut_s8 app_live_s21
+ walls_def_s1 walls_e1_s42 walls_econ_s42 walls_x_band0_s3 walls_x_shallow_s4 eye_walls_s1"
 
 # Configs the page must REFUSE (oc_init / oc_set_param; ocean_tests --accepts
 # must exit 1): every Ocean knob has a finite range, so none of these can run.
@@ -464,6 +519,13 @@ radd r_radius_big   '1 10 --cfg {"predatorCount":2,"predatorPerception":1e30}'
 # Every other float the step reads must be finite (1e39 is an infinite float),
 # and the counts / world sizes that size allocations have generous ceilings.
 radd r_turn_inf     '1 10 --cfg {"triangularMotion":true,"maxTurnRate":1e39}'
+# Arithmetic-safe motion bounds (the live-code audit of PRs #22-#25, finding 4):
+# maxTurnRate 3e38 x turnFactor 4/3 overflowed (then 0 x inf = NaN); maxSpeed
+# 1e-38 made the first captured OWN_SPEED = 80 / 1e-38 = inf.
+radd r_turn_big     '1 10 --cfg {"triangularMotion":true,"bodyModel":true,"maxTurnRate":3e38}'
+radd r_turn_neg_big '1 10 --cfg {"triangularMotion":true,"maxTurnRate":-10001}'
+radd r_speed_tiny   '1 10 --pop 1 --capture --cfg {"minPopulation":0,"minSpeed":0,"maxSpeed":1e-38}'
+radd r_live_speed_tiny '1 10 --cfg {"minSpeed":0} --set maxSpeed=0.001@5'
 radd r_cooldown_inf '1 10 --cfg {"interactCooldown":1e39}'
 radd r_repro_cd_inf '1 10 --cfg {"reproCooldown":-1e39}'
 radd r_pred_metab   '1 10 --cfg {"predatorCount":2,"predatorEconomy":true,"predatorMetabolism":1e39}'
@@ -546,6 +608,26 @@ radd r_app_live_off '1 10 --set appearance=0@5'
 radd r_app_live_two '1 10 --set appearance=2@5'
 radd r_app_live_mut '1 10 --set patternMutation=0.3@5'
 radd r_app_live_nov '1 10 --set morphologyNovelProbability=0.26@5'
+# Glass walls: never with toroidal (either order), the bool strict, the side
+# knobs in [0, 1e5] / [0, 1000], every walls key restart-only (oc_set_param
+# refuses it, on or off, the same value too), the world-size / grid checks too.
+radd r_walls_toro   '1 10 --cfg {"walls":true,"toroidal":true}'
+radd r_walls_toro_rev '1 10 --cfg {"toroidal":true,"walls":1}'
+radd r_walls_str    '1 10 --cfg {"walls":"yes"}'
+radd r_walls_two    '1 10 --cfg {"walls":2}'
+radd r_walls_dup    '1 10 --cfg {"walls":true,"walls":"x"}'
+radd r_wall_band_neg '1 10 --cfg {"walls":true,"sideWallBand":-1}'
+radd r_wall_band_big '1 10 --cfg {"walls":true,"sideWallBand":100001}'
+radd r_wall_turn_neg '1 10 --cfg {"walls":true,"sideWallTurnRate":-1}'
+radd r_wall_turn_big '1 10 --cfg {"walls":true,"sideWallTurnRate":1001}'
+radd r_wall_turn_inf '1 10 --cfg {"sideWallTurnRate":1e39}'
+radd r_live_walls   '1 10 --set walls=1@5'
+radd r_live_walls_off '1 10 --cfg {"walls":true} --set walls=0@5'
+radd r_live_walls_same '1 10 --cfg {"walls":true} --set walls=1@5'
+radd r_live_wall_band '1 10 --cfg {"walls":true} --set sideWallBand=40@5'
+radd r_live_wall_turn '1 10 --cfg {"walls":true} --set sideWallTurnRate=3@5'
+radd r_walls_grid   '1 10 --w 6000 --h 3000 --cfg {"walls":true,"perceptionRadius":1,"interactRadius":1,"pickupRadius":1}'
+radd r_walls_narrow '1 10 --w 99 --cfg {"walls":true}'
 
 # Non-finite state that is gone before any scan can see it (the Codex audit of
 # PR #18, finding 6): a fish whose reserves overflow to -inf starves and is
@@ -622,6 +704,13 @@ if [ "$SRC_PRESET" = "$E1_PRESET" ]; then
 else
     echo "== E1 preset DRIFT: harness '$E1_PRESET' vs ocean_config.hpp '$SRC_PRESET'"; GUARD_FAILED=1
 fi
+# The Big tank case runs the page's preset (web/ocean_config.js BIG_TANK) verbatim.
+JS_BIG=$($NODE -e 'require("./web/ocean_config.js"); const b = globalThis.EvoOceanConfig.BIG_TANK; console.log(JSON.stringify(b.cfg) + " " + b.width + "x" + b.height + "x" + b.depth + " pop=" + b.population)' 2>&1)
+if [ "$JS_BIG" = "{$BIGTANK} 3840x2160x240 pop=2000" ]; then
+    echo "== Big tank preset: the harness's copy == web/ocean_config.js BIG_TANK"
+else
+    echo "== Big tank preset DRIFT: harness '{$BIGTANK} 3840x2160x240 pop=2000' vs web/ocean_config.js '$JS_BIG'"; GUARD_FAILED=1
+fi
 # The Ocean's pre-cast check of int keys (ocean_config.hpp kSimConfigIntKeys)
 # must cover exactly the keys checkpoint::readConfig reads with intOr.
 RC_INT=$(sed -n '/^inline void readConfig/,/^}/p' src/core/checkpoint_io.hpp | grep -o 'intOr("[A-Za-z]*"' | sed 's/intOr("//;s/"//' | sort | tr '\n' ' ')
@@ -662,6 +751,42 @@ if [ -z "$nfbad" ]; then
     echo "== non-finite state removed within a step: ${#NFNAMES[@]} of ${#NFNAMES[@]} nf_* runs caught, native and wasm (--unchecked)"
 else
     echo "== non-finite state removed within a step NOT caught:$nfbad"; GUARD_FAILED=1
+fi
+# Every live refusal (r_live_*) through the harness's own --set as well, native
+# and wasm (tools/ocean_parity_driver.cpp applySet; the restart-only keys share
+# ocean_config.hpp oceanRestartOnlyError with oc_set_param): each run must stop
+# at its --set (exit 4) and print the state the refusal left, which must be,
+# bit for bit (rng included), the state a run without the --set has at that
+# step: nothing changed, nothing drawn.
+lvbad=""; nlv=0
+for i in "${!RNAMES[@]}"; do
+    [[ ${RNAMES[$i]} == r_live_* ]] || continue
+    read -r -a A <<< "${RARGS[$i]}"
+    P=(); S=""
+    for ((k = 0; k < ${#A[@]}; ++k)); do
+        if [ "${A[$k]}" = --set ]; then S=${A[$((k + 1))]##*@}; k=$((k + 1)); else P+=("${A[$k]}"); fi
+    done
+    P[1]=$S   # SEED STEPS ...: the plain run stops where the --set would apply
+    for b in native wasm; do
+        f="$OUT/${RNAMES[$i]}.live_$b.txt"; g="$OUT/${RNAMES[$i]}.plain_$b.txt"
+        if [ $b = native ]; then
+            "$OUT/opd_native" "${A[@]}" --sparse > "$f" 2> /dev/null; rc=$?
+            "$OUT/opd_native" "${P[@]}" --sparse --every "$S" > "$g" 2> /dev/null
+        else
+            $NODE "$OUT/opd_wasm.js" "${A[@]}" --sparse > "$f" 2> /dev/null; rc=$?
+            $NODE "$OUT/opd_wasm.js" "${P[@]}" --sparse --every "$S" > "$g" 2> /dev/null
+        fi
+        ref=$(sed -n 's/^refused /fp /p' "$f"); plain=$(grep "^fp $S " "$g")
+        if [ "$rc" != 4 ] || [ -z "$ref" ] || [ "$ref" != "$plain" ]; then
+            lvbad="$lvbad ${RNAMES[$i]}($b: rc=$rc$([ -n "$ref" ] && [ "$ref" != "$plain" ] && echo ', state moved'))"
+        fi
+    done
+    nlv=$((nlv + 1))
+done
+if [ -z "$lvbad" ]; then
+    echo "== live refusals through the harness's --set: $nlv of $nlv r_live_* refused by both drivers, the state untouched"
+else
+    echo "== live refusals NOT refused (or the state moved) by the harness's --set:$lvbad"; GUARD_FAILED=1
 fi
 [ -n "$FAST_BAD" ] && GUARD_FAILED=1
 # Baseline files without a case (a renamed or dropped case): stale history.
@@ -772,14 +897,18 @@ done
 # ---- appearance is cosmetic: each twin with {"appearance":0} must be the
 # case's own output with every app* field removed, byte for byte (line 1, the
 # header, names the cfg and so differs) ----
-DEFAULT_TWINS="def_s1 gate_s29 cap_s31 x_tri_body_s9 fast_logs_s41 rich_s5 pred_s7 econ_s42 toro_bud_s43 pred_age_s23 live_s21 capture_s17 big_toro_s9 long_s42 e1_preset_s42 e1_size_s9 e1_live_s21 e1_x_big_s9 life_live_s21 eye_def_s1 eye_e1_capture_s17 eye_code7_big_s42 eye_only_exp_s3 eye_cloak_live_s21 eye_life_steer_only_s3"
+DEFAULT_TWINS="def_s1 gate_s29 cap_s31 x_tri_body_s9 fast_logs_s41 rich_s5 pred_s7 econ_s42 toro_bud_s43 pred_age_s23 live_s21 capture_s17 big_toro_s9 long_s42 e1_preset_s42 e1_size_s9 e1_live_s21 e1_x_big_s9 life_live_s21 eye_def_s1 eye_e1_capture_s17 eye_code7_big_s42 eye_only_exp_s3 eye_cloak_live_s21 eye_life_steer_only_s3 walls_e1_s42 walls_econ_s42"
 TWINS=${APP_TWINS:-$DEFAULT_TWINS}
 [ "$TWINS" = all ] && TWINS="${NAMES[*]}"
 # The case's output minus its app* fields and its app* expectations.
 app_strip () { sed -E '/^expect app/d; s/ app[A-Za-z]*=[^ ]*//g' "$1" | tail -n +2; }
 twin_args () {  # twin_args ARGS -> the same with appearance 0 in its cfg and no app* expectations
+    # A live `--set appearance=N@S` is a no-op only at the value the world was
+    # built with (the driver refuses a change, exit 4): in the twin, built with
+    # appearance 0, it becomes `appearance=0` (app_live_s21's appearance=3@2200;
+    # the live-code audit of PRs #22-#25, finding 1).
     local a
-    a=$(printf '%s\n' "$1" | sed -E 's/ --expect app[A-Za-z]*[<>=]+[0-9]+//g')
+    a=$(printf '%s\n' "$1" | sed -E 's/ --expect app[A-Za-z]*[<>=]+[0-9]+//g; s/--set appearance=[0-9.]+@/--set appearance=0@/g')
     if [[ $a == *'"appearance":'* ]]; then printf '%s\n' "$a" | sed -E 's/"appearance":[0-9]+/"appearance":0/'
     elif [[ $a == *"--cfg {"* ]]; then printf '%s\n' "$a" | sed 's/--cfg {/--cfg {"appearance":0,/'
     else printf '%s --cfg {"appearance":0}\n' "$a"; fi

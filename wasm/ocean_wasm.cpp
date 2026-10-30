@@ -37,8 +37,13 @@
 //     triangularMotion, foodDrift, predatorEconomy, predatorInheritance,
 //     fastTanh) that is not true / false ({"toroidal":1} used to be passed
 //     over: the world kept its walls), or an Ocean one (deepCurrent,
-//     lightEnabled, depthCostScaled, sizeDrift, sizeFight, mouthGate) that is
-//     not true / false / 0 / 1.
+//     lightEnabled, depthCostScaled, sizeDrift, sizeFight, mouthGate, walls)
+//     that is not true / false / 0 / 1; and glass walls with toroidal = true
+//     (oceanTopologyError), or sideWallBand / sideWallTurnRate outside
+//     [0, 1e5] / [0, 1000].
+//   * walls, sideWallBand, sideWallTurnRate (the glass walls) are set by
+//     oc_init: oc_set_param refuses them ("restart to change it");
+//     oc_walls_enabled() reports the world's mode.
 //   * oc_set_param: the Ocean keys kBuoy, pitchMax, vDrag, wallBand,
 //     buoyMutation, cHold, cPress, foodDepthSpread, the E1 keys (waveSpeed,
 //     waveBand, waveGravity, L0, kWater, kMouth, and the on/off keys
@@ -281,6 +286,10 @@ bool configOk(const SimConfig& cfg, const OceanConfig& oc, int width, int height
         g_error = "ocean config: " + oerr;
         return false;
     }
+    // Glass walls and a toroidal world exclude each other (ocean_config.hpp
+    // oceanTopologyError).
+    g_error = oceanTopologyError(cfg, oc);
+    if (!g_error.empty()) return false;
     return true;
 }
 
@@ -488,6 +497,16 @@ EVO_EXPORT int oc_set_param(const char* name, double value) {
         "newbornEnergy", "mutationMultiplier", "minSpeed", "maxSpeed",
         "predatorMinPopulation", "predatorMaxPopulation", "predatorTraitMutation",
     };
+    // The glass walls and appearance are set by oc_init (ocean_config.hpp
+    // oceanRestartOnlyError, the harness's --set's policy too): named here so
+    // the refusal says so.
+    if (name) {
+        const std::string why = oceanRestartOnlyError(name, value, g_world->ocfg);
+        if (!why.empty()) {
+            g_error = why;
+            return 0;
+        }
+    }
     bool live = false;
     for (const char* k : kOcean) if (name && std::strcmp(name, k) == 0) { live = true; break; }
     for (const char* k : kLive)  if (name && std::strcmp(name, k) == 0) { live = true; break; }
@@ -505,12 +524,6 @@ EVO_EXPORT int oc_set_param(const char* name, double value) {
     }
     if (isInt && !isIntValue(value)) {
         g_error = std::string(name) + " must be a whole number that fits an int";   // the JSON reader's (int) cast
-        return 0;
-    }
-    // appearance is set at init (the side array is built with the world): the
-    // value it has is a successful no-op, any other is refused.
-    if (std::strcmp(name, "appearance") == 0 && value != (double)g_world->ocfg.appearance) {
-        g_error = "appearance is set by oc_init (restart to change it)";
         return 0;
     }
     if (std::strcmp(name, "pitchMax") == 0 && !(value > 0.0)) {
@@ -549,6 +562,11 @@ EVO_EXPORT const char* oc_last_error() { return g_error.c_str(); }
 
 // 1 in the eye build (the EYE_* sensors exist; "eye" may be 1), else 0.
 EVO_EXPORT int oc_has_eye() { return kOceanHasEye ? 1 : 0; }
+
+// The world's side faces: 1 = glass walls (OceanConfig::walls, set by
+// oc_init), 0 = wrapping (or no world). Its presence is the page's capability
+// check: a module without it has no walls key.
+EVO_EXPORT int oc_walls_enabled() { return (g_world && g_world->ocfg.walls) ? 1 : 0; }
 
 // ---- The page's controls: READ-ONLY exports, two display switches ----------
 // (see ADDITIONS at the top). Nothing below writes anything the step reads,

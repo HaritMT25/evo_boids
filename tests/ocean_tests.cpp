@@ -188,6 +188,11 @@
 //                 themselves accepted. (Every shim call is made before
 //                 oc_last_error() is read: as arguments of one expect() their
 //                 order was unspecified.)
+//   motion_bounds the live-code audit's finding 4, stepped: maxSpeed 0.01 (the
+//                 floor) keeps the first captured OWN_SPEED finite (80 / 0.01;
+//                 1e-38 refused), and triangular motion at |maxTurnRate| 1e4
+//                 with bodyElong 0.5 stays finite, steering or not (3e38
+//                 refused)
 //   shim_bools    bool keys (kSimConfigBoolKeys, kOceanBoolKeys, by member): a
 //                 SimConfig switch is true / false ({"toroidal":1} used to be
 //                 ignored, the world kept walls: now refused), an Ocean one
@@ -3361,6 +3366,7 @@ void testRanges() {
         {"foodPatchRadius", 0, 100000, R"("toroidal":true,"foodPatches":3,)"},
         {"foodSpawnBase", -10000, 10000, ""}, {"foodSpawnAmp", -10000, 10000, ""},
         {"maxSpeed", 30, 2000, ""}, {"predatorSpeed", 0, 2000, R"("predatorCount":3,)"},
+        {"maxTurnRate", -10000, 10000, R"("triangularMotion":true,"bodyModel":true,)"},
         // the food lifetime (ocean-vision): up to kOceanMaxFoodLife
         {"foodLife", 0, 3600, ""},
         // the energies, [-1e6, 1e6] (kOceanMaxEnergy); fish at the fastest
@@ -3486,6 +3492,7 @@ void testShimBools() {
         {"deepCurrent", &OceanConfig::deepCurrent}, {"lightEnabled", &OceanConfig::lightEnabled},
         {"depthCostScaled", &OceanConfig::depthCostScaled}, {"sizeDrift", &OceanConfig::sizeDrift},
         {"sizeFight", &OceanConfig::sizeFight}, {"mouthGate", &OceanConfig::mouthGate},
+        {"walls", &OceanConfig::walls},
     };
     t.expect(sizeof sims / sizeof sims[0] == sizeof kSimConfigBoolKeys / sizeof kSimConfigBoolKeys[0] &&
                  sizeof oceans / sizeof oceans[0] == sizeof kOceanBoolKeys / sizeof kOceanBoolKeys[0],
@@ -3676,7 +3683,11 @@ void testShimInts() {
                           R"({"predatorCount":2,"predatorCooldown":1e39})", R"({"predatorEconomy":true,"predatorMetabolism":1e39})",
                           R"({"predatorMoveCost":-1e39})", R"({"predatorReproEnergy":1e39})", R"({"predatorNewbornEnergy":1e39})",
                           R"({"predatorMeal":1e39})", R"({"predatorMaxAge":1e39})", R"({"minPopulation":100001})",
-                          R"({"predatorCount":100001})", R"({"foodPatches":100001})"}) {
+                          R"({"predatorCount":100001})", R"({"foodPatches":100001})",
+                          // arithmetic-safe motion bounds (the live-code audit, finding 4): 3e38 x 4/3
+                          // overflowed; OWN_SPEED = 80 / 1e-38 was inf on the first captured step
+                          R"({"triangularMotion":true,"maxTurnRate":3e38})", R"({"maxTurnRate":-10001})",
+                          R"({"minPopulation":0,"minSpeed":0,"maxSpeed":1e-38})", R"({"minSpeed":0,"maxSpeed":0.0099})"}) {
         const int initRc = oc_init(1307, 1920, 1080, 240.0, 50, c);
         refusedNew += t.expect(initRc == 0, "%s accepted", c);
     }
@@ -3694,7 +3705,8 @@ void testShimInts() {
     }
     t.expect(ofp::fingerprint(*g_world) == kept, "a refused oc_init / oc_set_param changed the world");
     int acceptedEdge = 0;
-    for (const char* c : {R"({"triangularMotion":true,"maxTurnRate":3e38})", R"({"minPopulation":100000,"predatorCount":3000,"foodPatches":100000})",
+    for (const char* c : {R"({"triangularMotion":true,"maxTurnRate":10000})", R"({"triangularMotion":true,"maxTurnRate":-10000})",
+                          R"({"minSpeed":0,"maxSpeed":0.01})", R"({"minPopulation":100000,"predatorCount":3000,"foodPatches":100000})",
                           R"({"perceptionRadius":2,"interactRadius":1,"pickupRadius":1})"}) {
         const int initRc = oc_init(1308, 1920, 1080, 240.0, 50, c);
         acceptedEdge += t.expect(initRc == 1, "%s refused: %s", c, oc_last_error());
@@ -3710,6 +3722,52 @@ void testShimInts() {
         t.expect(initRc == 1, "oc_init: %s", oc_last_error());
     }
     t.note("non-finite floats / allocation ceilings: %d refused, %d at the edge accepted", refusedNew, acceptedEdge);
+}
+
+// The live-code audit's finding 4, stepped: accepted finite movement settings
+// must keep the state finite. (a) The smallest accepted maxSpeed (0.01) with
+// a founder at its starting speed 80: the first captured step's OWN_SPEED is
+// 80 / 0.01, finite (1e-38 gave inf; refused now). (b) Triangular motion at
+// the largest accepted |maxTurnRate| (1e4) with the shortest body (bodyElong
+// 0.5, turnFactor 4/3): every float finite for 200 steps, both signs, with
+// and without steering (3e38 x 4/3 overflowed, then 0 x inf = NaN).
+void testMotionBounds() {
+    Test t("motion_bounds");
+    {
+        const int rc = oc_init(1401, 1920, 1080, 240.0, 1, R"({"minPopulation":0,"minSpeed":0,"maxSpeed":0.01,"targetFood":0})");
+        if (t.expect(rc == 1, "maxSpeed 0.01 refused: %s", oc_last_error())) {
+            oc_set_capture(1);
+            const float s0 = g_world->creatures.empty() ? 0.0f : g_world->creatures[0].speed;
+            oc_step(1);
+            const bool any = !g_world->creatures.empty();
+            const float own = any ? g_world->creatures[0].lastSensors[OWN_SPEED] : 0.0f;
+            t.expect(any && s0 == 80.0f && std::isfinite(own) && own == 80.0f / 0.01f,
+                     "first captured step: founder speed %g, OWN_SPEED %g (want 80 / 0.01)", (double)s0, (double)own);
+            t.expect(ofp::countNonFinite(*g_world) == 0, "maxSpeed 0.01: non-finite state after one step");
+            oc_step(100);
+            t.expect(ofp::countNonFinite(*g_world) == 0 && g_world->totalNonFiniteRemoved == 0, "maxSpeed 0.01: non-finite after 100 steps");
+        }
+        const int bad = oc_init(1401, 1920, 1080, 240.0, 1, R"({"minPopulation":0,"minSpeed":0,"maxSpeed":1e-38})");
+        t.expect(bad == 0, "maxSpeed 1e-38 accepted");
+    }
+    for (double rate : {10000.0, -10000.0}) {
+        for (int steer = 0; steer < 2; ++steer) {
+            char cfg[200];
+            std::snprintf(cfg, sizeof cfg, R"({"triangularMotion":true,"bodyModel":true,"maxTurnRate":%.9g,"minPopulation":0})", rate);
+            const int rc = oc_init(1402 + steer, 1920, 1080, 240.0, 40, cfg);
+            if (!t.expect(rc == 1, "%s refused: %s", cfg, oc_last_error())) continue;
+            for (Fish& f : g_world->creatures) {
+                f.bodyElong = 0.5f;   // turnFactor 4/3 (the shortest legal body)
+                if (!steer) f.nnet.flat.clear();   // no connections: every action 0 (no steering)
+            }
+            oc_set_capture(1);
+            oc_step(200);
+            t.expect(ofp::countNonFinite(*g_world) == 0 && g_world->totalNonFiniteRemoved == 0,
+                     "%s, bodyElong 0.5, %s: non-finite state after 200 steps", cfg, steer ? "wired" : "no steering");
+        }
+    }
+    t.expect(oc_init(1404, 1920, 1080, 240.0, 40, R"({"triangularMotion":true,"maxTurnRate":3e38})") == 0, "maxTurnRate 3e38 accepted");
+    t.expect(oc_init(1405, 1920, 1080, 240.0, 10, nullptr) == 1, "oc_init: %s", oc_last_error());   // leave a small world
 }
 #endif
 
@@ -4709,6 +4767,10 @@ void testFlowLanes() {
 #include "ocean_appearance_tests.hpp"
 #include "ocean_sense_tests.hpp"
 
+namespace ot {
+#include "ocean_walls_tests.hpp"   // the glass walls (uses this file's helpers)
+}  // namespace ot
+
 int main(int argc, char** argv) {
 #ifndef OCEAN_TESTS_NO_SHIM
     if (argc > 1 && std::strcmp(argv[1], "--accepts") == 0) return ot::acceptsMain(argc, argv);
@@ -4764,6 +4826,7 @@ int main(int argc, char** argv) {
 #ifndef OCEAN_TESTS_NO_SHIM
     ot::testRanges();
     ot::testShimInts();
+    ot::testMotionBounds();
     ot::testShimBools();
 #endif
     ot::testE1Hash();
@@ -4794,6 +4857,18 @@ int main(int argc, char** argv) {
 #ifndef OCEAN_TESTS_NO_SHIM
     ot::testAppearanceShim();
 #endif
+    // the glass walls: tests/ocean_walls_tests.hpp
+#ifndef OCEAN_TESTS_NO_SHIM
+    ot::testWallsConfig();
+#endif
+    ot::testWallFlow();
+    ot::testWallContainment();
+    ot::testWallPlacement();
+    ot::testWallTransport();
+    ot::testWallWavesOff();
+    ot::testWallEddy();
+    ot::testWallSensing();
+    ot::testWallDraws();
     std::printf("OCEAN TESTS: %d passed, %d failed\n", ot::g_passed, ot::g_failed);
     return ot::g_failed ? 1 : 0;
 }

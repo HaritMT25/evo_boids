@@ -16,7 +16,8 @@
 //
 //   cfg   every SimConfig and every OceanConfig field, by bit pattern; the
 //         ocean-vision keys (eye, eyeOnly, eyeCode, steerFrame, foodLife) each
-//         as a tagged word only when it is not its default (0)
+//         as a tagged word only when it is not its default (0); the glass-wall
+//         keys as one tagged block only off their defaults (format 4 below)
 //   ctr   frame, world size, D, every WorldCommon counter, nextId_, the
 //         pairing-graph window, the death / birth logs, totalReseeds and the
 //         wave trains' travelled phases
@@ -94,6 +95,16 @@
 // Nothing else moved: with the `app=` / `appchain=` fields and the cover
 // line's app* counters taken out, every case's output is its format-3 output
 // (the header's format number aside).
+//
+// Format 4, the glass walls (OceanConfig walls / sideWallBand /
+// sideWallTurnRate; a conditional extension like the ocean-vision keys', so
+// the format stays 4): `cfg` absorbs one tagged block (kWallsTag, then the
+// three keys) only when walls are on or a side knob is off its default
+// (oceanWallsAtDefaults), and `cur` absorbs the flow sampled ON the six faces
+// (forWallFaceSamples) only while walls are on. A world without walls hashes
+// every word it did before the keys existed (walls = false with the default
+// knobs is the same as leaving them out); no new per-fish, food or predator
+// state exists. The keys are dumped and scanned for non-finite values too.
 //
 // Private state is read WITHOUT engine accessors (namespace peek below: a
 // pointer to member taken in an explicit template instantiation, where C++
@@ -198,7 +209,7 @@ constexpr std::size_t fieldCount() {
 #define OFP_FIELDS(T, N) \
     static_assert(detail::fieldCount<T>() == (N), #T " gained or lost a field: hash it in tools/ocean_fingerprint.hpp, then update this count")
 OFP_FIELDS(SimConfig, 71);
-OFP_FIELDS(OceanConfig, 33);
+OFP_FIELDS(OceanConfig, 36);
 OFP_FIELDS(appearance::Stats, 10);   // founders, offspring, pattern[4], morph[4]
 OFP_FIELDS(AgentCore, 16 + NUM_SENSES + NUM_ACTIONS + 1);   // 14 scalars + genome + nnet, the two arrays, colour
 OFP_FIELDS(Fish, 1 + 6 + Fish::BODY_LEN);                   // base, pos .. bodyBuoy, body[]
@@ -387,9 +398,19 @@ void visitOceanConfigAppearance(const OceanConfig& c, V& v) {
     OFP_I(appearance); OFP_F(patternMutation); OFP_F(patternPhaseMutation); OFP_F(patternNovelProbability);
     OFP_F(morphologyMutation); OFP_F(morphologyNovelProbability);
 }
+// The glass-wall keys (walls, sideWallBand, sideWallTurnRate): dumped and
+// scanned like the rest, hashed in `cfg` as one tagged block only when they
+// are not at their defaults (hashConfig; oceanWallsAtDefaults).
+template <class V>
+void visitOceanConfigWalls(const OceanConfig& c, V& v) {
+    OFP_B(walls); OFP_F(sideWallBand); OFP_F(sideWallTurnRate);
+}
 #undef OFP_F
 #undef OFP_I
 #undef OFP_B
+
+// The tagged walls block's tag (an FNV-1a word like VisionTagger's, of "walls-block").
+inline constexpr std::uint64_t kWallsTag = 0x9A1C5E77D0B0C4E5ull;
 
 // A distinct tag word per key, then its value (bit pattern for the float).
 struct VisionTagger {
@@ -409,6 +430,10 @@ inline void hashConfig(Hasher& h, const SimConfig& c, const OceanConfig& o) {
     visitOceanConfig(o, h);
     VisionTagger t{h};
     visitOceanConfigVision(o, t);
+    if (!oceanWallsAtDefaults(o)) {   // the glass walls: one tagged block, only off the defaults
+        h.u64(kWallsTag);
+        visitOceanConfigWalls(o, h);
+    }
 }
 
 inline void hashCounters(Hasher& h, const OceanWorld& w) {
@@ -518,6 +543,20 @@ inline void forFlowSamples(const OceanWorld& w, F&& f) {
     for (float frac : {0.1f, 0.5f, 0.9f}) forCurrentLattice(w, [&](Vec2 p) { f(p, frac * w.D); });
 }
 
+// Glass walls: the flow sampled ON the six faces (the interior lattice above
+// never touches them): x = 0 and W along the lattice's y at its three depths,
+// y = 0 and H along its x, and the surface and floor over the 8 x 5 lattice.
+template <class F>
+inline void forWallFaceSamples(const OceanWorld& w, F&& f) {
+    const float W = (float)w.width, H = (float)w.height;
+    for (float frac : {0.1f, 0.5f, 0.9f}) {
+        const float d = frac * w.D;
+        for (int j = 0; j < 5; ++j) { const float y = ((float)j + 0.5f) * H / 5.0f; f(Vec2{0.0f, y}, d); f(Vec2{W, y}, d); }
+        for (int i = 0; i < 8; ++i) { const float x = ((float)i + 0.5f) * W / 8.0f; f(Vec2{x, 0.0f}, d); f(Vec2{x, H}, d); }
+    }
+    forCurrentLattice(w, [&](Vec2 p) { f(p, 0.0f); f(p, w.D); });
+}
+
 inline void hashCurrent(Hasher& h, const OceanWorld& w) {
     const CurrentField& cf = field<peek::OwCurrent>(w);
     h.i32((int)field<peek::CfMode>(cf));
@@ -539,6 +578,10 @@ inline void hashCurrent(Hasher& h, const OceanWorld& w) {
             const OceanWorld::Flow U = w.flowAt(p, d);
             h.f32x2(U.x, U.y); h.f32(U.d);
         });
+    if (w.ocfg.walls) forWallFaceSamples(w, [&](Vec2 p, float d) {   // glass walls only: the faces themselves
+        const OceanWorld::Flow U = w.flowAt(p, d);
+        h.f32x2(U.x, U.y); h.f32(U.d);
+    });
 }
 
 inline void hashGrid(Hasher& h, const SpatialGrid& g) {
@@ -678,6 +721,7 @@ inline long countNonFinite(const OceanWorld& w) {
     visitOceanConfig(w.ocfg, nf);
     visitOceanConfigVision(w.ocfg, nf);
     visitOceanConfigAppearance(w.ocfg, nf);
+    visitOceanConfigWalls(w.ocfg, nf);
     for (const auto& r : w.appearanceRecords())
         for (float v : r.genome.g) f(v);
     const CurrentField& cf = field<peek::OwCurrent>(w);
@@ -754,6 +798,7 @@ inline void dumpState(const OceanWorld& w, std::FILE* out) {
     visitOceanConfig(w.ocfg, d);
     visitOceanConfigVision(w.ocfg, d);
     visitOceanConfigAppearance(w.ocfg, d);
+    visitOceanConfigWalls(w.ocfg, d);
     std::fprintf(out, "\nwaves");
     for (const auto& t : field<peek::OwWaves>(w)) {
         d.db("kx", t.kx); d.db("ky", t.ky); d.db("phase", t.phase); d.db("phi", t.phi);
@@ -905,6 +950,8 @@ inline bool buildConfigs(const char* cfgJson, float depth, SimConfig& sc, OceanC
     err = oceanConfigError(oc);
     if (!err.empty()) { err = "invalid ocean config: " + err; return false; }
     err = oceanSimConfigError(sc);
+    if (!err.empty()) { err = "invalid config for the Ocean: " + err; return false; }
+    err = oceanTopologyError(sc, oc);
     if (!err.empty()) { err = "invalid config for the Ocean: " + err; return false; }
     return true;
 }

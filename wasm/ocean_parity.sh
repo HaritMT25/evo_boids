@@ -44,7 +44,9 @@
 # predWallTouch, foodNearGlass: the driver's cover counters, printed only when
 # non-zero). walls_bigtank_s9 is the page's Big tank preset (BIGTANK, checked
 # against web/ocean_config.js). The r_walls_* / r_wall_* / r_live_wall* configs
-# must be refused (walls + toroidal, the side knobs' ranges, live changes).
+# must be refused (walls + toroidal, the side knobs' ranges, live changes);
+# every r_live_* case is refused by both drivers' --set as well, the state
+# bit for bit what a run without it has.
 #
 # Direct compiler calls only: CMakeLists.txt / CMakePresets.json (Classic's
 # build) are untouched. Prereq: em++ on PATH, or ~/emsdk/emsdk_env.sh.
@@ -749,6 +751,42 @@ if [ -z "$nfbad" ]; then
     echo "== non-finite state removed within a step: ${#NFNAMES[@]} of ${#NFNAMES[@]} nf_* runs caught, native and wasm (--unchecked)"
 else
     echo "== non-finite state removed within a step NOT caught:$nfbad"; GUARD_FAILED=1
+fi
+# Every live refusal (r_live_*) through the harness's own --set as well, native
+# and wasm (tools/ocean_parity_driver.cpp applySet; the restart-only keys share
+# ocean_config.hpp oceanRestartOnlyError with oc_set_param): each run must stop
+# at its --set (exit 4) and print the state the refusal left, which must be,
+# bit for bit (rng included), the state a run without the --set has at that
+# step: nothing changed, nothing drawn.
+lvbad=""; nlv=0
+for i in "${!RNAMES[@]}"; do
+    [[ ${RNAMES[$i]} == r_live_* ]] || continue
+    read -r -a A <<< "${RARGS[$i]}"
+    P=(); S=""
+    for ((k = 0; k < ${#A[@]}; ++k)); do
+        if [ "${A[$k]}" = --set ]; then S=${A[$((k + 1))]##*@}; k=$((k + 1)); else P+=("${A[$k]}"); fi
+    done
+    P[1]=$S   # SEED STEPS ...: the plain run stops where the --set would apply
+    for b in native wasm; do
+        f="$OUT/${RNAMES[$i]}.live_$b.txt"; g="$OUT/${RNAMES[$i]}.plain_$b.txt"
+        if [ $b = native ]; then
+            "$OUT/opd_native" "${A[@]}" --sparse > "$f" 2> /dev/null; rc=$?
+            "$OUT/opd_native" "${P[@]}" --sparse --every "$S" > "$g" 2> /dev/null
+        else
+            $NODE "$OUT/opd_wasm.js" "${A[@]}" --sparse > "$f" 2> /dev/null; rc=$?
+            $NODE "$OUT/opd_wasm.js" "${P[@]}" --sparse --every "$S" > "$g" 2> /dev/null
+        fi
+        ref=$(sed -n 's/^refused /fp /p' "$f"); plain=$(grep "^fp $S " "$g")
+        if [ "$rc" != 4 ] || [ -z "$ref" ] || [ "$ref" != "$plain" ]; then
+            lvbad="$lvbad ${RNAMES[$i]}($b: rc=$rc$([ -n "$ref" ] && [ "$ref" != "$plain" ] && echo ', state moved'))"
+        fi
+    done
+    nlv=$((nlv + 1))
+done
+if [ -z "$lvbad" ]; then
+    echo "== live refusals through the harness's --set: $nlv of $nlv r_live_* refused by both drivers, the state untouched"
+else
+    echo "== live refusals NOT refused (or the state moved) by the harness's --set:$lvbad"; GUARD_FAILED=1
 fi
 [ -n "$FAST_BAD" ] && GUARD_FAILED=1
 # Baseline files without a case (a renamed or dropped case): stale history.

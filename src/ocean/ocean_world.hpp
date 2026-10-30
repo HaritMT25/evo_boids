@@ -198,8 +198,9 @@
 //     streamfunction tapered to zero at the side faces): divergence-free, no
 //     flow through any of the six faces; every reader (food, fish, predators,
 //     CURRENT_FWD / LR, the harness) gets it.
-//   * food rides it with deterministic substeps (one forward step in a gentle
-//     flow, midpoint substeps in a strong one; wallAdvect), every excursion
+//   * food rides it with deterministic midpoint substeps (as many as the
+//     flow's speed and scale need, up to 16; beyond, food lags water too fast
+//     for it: wallFoodSteps, wallAdvect), every excursion
 //     mirror-folded (never projected onto the glass); patch food
 //     is drawn over the patch ∩ the tank (one draw per coordinate, as open);
 //     a predator's bud is mirror-folded into the tank (the same draws).
@@ -628,8 +629,11 @@ public:
     }
     // Wave train i alone (whatever waveSpeed is; 0 gives zero flow — so do
     // trains never prepared, which only a world whose waves were never on has).
+    // With walls, waves off return exact zeros before anything is read (the
+    // pairs divide by |K|², 0 in trains never prepared: 0·inf was NaN).
     Flow waveTrainAt(int i, Vec2 p, float d) const {
         if (ocfg.walls) {
+            if (!wavesOn()) return Flow{};
             ensureFlow();
             Flow u[kWaveTrains];
             return wallWavesTable(p, d, u) ? u[i] : wallTrainExactAt(i, p, d);
@@ -1553,8 +1557,11 @@ private:
         if (v == 0.0f || (double)v == L) s = 0.0f;
     }
     // Train i's pair at (p, d) from the formulas (the tables' fallback and the
-    // tests' reference).
+    // tests' reference). Waves off: exact zeros, before the division by |K|²
+    // (a train never prepared has K = 0; wallFlowFast / wallFlowExact never
+    // ask then, the public readers can). No state is touched.
     Flow wallTrainExactAt(int i, Vec2 p, float d) const {
+        if (!wavesOn()) return Flow{};
         ensureWaves();
         const WaveTrain& t = waves_[i];
         const Taper tp = taperAt(d);
@@ -1716,13 +1723,26 @@ private:
         (void)rng.range(0.0f, 1.0f);
         return std::clamp(c, inset, L - inset);
     }
-    // Food's transport substeps this step: from a bound on the wall flow's
-    // speed (the pairs' amplitudes incl. the narrow-band horizontal factor;
-    // each eddy's peak and taper correction; the gyre's) against a quarter of
-    // its shortest length scale (the wave band, the current's band and core),
-    // in [1, 16]. Config arithmetic in double (IEEE ops only): the same count
-    // on every build.
-    int wallFoodSubsteps(float dt) const {
+    // Food's transport this step: n midpoint substeps over a time dtFood. The
+    // count the flow needs, need = ceil(ub·dt / (len/8)), is from a bound ub
+    // on the wall flow's speed (the pairs' amplitudes incl. the narrow-band
+    // horizontal factor; each eddy's peak and taper correction; the gyre's)
+    // against an eighth of its shortest length scale len (the wave band, the
+    // current's band and core): a substep turns an eddy's core by at most
+    // ~0.05 rad, where the midpoint's radial error is ~θ⁴/8 < 1e-6 (a
+    // stationary eddy's tracers keep their radius: tests "wall_eddy").
+    // need <= 16: n = need (at least 1) over the whole step. need > 16, flow
+    // too fast or too fine for the work budget (one eddy of currentStrength
+    // 1000 and core 1 needs 577): n = 16 substeps of the size the bound asks
+    // for, dt·16/need, so food covers 16/need of the step's flow — it lags
+    // water too fast for it, deterministically, rather than taking 16
+    // substeps too long (at the old cap a tracer 0.1 units from that eddy's
+    // centre went out to 1.2 in one frame). Over a shorter time it is the
+    // same divergence-free field with no flow through the glass, so food
+    // stays uniform and inside. Config arithmetic in double (IEEE ops only):
+    // the same count and time on every build.
+    struct FoodSteps { int n; float dt; double need; };
+    FoodSteps wallFoodSteps(float dt) const {
         double ub = 0.0, len = 1e30;
         if (wavesOn()) {
             const double b = std::min((double)ocfg.waveBand, 0.25 * (double)D);
@@ -1743,17 +1763,20 @@ private:
             }
             len = std::min(len, bc);
         }
-        const double n = std::ceil(ub * (double)dt / (0.25 * len));
-        return !(n > 1.0) ? 1 : (n >= 16.0 ? 16 : (int)n);
+        const double need = std::ceil(ub * (double)dt / (0.125 * len));
+        if (!(need > 1.0)) return {1, dt, 1.0};
+        if (need <= (double)kWallFoodMaxSubsteps) return {(int)need, dt, need};
+        return {kWallFoodMaxSubsteps, (float)((double)dt * (double)kWallFoodMaxSubsteps / need), need};
     }
+    static constexpr int kWallFoodMaxSubsteps = 16;
     void wallTransportFood(float dt) {
-        const int n = wallFoodSubsteps(dt);
+        const FoodSteps fs = wallFoodSteps(dt);
         for (auto& f : food) {
             if (!f.alive) continue;
 #ifdef EVO_OCEAN_EYE
             const float z0 = f.depth;
 #endif
-            wallAdvect(f.pos, f.depth, dt, n);
+            wallAdvect(f.pos, f.depth, fs.dt, fs.n);
 #ifdef EVO_OCEAN_EYE
             if (f.depth != z0) f.eyeCon = ocean::eyeContrast(ocean::kEyeFoodBright, f.depth);   // no draws
 #endif
@@ -1773,24 +1796,16 @@ public:
         return (r <= L) ? r : L2 - r;
     }
     // One particle's transport over dt through the wall flow, frozen at this
-    // step's time (ensureFlow done); every trial and final coordinate
-    // mirror-folded into the tank. n = 1 (wallFoodSubsteps: the step's
-    // displacement bound is under a quarter of the flow's shortest length
-    // scale): one forward step, one evaluation; n > 1: n midpoint (RK2)
-    // substeps. (At the Big tank preset's gentle flow the forward step and
-    // the midpoint gave the same 5% face-band shares, 0.049-0.052, and tracers
-    // within 0.05 units of each other over 3000 steps; the midpoint's second
-    // evaluation was half the walls' food cost.) Not claimed to preserve
-    // volume exactly: tests/ocean_tests.cpp "wall_transport" checks uniform
-    // tracers for wall accumulation and convergence in n.
+    // step's time (ensureFlow done): n midpoint (RK2) substeps (wallFoodSteps),
+    // every trial and final coordinate mirror-folded into the tank. (A single
+    // forward step, tried for n = 1, spiralled food out of eddies: its radial
+    // error is ~θ²/2 per step, +126% in 600 frames at currentStrength 60 and
+    // core 30 against the midpoint's 7e-4.) Not claimed to preserve volume
+    // exactly: tests "wall_transport" checks uniform tracers for wall
+    // accumulation and convergence in n, "wall_eddy" a stationary eddy's radii
+    // and density.
     void wallAdvect(Vec2& p, float& d, float dt, int n) const {
         const float W = (float)width, H = (float)height;
-        if (n == 1) {
-            const Flow U = wallFlowFast(p, d);
-            p = {mirrorFold(p.x + dt * U.x, W), mirrorFold(p.y + dt * U.y, H)};
-            d = mirrorFold(d + dt * U.d, D);
-            return;
-        }
         const float h = dt / (float)n, hh = 0.5f * h;
         for (int k = 0; k < n; ++k) {
             const Flow U1 = wallFlowFast(p, d);
@@ -1802,7 +1817,8 @@ public:
         }
     }
     bool wallFlowOn() const { return ocfg.walls && (current_.active() || wavesOn()); }
-    int wallFoodSubstepsNow(float dt) const { return wallFoodSubsteps(dt); }   // (tests)
+    int wallFoodSubstepsNow(float dt) const { return wallFoodSteps(dt).n; }   // (tests)
+    FoodSteps wallFoodStepsNow(float dt) const { return wallFoodSteps(dt); }  // (tests: n, the time, the need)
 
 private:
 

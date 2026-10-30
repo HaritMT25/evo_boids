@@ -157,7 +157,7 @@ The Ocean's page options (`web/ocean.js` lists them):
 
 A value outside the engine's limits makes the page refuse the link with the reason (and offer the default settings) rather than quietly changing it.
 
-**A bigger tank.** Settings → World holds the tank's size and its sides, and **Start the Big tank**: 3840 × 2160 × 240 (four times the standard volume) with 2,000 fish, glass walls, four times the food, the tuned water and a 2,000-fish birth cap. Over 100,000 steps (3 seeds, and a fourth from 500 founders) it never reaches its reseed floor of 200: after one dip to 600–740 fish around step 8,000, when the founders (all born together, and capped at 2,000) reach their 120 s lifespan, it climbs back and stays near 2,000 (at least 1,880 from step 20,000 on). Randomize keeps the tank's size and sides and scales its recipe to the volume.
+**A bigger tank.** Settings → World holds the tank's size and its sides, and **Start the Big tank**: 3840 × 2160 × 240 (four times the standard volume) with 2,000 fish, glass walls, four times the food, the tuned water and a 2,000-fish birth cap. Over 100,000 steps (3 seeds, and a fourth from 500 founders) it never reaches its reseed floor of 200: after one dip to 590–740 fish around step 8,000, when the founders (all born together, and capped at 2,000) reach their 120 s lifespan, it climbs back and stays near 2,000 (at least 1,880 from step 20,000 on). The cap is what holds it there: the same food without a cap carries about 2,300 fish on average, but in boom-and-bust cycles of about 25,000 steps between roughly 800 and 4,200 fish, nine deaths in ten by starvation (2 seeds, 100,000 steps). Randomize keeps the tank's size and sides and scales its recipe to the volume.
 
 ### Phones and touch screens
 

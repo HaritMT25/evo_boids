@@ -512,6 +512,23 @@ inline std::string oceanTopologyError(const SimConfig& sc, const OceanConfig& oc
     return "";
 }
 
+// The keys a LIVE change may not touch, because the world is built with them:
+// the glass walls (walls, sideWallBand, sideWallTurnRate: bounded or not) are
+// refused whatever the value, even the one they have; appearance (its side
+// array is built with the world) is refused unless it is the value it has (a
+// no-op). "" when `key` may go on to the live checks. The one policy of every
+// live path: oc_set_param (wasm/ocean_wasm.cpp, first, before the key is even
+// looked up) and the harness's --set (tools/ocean_parity_driver.cpp applySet,
+// before the copies are read), so neither can change the world or the rng.
+inline std::string oceanRestartOnlyError(const std::string& key, double value, const OceanConfig& now) {
+    static const char* const kInitOnly[] = {"walls", "sideWallBand", "sideWallTurnRate"};
+    for (const char* k : kInitOnly)
+        if (key == k) return key + " is set by oc_init (restart to change it)";
+    if (key == "appearance" && !(value == (double)now.appearance))
+        return "appearance is set by oc_init (restart to change it)";
+    return "";
+}
+
 // The Ocean's own ranges for SimConfig keys whose extreme FINITE values break
 // the Ocean step (SimConfig itself is Classic's and stays as it is). "" when
 // every one is inside, else which one is not and why. Checked wherever an

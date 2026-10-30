@@ -36,7 +36,10 @@
 //   --pop N            founders (default 300)
 //   --cfg JSON         flat SimConfig + OceanConfig keys, as oc_init takes them
 //   --set NAME=V@S     before step S+1 (after S steps), change one live knob the
-//                      way oc_set_param does (repeatable)
+//                      way oc_set_param does (repeatable). A refused one (the
+//                      restart-only keys, ocean_config.hpp oceanRestartOnlyError,
+//                      or a value the checks refuse) prints "refused S ..." with
+//                      the state's fingerprint and exits 4, the world untouched
 //   --expect NAMEopV   after the run, a coverage counter (the `cover` line) must
 //                      satisfy op V (op: > >= = <= <); repeatable; exit 5 if not.
 //                      This is how a case proves it reached the branch it is for.
@@ -92,10 +95,13 @@ bool parseSet(const char* s, LiveSet& out) {
     return !out.name.empty() && out.step >= 0;
 }
 
-// oc_set_param's path: the value into a one-key JSON (an int key, which must
-// be a whole number, as its exact integer; any other "%.9g"), read onto copies
-// of both configs, clamped, checked (not with --unchecked), assigned.
+// oc_set_param's path: the restart-only keys refused first (ocean_config.hpp
+// oceanRestartOnlyError, the shim's own policy; --unchecked too), then the
+// value into a one-key JSON (an int key, which must be a whole number, as its
+// exact integer; any other "%.9g"), read onto copies of both configs, clamped,
+// checked (not with --unchecked), assigned. False leaves w untouched.
 bool applySet(OceanWorld& w, const LiveSet& s, bool unchecked) {
+    if (!oceanRestartOnlyError(s.name, s.value, w.ocfg).empty()) return false;
     char num[40];
     if (isSimConfigIntKey(s.name) || isOceanIntKey(s.name)) {
         if (!isIntValue(s.value)) return false;
@@ -111,7 +117,6 @@ bool applySet(OceanWorld& w, const LiveSet& s, bool unchecked) {
     ofp::clampConfigLikeShim(sc);
     if (!unchecked && (!oceanConfigValid(oc) || !oceanSimConfigError(sc).empty() || !oceanTopologyError(sc, oc).empty()))
         return false;
-    if (oc.appearance != w.ocfg.appearance) return false;   // init only (oc_set_param refuses a change)
     w.cfg = sc;
     w.ocfg = oc;
     return true;
@@ -443,6 +448,9 @@ int main(int argc, char** argv) {
         for (const LiveSet& ls : sets)
             if (ls.step == s && !applySet(w, ls, unchecked)) {
                 std::fprintf(stderr, "--set %s refused\n", ls.name.c_str());
+                // The state the refusal left, which must be the state before it
+                // (wasm/ocean_parity.sh compares it with a run without the --set).
+                std::printf("%s\n", ofp::fingerprintLine("refused", s, w, ofp::fingerprint(w)).c_str());
                 return 4;
             }
         cover.before(w);

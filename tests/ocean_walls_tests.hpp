@@ -36,6 +36,15 @@
 //                 share in each 5% face band stays 5% (no accumulation or
 //                 depletion at the glass, surface or floor); every tracer
 //                 inside; finer substeps converge (n = 1, 2, 4 vs 8)
+//   wall_waves_off with walls and waves off, both per-train readers give exact
+//                 zeros at the faces, corners and inside, before the trains were
+//                 ever prepared and after the waves ran and stopped; reading them
+//                 changes neither the world nor the rng
+//   wall_eddy     a stationary eddy (cores 1-120, currentStrength 6-1000, up to
+//                 577 substeps needed): the substep budget's fallback (16 of the
+//                 needed size, food lagging), tracers keep their radius over 600
+//                 frames, a uniform disk stays uniform, the drift converges in n;
+//                 the old cap's blow-up as the contrast
 //   wall_sense    no opposite-wall pickup, pairing or capture
 //   wall_draws    150 steps with walls (fish in the bands and on the glass,
 //                 predators wandering at the walls, food drifting): per-step
@@ -131,6 +140,44 @@ void testWallsConfig() {
                      "walls %d: oc_set_param(%s, %g): rc %d (%s)", on, s.k, s.v, r, e.c_str());
         }
         t.expect(ofp::fingerprint(*g_world) == kept && sameEngine(r0, rng), "walls %d: a refused oc_set_param changed the world", on);
+    }
+    // The one restart-only policy (ocean_config.hpp oceanRestartOnlyError), which
+    // the harness's --set shares (wasm/ocean_parity.sh runs every r_live_* case
+    // through both drivers too): the walls keys always, appearance unless unchanged.
+    {
+        OceanConfig oc;
+        oc.appearance = 1;
+        for (const char* k : {"walls", "sideWallBand", "sideWallTurnRate"})
+            for (double v : {0.0, 1.0, 80.0, 6.0})
+                t.expect(oceanRestartOnlyError(k, v, oc).find("restart") != std::string::npos, "oceanRestartOnlyError(%s, %g) allowed", k, v);
+        t.expect(oceanRestartOnlyError("appearance", 1.0, oc).empty() && !oceanRestartOnlyError("appearance", 0.0, oc).empty() &&
+                     !oceanRestartOnlyError("appearance", std::nan(""), oc).empty(),
+                 "oceanRestartOnlyError: appearance's no-op / change");
+        for (const char* k : {"maxSpeed", "waveSpeed", "toroidal", "wallBand"})
+            t.expect(oceanRestartOnlyError(k, 1.0, oc).empty(), "oceanRestartOnlyError(%s) refused a key it does not own", k);
+    }
+    // The tank's size is oc_init's (the page's width / height go there, never
+    // into the cfg): the Big tank's size is the world's, a refused size keeps
+    // it, oc_reset rebuilds it, and a size key inside the cfg changes nothing.
+    {
+        int rc = oc_init(2109, 3840, 2160, 240.0, 30, R"({"walls":true})");
+        t.expect(rc == 1 && oc_width() == 3840 && oc_height() == 2160, "oc_init 3840 x 2160: rc %d, world %d x %d", rc, oc_width(),
+                 oc_height());
+        oc_step(5);
+        struct Sz { int w, h; };
+        for (const Sz b : {Sz{99, 2160}, Sz{3840, 100001}, Sz{0, 0}}) {
+            rc = oc_init(2110, b.w, b.h, 240.0, 30, R"({"walls":true})");
+            t.expect(rc == 0 && oc_width() == 3840 && oc_height() == 2160, "a refused %d x %d: rc %d, world now %d x %d", b.w, b.h, rc,
+                     oc_width(), oc_height());
+        }
+        rc = oc_reset();
+        t.expect(rc == 1 && oc_width() == 3840 && oc_height() == 2160, "oc_reset: rc %d, world %d x %d", rc, oc_width(), oc_height());
+        // width / height as cfg keys: oc_init's size rules either way (accepted: its arguments' size; refused: the world kept)
+        rc = oc_init(2111, 1920, 1080, 240.0, 30, R"({"walls":true,"width":3840,"height":2160})");
+        const bool sized = rc == 1 ? (oc_width() == 1920 && oc_height() == 1080) : (oc_width() == 3840 && oc_height() == 2160);
+        t.expect(sized, "width / height in the cfg: rc %d, world %d x %d", rc, oc_width(), oc_height());
+        t.note("the size is oc_init's: 3840 x 2160 kept through refused sizes and oc_reset; width / height in the cfg %s",
+               rc == 1 ? "ignored (the arguments' 1920 x 1080)" : "refused (the world kept)");
     }
     {
         const int rc = oc_init(2108, 1920, 1080, 240.0, 10, nullptr);
@@ -589,6 +636,198 @@ void testWallTransport() {
              e[0], e[1], e[2]);
     t.note("1200 steps, %d tracers, substeps %d: 5%% face bands hold%s", N, nStep, line.c_str());
     t.note("substeps vs n = 8 (20 calls of dt 0.16): n=1 %.2e, n=2 %.2e, n=4 %.2e units (mean)", e[0], e[1], e[2]);
+}
+
+// Waves off with walls: the per-train readers give exact zeros (never NaN),
+// before the trains were ever prepared (waveSpeed 0 from init: a pair's |K|² is
+// 0 there) and after the waves ran and stopped; reading them changes nothing.
+void testWallWavesOff() {
+    Test t("wall_waves_off");
+    using Fl = OceanWorld::Flow;
+    OceanWorld w;
+    std::string err;
+    if (!t.expect(ofp::initWorld(w, 2801, 1920, 1080, 240.0f, 40, R"({"walls":true,"currentStrength":60,"foodDrift":true})", err),
+                  "%s", err.c_str()))
+        return;
+    const float W = 1920.0f, H = 1080.0f, D = 240.0f;
+    const Vec2 pts[] = {{0.0f, 0.0f}, {W, 0.0f}, {0.0f, H}, {W, H}, {0.0f, 0.5f * H}, {W, 0.5f * H}, {0.5f * W, 0.0f},
+                        {0.5f * W, H}, {0.37f * W, 0.61f * H}, {1.0f, 1.0f}, {W - 1.0f, 2.0f}};
+    const float ds[] = {0.0f, 1.0f, 0.5f * D, D - 1.0f, D};
+    long total = 0;
+    auto zeros = [&](const char* when) {
+        long bad = 0, n = 0;
+        const ofp::Fingerprint kept = ofp::fingerprint(w);
+        const RandomGen r0 = rng;
+        for (int i = 0; i < OceanWorld::kWaveTrains; ++i)
+            for (const Vec2& p : pts)
+                for (float d : ds) {
+                    const Fl a = w.waveTrainAt(i, p, d), e = w.waveTrainExactAt(i, p, d);
+                    for (const Fl& u : {a, e}) {
+                        ++n;
+                        if (!(u.x == 0.0f && u.y == 0.0f && u.d == 0.0f) && bad++ < 3)
+                            t.expect(false, "%s: train %d at (%g, %g, %g): (%g, %g, %g)", when, i, (double)p.x, (double)p.y, (double)d,
+                                     (double)u.x, (double)u.y, (double)u.d);
+                    }
+                }
+        t.expect(bad == 0, "%s: %ld of %ld readings not exactly zero", when, bad, n);
+        t.expect(ofp::fingerprint(w) == kept && sameEngine(r0, rng), "%s: reading the trains changed the world or the rng", when);
+        total += n;
+    };
+    zeros("never prepared, before a step");
+    for (int s = 0; s < 30; ++s) w.update(0.016f);
+    zeros("never prepared, 30 steps");
+    w.ocfg.waveSpeed = 6.0f;   // on, as oc_set_param("waveSpeed", 6)
+    for (int s = 0; s < 30; ++s) w.update(0.016f);
+    const Fl on = w.waveTrainAt(0, {0.37f * W, 0.61f * H}, 0.5f * D);
+    t.expect(std::isfinite(on.x) && std::isfinite(on.d) && (on.x != 0.0f || on.y != 0.0f || on.d != 0.0f),
+             "waves on: train 0 reads (%g, %g, %g)", (double)on.x, (double)on.y, (double)on.d);
+    w.ocfg.waveSpeed = 0.0f;   // and off again
+    for (int s = 0; s < 5; ++s) w.update(0.016f);
+    zeros("prepared, then waves off");
+    t.note("%ld readings (3 trains x %zu points incl. the corners x %zu depths x both readers, three times): all exactly 0, world and rng kept",
+           total, sizeof pts / sizeof pts[0], sizeof ds / sizeof ds[0]);
+}
+
+// A stationary eddy (one, no drift, no waves): the wall flow inside its taper
+// is a pure rotation about the centre, so a tracer keeps its radius and a
+// uniform disk stays uniform. Small cores and strong currents, up to far beyond
+// the 16-substep budget (food then lags the water: wallFoodSteps); the old cap
+// (16 substeps over the whole step) is measured as the contrast.
+void testWallEddy() {
+    Test t("wall_eddy");
+    struct C { float s, core; bool density; };
+    const C cs[] = {{60, 1, false}, {1000, 1, false}, {1000, 5, true}, {60, 5, false}, {1000, 30, false}, {60, 30, true}, {6, 120, false}};
+    const float dt = 0.016f;
+    for (const C& c : cs) {
+        OceanWorld w;
+        std::string err;
+        char cfg[320];
+        std::snprintf(cfg, sizeof cfg,
+                      R"({"walls":true,"minPopulation":0,"targetFood":0,"foodSpawnBase":0,"foodSpawnAmp":0,"currentStrength":%g,"currentEddies":1,"currentCore":%g,"currentDrift":0,"foodDrift":true})",
+                      (double)c.s, (double)c.core);
+        const float cr = std::max(c.core, 1.0f);
+        Vec2 ctr{};
+        bool found = false;
+        for (unsigned seed = 2802; seed < 3200 && !found; ++seed) {   // an eddy well inside: 4 cores + 20 from every face
+            if (!ofp::initWorld(w, seed, 1920, 1080, 240.0f, 0, cfg, err)) break;
+            w.update(dt);
+            ctr = ofp::field<ofp::peek::CfCenters>(ofp::field<ofp::peek::OwCurrent>(w))[0];
+            const float m = 4.0f * cr + 20.0f;
+            found = ctr.x > m && ctr.x < 1920.0f - m && ctr.y > m && ctr.y < 1080.0f - m;
+        }
+        if (!t.expect(found, "s %g core %g: no interior eddy (%s)", (double)c.s, (double)c.core, err.c_str())) continue;
+        (void)w.flowAt({1.0f, 1.0f}, 1.0f);   // the cache (frozen: no more steps)
+        const auto fs = w.wallFoodStepsNow(dt);
+        if (fs.need > 16.0)
+            t.expect(fs.n == 16 && fs.dt == (float)((double)dt * 16.0 / fs.need) && fs.dt < dt,
+                     "s %g core %g: need %g, n %d, dt %g (the budget's fallback)", (double)c.s, (double)c.core, fs.need, fs.n, (double)fs.dt);
+        else
+            t.expect(fs.n == std::max(1, (int)fs.need) && fs.dt == dt, "s %g core %g: need %g, n %d, dt %g", (double)c.s, (double)c.core,
+                     fs.need, fs.n, (double)fs.dt);
+        auto radius = [&](Vec2 p) { return std::hypot((double)p.x - ctr.x, (double)p.y - ctr.y); };
+        // Radii: 0.1 .. 3 cores, 8 angles, 600 frames (10 s). Relative drift for
+        // r0 >= 1 unit; below that a float position's own rounding (~6e-5 at x ~ 900)
+        // is a sizeable fraction of r, so those are held to the absolute bound.
+        double relWorst = 0, absWorst = 0, oldCap = 0;
+        long depthMoved = 0;
+        for (float rf : {0.1f, 0.5f, 1.0f, 2.0f, 3.0f})
+            for (int a = 0; a < 8; ++a) {
+                const float th = 0.785398f * (float)a + 0.1f;
+                const Vec2 p0 = {ctr.x + rf * cr * std::cos(th), ctr.y + rf * cr * std::sin(th)};
+                const double R0 = radius(p0);
+                Vec2 p = p0;
+                float d = 120.0f;
+                for (int f = 0; f < 600; ++f) {
+                    w.wallAdvect(p, d, fs.dt, fs.n);
+                    const double e = std::abs(radius(p) - R0);
+                    absWorst = std::max(absWorst, e);
+                    if (R0 >= 1.0) relWorst = std::max(relWorst, e / R0);
+                }
+                depthMoved += (d != 120.0f);
+                if (fs.need > 16.0) {   // the old cap: 16 substeps over the whole step, one frame
+                    Vec2 q = p0;
+                    float dq = 120.0f;
+                    w.wallAdvect(q, dq, dt, 16);
+                    oldCap = std::max(oldCap, std::abs(radius(q) - R0) / R0);
+                }
+            }
+        t.expect(relWorst < 1e-2 && absWorst < 0.1 && depthMoved == 0,
+                 "s %g core %g: radius drift over 600 frames %.2e (r0 >= 1 unit), %.2e units; %ld depth(s) moved", (double)c.s,
+                 (double)c.core, relWorst, absWorst, depthMoved);
+        if (fs.need > 16.0 && c.s >= 1000.0f && c.core <= 1.0f)   // the review's case (need 577)
+            t.expect(oldCap > 2.0, "s %g core %g: the old cap kept the radius (%.2e): the contrast is lost", (double)c.s, (double)c.core, oldCap);
+        char extra[160] = "";
+        // Density: a uniform disk of 3 cores, 1000 tracers, 300 frames: the counts
+        // in six equal-area annuli and the mean r² hold.
+        if (c.density) {
+            constexpr int N = 1000;
+            const double R = 3.0 * cr;
+            std::vector<Vec2> p(N);
+            std::vector<float> d(N, 120.0f);
+            Lcg g(2803);
+            for (int k = 0; k < N; ++k) {
+                const double r = R * std::sqrt(g.unit()), th = 6.283185307179586 * g.unit();
+                p[k] = {(float)(ctr.x + r * std::cos(th)), (float)(ctr.y + r * std::sin(th))};
+            }
+            auto census = [&](int cnt[6], double& r2) {
+                r2 = 0;
+                for (int b = 0; b < 6; ++b) cnt[b] = 0;
+                for (int k = 0; k < N; ++k) {
+                    const double rr = radius(p[k]);
+                    r2 += rr * rr / N;
+                    ++cnt[std::min(5, (int)(6.0 * rr * rr / (R * R)))];
+                }
+            };
+            int c0[6], c1[6];
+            double r20, r21;
+            census(c0, r20);
+            for (int f = 0; f < 300; ++f)
+                for (int k = 0; k < N; ++k) w.wallAdvect(p[k], d[k], fs.dt, fs.n);
+            census(c1, r21);
+            int worst = 0;
+            for (int b = 0; b < 6; ++b) worst = std::max(worst, std::abs(c1[b] - c0[b]));
+            t.expect(worst <= N / 50 && std::abs(r21 / r20 - 1.0) < 1e-2,
+                     "s %g core %g: annulus counts moved by up to %d of %d, mean r^2 x %.5f", (double)c.s, (double)c.core, worst, N,
+                     r21 / r20);
+            std::snprintf(extra, sizeof extra, "; density: annuli move <= %d of %d, mean r^2 x %.5f", worst, N, r21 / r20);
+        }
+        t.note("currentStrength %-4g core %-3g: need %4.0f -> n %2d over %.5f s; radii over 600 frames %.1e (r0 >= 1), %.1e units%s",
+               (double)c.s, (double)c.core, fs.need, fs.n, (double)fs.dt, relWorst, absWorst, extra);
+        if (fs.need > 16.0) t.note("    the old cap (16 substeps over the whole step): radius x %.2f after one frame", 1.0 + oldCap);
+    }
+    // Convergence: the core-30 eddy at currentStrength 1000, r0 = 30, 100 frames
+    // of the whole step with n = 4, 8, 16 (all under its need: the truncation,
+    // not rounding, dominates): the drift falls ~n^-3.
+    {
+        OceanWorld w;
+        std::string err;
+        Vec2 ctr{};
+        bool found = false;
+        for (unsigned seed = 2802; seed < 3200 && !found; ++seed) {
+            if (!ofp::initWorld(w, seed, 1920, 1080, 240.0f, 0,
+                                R"({"walls":true,"minPopulation":0,"targetFood":0,"foodSpawnBase":0,"foodSpawnAmp":0,"currentStrength":1000,"currentEddies":1,"currentCore":30,"currentDrift":0,"foodDrift":true})",
+                                err))
+                break;
+            w.update(dt);
+            ctr = ofp::field<ofp::peek::CfCenters>(ofp::field<ofp::peek::OwCurrent>(w))[0];
+            found = ctr.x > 140.0f && ctr.x < 1780.0f && ctr.y > 140.0f && ctr.y < 940.0f;
+        }
+        if (t.expect(found, "convergence: no interior eddy")) {
+            (void)w.flowAt({1.0f, 1.0f}, 1.0f);
+            double e[3] = {};
+            for (int m = 0; m < 3; ++m)
+                for (int a = 0; a < 8; ++a) {
+                    const float th = 0.785398f * (float)a + 0.1f;
+                    Vec2 p = {ctr.x + 30.0f * std::cos(th), ctr.y + 30.0f * std::sin(th)};
+                    const double R0 = std::hypot((double)p.x - ctr.x, (double)p.y - ctr.y);
+                    float d = 120.0f;
+                    for (int f = 0; f < 100; ++f) w.wallAdvect(p, d, dt, 4 << m);
+                    e[m] = std::max(e[m], std::abs(std::hypot((double)p.x - ctr.x, (double)p.y - ctr.y) / R0 - 1.0));
+                }
+            t.expect(e[0] > 4.0 * e[1] && e[1] > 4.0 * e[2], "convergence: radius drift n=4 %.2e, n=8 %.2e, n=16 %.2e", e[0], e[1], e[2]);
+            t.note("convergence (core 30 at 1000, r0 30, 100 frames): radius drift n=4 %.2e, n=8 %.2e, n=16 %.2e", e[0], e[1], e[2]);
+        }
+    }
 }
 
 // Sensing does not wrap: no pickup, pairing or capture across the tank.

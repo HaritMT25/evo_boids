@@ -497,14 +497,16 @@ EVO_EXPORT int oc_set_param(const char* name, double value) {
         "newbornEnergy", "mutationMultiplier", "minSpeed", "maxSpeed",
         "predatorMinPopulation", "predatorMaxPopulation", "predatorTraitMutation",
     };
-    // The glass walls are set by oc_init (the world is built bounded or not):
-    // named here so the refusal says so.
-    static const char* const kRestartOnly[] = {"walls", "sideWallBand", "sideWallTurnRate"};
-    for (const char* k : kRestartOnly)
-        if (name && std::strcmp(name, k) == 0) {
-            g_error = std::string(name) + " is set by oc_init (restart to change it)";
+    // The glass walls and appearance are set by oc_init (ocean_config.hpp
+    // oceanRestartOnlyError, the harness's --set's policy too): named here so
+    // the refusal says so.
+    if (name) {
+        const std::string why = oceanRestartOnlyError(name, value, g_world->ocfg);
+        if (!why.empty()) {
+            g_error = why;
             return 0;
         }
+    }
     bool live = false;
     for (const char* k : kOcean) if (name && std::strcmp(name, k) == 0) { live = true; break; }
     for (const char* k : kLive)  if (name && std::strcmp(name, k) == 0) { live = true; break; }
@@ -522,12 +524,6 @@ EVO_EXPORT int oc_set_param(const char* name, double value) {
     }
     if (isInt && !isIntValue(value)) {
         g_error = std::string(name) + " must be a whole number that fits an int";   // the JSON reader's (int) cast
-        return 0;
-    }
-    // appearance is set at init (the side array is built with the world): the
-    // value it has is a successful no-op, any other is refused.
-    if (std::strcmp(name, "appearance") == 0 && value != (double)g_world->ocfg.appearance) {
-        g_error = "appearance is set by oc_init (restart to change it)";
         return 0;
     }
     if (std::strcmp(name, "pitchMax") == 0 && !(value > 0.0)) {

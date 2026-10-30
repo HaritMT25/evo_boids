@@ -4865,6 +4865,8 @@ int main(int argc, char** argv) {
     ot::testWallContainment();
     ot::testWallPlacement();
     ot::testWallTransport();
+    ot::testWallWavesOff();
+    ot::testWallEddy();
     ot::testWallSensing();
     ot::testWallDraws();
     std::printf("OCEAN TESTS: %d passed, %d failed\n", ot::g_passed, ot::g_failed);

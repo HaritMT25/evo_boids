@@ -1226,6 +1226,49 @@ async function pageAsyncSetup() {
     }
 }
 
+/* (#4) A Turbo start that throws on the page (the Worker constructor, the
+ * first postMessage, the copy of the memory) left main's page "entering"
+ * for good: controls locked, no Stop. Each injected failure first makes the
+ * held three-edit sequence (as an edit landing in that moment would be
+ * held), so the recovery must apply it too; then a second start must work. */
+async function pageStartFailures() {
+    section('The page: a Turbo start that throws recovers (the Worker, its first message, the memory copy)');
+    const injections = [
+        ['the Worker constructor throws', (p) => { p.hooks.ctor = () => { edit3(p); throw new Error('injected: no worker'); }; }],
+        ['the first postMessage throws', (p) => { p.hooks.post = () => { edit3(p); throw new Error('injected: could not post'); }; }],
+        ['the memory copy throws', (p) => {
+            const b = HO.buffer(p.M);
+            Object.defineProperty(b, 'slice', { configurable: true, value: () => { delete b.slice; edit3(p); throw new RangeError('injected: out of memory'); } });
+        }]
+    ];
+    for (const [what, arm] of injections) {
+        const p = await bootPage(PAGE_Q);
+        const img = HO.buffer(p.M).slice(0), f0 = frame(p.M), sets0 = p.sets.length, nW = p.workers.length;
+        arm(p);
+        p.click('turbobtn');
+        for (let i = 0; i < 4; i++) await tick();
+        const sh = p.workers.length > nW ? p.worker() : null, c = turboControls(p);
+        ok(p.T.turboState === 'live' && p.T.turboWorker === null && !c.card && c.button && !c.locked.length && /Turbo could not start/.test(p.msg()),
+           what + ': the page is live again, no worker, the Turbo card hidden, its button on, nothing locked ("' + p.msg() + '"; state ' +
+           p.T.turboState + (c.locked.length ? ', locked ' + c.locked.join(' ') : '') + ')');
+        if (sh) ok(sh.terminated === 1 && sh.onmessage === null && sh.onerror === null,
+                   what + ': the worker it had made is terminated once, its handlers detached (' + sh.terminated + ')');
+        ok(at5to10(p), what + ': the edits held in that moment apply, in order (' + speeds(p) + ')');
+        const ref = await controlRun(img, p.sets.slice(sets0), f0), d = sameFor(p.M, ref, 50);
+        ok(d === '', what + ': the page\'s world is its own, untouched but for those edits (50 steps bit-identical)' + (d ? ': ' + d : ''));
+        if (p.T.turboState === 'live') {
+            const f1 = frame(p.M);
+            p.click('turbobtn');
+            await until(() => p.T.turboState === 'turbo', 'the second start');
+            await until(() => p.worker().fromWorker.some(m => m.type === 'stats' && m.frame >= f1 + 60), 'the second run');
+            p.click('turboexit');
+            await until(() => p.T.turboState === 'live', 'the second hand-back');
+            ok(frame(p.M) > f1 && at5to10(p), what + ': a second Turbo starts and hands back (frame ' + f1 + ' -> ' + frame(p.M) + ')');
+        } else ok(false, what + ': a second Turbo start (the page is stuck "' + p.T.turboState + '")');
+        ok(p.uncaught.length === 0, what + ': no exception escaped the page\'s handlers' + (p.uncaught.length ? ' (' + p.uncaught[0] + ')' : ''));
+    }
+}
+
 /* Every section, in order; `node tests/ocean_turbo_handoff.js NAME...` runs only those. */
 const SECTIONS = {
     repeatedKeys, liveLedger, growthPage, randomize, imports,
@@ -1238,7 +1281,7 @@ const SECTIONS = {
                                                 foodPatches: 5, foodDepthMode: 1, bodyModel: true }));
     },
     failures: failures_,
-    pageHeld, pageRefusal, pageAsyncSetup
+    pageHeld, pageRefusal, pageAsyncSetup, pageStartFailures
 };
 const unhandled = [];
 process.on('unhandledRejection', (e) => { unhandled.push(e); });

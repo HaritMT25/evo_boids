@@ -1558,26 +1558,34 @@
     turboWorker = null;
   }
   function frameNow() { M._oc_sync(); return HO.f64(M, M._oc_stats(), statsLen)[1]; }
+  /* A start that throws here (the Worker, the copy of the memory, the first
+   * message) goes back to live through turboFailed, as a worker that fails
+   * while starting does: the worker dropped, the held edits applied. The
+   * worker always gets a copy: this page's memory stays the fallback. */
   function enterTurbo() {
     if (turboState !== "live" || !M || MOCK) { if (MOCK) showNote("Turbo needs the real engine."); return; }
-    turboState = "entering";
-    turboStats = null;
-    turboEntryCfg = Object.assign({}, runCfg);
-    live.start();
-    select(null);
-    unfollow();
-    updateLocks();
-    if (!turboWorker) {
-      turboWorker = new Worker(A.worker);
-      turboWorker.onmessage = onTurboMessage;
-      turboWorker.onerror = function (ev) {
-        if (ev && ev.preventDefault) ev.preventDefault();
-        turboFailed("The Turbo worker failed: " + (ev && ev.message || "could not load ocean_worker.js"), null);
-      };
+    try {
+      turboState = "entering";
+      turboStats = null;
+      turboEntryCfg = Object.assign({}, runCfg);
+      live.start();
+      select(null);
+      unfollow();
+      updateLocks();
+      if (!turboWorker) {
+        turboWorker = new Worker(A.worker);
+        turboWorker.onmessage = onTurboMessage;
+        turboWorker.onerror = function (ev) {
+          if (ev && ev.preventDefault) ev.preventDefault();
+          turboFailed("The Turbo worker failed: " + (ev && ev.message || "could not load ocean_worker.js"), null);
+        };
+      }
+      var mem = heap().slice(0);
+      turboWorker.postMessage({ cmd: "start", js: moduleUrls.js, wasm: moduleUrls.wasm, handoff: moduleUrls.handoff, mem: mem,
+                                recEvery: dash() ? dash().every() : 60, famK: dash() ? dash().famK : 8 }, [mem]);
+    } catch (err) {
+      turboFailed("Turbo could not start: " + (err && err.message || err), null);
     }
-    var mem = heap().slice(0);
-    turboWorker.postMessage({ cmd: "start", js: moduleUrls.js, wasm: moduleUrls.wasm, handoff: moduleUrls.handoff, mem: mem,
-                              recEvery: dash() ? dash().every() : 60, famK: dash() ? dash().famK : 8 }, [mem]);
   }
   function exitTurbo() {
     if (turboState !== "turbo") return;

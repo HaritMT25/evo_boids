@@ -1170,6 +1170,62 @@ async function pageRefusal() {
     }
 }
 
+/* (#3) Load setup reads the file asynchronously; the page checked who owns
+ * the world before the read, not when it completed. A read started while
+ * the page ran and finished during Turbo replaced the page's copy (the one
+ * a lost Turbo world falls back to) and its seed and settings while the
+ * worker went on with the old world. Through the page's own file-input
+ * callback, the read completing while Turbo starts, runs and stops; then
+ * the same file while the page runs. */
+const SETUP99 = JSON.stringify({ format: 'evo_ocean_setup', seed: 99, population: 12, depth: 200, width: 800, height: 600,
+                                 config: { minPopulation: 0, targetFood: 0, foodSpawnBase: 0, foodSpawnAmp: 0, foodEnergy: 9 } });
+function deferredFile(text) {
+    let resolve;
+    const pr = new Promise((r) => { resolve = r; });
+    return { file: { name: 'setup.json', text: () => pr }, resolve: () => resolve(text) };
+}
+async function pageAsyncSetup() {
+    section('The page: a setup file whose read completes during Turbo is refused then, not loaded');
+    for (const when of ['entering', 'turbo', 'exiting']) {
+        const p = await bootPage(PAGE_Q);
+        const f0 = frame(p.M), print0 = fingerprint(p.M), state0 = p.state(), inits0 = p.inits.length;
+        const img = HO.buffer(p.M).slice(0);
+        const f = deferredFile(SETUP99);
+        p.loadFile(f.file);   /* the page runs: the read starts */
+        if (when === 'entering') p.hooks.onWorker = (sh) => sh.pause();
+        p.click('turbobtn');
+        const sh = p.worker();
+        if (when === 'entering') await until(() => sh.queued(isType('stats')), 'the first stats');
+        else await until(() => p.T.turboState === 'turbo', 'Turbo');
+        if (when === 'exiting') { sh.pause(); trapNext(sh); await until(() => sh.queued(isType('error')), 'the trap'); p.click('turboexit'); }
+        const st = p.T.turboState;
+        f.resolve();
+        for (let i = 0; i < 4; i++) await tick();
+        const kept = p.inits.length === inits0 && fingerprint(p.M) === print0 && p.state() === state0;
+        ok(st === when && kept && /Stop Turbo first/.test(p.msg()),
+           when + ': the read completing then is refused ("' + p.msg() + '"): no oc_init, the page\'s copy, seed, settings, size, sheet and address as they were');
+        if (when === 'entering') { sh.resume(); await until(() => p.T.turboState === 'turbo', 'Turbo'); }
+        if (when === 'exiting') sh.resume();
+        else p.click('turboexit');
+        await until(() => p.T.turboState === 'live', 'the world back');
+        const at = frame(p.M), ref = await controlRun(img, [], at), d = sameFor(p.M, ref, 100);
+        ok(d === '' && p.T.initArgs.seed === 4242 && (when === 'exiting' ? at === f0 : at > f0),
+           when + ': the world that comes back (' + (when === 'exiting' ? 'lost: the page\'s copy' : 'handed back') + ', frame ' + at +
+           ') is the original one, 100 steps bit-identical' + (d ? ': ' + d : ''));
+    }
+    {
+        const p = await bootPage(PAGE_Q);
+        const inits0 = p.inits.length, f = deferredFile(SETUP99);
+        p.loadFile(f.file);
+        f.resolve();
+        await until(() => /Setup loaded/.test(p.msg()) || /refused|not/.test(p.msg()), 'the setup');
+        ok(p.inits.length === inits0 + 1 && p.T.initArgs.seed === 99 && p.T.initArgs.population === 12 && p.T.W === 800 && p.T.H === 600 &&
+           p.T.D === 200 && p.T.runCfg.foodEnergy === 9 && !p.T.WALLS,
+           'while the page runs, the same file loads: seed 99, 12 fish, 800 x 600 x 200, foodEnergy 9 ("' + p.msg() + '")');
+        ok(p.uncaught.length === 0, 'no exception escaped the page\'s handlers');
+    }
+}
+
 /* Every section, in order; `node tests/ocean_turbo_handoff.js NAME...` runs only those. */
 const SECTIONS = {
     repeatedKeys, liveLedger, growthPage, randomize, imports,
@@ -1182,7 +1238,7 @@ const SECTIONS = {
                                                 foodPatches: 5, foodDepthMode: 1, bodyModel: true }));
     },
     failures: failures_,
-    pageHeld, pageRefusal
+    pageHeld, pageRefusal, pageAsyncSetup
 };
 const unhandled = [];
 process.on('unhandledRejection', (e) => { unhandled.push(e); });

@@ -840,6 +840,9 @@
    * (importWorld: a value the engine refuses is reported, and nothing
    * changes). A setup without a size takes this screen's. */
   function loadSetup(text) {
+    /* the read is asynchronous: who owns the world is asked again now (the
+     * file input's check, before the read, stays: it starts no read for nothing) */
+    if (!M || guardTurbo()) return;
     var s, pf;
     try { pf = HO.parseFirst(text); s = pf.value; } catch (e) { showError("That file is not JSON: " + e.message); return; }
     /* a repeated key, as for ?cfg=: the first occurrence counts, every one is

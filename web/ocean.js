@@ -1481,9 +1481,12 @@
     } else if (msg.type === "rec") {
       if (dash()) dash().ingest(msg.rows);
     } else if (msg.type === "set") {
-      live.answered(msg.key, !!msg.ok);
+      /* a refusal leaves the field alone when a newer edit of the key, in
+       * flight or held for the hand-off, follows the one answered */
+      var answered = live.answered(msg.key, !!msg.ok);
+      if (!answered) return;
       if (msg.ok) liveApplied(msg.key, valOf(msg.key, msg.value));
-      else refuse(msg.key, msg.error, live.pending(msg.key));
+      else refuse(msg.key, msg.error, live.pending(msg.key, answered.seq));
     } else if (msg.type === "memory") {
       if (turboState !== "exiting") return;
       try { takeMemory(msg.mem); }

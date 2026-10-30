@@ -145,8 +145,13 @@
         }
         return null;
       },
-      /* a newer edit of key is still on its way */
-      pending: function (key) { return inflight.some(function (e) { return e.key === key; }); },
+      /* an edit of key newer than sequence number afterSeq (any, without it)
+       * still waits: in flight, or held for the hand-off. The answer to an
+       * older edit must not undo it (the page's field shows it) */
+      pending: function (key, afterSeq) {
+        var s = afterSeq === undefined ? 0 : afterSeq;
+        return inflight.concat(held).some(function (e) { return e.key === key && e.seq > s; });
+      },
       /* the held edits, oldest first, now that one side owns the world */
       takeHeld: function () { var l = held; held = []; return l; },
       /* the page owns the world again: what it applies, oldest first */

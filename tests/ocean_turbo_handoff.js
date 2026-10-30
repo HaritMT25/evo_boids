@@ -859,8 +859,26 @@ async function liveLedger() {
         L.hold('x', 1); L.hold('y', 2);
         const fl = L.takeHeld(); fl.forEach(e => L.sent(e.key, e.num, e.seq));
         L.hold('x', 9);
+        const pendX = L.pending('x');
         const order = L.back(true).map(e => e.key + e.num).join(' ');
-        ok(order === 'x1 y2 x9' && L.pending('x') === false, 'a held edit flushed to the worker keeps its place (' + order + ')');
+        ok(order === 'x1 y2 x9' && pendX === true && L.pending('x') === false,
+           'a held edit flushed to the worker keeps its place (' + order + '); x is pending until the world is back');
+        /* pending(key, seq): a NEWER edit of key, held or in flight, than the answered one */
+        L.start();
+        L.sent('k', 1); L.hold('k', 2);
+        const refusedK = L.answered('k', false);
+        const newerHeld = L.pending('k', refusedK.seq);
+        L.back(false);
+        L.start();
+        L.hold('m', 1); L.sent('m', 2);
+        const refusedM = L.answered('m', false);
+        const olderHeld = L.pending('m', refusedM.seq);
+        L.sent('m', 3);
+        const newerSent = L.pending('m', refusedM.seq), notAfterItself = L.pending('m', 99);
+        L.back(false);
+        ok(newerHeld === true && olderHeld === false && newerSent === true && notAfterItself === false,
+           'pending(key, seq): a newer held edit counts (' + newerHeld + '), an older held one does not (' + olderHeld +
+           '), a newer one in flight does (' + newerSent + '), nothing after the newest (' + notAfterItself + ')');
     }
 
     const SEED = 4242;
@@ -1081,6 +1099,77 @@ async function pageHeld() {
     }
 }
 
+/* (#2) An answer to an older edit must not undo a newer one. The worker
+ * refuses minSpeed 200 (the maximum is 150); before the refusal reaches the
+ * page, Stop, and minSpeed 20 is held. main's handler asked only whether a
+ * newer edit was in flight: it reset the field to 30 and cleared its note,
+ * then the recovery applied the held 20 under a field showing 30. Through
+ * the page's own handler, with the world handed back and with it lost; the
+ * controls: no newer edit (the field goes back to 30), a newer one in
+ * flight (it stays); and with the held three-edit sequence after it. */
+async function pageRefusal() {
+    section('The page: an older edit\'s refusal leaves a newer held or in-flight edit alone');
+    const refusal = (m) => m.type === 'set' && !m.ok;
+    for (const how of ['handed back', 'lost']) {
+        const { p, img, f0, sets0, sh } = await pageInTurbo();
+        sh.pause();
+        p.edit('minSpeed', 200);
+        await until(() => sh.queued(refusal), 'the refusal');
+        if (how === 'lost') { trapNext(sh); await until(() => sh.queued(isType('error')), 'the trap'); }
+        p.click('turboexit');
+        if (how !== 'lost') await until(() => sh.queued(isType('memory')), 'the memory');
+        p.edit('minSpeed', 20);
+        const held = p.note('minSpeed');
+        await sh.release(refusal, 'the refusal');
+        const field = p.T.getVal('minSpeed'), note = p.note('minSpeed');
+        ok(held !== '' && field === 20 && note === held,
+           how + ': the old refusal leaves the held 20 in its field, its note unchanged (field ' + field + ', note "' + note + '")');
+        sh.resume();
+        await until(() => p.T.turboState === 'live', 'the world back');
+        ok(p.T.runCfg.minSpeed === 20 && p.T.getVal('minSpeed') === 20 && p.note('minSpeed') === '',
+           how + ': the world, runCfg and the field agree on 20, no note left (runCfg ' + p.T.runCfg.minSpeed + ', field ' + p.T.getVal('minSpeed') + ')');
+        const edits = (how === 'lost' ? [] : workerEdits(sh)).concat(p.sets.slice(sets0)), at = frame(p.M);
+        const ref = await controlRun(img, edits, at);
+        const d = sameFor(p.M, ref, 150);
+        ok((how !== 'lost' || at === f0) && d === '', how + ': 150 further steps bit-identical to minSpeed 20 applied where the page applied it (frame ' +
+           at + ')' + (d ? ': ' + d : ''));
+    }
+    {   /* controls: no newer edit (back to 30); a newer one in flight (the field stays) */
+        const { p, sh } = await pageInTurbo();
+        sh.pause();
+        p.edit('minSpeed', 200);
+        await sh.release(refusal, 'the refusal');
+        ok(p.T.getVal('minSpeed') === 30 && p.note('minSpeed') === '' && !('minSpeed' in p.T.runCfg) && /back to 30/.test(p.msg()),
+           'no newer edit: the refused field goes back to 30 ("' + p.msg() + '")');
+        p.edit('minSpeed', 200);
+        await until(() => sh.queued(refusal), 'the second refusal');
+        p.edit('minSpeed', 20);
+        await sh.release(refusal, 'the refusal');
+        const kept = p.T.getVal('minSpeed');
+        sh.resume();
+        await until(() => sh.delivered.filter(isType('set')).length === 3, 'the answer to 20');
+        ok(kept === 20 && p.T.getVal('minSpeed') === 20 && p.T.runCfg.minSpeed === 20,
+           'a newer edit in flight: the field stays 20 through the old refusal, then 20 applies (' + kept + ', runCfg ' + p.T.runCfg.minSpeed + ')');
+    }
+    {   /* with #1: a refused older edit, then the held three-edit sequence */
+        const { p, img, sets0, sh } = await pageInTurbo();
+        sh.pause();
+        p.edit('minSpeed', 200);
+        await until(() => sh.queued(refusal), 'the refusal');
+        p.click('turboexit');
+        await until(() => sh.queued(isType('memory')), 'the memory');
+        edit3(p);
+        await sh.release(refusal, 'the refusal');
+        const fields = p.T.getVal('minSpeed') + '-' + p.T.getVal('maxSpeed');
+        sh.resume();
+        await until(() => p.T.turboState === 'live', 'the world back');
+        ok(fields === '5-10' && at5to10(p), 'a refusal before the held 0, 10, 5: the fields stay 5-10 through it, and 5-10 is what runs (' + speeds(p) + ')');
+        const ref = await controlRun(img, workerEdits(sh).concat(p.sets.slice(sets0)), frame(p.M));
+        const d = sameFor(p.M, ref, 150);
+        ok(d === '' && p.uncaught.length === 0, 'and 150 further steps are bit-identical to that' + (d ? ': ' + d : ''));
+    }
+}
+
 /* Every section, in order; `node tests/ocean_turbo_handoff.js NAME...` runs only those. */
 const SECTIONS = {
     repeatedKeys, liveLedger, growthPage, randomize, imports,
@@ -1093,7 +1182,7 @@ const SECTIONS = {
                                                 foodPatches: 5, foodDepthMode: 1, bodyModel: true }));
     },
     failures: failures_,
-    pageHeld
+    pageHeld, pageRefusal
 };
 const unhandled = [];
 process.on('unhandledRejection', (e) => { unhandled.push(e); });

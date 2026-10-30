@@ -536,8 +536,9 @@
   /* Edits in the order they were made (ledger entries): to the worker while
    * Turbo owns the world, else to this one. A refused edit keeps its field
    * when a later edit of the key follows in the list. Returns what this
-   * world did: {applied: [entry], refused: [[entry, why]]}. */
-  function replay(list, quiet) {
+   * world did: {applied: [entry], refused: [[entry, why]]}. (Not "replay":
+   * that is the page's Replay, oc_reset, below.) */
+  function replayEdits(list, quiet) {
     var out = { applied: [], refused: [] };
     list.forEach(function (e, i) {
       fieldNote(e.key, "");
@@ -549,7 +550,7 @@
     return out;
   }
   /* the held edits, now that one side owns the world */
-  function flushHeld(quiet) { return replay(live.takeHeld(), quiet); }
+  function flushHeld(quiet) { return replayEdits(live.takeHeld(), quiet); }
 
   var tabsEl = el("tabs"), panelsEl = el("panels"), currentTab = "run";
   function buildSettings() {
@@ -1500,7 +1501,7 @@
   /* The page owns the world again: its memory is the worker's, or (lost) its
    * own, from where Turbo took it. It applies, in the order they were made,
    * the edits never answered (never applied) and the held ones, and, lost,
-   * the acknowledged ones before them (ledger back). Returns replay's result. */
+   * the acknowledged ones before them (ledger back). Returns replayEdits'. */
   function turboBack(quiet, lost) {
     turboState = "live";
     var plan = live.back(!!lost);
@@ -1508,7 +1509,7 @@
     sampleBucket = Math.floor(M._oc_stats ? frameNow() / (dash() ? dash().every() : 60) : -1);
     setPaused(false);
     updateLocks();
-    return replay(plan, quiet);
+    return replayEdits(plan, quiet);
   }
   /* The worker stopped on an error, or died. With its memory (the world was
    * whole), the run goes on from where Turbo got it, as after a Stop.

@@ -43,6 +43,11 @@
 //                 the food; 24 = predators only); faded contrast 0 at R;
 //                 ranges in populated worlds; 0..31 valid, live via
 //                 oc_set_param (plain build: eyeCode must stay 0)
+//   sense_edges   the food / neighbour scans' edges, bit for bit, and sense_ref:
+//   sense_ref     randomized scenes against their definition (both in
+//                 tests/ocean_sense_tests.hpp, which lists what they pin)
+//   food_grid     OceanFoodGrid == SpatialGrid: the same lists and visits, and
+//                 each entry's payload is its item's
 //   food_life     foodLife: an item goes on the step its age reaches foodLife;
 //                 off, none do; the first stock's ages spread; draws unchanged;
 //                 the spawn cap counts live items (what expires frees its place
@@ -1981,7 +1986,7 @@ void testReproducible() {
     { float& c = ofp::field<pk::CfCore>(ofp::field<pk::OwCurrent>(w)); const float keep = c; bump(c); only("the eddy core", &FP::cur); c = keep; }
     { float& d = ofp::field<pk::OwPatchDepth>(w)[1]; const float keep = d; bump(d); only("a food-patch depth", &FP::geo); d = keep; }
     { float& x = ofp::field<pk::OwPatches>(w)[2].x; const float keep = x; bump(x); only("a food-patch centre", &FP::geo); x = keep; }
-    { float& ic = ofp::field<pk::SgInvCell>(ofp::field<pk::OwFoodGrid>(w)); const float keep = ic; bump(ic);
+    { float& ic = ofp::field<pk::FgInvCell>(ofp::field<pk::OwFoodGrid>(w)); const float keep = ic; bump(ic);
       only("the food grid's cell size", &FP::geo); ic = keep; }
     { bool& tor = ofp::field<pk::SigToroidal>(w.signals); tor = !tor; only("the signal grid's wrap flag", &FP::geo); tor = !tor; }
     { int& wc = ofp::field<pk::SigWrapCols>(w.signals); ++wc; only("the signal grid's seam period", &FP::geo); --wc; }
@@ -4493,11 +4498,15 @@ void testProbe() {
         t.expect(pw.cfg.perceptionRadius == c.radius && g_world->cfg.perceptionRadius == c.radius,
                  "%s: perceptionRadius stored %.9g by the probe, %.9g by the shim (expected %.9g)", name,
                  (double)pw.cfg.perceptionRadius, (double)g_world->cfg.perceptionRadius, (double)c.radius);
-        for (const SpatialGrid* g : {&ofp::field<ofp::peek::OwCreatureGrid>(pw), &ofp::field<ofp::peek::OwFoodGrid>(pw)}) {
-            const float inv = ofp::field<ofp::peek::SgInvCell>(*g);
-            const int cols = ofp::field<ofp::peek::SgCols>(*g), rows = ofp::field<ofp::peek::SgRows>(*g);
-            t.expect(std::isfinite(inv) && inv > 0.0f && cols > 0 && rows > 0, "%s: probe grid 1/cell %.9g, %d x %d cells", name,
-                     (double)inv, cols, rows);
+        {   // both neighbour grids (the fish's SpatialGrid, the OceanFoodGrid)
+            const SpatialGrid& g = ofp::field<ofp::peek::OwCreatureGrid>(pw);
+            const OceanFoodGrid& fg = ofp::field<ofp::peek::OwFoodGrid>(pw);
+            const float invs[2] = {ofp::field<ofp::peek::SgInvCell>(g), ofp::field<ofp::peek::FgInvCell>(fg)};
+            const int colss[2] = {ofp::field<ofp::peek::SgCols>(g), ofp::field<ofp::peek::FgCols>(fg)};
+            const int rowss[2] = {ofp::field<ofp::peek::SgRows>(g), ofp::field<ofp::peek::FgRows>(fg)};
+            for (int k = 0; k < 2; ++k)
+                t.expect(std::isfinite(invs[k]) && invs[k] > 0.0f && colss[k] > 0 && rowss[k] > 0,
+                         "%s: probe grid 1/cell %.9g, %d x %d cells", name, (double)invs[k], colss[k], rowss[k]);
         }
         const ofp::Fingerprint sf = ofp::fingerprint(*g_world);
         t.expect(pf == sf, "%s%s: the probe's world != the shim's (cfg %d geo %d rng %d)", name, c.e1 ? " --e1" : "",
@@ -4756,6 +4765,7 @@ void testFlowLanes() {
 }  // namespace ot
 
 #include "ocean_appearance_tests.hpp"
+#include "ocean_sense_tests.hpp"
 
 namespace ot {
 #include "ocean_walls_tests.hpp"   // the glass walls (uses this file's helpers)
@@ -4780,6 +4790,9 @@ int main(int argc, char** argv) {
     ot::testEye();
     ot::testEyeOnly();
     ot::testEyeCode();
+    ot::testSenseEdges();   // tests/ocean_sense_tests.hpp: the scans' edges, pinned
+    ot::testSenseRef();
+    ot::testFoodGrid();
     ot::testFoodLife();
     ot::testRemovedNonFinite();
     ot::testReproducible();

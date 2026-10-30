@@ -242,6 +242,7 @@
 #include "ocean_math.hpp"
 #include "fish.hpp"
 #include "appearance_model.hpp"
+#include "ocean_food_grid.hpp"
 
 // The defensive clamps every Ocean entry point applies to the SimConfig half
 // after reading the cfg JSON and before checking or using it: oc_init /
@@ -832,7 +833,7 @@ public:
             if (c.alive) creatureGrid_.insert(c.pos, i);
         }
         for (int i = 0; i < numFood; ++i)
-            if (food[i].alive) foodGrid_.insert(food[i].pos, i);
+            if (food[i].alive) foodGrid_.insert(food[i], i);
         creatureGrid_.build();
         foodGrid_.build();
 
@@ -1065,12 +1066,14 @@ private:
     };
     struct PendingSignal { bool wants = false; Vec2 pos; };
     struct Candidate { float distSq, dx, dy, dz; int index; };
+    struct FoodSeen { float dx, dy, dz, d2; int k; };   // a food item within R: its offset, d², grid slot
 
     SpatialGrid creatureGrid_;
-    SpatialGrid foodGrid_;
+    OceanFoodGrid foodGrid_;   // SpatialGrid's layout and queries + each item's depth / size / eyeCon
     std::vector<FishHot> hot_;
     std::vector<PendingSignal> pending_;
     std::vector<int> neighbors_, nearbyFood_, nearby_, near_;
+    std::vector<FoodSeen> foodSeen_;   // foodWithin's list (scratch, one fish at a time)
     CurrentField current_;
     std::vector<Vec2> foodPatches_;
     std::vector<float> foodPatchDepth_;   // foodDepthMode 1: one depth per patch
@@ -2175,6 +2178,110 @@ private:
         }
     }
 
+    // The bounded food scan (cfg.toroidal off): every item within R of fish c
+    // in 3-D, in the grid's visit order, as foodSeen_[0, n) — offset, d², grid
+    // slot. One pass over the query's rows of cells (the grid's own runs, in its
+    // order) takes each candidate's offset from c.pos, the query centre (dx =
+    // x − c.pos.x, as the grid's 2-D test takes it), q2 = dx·dx + dy·dy (that
+    // test's sum), dz, and d2 = q2 + dz·dz (dx·dx + dy·dy + dz·dz, the same
+    // left-to-right sum); it writes the record and advances the list exactly
+    // when the grid's 2-D test (q2 <= R²) and the 3-D test (!(d2 > R²): a NaN d²
+    // passes, as it always has) both hold — no branch on either (each passes a
+    // random-looking third to half of the time: a mispredict on a large share of
+    // candidates). The kept records are what the grid's visitor saw, in its
+    // order, with its arithmetic.
+    int foodWithin(const Fish& c, float R) {
+        FoodSeen* out = foodSeenList();
+        const float* fx = foodGrid_.xs();
+        const float* fy = foodGrid_.ys();
+        const float* fz = foodGrid_.depths();
+        const float R2 = R * R;
+        const float px = c.pos.x, py = c.pos.y, pz = c.depth;
+        // Four candidates at a time (GCC / Clang vector extensions: SSE2 on
+        // x86-64, SIMD128 under -msimd128): lane j runs candidate k + j's very
+        // operations — IEEE single −, × and + in the same tree, no FMA
+        // (-ffp-contract=off) and no relaxed SIMD — so its values are the scalar
+        // loop's bits; the comparisons give 0 / −1 masks (the literal q2 <= R²
+        // and !(d2 > R²)), and the lanes are written and kept one by one in lane
+        // order, as the scalar loop would. The rest of a run (< 4) is scalar.
+        typedef float v4f __attribute__((vector_size(16)));
+        typedef int v4i __attribute__((vector_size(16)));
+        const v4f PX = {px, px, px, px}, PY = {py, py, py, py}, PZ = {pz, pz, pz, pz};
+        const v4f RR = {R2, R2, R2, R2};
+        int n = 0;
+        foodGrid_.forEachRun(c.pos, R, [&](int b, int e) {
+            int k = b;
+            for (; k + 4 <= e; k += 4) {
+                v4f X, Y, Z;
+                std::memcpy(&X, fx + k, sizeof X);
+                std::memcpy(&Y, fy + k, sizeof Y);
+                std::memcpy(&Z, fz + k, sizeof Z);
+                const v4f dx = X - PX, dy = Y - PY;
+                const v4f q2 = dx * dx + dy * dy;
+                const v4f dz = Z - PZ;
+                const v4f d2 = q2 + dz * dz;
+                const v4i keep = (q2 <= RR) & ~(d2 > RR);   // −1 = kept
+                for (int j = 0; j < 4; ++j) {
+                    out[n] = {dx[j], dy[j], dz[j], d2[j], k + j};
+                    n -= keep[j];
+                }
+            }
+            for (; k < e; ++k) {
+                const float dx = fx[k] - px, dy = fy[k] - py;
+                const float q2 = dx * dx + dy * dy;
+                const float dz = fz[k] - pz;
+                const float d2 = q2 + dz * dz;
+                out[n] = {dx, dy, dz, d2, k};
+                n += (int)(q2 <= R2) & (int)!(d2 > R2);
+            }
+        });
+        return n;
+    }
+
+    // The toroidal food scan, as foodWithin (the same list: every item within R
+    // in 3-D, in the grid's visit order — here the nine images in their order).
+    // Per candidate both of the old scan's tests, each with its own arithmetic:
+    // the grid's 2-D test against the image's translated centre (cx0, cy0), and
+    // the 3-D test on the scan's offset, the difference from c.pos wrapped by
+    // wrapDelta's rule (d > W/2: d − W; d < −W/2: d + W; else d) — the two round
+    // differently, so both stay (sense_edges, "wrapped filter"). The rule is
+    // taken as a select between the three values wrapDelta returns, each
+    // computed as it computes it: no branch, the same bits. Scalar.
+    int foodWithinWrapped(const Fish& c, float R) {
+        FoodSeen* out = foodSeenList();
+        const float* fx = foodGrid_.xs();
+        const float* fy = foodGrid_.ys();
+        const float* fz = foodGrid_.depths();
+        const float R2 = R * R;
+        const float px = c.pos.x, py = c.pos.y, pz = c.depth;
+        const float W = (float)width, H = (float)height;
+        const float hw = 0.5f * W, hh = 0.5f * H;   // wrapDelta's half = 0.5f · span
+        int n = 0;
+        foodGrid_.forEachRunWrapped(c.pos, R, [&](int b, int e, float cx0, float cy0) {
+            for (int k = b; k < e; ++k) {
+                const float gx = fx[k] - cx0, gy = fy[k] - cy0;   // the grid's 2-D test
+                const float q2 = gx * gx + gy * gy;
+                const float ux = fx[k] - px, uy = fy[k] - py;     // the scan's offset, wrapped
+                const float dx = (ux > hw) ? ux - W : ((ux < -hw) ? ux + W : ux);
+                const float dy = (uy > hh) ? uy - H : ((uy < -hh) ? uy + H : uy);
+                const float dz = fz[k] - pz;
+                const float d2 = dx * dx + dy * dy + dz * dz;
+                out[n] = {dx, dy, dz, d2, k};
+                n += (int)(q2 <= R2) & (int)!(d2 > R2);
+            }
+        });
+        return n;
+    }
+    // foodSeen_ with room for a query's writes: one per candidate, the list
+    // advancing only on a kept item, and an item is kept at most once (in a
+    // wrapped query it can be a candidate twice, within R of one image only), so
+    // a write lands at most at index entryCount().
+    FoodSeen* foodSeenList() {
+        const std::size_t need = (std::size_t)foodGrid_.entryCount() + 1;
+        if (foodSeen_.size() < need) foodSeen_.resize(need);
+        return foodSeen_.data();
+    }
+
 #ifdef EVO_OCEAN_EYE
     // Eye-only mode: the eye's half of computeSensors' neighbour, food and
     // predator loops — the same queries, every object within R in the same
@@ -2203,18 +2310,17 @@ private:
                 eyeSee(eye, fwd, rht, dx, dy, dz, d2, other.eyeSize, other.eyeCon, R);
             }
         }
-        auto look = [&](int fi, Vec2 fp) {
-            float dx = fp.x - c.pos.x;
-            float dy = fp.y - c.pos.y;
-            if (cfg.toroidal) { dx = wrapDx(dx); dy = wrapDy(dy); }
-            const float dz = food[fi].depth - c.depth;
-            const float d2 = dx * dx + dy * dy + dz * dz;
+        // k: the item's grid slot (its payload == food[index]'s); the offset
+        // and d² as computeSensors' smell takes them (see there).
+        const float* fcon = foodGrid_.eyeCons();
+        auto look = [&](int k, float dx, float dy, float dz, float d2) {
             if (d2 > R2) return;
-            eyeSee(eye, fwd, rht, dx, dy, dz, d2, ocean::kEyeFoodSize, food[fi].eyeCon, R);
+            eyeSee(eye, fwd, rht, dx, dy, dz, d2, ocean::kEyeFoodSize, fcon[k], R);
         };
-        if (!(ocfg.eyeCode & kEyeCodeNoFood)) {
-            if (cfg.toroidal) foodGrid_.forEachInRadiusWrapped(c.pos, R, look);
-            else              foodGrid_.forEachInRadius(c.pos, R, look);
+        if (!(ocfg.eyeCode & kEyeCodeNoFood)) {   // the items within R, in the grid's visit order
+            const int n = cfg.toroidal ? foodWithinWrapped(c, R) : foodWithin(c, R);
+            const FoodSeen* s = foodSeen_.data();
+            for (int j = 0; j < n; ++j) look(s[j].k, s[j].dx, s[j].dy, s[j].dz, s[j].d2);
         }
         for (std::size_t k = 0; k < predators.size(); ++k) {
             const OceanPredator& p = predators[k];
@@ -2286,10 +2392,13 @@ private:
 #endif
 
         // ---- neighbours: (x, y) grid candidates, kept if within R in 3-D ----
+        // The step's flags, read once per fish (a config change takes effect
+        // between steps, never inside one).
+        const bool tor = cfg.toroidal;
         std::vector<int>& neighbors = neighbors_;
         neighbors.clear();
-        if (cfg.toroidal) creatureGrid_.queryRadiusWrapped(c.pos, R, neighbors);
-        else              creatureGrid_.queryRadius(c.pos, R, neighbors);
+        if (tor) creatureGrid_.queryRadiusWrapped(c.pos, R, neighbors);
+        else     creatureGrid_.queryRadius(c.pos, R, neighbors);
 
         float avgDx = 0, avgDy = 0, avgDz = 0, avgHx = 0, avgHy = 0;
         float nearestDist = R;
@@ -2306,16 +2415,30 @@ private:
             neighborCount++;
         };
 
+        // The grid's candidates within R in 3-D, by their hot_ state, in list
+        // order (as foodWithin, the 3-D test and the self test without a branch):
+        // each candidate's offset and d² are written, the list advancing exactly
+        // for another fish with !(d2 > R²). hot_ does not change while one fish
+        // senses, so these are the values the loops below would have read.
+        if (foodSeen_.size() < neighbors.size() + 1) foodSeen_.resize(neighbors.size() + 1);
+        FoodSeen* kept = foodSeen_.data();
+        int nKept = 0;
+        for (int ni : neighbors) {
+            const FishHot& other = hot_[ni];
+            float dx = other.pos.x - c.pos.x;
+            float dy = other.pos.y - c.pos.y;
+            if (tor) { dx = wrapDx(dx); dy = wrapDy(dy); }
+            const float dz = other.depth - c.depth;
+            const float d2 = dx * dx + dy * dy + dz * dz;
+            kept[nKept] = {dx, dy, dz, d2, ni};
+            nKept += (int)(ni != selfIdx) & (int)!(d2 > R2);
+        }
+
         if (cfg.maxNeighbors <= 0) {
-            for (int ni : neighbors) {
-                if (ni == selfIdx) continue;
+            for (int j = 0; j < nKept; ++j) {
+                const int ni = kept[j].k;
                 const FishHot& other = hot_[ni];
-                float dx = other.pos.x - c.pos.x;
-                float dy = other.pos.y - c.pos.y;
-                if (cfg.toroidal) { dx = wrapDx(dx); dy = wrapDy(dy); }
-                const float dz = other.depth - c.depth;
-                const float d2 = dx * dx + dy * dy + dz * dz;
-                if (d2 > R2) continue;
+                const float dx = kept[j].dx, dy = kept[j].dy, dz = kept[j].dz, d2 = kept[j].d2;
 #ifdef EVO_OCEAN_EYE
                 if constexpr (Eye) { if (eyeFish) eyeSee(eye, fwd, rht, dx, dy, dz, d2, other.eyeSize, other.eyeCon, R); }
 #endif
@@ -2327,15 +2450,10 @@ private:
             const int keepMax = std::min(cfg.maxNeighbors, MAX_TOPOLOGICAL_NEIGHBORS);
             Candidate best[MAX_TOPOLOGICAL_NEIGHBORS];
             int have = 0;
-            for (int ni : neighbors) {
-                if (ni == selfIdx) continue;
-                const FishHot& other = hot_[ni];
-                float dx = other.pos.x - c.pos.x;
-                float dy = other.pos.y - c.pos.y;
-                if (cfg.toroidal) { dx = wrapDx(dx); dy = wrapDy(dy); }
-                const float dz = other.depth - c.depth;
-                const float d2 = dx * dx + dy * dy + dz * dz;
-                if (d2 > R2) continue;
+            for (int j = 0; j < nKept; ++j) {
+                const int ni = kept[j].k;
+                [[maybe_unused]] const FishHot& other = hot_[ni];
+                const float dx = kept[j].dx, dy = kept[j].dy, dz = kept[j].dz, d2 = kept[j].d2;
                 ++inRadiusCount;
 #ifdef EVO_OCEAN_EYE
                 if constexpr (Eye) { if (eyeFish) eyeSee(eye, fwd, rht, dx, dy, dz, d2, other.eyeSize, other.eyeCon, R); }
@@ -2379,7 +2497,7 @@ private:
             const float sim = kernel::writeNearestSensors(c, nearest, sensors);
             float dx = nearest.pos.x - c.pos.x;
             float dy = nearest.pos.y - c.pos.y;
-            if (cfg.toroidal) { dx = wrapDx(dx); dy = wrapDy(dy); }
+            if (tor) { dx = wrapDx(dx); dy = wrapDy(dy); }
             sensors[GENETIC_SIM_FWD] = (dx * fwd.x + dy * fwd.y > 0) ? sim : 0.5f;
         } else {
             kernel::clearNearestSensors(sensors);
@@ -2387,31 +2505,56 @@ private:
         }
 
         // ---- food: nearest within R in 3-D; DX/DY/DZ = the unit vector to it ----
+        // foodD2 is the winner's d² (+inf before one): sqrt is monotone, so an
+        // item with d² >= foodD2 has sqrt(d²) >= foodDist and cannot pass the
+        // strict test below; only a smaller d² takes the sqrt and that test
+        // (which still decides: distinct d² can share a sqrt, e.g. 1 + 2^-23
+        // and 1). NaN fails both. The count, the eye and the mouth gate run
+        // for every item as before.
         float foodDx = 0, foodDy = 0, foodDz = 0, foodDist = R;
+        float foodD2 = std::numeric_limits<float>::infinity();
         int foodCount = 0;
-        auto smell = [&](int fi, Vec2 fp) {
-            float dx = fp.x - c.pos.x;
-            float dy = fp.y - c.pos.y;
-            if (cfg.toroidal) { dx = wrapDx(dx); dy = wrapDy(dy); }
-            const float dz = food[fi].depth - c.depth;
-            const float d2 = dx * dx + dy * dy + dz * dz;
+        // The mouth gate, once per fish: its flag, and the size limit (the very
+        // product kMouth · bodySize the test took per item).
+        const bool mouthGate = ocfg.mouthGate;
+        const float mouthMax = ocfg.kMouth * c.bodySize;
+        // k: the item's grid slot, whose depth / size / eyeCon are food[index]'s
+        // (copied at this step's build; food does not change in the per-fish
+        // phase); (dx, dy, dz) its offset, d2 = dx·dx + dy·dy + dz·dz.
+        const float* fsize = foodGrid_.sizes();
+#ifdef EVO_OCEAN_EYE
+        [[maybe_unused]] const float* fcon = foodGrid_.eyeCons();
+#endif
+        auto smell = [&](int k, float dx, float dy, float dz, float d2) {
             if (d2 > R2) return;
 #ifdef EVO_OCEAN_EYE
             // The eye sees every item within R (size does not hide it; unless cloaked) ...
-            if constexpr (Eye) { if (eyeFood) eyeSee(eye, fwd, rht, dx, dy, dz, d2, ocean::kEyeFoodSize, food[fi].eyeCon, R); }
+            if constexpr (Eye) { if (eyeFood) eyeSee(eye, fwd, rht, dx, dy, dz, d2, ocean::kEyeFoodSize, fcon[k], R); }
 #endif
             // ... the smell senses only what this fish could swallow.
-            if (ocfg.mouthGate && food[fi].size > ocfg.kMouth * c.bodySize) return;   // E1: not food for me
+            if (mouthGate && fsize[k] > mouthMax) return;   // E1: not food for me
             ++foodCount;
-            const float dist = std::sqrt(d2);
-            if (dist < foodDist) {
-                foodDist = dist;
-                const float invD = (dist > 0.001f) ? 1.0f / dist : 0.0f;
-                foodDx = dx * invD; foodDy = dy * invD; foodDz = dz * invD;
+            if (d2 < foodD2) {
+                const float dist = std::sqrt(d2);
+                if (dist < foodDist) {
+                    foodD2 = d2;
+                    foodDist = dist;
+                    const float invD = (dist > 0.001f) ? 1.0f / dist : 0.0f;
+                    foodDx = dx * invD; foodDy = dy * invD; foodDz = dz * invD;
+                }
             }
         };
-        if (cfg.toroidal) foodGrid_.forEachInRadiusWrapped(c.pos, R, smell);
-        else              foodGrid_.forEachInRadius(c.pos, R, smell);
+        {
+            // The items within R in the grid's visit order (foodWithin /
+            // foodWithinWrapped, see there; both keep the grid's 2-D test). Bounded,
+            // with the grid's own offset and q2 = dx·dx + dy·dy (taken against
+            // the query centre c.pos, the very values the offset here was), so
+            // d² = q2 + dz·dz is the same left-to-right sum; toroidal, with the
+            // wrapped difference from c.pos. smell's d2 > R² test is then always false.
+            const int n = tor ? foodWithinWrapped(c, R) : foodWithin(c, R);
+            const FoodSeen* s = foodSeen_.data();
+            for (int j = 0; j < n; ++j) smell(s[j].k, s[j].dx, s[j].dy, s[j].dz, s[j].d2);
+        }
         sensors[NEAREST_FOOD_DX] = foodDx;
         sensors[NEAREST_FOOD_DY] = foodDy;
         sensors[NEAREST_FOOD_DZ] = foodDz;

@@ -37,8 +37,8 @@
 //         and every current centre; then the velocity it gives on a fixed
 //         8 x 5 lattice and, while the 3-D flow is on (flowE1), flowAt on
 //         that lattice at three depths
-//   geo   persistent geometry: both SpatialGrids (width, height, cols, rows,
-//         1 / cell size), the SignalGrid (world size, cell size, cols, rows,
+//   geo   persistent geometry: both neighbour grids (the fish's SpatialGrid and
+//         the OceanFoodGrid: width, height, cols, rows, 1 / cell size), the SignalGrid (world size, cell size, cols, rows,
 //         seam period, toroidal flag, byte count), the food-patch centres and
 //         per-patch depths, the wave trains' fixed modes (format 3: prepared
 //         lazily, the first time the waves are on; a world whose waves were
@@ -61,7 +61,9 @@
 //         app_off_* twins check exactly that (wasm/ocean_parity.sh).
 //
 // Not hashed, by design: scratch the step rebuilds from hashed state before
-// reading it (the grids' entries, hot_, pending_, the neighbour vectors, the
+// reading it (the grids' entries — the food grid's copies of each item's depth /
+// size / eyeCon among them — hot_, pending_, the neighbour vectors and the
+// bounded food scan's list of items within R (foodSeen_), the
 // E1 flow cache flow_ — src/ocean/ocean_flow.hpp: tables and keys derived from
 // cfg / ocfg / the world size / the wave phases / the CurrentField's vortices
 // and the frame, rebuilt by OceanWorld::ensureFlow before any read; the flow
@@ -171,6 +173,11 @@ OFP_PEEK(SgHeight, SpatialGrid, height_)
 OFP_PEEK(SgCols, SpatialGrid, cols_)
 OFP_PEEK(SgRows, SpatialGrid, rows_)
 OFP_PEEK(SgInvCell, SpatialGrid, invCell_)
+OFP_PEEK(FgWidth, OceanFoodGrid, width_)
+OFP_PEEK(FgHeight, OceanFoodGrid, height_)
+OFP_PEEK(FgCols, OceanFoodGrid, cols_)
+OFP_PEEK(FgRows, OceanFoodGrid, rows_)
+OFP_PEEK(FgInvCell, OceanFoodGrid, invCell_)
 OFP_PEEK(SigW, SignalGrid, w_)
 OFP_PEEK(SigH, SignalGrid, h_)
 OFP_PEEK(SigWrapCols, SignalGrid, wrapCols_)
@@ -224,6 +231,13 @@ OFP_FIELDS(repro::Edge, 2);
 namespace mirror {
 struct SignalGrid_ { int w, h, cell, cols, rows, wrapCols, wrapRows; bool tor; std::vector<std::uint8_t> g; };
 struct SpatialGrid_ { int w, h, cols, rows; float inv; std::vector<int> start, cursor, staged, entries; };
+struct OceanFoodGrid_ {   // the entries (x .. index) are scratch
+    int w, h, cols, rows; float inv; std::vector<int> start, cursor, staged; std::vector<float> x, y, z, size;
+#ifdef EVO_OCEAN_EYE
+    std::vector<float> con;
+#endif
+    std::vector<int> index;
+};
 struct CurrentField_ { CurrentField::Mode m; std::vector<int> vort, centers; float s, core; int w, h; float eps, om, a, t; };
 struct Mt_ { std::uint32_t x[624]; int p; };
 struct WaveTrain_ { double kx, ky, phase, phi; float k, qx, qy, frac; };
@@ -242,8 +256,9 @@ struct OceanWorld_ : WorldCommon {
 #ifdef EVO_OCEAN_PROF
     OceanWorld::OceanProf oprof;   // wall clock
 #endif
-    SpatialGrid creatureGrid, foodGrid; std::vector<FishHot_> hot; std::vector<Pending_> pending;
+    SpatialGrid creatureGrid; OceanFoodGrid foodGrid; std::vector<FishHot_> hot; std::vector<Pending_> pending;
     std::vector<int> neighbors, nearbyFood, nearby, near;
+    std::vector<int> foodSeen;   // scratch (see above)
     CurrentField current; std::vector<Vec2> patches; std::vector<float> patchDepth;
     std::vector<appearance::Record> app; std::uint64_t appKey; int appFlags; bool appBroken; appearance::Stats appStats;
     WaveTrain_ waves[OceanWorld::kWaveTrains];
@@ -255,6 +270,7 @@ struct OceanWorld_ : WorldCommon {
 }  // namespace mirror
 static_assert(sizeof(SignalGrid) == sizeof(mirror::SignalGrid_), "SignalGrid's members changed: update hashGeometry and mirror::SignalGrid_");
 static_assert(sizeof(SpatialGrid) == sizeof(mirror::SpatialGrid_), "SpatialGrid's members changed: update hashGrid and mirror::SpatialGrid_");
+static_assert(sizeof(OceanFoodGrid) == sizeof(mirror::OceanFoodGrid_), "OceanFoodGrid's members changed: update hashGrid and mirror::OceanFoodGrid_");
 static_assert(sizeof(CurrentField) == sizeof(mirror::CurrentField_), "CurrentField's members changed: update hashCurrent and mirror::CurrentField_");
 static_assert(sizeof(PortableMT19937) == sizeof(mirror::Mt_) && sizeof(RandomGen) == sizeof(mirror::Mt_),
               "the rng engine's members changed: update hashRng and mirror::Mt_");
@@ -573,6 +589,14 @@ inline void hashGrid(Hasher& h, const SpatialGrid& g) {
     h.i32(field<peek::SgCols>(g)); h.i32(field<peek::SgRows>(g));
     h.f32(field<peek::SgInvCell>(g));
 }
+// The food grid's geometry: the same five words in the same order as a
+// SpatialGrid's (it was one until its entries carried the payload; the
+// format is unchanged).
+inline void hashGrid(Hasher& h, const OceanFoodGrid& g) {
+    h.i32(field<peek::FgWidth>(g)); h.i32(field<peek::FgHeight>(g));
+    h.i32(field<peek::FgCols>(g)); h.i32(field<peek::FgRows>(g));
+    h.f32(field<peek::FgInvCell>(g));
+}
 
 inline void hashGeometry(Hasher& h, const OceanWorld& w) {
     hashGrid(h, field<peek::OwCreatureGrid>(w));
@@ -713,7 +737,7 @@ inline long countNonFinite(const OceanWorld& w) {
     for (const Vec2& p : field<peek::OwPatches>(w)) { f(p.x); f(p.y); }
     for (float d : field<peek::OwPatchDepth>(w)) f(d);
     f(field<peek::SgInvCell>(field<peek::OwCreatureGrid>(w)));
-    f(field<peek::SgInvCell>(field<peek::OwFoodGrid>(w)));
+    f(field<peek::FgInvCell>(field<peek::OwFoodGrid>(w)));
     for (const auto& d : w.deathLog) {
         f(d.x); f(d.y); f(d.age);
         for (float s : d.sketch) f(s);
@@ -794,10 +818,15 @@ inline void dumpState(const OceanWorld& w, std::FILE* out) {
     d.ll("foodEaten", w.totalFoodEaten); d.ll("foodExpired", w.totalFoodExpired);   // statistics (not hashed)
     d.ll("nonFiniteRemoved", w.totalNonFiniteRemoved);
     std::fprintf(out, "\ngeometry");
-    for (const SpatialGrid* g : {&field<peek::OwCreatureGrid>(w), &field<peek::OwFoodGrid>(w)}) {
-        d.ll("gridW", field<peek::SgWidth>(*g)); d.ll("gridH", field<peek::SgHeight>(*g));
-        d.ll("cols", field<peek::SgCols>(*g)); d.ll("rows", field<peek::SgRows>(*g));
-        d.fl("invCell", field<peek::SgInvCell>(*g));
+    {
+        const SpatialGrid& g = field<peek::OwCreatureGrid>(w);
+        d.ll("gridW", field<peek::SgWidth>(g)); d.ll("gridH", field<peek::SgHeight>(g));
+        d.ll("cols", field<peek::SgCols>(g)); d.ll("rows", field<peek::SgRows>(g));
+        d.fl("invCell", field<peek::SgInvCell>(g));
+        const OceanFoodGrid& fg = field<peek::OwFoodGrid>(w);
+        d.ll("gridW", field<peek::FgWidth>(fg)); d.ll("gridH", field<peek::FgHeight>(fg));
+        d.ll("cols", field<peek::FgCols>(fg)); d.ll("rows", field<peek::FgRows>(fg));
+        d.fl("invCell", field<peek::FgInvCell>(fg));
     }
     d.ll("sigW", field<peek::SigW>(w.signals)); d.ll("sigH", field<peek::SigH>(w.signals));
     d.ll("sigCell", w.signals.cellSize()); d.ll("sigCols", w.signals.cols()); d.ll("sigRows", w.signals.rows());

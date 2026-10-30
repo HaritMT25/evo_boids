@@ -24,9 +24,10 @@
  *     engine's L(d) = L0·exp(−k·d); off, the preview's linear depth / D.
  *     How much is the water's clarity (setClarity(u), drawing only; CLARITY):
  *     0 realistic, the water as the preview drew it; 1 clear (the page's
- *     default), about half the darkening, a lighter teal water, brighter
- *     backs and ambient, dimmer marine snow and a mild lift of the fish's
- *     colours outside the flashlight
+ *     default), about half the darkening, a lighter teal water above a
+ *     deeper teal floor (as Classic's tank), brighter backs and ambient,
+ *     softer caustics, dimmer marine snow and plankton glow, and a lift of
+ *     the fish's colours outside the flashlight
  *   - each body pitches by s.vz (+ = sinking, head down), pivoting at the head
  *   - the flashlight (setFlashlight, viewer only): a cone of clear light from
  *     the camera onto the followed fish or the point it looks at; inside it
@@ -96,28 +97,36 @@
    *   lKeep: the share of the light field's loss (E1, L(d)) given back
    *   floorMin: no channel kept below this (clear: 45 % at the floor)
    *   back, ambLo, ambHi, vivid: the fish's back (its share kept), ambient
-   *     light, and the display-only lift [saturation, gain] (CLARITY_FN)
+   *     light, and the display-only lift [saturation, gain, gamma]
+   *     (CLARITY_FN)
    *   fog, fogK: the water's colour (and the clear colour above the tank)
    *     and its density; clear: a lighter teal, thinner
-   *   water: the tint on the sand; snow: the marine snow's brightness and the
-   *     share of its flakes drawn; shadow: the fish's shadows' opacity;
-   *     foodShade: how much depth dims and cools the plankton */
+   *   water, causticK: the tint on the sand and the caustics' strength;
+   *     clear: a deeper teal floor (as Classic's tank) with softer caustics,
+   *     so bright fish read against it rather than dark ones against bright
+   *     sand
+   *   snow: the marine snow's brightness and the share of its flakes drawn;
+   *     shadow: the fish's shadows' opacity; foodShade, foodGain: how much
+   *     depth dims and cools the plankton, and its glow outside the
+   *     flashlight (the specks crowd the fish) */
   var CLARITY = {
     deepTint: [[0.28, 0.50, 0.90], [0.62, 0.78, 0.96]],
     deepDim: [0.42, 0.21],
     deepAdd: [[0.0, 0.02, 0.055], [0.0, 0.012, 0.03]],
     lKeep: [0, 0.5],
     floorMin: [0, 0.45],
-    back: [0.56, 0.80],
-    ambLo: [[0.07, 0.13, 0.14], [0.12, 0.18, 0.19]],
-    ambHi: [[0.36, 0.48, 0.46], [0.43, 0.54, 0.52]],
-    vivid: [[1, 1], [1.2, 1.08]],
+    back: [0.56, 0.88],
+    ambLo: [[0.07, 0.13, 0.14], [0.14, 0.20, 0.21]],
+    ambHi: [[0.36, 0.48, 0.46], [0.46, 0.57, 0.55]],
+    vivid: [[1, 1, 1], [1.25, 1.15, 0.65]],
     fog: [[0.027, 0.122, 0.125], [0.085, 0.215, 0.225]],
     fogK: [1, 0.6],
-    water: [[0.52, 0.57, 0.57], [0.50, 0.60, 0.66]],
+    water: [[0.52, 0.57, 0.57], [0.24, 0.38, 0.42]],
+    causticK: [1, 0.65],
     snow: [[1, 1], [0.45, 0.5]],
     shadow: [0.40, 0.30],
-    foodShade: [1, 0.5]
+    foodShade: [1, 0.5],
+    foodGain: [1, 0.65]
   };
 
   function load() {
@@ -237,15 +246,16 @@
 
   /* The water's clarity on the fish's own colour (setClarity): the back's
    * darkening (uBack: its share kept), the ambient light (uAmbLo facing down
-   * .. uAmbHi facing up) and a display-only lift, vivid(): saturation and
-   * gain (uVivid; (1, 1) leaves the colour as it is). Never on the genes, the
-   * fish card's swatch or the flashlight's clear light. */
+   * .. uAmbHi facing up) and a display-only lift, vivid(): saturation, gain
+   * and a gamma below 1 that lifts dark skins more than bright ones (uVivid;
+   * (1, 1, 1) leaves the colour as it is). Never on the genes, the fish
+   * card's swatch or the flashlight's clear light. */
   var CLARITY_FN = [
-    "uniform float uBack; uniform vec3 uAmbLo; uniform vec3 uAmbHi; uniform vec2 uVivid;",
+    "uniform float uBack; uniform vec3 uAmbLo; uniform vec3 uAmbHi; uniform vec3 uVivid;",
     "vec3 vivid(vec3 c) {",
-    "  if (uVivid.x == 1.0 && uVivid.y == 1.0) return c;",
+    "  if (uVivid == vec3(1.0)) return c;",
     "  float l = dot(c, vec3(0.2126, 0.7152, 0.0722));",
-    "  return max(mix(vec3(l), c, uVivid.x), vec3(0.0)) * uVivid.y;",
+    "  return pow(max(mix(vec3(l), c, uVivid.x), vec3(0.0)), vec3(uVivid.z)) * uVivid.y;",
     "}"
   ].join("\n");
 
@@ -886,10 +896,11 @@
   ].join("\n");
 
   /* plankton glows on its own, so depth only dims and cools it a little
-   * (uFoodShade: how much, the water's clarity; 1 = realistic) */
+   * (uFoodShade: how much, and uFoodGain: its glow outside the flashlight,
+   * the water's clarity; 1 = realistic) */
   var FOOD_VS = [
     "attribute float seed;",
-    "uniform float uPx; uniform float uTime; uniform float uSize; uniform float uFoodShade;",
+    "uniform float uPx; uniform float uTime; uniform float uSize; uniform float uFoodShade; uniform float uFoodGain;",
     DEPTH_FN,
     BEAM_FN,
     "varying float vTw; varying float vDz;",
@@ -899,6 +910,7 @@
     "  float bk = beamOf(position);",                                   /* in the flashlight: its true colour */
     "  vDz = shadeOf(position.y) * uFoodShade * (1.0 - bk);",
     "  vTw = (0.78 + 0.22 * sin(uTime * 2.3 + seed * 6.2831)) * (1.0 - 0.3 * vDz) * (1.0 + 0.25 * bk);",
+    "  if (uFoodGain != 1.0) vTw *= uFoodGain + (1.0 - uFoodGain) * bk;",
     "  gl_PointSize = max(2.0, uSize * uPx / -mv.z);",
     "}"
   ].join("\n");
@@ -1138,7 +1150,7 @@
       uDeepAdd: { value: v3(CLARITY.deepAdd[1]) }, uLKeep: { value: CLARITY.lKeep[1] },
       uFloorMin: { value: CLARITY.floorMin[1] }, uBack: { value: CLARITY.back[1] },
       uAmbLo: { value: v3(CLARITY.ambLo[1]) }, uAmbHi: { value: v3(CLARITY.ambHi[1]) },
-      uVivid: { value: new THREE.Vector2(CLARITY.vivid[1][0], CLARITY.vivid[1][1]) }
+      uVivid: { value: v3(CLARITY.vivid[1]) }
     };
     function clarityUniforms(u) {
       Object.keys(clarityU).forEach(function (k) { u[k] = clarityU[k]; });
@@ -2061,7 +2073,7 @@
       snow.visible = quality >= 3 && !reduced;
       if (causticFade < 1 && causticReady) {
         causticFade = Math.min(1, causticFade + dt / 1.4);
-        floorMat.uniforms.uCausticAmt.value = 0.5 * (1 - Math.pow(1 - causticFade, 3));   /* strong enough to read on the sand */
+        floorMat.uniforms.uCausticAmt.value = causticAmt();   /* strong enough to read on the sand */
       }
       aimBeam(s, sel, dt);
       renderer.render(scene, camera);
@@ -2096,6 +2108,7 @@
     /* The caustic pattern costs ~40 ms of JS on a laptop (more on a phone), so
      * it is built after the first frames, in idle time, and the light fades in. */
     var causticReady = false, causticFade = 0;
+    function causticAmt() { return 0.5 * causticK * (1 - Math.pow(1 - causticFade, 3)); }   /* causticK: the water's clarity */
     (window.requestIdleCallback || function (f) { return setTimeout(f, 300); })(function () {
       floorMat.uniforms.uCaustic.value.dispose();
       floorMat.uniforms.uCaustic.value = causticTexture(256);
@@ -2195,7 +2208,7 @@
      * sets uniforms and the snow's draw range, no shader is rebuilt. The
      * flashlight's clear light, the fish card's swatch and the genes never
      * see it. */
-    var clarity = 1, fogK = 1;
+    var clarity = 1, fogK = 1, causticK = 1;
     function setClarity(u) {
       u = +u;
       u = u >= 0 ? Math.min(1, u) : (u < 0 ? 0 : 1);   /* NaN: clear */
@@ -2212,7 +2225,7 @@
       clarityU.uBack.value = mix("back");
       clarityU.uAmbLo.value.set(lo[0], lo[1], lo[2]);
       clarityU.uAmbHi.value.set(hi[0], hi[1], hi[2]);
-      clarityU.uVivid.value.set(vv[0], vv[1]);
+      clarityU.uVivid.value.set(vv[0], vv[1], vv[2]);
       common.uFog.value.set(f[0], f[1], f[2]);
       renderer.setClearColor(new THREE.Color().setRGB(f[0], f[1], f[2], "srgb"), 1);   /* the water above the tank */
       fogK = mix("fogK");
@@ -2222,10 +2235,14 @@
       snowGeo.setDrawRange(0, Math.round(SNOW * sn[1]));
       shadowMat.uniforms.uAlpha.value = mix("shadow");   /* shared with the appearance fish's shadows */
       foodMat.uniforms.uFoodShade.value = mix("foodShade");
+      foodMat.uniforms.uFoodGain.value = mix("foodGain");
+      causticK = mix("causticK");
+      if (causticReady) floorMat.uniforms.uCausticAmt.value = causticAmt();
     }
     clarityUniforms(fishMat.uniforms);
     clarityUniforms(foodMat.uniforms);
     foodMat.uniforms.uFoodShade = { value: 1 };
+    foodMat.uniforms.uFoodGain = { value: 1 };
     setClarity(1);
 
     resize();

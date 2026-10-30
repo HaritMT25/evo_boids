@@ -249,9 +249,18 @@
    * .. uAmbHi facing up) and a display-only lift, vivid(): saturation, gain
    * and a gamma below 1 that lifts dark skins more than bright ones (uVivid;
    * (1, 1, 1) leaves the colour as it is). Never on the genes, the fish
-   * card's swatch or the flashlight's clear light. */
+   * card's swatch or the flashlight's clear light: lit() is the one light
+   * model, and in the beam the fish is lit with the true-colour constants
+   * (BACK_TRUE, ambTrue: the realistic ones), the same in any water. */
   var CLARITY_FN = [
     "uniform float uBack; uniform vec3 uAmbLo; uniform vec3 uAmbHi; uniform vec3 uVivid;",
+    "const float BACK_TRUE = 0.56;",
+    "vec3 ambOf(float ny) { return mix(uAmbLo, uAmbHi, 0.5 + 0.5 * ny); }",
+    "vec3 ambTrue(float ny) { return mix(vec3(0.07, 0.13, 0.14), vec3(0.36, 0.48, 0.46), 0.5 + 0.5 * ny); }",
+    "vec3 lit(vec3 b, vec3 amb, float diff, float rim) {",
+    "  vec3 c = b * (amb + diff * vec3(1.0, 0.96, 0.86) * 0.92);",
+    "  return c + rim * mix(b, vec3(0.6, 1.0, 0.92), 0.55) * 0.35;",
+    "}",
     "vec3 vivid(vec3 c) {",
     "  if (uVivid == vec3(1.0)) return c;",
     "  float l = dot(c, vec3(0.2126, 0.7152, 0.0722));",
@@ -267,22 +276,25 @@
     BEAM_FN,
     "varying vec3 vWorld; varying vec3 vCol; varying float vPart; varying float vOy;",
     "varying float vSel; varying float vEmber;",
+    "vec3 baseOf(float back) {",
+    "  vec3 base = vCol;",
+    "  float body = 1.0 - step(0.5, vPart);",
+    "  base = mix(base, base * back, smoothstep(0.30, 0.85, vOy) * body);",           /* darker back */
+    "  base = mix(base, mix(base, vec3(0.93, 0.97, 0.90), 0.5), 1.0 - smoothstep(-0.7, -0.15, vOy));", /* pale belly */
+    "  if (vPart > 0.5 && vPart < 1.5) base = mix(base, vec3(0.92, 0.98, 0.95), 0.22);", /* fins */
+    "  return base;",
+    "}",
     "void main() {",
     /* flat facets: the triangle's own normal, from screen-space derivatives */
     "  vec3 N = normalize(cross(dFdx(vWorld), dFdy(vWorld)));",
     "  vec3 V = normalize(cameraPosition - vWorld);",
     "  if (dot(N, V) < 0.0) N = -N;",
-    "  vec3 base = vCol;",
-    "  float body = 1.0 - step(0.5, vPart);",
-    "  base = mix(base, base * uBack, smoothstep(0.30, 0.85, vOy) * body);",          /* darker back */
-    "  base = mix(base, mix(base, vec3(0.93, 0.97, 0.90), 0.5), 1.0 - smoothstep(-0.7, -0.15, vOy));", /* pale belly */
-    "  if (vPart > 0.5 && vPart < 1.5) base = mix(base, vec3(0.92, 0.98, 0.95), 0.22);", /* fins */
     "  float diff = max(dot(N, uLight), 0.0);",
-    "  vec3 amb = mix(uAmbLo, uAmbHi, 0.5 + 0.5 * N.y);",
-    "  vec3 col = base * (amb + diff * vec3(1.0, 0.96, 0.86) * 0.92);",
     "  float rim = pow(1.0 - max(dot(N, V), 0.0), 3.0);",
-    "  col += rim * mix(base, vec3(0.6, 1.0, 0.92), 0.55) * 0.35;",
-    "  vec3 clear = col;",                                                             /* in clear light (the flashlight) */
+    "  vec3 col = lit(baseOf(uBack), ambOf(N.y), diff, rim);",
+    "  float bk = beamOf(vWorld);",
+    /* in the flashlight's clear light: the true colours, the same in any water */
+    "  vec3 clear = bk > 0.0 ? lit(baseOf(BACK_TRUE), ambTrue(N.y), diff, rim) : col;",
     "  col = underwaterAt(vivid(col), vWorld.y);",
     "  vec3 ember = vec3(1.0, 0.38, 0.16) * (0.8 + 0.2 * sin(uTime * 6.0));",
     "  vec3 add = vec3(0.0);",
@@ -297,7 +309,6 @@
     "  else if (vSel > 0.25) add += uSelect * 0.4 * rim;",
     "  col += add;",
     "  vec3 murky = mix(col, uFog, fogOf(vWorld));",
-    "  float bk = beamOf(vWorld);",
     "  if (bk > 0.0) {",
     "    clear = (clear + add) * (1.0 + 0.2 * max(dot(N, -uBeamDir), 0.0));",        /* the beam's own light on the side facing it */
     "    murky = mix(murky, clear, bk);",
@@ -412,12 +423,12 @@
       "varying vec3 vWorld; varying vec4 vMatV; flat varying vec4 vPart;",
       /* the family / brain colour (vPart.w = 0xRRGGBB) through FISH_FS's base
        * stage; oy = the legacy template's height in body radii */
-      "vec3 colourBase(int fin, float oy) {",
+      "vec3 colourBase(int fin, float oy, float back) {",
       "  float c = vPart.w;",
       "  float r = floor(c / 65536.0);",
       "  float g = floor((c - 65536.0 * r) / 256.0);",
       "  vec3 base = vec3(r, g, c - 65536.0 * r - 256.0 * g) / 255.0;",
-      "  base = mix(base, base * uBack, smoothstep(0.30, 0.85, oy) * (fin == 0 ? 1.0 : 0.0));",       /* darker back */
+      "  base = mix(base, base * back, smoothstep(0.30, 0.85, oy) * (fin == 0 ? 1.0 : 0.0));",        /* darker back */
       "  base = mix(base, mix(base, vec3(0.93, 0.97, 0.90), 0.5), 1.0 - smoothstep(-0.7, -0.15, oy));", /* pale belly */
       "  if (fin != 0) base = mix(base, vec3(0.92, 0.98, 0.95), 0.22);",                              /* fins, barbels */
       "  return base;",
@@ -431,7 +442,8 @@
       "  float v = bodyLike ? 0.5 * (1.0 - sn) : vMatV.y;",
       "  float zL = bodyLike ? sn * pProfileH(u) : 0.0;",
       "  vec3 base;",
-      "  if (uColourBy > 0.5) base = colourBase(fin, (1.0 - 2.0 * v) * pProfileH(u));",
+      "  float oyL = (1.0 - 2.0 * v) * pProfileH(u);",
+      "  if (uColourBy > 0.5) base = colourBase(fin, oyL, uBack);",
       "  else {",
       "    base = patternSkinM(u, v, zL, fin == 7 ? 0 : fin, vMatV.w);",
       "    if (fin == 7) base = mix(base, patternBase(u, v), pS(0.0, 1.0, vMatV.z));",
@@ -440,11 +452,11 @@
       "  vec3 V = normalize(cameraPosition - vWorld);",
       "  if (dot(N, V) < 0.0) N = -N;",
       "  float diff = max(dot(N, uLight), 0.0);",
-      "  vec3 amb = mix(uAmbLo, uAmbHi, 0.5 + 0.5 * N.y);",
-      "  vec3 col = base * (amb + diff * vec3(1.0, 0.96, 0.86) * 0.92);",
       "  float rim = pow(1.0 - max(dot(N, V), 0.0), 3.0);",
-      "  col += rim * mix(base, vec3(0.6, 1.0, 0.92), 0.55) * 0.35;",
-      "  vec3 clear = col;",
+      "  vec3 col = lit(base, ambOf(N.y), diff, rim);",
+      "  float bk = beamOf(vWorld);",
+      /* in the flashlight's clear light: the true colours, the same in any water (the skin never sees the water) */
+      "  vec3 clear = bk > 0.0 ? lit(uColourBy > 0.5 ? colourBase(fin, oyL, BACK_TRUE) : base, ambTrue(N.y), diff, rim) : col;",
       "  col = underwaterAt(vivid(col), vWorld.y);",
       "  vec3 add = vec3(0.0);",
       "  float vSel = vPart.z;",
@@ -457,7 +469,6 @@
       "  else if (vSel > 0.25) add += uSelect * 0.4 * rim;",
       "  col += add;",
       "  vec3 murky = mix(col, uFog, fogOf(vWorld));",
-      "  float bk = beamOf(vWorld);",
       "  if (bk > 0.0) {",
       "    clear = (clear + add) * (1.0 + 0.2 * max(dot(N, -uBeamDir), 0.0));",
       "    murky = mix(murky, clear, bk);",

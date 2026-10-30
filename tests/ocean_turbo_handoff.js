@@ -26,7 +26,17 @@
 //     hidden neurons and wiring);
 //   * Randomize (web/ocean_config.js draw) against oc_init at small and
 //     default world sizes, and the refusals of imported values the sheet
-//     would otherwise round or drop.
+//     would otherwise round or drop;
+//   * the page's live edits around Turbo (web/ocean_handoff.js ledger, as
+//     web/ocean.js uses it): dependent edits acknowledged in Turbo and then
+//     a worker failure that loses the world (minSpeed 0, maxSpeed 300,
+//     minSpeed 200 come back in that order, bit-identical to applying them
+//     directly; main's key-order recovery ran 30-300), and an unanswered
+//     edit with a newer one held after Stop (the newer wins: field, runCfg
+//     and world agree; main's ran the older one);
+//   * a repeated key in ?cfg= or a setup file (parseFirst / cfgJson): the
+//     page and oc_init accept or refuse the same documents and run the same
+//     world (JSON.parse's page did neither).
 'use strict';
 const fs = require('fs'), path = require('path'), vm = require('vm'), crypto = require('crypto');
 
@@ -134,6 +144,38 @@ function legacyTake(M, src) {
     if (dst.length > need) dst.fill(0, need);
 }
 function throws(fn) { try { fn(); return ''; } catch (e) { return String(e && e.message || e); } }
+
+/* main's Turbo recovery (web/ocean.js turboFailed / turboBack / flushHeld at
+ * fb976b2), for the record: the live keys where runCfg differs from the
+ * entry config, in object-key order, skipping held keys; then every
+ * unanswered edit copied over the held ones; then all of it in key order */
+function legacyRecovery(runCfg, entryCfg, held, inflight) {
+    const heldLive = Object.assign({}, held);
+    if (runCfg) Object.keys(Object.assign({}, runCfg, entryCfg)).forEach(k => {
+        const a = Object.prototype.hasOwnProperty.call(runCfg, k) ? runCfg[k] : CFG.KEYS[k] && CFG.KEYS[k][0];
+        const b = Object.prototype.hasOwnProperty.call(entryCfg, k) ? entryCfg[k] : CFG.KEYS[k] && CFG.KEYS[k][0];
+        if (CFG.LIVE[k] && a !== b && !(k in heldLive)) heldLive[k] = a;
+    });
+    inflight.forEach(([k, v]) => { heldLive[k] = v; });
+    return Object.keys(heldLive).map(k => [k, heldLive[k]]);
+}
+/* the page's liveApplied: runCfg keeps what differs from the default */
+function liveApplied(runCfg, key, v) { if (v === CFG.KEYS[key][0]) delete runCfg[key]; else runCfg[key] = v; }
+/* the page's replay (web/ocean.js) of a ledger plan on its own world: each
+ * edit with oc_set_param, in order; runCfg follows what is accepted */
+function replayOnPage(M, plan, runCfg) {
+    return plan.map(e => {
+        const r = HO.withCString(M, e.key, p => M._oc_set_param(p, e.num));
+        if (r) liveApplied(runCfg, e.key, e.num);
+        return r ? '' : e.key + ' ' + e.num + ': ' + HO.cString(M, M._oc_last_error());
+    });
+}
+/* a worker whose oc_step traps on its `at`th chunk (its world is lost) */
+function trapAt(w, at) {
+    const real = w.M._oc_step;
+    let k = 0;
+    w.M._oc_step = function (s) { if (++k === at) throw new WebAssembly.RuntimeError('injected: a trap mid-step'); return real(s); };
+}
 
 /* web/ocean_worker.js in a vm context: a dedicated worker's globals, its
  * MessageChannel a macrotask per message (as in a browser), importScripts
@@ -463,8 +505,153 @@ async function imports() {
     }
 }
 
+/* The page's live edits around Turbo (web/ocean_handoff.js ledger, which
+ * web/ocean.js turboBack / turboFailed / replay use as they are): the edits
+ * the page applies when the world comes back, or doesn't, in the order they
+ * were made. Driven here as the page drives it, against the real worker and
+ * the real module, with a worker failure that loses the world. */
+async function liveLedger() {
+    section('Live edits around Turbo: the page applies them in the order they were made (ledger)');
+    {   /* the ledger alone: order, a newer edit never under an older one */
+        const L = HO.ledger();
+        L.start();
+        L.sent('a', 1); L.sent('b', 2); L.answered('a', true); L.hold('a', 3);
+        const kept = L.back(false).map(e => e.key + e.num + e.from).join(' ');
+        ok(kept === 'b2sent a3held', 'with the worker\'s world: the unanswered and held edits, oldest first (' + kept + ')');
+        L.start();
+        L.sent('a', 1); L.answered('a', true); L.sent('a', 5); L.answered('a', false); L.sent('b', 2); L.hold('a', 3); L.hold('a', 4);
+        const lost = L.back(true).map(e => e.key + e.num + e.from).join(' ');
+        ok(lost === 'a1acked b2sent a4held', 'without it: the acknowledged ones first, a refused one never, the newest held edit last (' + lost + ')');
+        L.start();
+        L.hold('x', 1); L.hold('y', 2);
+        const fl = L.takeHeld(); fl.forEach(e => L.sent(e.key, e.num, e.seq));
+        L.hold('x', 9);
+        const order = L.back(true).map(e => e.key + e.num).join(' ');
+        ok(order === 'x1 y2 x9' && L.pending('x') === false, 'a held edit flushed to the worker keeps its place (' + order + ')');
+    }
+
+    const SEED = 4242;
+    /* (#2) dependent edits, acknowledged in Turbo, then the worker dies without its world */
+    {
+        const page = await mk(SEED);
+        page._oc_step(100);
+        const entryFrame = frame(page), entryImg = HO.buffer(page).slice(0), entryCfg = {};
+        const L = HO.ledger(), runCfg = {};
+        L.start();
+        const w = makeWorker();
+        w.send(startMsg(entryImg.slice(0)));
+        await w.wait(isType('stats'), 'the first stats');
+        for (const [k, v] of [['minSpeed', 0], ['maxSpeed', 300], ['minSpeed', 200]]) {
+            L.sent(k, v);
+            w.send({ cmd: 'set', key: k, value: v });
+            const r = await w.wait(isType('set'), 'the ' + k + ' reply');
+            L.answered(r.key, !!r.ok);
+            if (r.ok) liveApplied(runCfg, k, v);
+            ok(r.ok, 'in Turbo: ' + k + ' ' + v + ' acknowledged');
+        }
+        trapAt(w, 2);
+        const e = await w.wait(isType('error'), 'the error');
+        ok(!e.mem && frame(page) === entryFrame, 'the worker dies without its world; the page has its copy from Turbo\'s start (frame ' + entryFrame + ')');
+        /* main's recovery first, on a copy of the same world */
+        const legacy = await mk(1);
+        HO.take(legacy, entryImg.slice(0), 'the legacy');
+        const lplan = legacyRecovery(runCfg, entryCfg, {}, []);
+        const lres = lplan.map(([k, v]) => HO.withCString(legacy, k, p => legacy._oc_set_param(p, v)) ? '' : k + ' ' + v + ': ' + HO.cString(legacy, legacy._oc_last_error()));
+        ok(lplan.map(x => x.join('=')).join(',') === 'minSpeed=200,maxSpeed=300' && lres[0] !== '' && lres[1] === '',
+           'main\'s recovery (the config difference in key order) is refused minSpeed 200 against the old maximum (' + lres[0] + '), then sets the maximum: 30-300');
+        /* the page's: the ledger's plan, replayed in order */
+        const plan = L.back(true), pRun = Object.assign({}, entryCfg);
+        const res = replayOnPage(page, plan, pRun);
+        ok(plan.map(x => x.key + '=' + x.num).join(',') === 'minSpeed=0,maxSpeed=300,minSpeed=200' && res.every(x => x === ''),
+           'the page replays them as the worker applied them (' + plan.map(x => x.key + '=' + x.num).join(', ') + '), each accepted');
+        ok(pRun.minSpeed === 200 && pRun.maxSpeed === 300 && JSON.stringify(pRun) === JSON.stringify(runCfg),
+           'runCfg after the recovery is what Turbo acknowledged (' + JSON.stringify(pRun) + ')');
+        const ref = await mk(SEED);
+        ref._oc_step(entryFrame);
+        setParam(ref, 'minSpeed', 0); setParam(ref, 'maxSpeed', 300); setParam(ref, 'minSpeed', 200);
+        const ref2 = await mk(1);
+        HO.take(ref2, HO.buffer(ref).slice(0), 'the reference copy');
+        ok(sameFor(page, ref, 150) === '', 'the recovered world runs 200-300: 150 steps bit-identical to the same edits applied directly');
+        ok(sameFor(legacy, ref2, 150) !== '', 'and main\'s recovered world is another one (it runs 30-300)');
+    }
+    /* (#3) an edit sent in Turbo, not answered yet; Stop; a newer edit of it held; the worker dies */
+    {
+        const page = await mk(SEED);
+        page._oc_step(100);
+        const entryFrame = frame(page);
+        const L = HO.ledger(), runCfg = {}, form = {};
+        L.start();
+        const w = makeWorker();
+        w.send(startMsg(HO.buffer(page).slice(0)));
+        await w.wait(isType('stats'), 'the first stats');
+        L.sent('minSpeed', 10); form.minSpeed = 10;
+        w.send({ cmd: 'set', key: 'minSpeed', value: 10 });   /* its answer: never read (the worker is dropped first) */
+        /* Stop: "exiting"; the field changes again and is held */
+        L.hold('minSpeed', 20); form.minSpeed = 20;
+        trapAt(w, 1);
+        await w.wait(isType('error'), 'the error');
+        const lplan = legacyRecovery(null, {}, { minSpeed: 20 }, L.inflight());
+        ok(lplan.length === 1 && lplan[0][1] === 10 && form.minSpeed === 20,
+           'main\'s turboBack copies the unanswered 10 over the held 20: the world would run 10 under a field showing 20');
+        const plan = L.back(true);
+        const res = replayOnPage(page, plan, runCfg);
+        ok(plan.map(x => x.num).join(',') === '10,20' && res.every(x => x === ''), 'the page applies 10, then the newer 20');
+        ok(form.minSpeed === 20 && runCfg.minSpeed === 20, 'the field, runCfg and the world agree: minSpeed 20');
+        const ref = await mk(SEED);
+        ref._oc_step(entryFrame);
+        setParam(ref, 'minSpeed', 20);
+        ok(sameFor(page, ref, 150) === '', 'the world runs minSpeed 20: 150 steps bit-identical to that edit applied directly (frame ' + entryFrame + ')');
+    }
+}
+
+/* A key twice in ?cfg= or a setup file: the page now follows the engine's
+ * rule (web/ocean_handoff.js parseFirst / cfgJson, as web/ocean.js
+ * importWorld / loadSetup use them): the first occurrence counts, every one
+ * is checked. JSON.parse kept the last and dropped the rest unchecked. */
+async function repeatedKeys() {
+    section('A repeated key in ?cfg= or a setup file: the engine\'s rule on the page (parseFirst / cfgJson)');
+    const same = ['{}', '[]', '{"a":1,"b":[1,2,{"c":"x\\"y\\\\"}],"d":{"e":null,"f":true,"g":false}}', '"\\u00e9\\ud83d\\ude00"',
+                  '-0', '1e-7', ' {\n "a" : [ ] ,\t"b" : { } } ', '{"__proto__":{"x":1},"y":-12.5e3}', '[{"a":{"b":[[]]}}]'];
+    const deq = (a, b) => JSON.stringify(a) === JSON.stringify(b) && (typeof a !== 'number' || Object.is(a, b));   /* -0 too */
+    ok(same.every(t => { const p = HO.parseFirst(t); return deq(p.value, JSON.parse(t)) && !p.repeats.length; }),
+       'parseFirst is JSON.parse on documents without a repeated key (' + same.length + ' of them, escapes and nesting)');
+    const proto = HO.parseFirst('{"__proto__":{"x":1}}').value;
+    ok(Object.getPrototypeOf(proto) === Object.prototype && Object.prototype.hasOwnProperty.call(proto, '__proto__'),
+       'a "__proto__" key is an own property, as JSON.parse makes it (no prototype change)');
+    ok(['{', '{"a":1,}', '[1,]', '{\'a\':1}', '{"a":01}', ''].every(t => throws(() => HO.parseFirst(t)) === throws(() => JSON.parse(t)) && throws(() => JSON.parse(t)) !== ''),
+       'it refuses what JSON.parse refuses, with the same message');
+    const nest = HO.parseFirst('{"a":1,"b":{"c":1,"c":2},"a":[3],"a":4}');
+    ok(nest.value.a === 1 && nest.value.b.c === 1 && nest.repeats.map(r => r.path.join('.') + ':' + r.key + '=' + JSON.stringify(r.value)).join(' ') === 'b:c=2 :a=[3] :a=4',
+       'a repeated key keeps its first value and lists the later ones with where they are');
+
+    const M = await mk(1);
+    const init = (json) => {
+        const r = HO.withCString(M, json, p => M._oc_init(3, 1920, 1080, 240, 60, p));
+        return { ok: r === 1, why: r ? '' : HO.cString(M, M._oc_last_error()), print: r ? fingerprint(M) : '' };
+    };
+    /* the URL's text (URLSearchParams decodes it), and a setup file with it as its config */
+    for (const doc of ['{"toroidal":1,"toroidal":true}', '{"toroidal":true,"toroidal":1}', '{"toroidal":false,"toroidal":true}',
+                       '{"foodEnergy":5,"foodEnergy":9}', '{"maxPopulation":300,"maxPopulation":0.5}', '{"maxPopulation":0.5,"maxPopulation":300}']) {
+        const direct = init(doc);
+        const url = new URLSearchParams('cfg=' + encodeURIComponent(doc)).get('cfg');
+        const pf = HO.parseFirst(url), top = pf.repeats.filter(r => !r.path.length);
+        const page = init(HO.cfgJson(pf.value, top));
+        const file = HO.parseFirst('{"format":"evo_ocean_setup","seed":3,"config":' + doc + '}');
+        const fileCfg = init(HO.cfgJson(file.value.config, file.repeats.filter(r => r.path.length === 1 && r.path[0] === 'config')));
+        const legacy = init(JSON.stringify(JSON.parse(url)));
+        const agree = page.ok === direct.ok && page.print === direct.print && fileCfg.ok === direct.ok && fileCfg.print === direct.print;
+        ok(agree, doc + ': the page (?cfg= and setup file) and oc_init agree: ' + (direct.ok ? 'accepted, the same world' : 'refused (' + direct.why + ')') +
+           (legacy.ok !== direct.ok || legacy.print !== direct.print ? '; JSON.parse\'s page ' + (legacy.ok ? 'ran another world' : 'refused it') : ''));
+    }
+    const off = init('{"toroidal":false}'), twice = init(HO.cfgJson(HO.parseFirst('{"toroidal":false,"toroidal":true}').value,
+                                                                     HO.parseFirst('{"toroidal":false,"toroidal":true}').repeats));
+    ok(off.ok && twice.ok && off.print === twice.print, '{"toroidal":false,"toroidal":true} runs with walls on the page too (the first: false), as in oc_init');
+}
+
 (async () => {
     const t0 = Date.now();
+    await repeatedKeys();
+    await liveLedger();
     await growthPage();
     await randomize();
     await imports();

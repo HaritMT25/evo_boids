@@ -546,10 +546,190 @@
   /* λ = body length / radius: 20·size·elongation / (4.6·B(size)), B = the tank's body-radius curve */
   function lambdaOf(size, elong) { return 20 * size * elong / (4.6 * (1 + 0.4 * Math.tanh(5 * (size - 1)))); }
 
+  /* ---------------- CPU mirror of the vertex stage (MORPH mDecode / mBuild, DECODE) ----------------
+   * Line for line the GLSL above, in doubles, with its constants as the GLSL
+   * has them (float32), for the production-path check (EvoOceanScene
+   * appearancePathCheck): the fish program run on the real gene texture,
+   * its outputs read back and compared with these. */
+  var C32 = { caud: CAUD_I.map(f32), phi: f32(PHI_I), pec: f32(PEC_THETA), pel: f32(PEL_THETA), eyeT: f32(EYE_T), eyeTh: f32(EYE_TH), iso: f32(ISO_A) };
+  function pS(a, b, x) { var t = (x - a) / (b - a); t = t < 0 ? 0 : (t > 1 ? 1 : t); return t * t * (3 - 2 * t); }
+  function clampv(x, a, b) { return x < a ? a : (x > b ? b : x); }
+  function mixv(x, y, a) { return x + (y - x) * a; }
+  function profileY(u) {
+    var U = [-0.20, -0.10, 0.04, 0.20, 0.42, 0.64, 0.84, 1.00], Y = [0, 0.50, 0.88, 1.00, 0.86, 0.60, 0.36, 0.20];
+    if (u <= U[0]) return 0;
+    for (var i = 1; i < 8; i++) if (u < U[i]) return mixv(Y[i - 1], Y[i], (u - U[i - 1]) / (U[i] - U[i - 1]));
+    return 0.20;
+  }
+  function hsv3(h, s, v) { var o = [0, 0, 0]; hsvInto(h, s, v, o); return o; }
+  /* DECODE: the flat varyings vG0..vG7, vAux, vMeta of one row (63 floats) */
+  function patternVaryings(g, lam) {
+    var bcx = 2 * g[0] - 1, bcy = 2 * g[1] - 1, bcc = bcx * bcx + bcy * bcy;
+    var vG0 = [bcc === 0 ? 0 : wrap01(Math.atan2(bcy, bcx) / TAU), Math.min(1, Math.sqrt(bcc)), g[2], g[3]];
+    var vG1 = [0.15 + 0.70 * g[4], g[5], g[6], g[7]];
+    var ox = 2 * g[9] - 1, oy = 2 * g[10] - 1, oo = ox * ox + oy * oy;
+    var a = Math.min(1, Math.sqrt(oo)), th = oo === 0 ? 0 : 0.5 * Math.atan2(oy, ox), del = PI * g[11];
+    var vG2 = [1.5 * Math.exp(2.0794415416798359 * g[8]), a, Math.cos(th), Math.sin(th)];
+    var w = g[12], coh = 1 - pS(0.02, 0.20, Math.abs(Math.sin(del)));
+    var q0 = C32.iso * (1 - a), q1 = 0.95 * a;
+    var A = Math.sqrt(q0 * q0 + q1 * q1 * (1 + w * w + 2 * w * coh) / ((1 + w) * (1 + w)));
+    var vG3 = [w, g[13], Math.max(0, 2 * g[14] - 1), 0];
+    var fx = 2 * g[15] - 1, fy = 2 * g[16] - 1, fcc = fx * fx + fy * fy;
+    var mc = hsv3(fcc === 0 ? 0 : wrap01(Math.atan2(fy, fx) / TAU), Math.min(1, Math.sqrt(fcc)), g[17]);
+    return { vG0: vG0, vG1: vG1, vG2: vG2, vG3: vG3, vG4: [mc[0], mc[1], mc[2], g[18]], vG5: [g[19], g[20], g[21], g[22]],
+             vG6: [g[23], g[24], g[25], g[26]], vG7: [g[27], g[28], g[29], g[30]],
+             vAux: [Math.cos(th + del), Math.sin(th + del), A, lam], vMeta: [0.35 * Math.sin(TAU * g[31]), 0.25 * Math.sin(TAU * g[32]), 0, 0] };
+  }
+  function mH(g, a, b, c) { return b + (2 * g - 1) * (g < 0.5 ? b - a : c - b); }
+  function mPw(x, p) { return x > 0 ? Math.pow(x, p) : 0; }
+  function mSc(c, e) { var a = Math.abs(c); return a > 0 ? Math.sign(c) * Math.pow(a, e) : 0; }
+  function caudLEk(k, a) { return k < 2 ? a * a : 0.2 * a * a; }
+  function caudTEk(k, a) {
+    if (k === 0) return 0.35 + 0.65 * a;
+    if (k === 1) return 0.22 + 0.78 * a * a;
+    if (k === 2) return 1;
+    if (k === 3) return 0.25 + 0.75 * Math.sqrt(Math.max(0, 1 - a * a));
+    return 0.20 + 0.80 * (1 - a);
+  }
+  function caudMix(f, o, a) { var k = Math.min(3, Math.floor(o * 4)), w = pS(0, 1, o * 4 - k); return mixv(f(k, a), f(k + 1, a), w); }
+  function caudLE(o, a) { return caudMix(caudLEk, o, a); }
+  function caudTE(o, a) { return caudMix(caudTEk, o, a); }
+  function caudI(o) { return caudMix(function (k) { return C32.caud[k]; }, o, 0); }
+  /* mDecode: the body plan of one row (genes 33..62) at λ */
+  function morphDecode(g, lam) {
+    var mg = function (j) { return g[MO + j]; }, M = {};
+    M.depth = mH(mg(0), 0.22, 1.0, 2.40); M.width = mH(mg(1), 0.18, 1.0, 1.90); M.n = 1 + 2 * mg(2); M.fexp = mH(mg(3), 0.55, 1.0, 1.60);
+    M.sh = 0.08 + 0.24 * mg(4); M.hbulk = mH(mg(5), 0.60, 1.0, 1.60); M.sn = mH(mg(6), 0.08, 0.20, 0.40); M.nexp = mH(mg(7), 1.80, 1.0, 0.40);
+    M.ped = mH(mg(8), 0.45, 1.0, 1.70); M.outline = mg(9); M.AR = mH(mg(10), 0.50, 2.80, 8.0); M.cA = mH(mg(11), 0.0, 1.20, 3.20);
+    M.span = M.cA > 1e-6 ? Math.sqrt(M.AR * M.cA) : 0;
+    M.cx = M.cA > 1e-6 ? Math.min(CHORD_CAP, 2 * M.cA / (M.span * caudI(M.outline))) : 0;
+    M.dH = 1.60 * mg(12); M.dL = 0.10 + 0.60 * mg(13); M.dS = mg(14); M.dSplit = mg(15);
+    M.aH = 1.20 * mg(16); M.aL = 0.10 + 0.45 * mg(17); M.aS = mg(18);
+    M.pA = mH(mg(19), 0.0, 0.45, 1.20); M.pT = 0.06 + 0.28 * mg(20); M.pSweep = mH(mg(21), -0.25, 0.50, 1.25); M.pDih = (-70 + 110 * mg(22)) * PI / 180;
+    M.vA = mH(mg(23), 0.0, 0.20, 0.90); M.vT = 0.20 + 0.40 * mg(24); M.vSweep = mH(mg(25), 0.0, 0.50, 1.0);
+    M.bD = mg(26); M.bReach = mH(mg(27), 0.10, 1.20, 3.0); M.bBeta = mg(28); M.eye = mH(mg(29), 0.40, 1.0, 1.80);
+    M.lam = lam;
+    return M;
+  }
+  function mWarp(M, t) { return t <= 0.2 ? -M.sn + (t + 0.2) / 0.4 * (M.sh + M.sn) : M.sh + (t - 0.2) / 0.8 * (1 - M.sh); }
+  function mInvWarp(M, u) { return u <= M.sh ? -0.2 + 0.4 * (u + M.sn) / (M.sh + M.sn) : 0.2 + 0.8 * (u - M.sh) / (1 - M.sh); }
+  function mHalfAxes(M, t) {
+    var headMask = 1 - pS(0.04, 0.30, t), noseMask = 1 - pS(-0.16, 0.04, t), rearMask = pS(0.65, 1.0, t);
+    var p = M.fexp * (1 + (M.nexp - 1) * noseMask);
+    var sc = (1 + (M.hbulk - 1) * headMask) * (1 + (M.ped - 1) * rearMask);
+    return [M.width * mPw(profileY(t), p) * sc, M.depth * 0.84 * mPw(hOf(t) / 0.84, p) * sc];
+  }
+  function mSurf(M, t, th, side) {
+    var ab = mHalfAxes(M, t), e = 2 / M.n;
+    return [M.lam * mWarp(M, t), side * ab[0] * mSc(Math.max(Math.cos(th), 0), e), ab[1] * mSc(Math.sin(th), e)];
+  }
+  function add3(a, b) { return [a[0] + b[0], a[1] + b[1], a[2] + b[2]]; }
+  function sub3(a, b) { return [a[0] - b[0], a[1] - b[1], a[2] - b[2]]; }
+  function mul3(a, s) { return [a[0] * s, a[1] * s, a[2] * s]; }
+  /* rings: {ringT (float32 values, as the uniform holds them), half} */
+  function mFacet(M, rings, t, th, side) {
+    var R = rings.ringT, N = R.length, i = 0, k;
+    for (k = 1; k < 16; k++) if (k < N && t >= R[k]) i = k;
+    i = Math.min(i, N - 2);
+    var t0 = R[i], t1 = R[i + 1], al = clampv((t - t0) / (t1 - t0), 0, 1);
+    var stp = PI / rings.half, q = (th + 0.5 * PI) / stp;
+    var k0 = clampv(Math.floor(q), 0, rings.half - 1), be = clampv(q - k0, 0, 1);
+    var th0 = -0.5 * PI + k0 * stp, th1 = th0 + stp;
+    var P10 = mSurf(M, t1, th0, side), P11 = mSurf(M, t1, th1, side);
+    if (i === 0) { var P0 = mSurf(M, t0, 0, side); return add3(P0, mul3(sub3(add3(P10, mul3(sub3(P11, P10), be)), P0), al)); }
+    var P00 = mSurf(M, t0, th0, side), P01 = mSurf(M, t0, th1, side);
+    return al >= be ? add3(add3(P00, mul3(sub3(P10, P00), al)), mul3(sub3(P11, P10), be))
+                    : add3(add3(P00, mul3(sub3(P01, P00), be)), mul3(sub3(P11, P01), al));
+  }
+  function mFinH(H, split, s) { return H * 4 * s * (1 - s) * (1 - split * (1 - pS(0.08, 0.20, Math.abs(s - 0.5)))); }
+  function mSeg2(px, py, ax, ay, bx, by) {
+    var ux = bx - ax, uy = by - ay, L2 = ux * ux + uy * uy;
+    var t = L2 > 0 ? clampv(((px - ax) * ux + (py - ay) * uy) / L2, 0, 1) : 0;
+    return Math.hypot(px - ax - t * ux, py - ay - t * uy);
+  }
+  /* mBuild: one template vertex (a = aT, pat = aPattern) of one body ->
+   * {geo, mat, mar} (rest point in body radii, material site, fin margin) */
+  function morphBuild(M, rings, a, pat, time, wag, minW) {
+    var fin = Math.floor(pat[0] + 0.5), side = pat[2], mar = 1000, geo, mat, k, d, pp, qq, sk;
+    if (fin === 0) {
+      var p = mSurf(M, a[0], a[1], side);
+      geo = [p[0], a[2] * p[1], a[2] * p[2]]; mat = [a[0], a[1], a[2]];
+    } else if (fin === 1) {
+      var eta = a[0], row = a[1], ae = Math.abs(eta);
+      var LE = caudLE(M.outline, ae), TE = caudTE(M.outline, ae), r = clampv(row, 0, 1);
+      var x = M.cx * (LE + r * (TE - LE)), z = 0.5 * M.span * eta;
+      var B1 = mHalfAxes(M, 1)[1], xLE = M.cx * LE;
+      if (row < -0.5) { var wc = 1 - pS(0.75 * B1, B1, Math.abs(z)); x = xLE + wc * (-0.12 - xLE); }
+      geo = [M.lam + x, 0, z];
+      var vLE = 0.5 * (1 - Math.sign(z) * Math.pow(Math.min(1, Math.abs(z) / Math.max(B1, 1e-6)), 0.5 * M.n)), vTE = 0.5 * (1 - eta);
+      mat = [1 + x / M.lam, row < -0.5 ? vLE : vLE + r * (vTE - vLE), 0];
+      var chord = M.cx * (TE - LE), hh = 0.01;
+      var a1 = Math.min(ae + hh, 1), a0 = Math.max(ae - hh, 0), dz = (a1 - a0) * 0.5 * M.span + 1e-6;
+      var sTE = M.cx * (caudTE(M.outline, a1) - caudTE(M.outline, a0)) / dz, sLE = M.cx * (caudLE(M.outline, a1) - caudLE(M.outline, a0)) / dz;
+      var nTE = 1 / Math.sqrt(1 + sTE * sTE), nLE = 1 / Math.sqrt(1 + sLE * sLE);
+      var fr = pS(0.9 * B1, 1.2 * B1, Math.abs(z));
+      if (row < -0.5) mar = 1000;
+      else if (row < 0.25) mar = Math.min(chord * nTE, (1 - fr) * 1000);
+      else if (row < 0.75) mar = Math.min(0.5 * chord * nTE, 0.5 * chord * nLE + (1 - fr) * 1000);
+      else mar = 0;
+    } else if (fin === 2 || fin === 5) {
+      var s = a[0], q = a[1], dors = fin === 2, up = dors ? 1 : -1;
+      var ell = dors ? M.dL : M.aL, H = dors ? M.dH : M.aH, start = 0.04 + (0.92 - ell) * (dors ? M.dS : M.aS), split = dors ? M.dSplit : 0;
+      var t = start + ell * s, root = mFacet(M, rings, t, up * 0.5 * PI, 1), ht = mFinH(H, split, s);
+      geo = [root[0], 0, root[2] + up * q * ht];
+      var b0 = Math.max(hOf(t), 1e-3);
+      mat = [t, dors ? -0.5 * q * ht / b0 : 1 + 0.5 * q * ht / b0, 0];
+      var X0 = M.lam * mWarp(M, t);
+      d = 1000; pp = [M.lam * mWarp(M, start), mFinH(H, split, 0)];
+      for (k = 1; k <= 16; k++) { sk = k / 16; qq = [M.lam * mWarp(M, start + ell * sk), mFinH(H, split, sk)]; d = Math.min(d, mSeg2(X0, 0, pp[0], pp[1], qq[0], qq[1])); pp = qq; }
+      mar = (1 - q) * d;
+    } else if (fin === 3 || fin === 6) {
+      var s2 = a[0], r2 = a[1], pec = fin === 3;
+      var chord2 = pec ? 0.80 : 0.55, area = pec ? M.pA : M.vA, tc = pec ? M.pT : M.vT, sweep = pec ? M.pSweep : M.vSweep;
+      var dih = pec ? M.pDih : -0.25 * PI, thr = pec ? C32.pec : C32.pel;
+      var span = area / (chord2 * C32.phi);
+      var X = M.lam * mWarp(M, tc) + chord2 * (s2 - 0.5), t2 = mInvWarp(M, X / M.lam);
+      var root2 = mFacet(M, rings, t2, thr, side), phi = 4 * s2 * (1 - s2), w = span * r2 * phi;
+      geo = add3(root2, [sweep * w, side * w * Math.cos(dih), w * Math.sin(dih)]);
+      mat = [t2 + sweep * w / M.lam, 0.5 * (1 - Math.sin(thr)) + 0.21 * r2 * phi, 0];
+      var x0 = chord2 * (s2 - 0.5);
+      d = 1000; pp = [-0.5 * chord2, 0];
+      for (k = 1; k <= 16; k++) { sk = k / 16; var wk = span * 4 * sk * (1 - sk); qq = [chord2 * (sk - 0.5) + sweep * wk, wk]; d = Math.min(d, mSeg2(x0, 0, pp[0], pp[1], qq[0], qq[1])); pp = qq; }
+      mar = (1 - r2) * d;
+    } else if (fin === 4) {
+      var kE = Math.min(M.eye, 0.32 * mHalfAxes(M, C32.eyeT)[1] / 0.14);
+      var c = mSurf(M, C32.eyeT, C32.eyeTh, side);
+      var Xe = c[0] + a[0] * 0.24 * kE, Ze = c[2] + a[1] * 0.14 * kE;
+      var te = mInvWarp(M, Xe / M.lam), ab = mHalfAxes(M, te);
+      var sn = Math.sign(Ze) * Math.pow(Math.min(1, Math.abs(Ze) / Math.max(ab[1], 1e-6)), 0.5 * M.n);
+      var pe = mSurf(M, te, Math.asin(clampv(sn, -1, 1)), side);
+      geo = [pe[0], side * (Math.abs(pe[1]) + 0.04 + 0.05 * ab[0]), pe[2]]; mat = [0, 0, 0];
+    } else {
+      var qb = a[0], ws = a[1], j = a[2], rib = a[3];
+      var db = Math.max(0, (M.bD - 0.2) / 0.8), wj = pS(0, 1, 3 * db - j);
+      var tj = -0.16 + 0.18 * M.bBeta + 0.015 * j, thj = -PI * (0.06 + 0.25 * M.bBeta + 0.055 * j);
+      var P0 = mFacet(M, rings, tj, thj, 1), L = M.bReach * (1 - 0.15 * j) * wj;
+      var P1 = add3(P0, mul3([-0.30, 0.40, -0.20], L)), P2 = add3(P0, mul3([0.25, 0.70, -0.55], L));
+      var C = add3(add3(mul3(P0, (1 - qb) * (1 - qb)), mul3(P1, 2 * qb * (1 - qb))), mul3(P2, qb * qb));
+      var T = add3(mul3(sub3(P1, P0), 2 * (1 - qb)), mul3(sub3(P2, P1), 2 * qb)), tl = Math.hypot(T[0], T[1], T[2]);
+      T = tl > 1e-9 ? mul3(T, 1 / tl) : [1, 0, 0];
+      var n1 = [T[1], -T[0], 0], nl = Math.hypot(n1[0], n1[1]);
+      n1 = nl > 1e-6 ? mul3(n1, 1 / nl) : [0, 1, 0];
+      var n2 = [T[1] * n1[2] - T[2] * n1[1], T[2] * n1[0] - T[0] * n1[2], T[0] * n1[1] - T[1] * n1[0]];
+      var sw = wag * 0.10 * L * qb * qb * Math.sin(5.5 * time + 2 * j + (side > 0 ? 0 : 1.3));
+      var hw = wj > 0 ? Math.max(0.04 * (1 - 0.6 * qb) * Math.min(1, 4 * wj), minW) : 0;
+      geo = add3(add3(C, mul3(n2, sw)), mul3(rib < 0.5 ? n1 : n2, ws * hw));
+      geo[1] *= side;
+      mat = [tj, thj, qb];
+    }
+    return { geo: geo, mat: mat, mar: mar };
+  }
+
   window.EvoAppearance = {
     LAWS: LAWS, NG: NG, MO: MO, NM: NM, STRIDE: STRIDE,
     GLSL: { COMMON: COMMON, VARY: VARY, DECODE: DECODE, SKIN: SKIN, GENES: GENES, MORPH: MORPH },
     LODS: LODS, buildTemplate: buildTemplate, buildBarbels: buildBarbels,
-    decode: decode, flankAt: flankAt, flankImage: flankImage, lambdaOf: lambdaOf
+    decode: decode, flankAt: flankAt, flankImage: flankImage, lambdaOf: lambdaOf,
+    patternVaryings: patternVaryings, morphDecode: morphDecode, morphBuild: morphBuild
   };
 })();

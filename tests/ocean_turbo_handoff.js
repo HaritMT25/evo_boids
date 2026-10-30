@@ -161,7 +161,7 @@ function legacyRecovery(runCfg, entryCfg, held, inflight) {
 }
 /* the page's liveApplied: runCfg keeps what differs from the default */
 function liveApplied(runCfg, key, v) { if (v === CFG.KEYS[key][0]) delete runCfg[key]; else runCfg[key] = v; }
-/* the page's replay (web/ocean.js) of a ledger plan on its own world: each
+/* the page's replayEdits (web/ocean.js) of a ledger plan on its own world: each
  * edit with oc_set_param, in order; runCfg follows what is accepted */
 function replayOnPage(M, plan, runCfg) {
     return plan.map(e => {
@@ -506,7 +506,7 @@ async function imports() {
 }
 
 /* The page's live edits around Turbo (web/ocean_handoff.js ledger, which
- * web/ocean.js turboBack / turboFailed / replay use as they are): the edits
+ * web/ocean.js turboBack / turboFailed / replayEdits use as they are): the edits
  * the page applies when the world comes back, or doesn't, in the order they
  * were made. Driven here as the page drives it, against the real worker and
  * the real module, with a worker failure that loses the world. */

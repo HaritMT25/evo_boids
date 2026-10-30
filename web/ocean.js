@@ -763,6 +763,7 @@
   function replay() {
     if (!M || guardTurbo() || !initArgs) return;
     if (!M._oc_reset()) { showError("oc_reset failed: " + lastError()); return; }
+    clearError();   /* e.g. a refused restart's message: the sheet goes back to this world */
     resetForm();
     setVal("seed", initArgs.seed); setVal("population", initArgs.population); setVal("depth", initArgs.depth);
     setVal("width", initArgs.width); setVal("height", initArgs.height);

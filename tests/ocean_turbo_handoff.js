@@ -179,18 +179,21 @@ function trapAt(w, at) {
 
 /* web/ocean_worker.js in a vm context: a dedicated worker's globals, its
  * MessageChannel a macrotask per message (as in a browser), importScripts
- * loading ocean_handoff.js into the context and handing it the module factory. */
-function makeWorker() {
-    const inbox = [], waiters = [];
+ * loading ocean_handoff.js into the context and handing it the module factory.
+ * opts.out: where its messages go instead of the inbox (the page's Worker
+ * below); kill(): terminated, it neither runs nor posts again. */
+function makeWorker(opts) {
+    const inbox = [], waiters = [], out = opts && opts.out;
+    let dead = false;
     function Chan() {
         const p1 = { onmessage: null };
         this.port1 = p1;
-        this.port2 = { postMessage: d => setImmediate(() => { if (p1.onmessage) p1.onmessage({ data: d }); }) };
+        this.port2 = { postMessage: d => setImmediate(() => { if (!dead && p1.onmessage) p1.onmessage({ data: d }); }) };
     }
     const ctx = {
         console, performance, setTimeout, clearTimeout, TextEncoder, TextDecoder, WebAssembly,
         MessageChannel: Chan, onmessage: null,
-        postMessage: (m) => { inbox.push(m); pump(); }
+        postMessage: (m) => { if (dead) return; if (out) { out(m); return; } inbox.push(m); pump(); }
     };
     ctx.self = ctx;
     ctx.importScripts = function () {
@@ -219,7 +222,8 @@ function makeWorker() {
     return {
         ctx,
         get M() { return ctx.M; },
-        send(m) { setImmediate(() => ctx.onmessage({ data: m })); },
+        send(m) { setImmediate(() => { if (!dead) ctx.onmessage({ data: m }); }); },
+        kill() { dead = true; },
         wait(pred, what, ms) {
             return new Promise((resolve, reject) => {
                 const wt = { pred, resolve };
@@ -240,6 +244,335 @@ const startMsg = (mem) => ({ cmd: 'start', js: path.join(WEB, 'evo_ocean.js'), w
                              handoff: path.join(WEB, 'ocean_handoff.js'), mem, recEvery: 60, famK: 8 });
 const isType = (t) => (m) => m.type === t;
 const statsAt = (f) => (m) => m.type === 'stats' && m.frame >= f;
+
+/* ---------------------------------------------------------------------
+ * The page itself. web/ocean_handoff.js, web/ocean_config.js,
+ * web/ocean_dash.js and web/ocean.js, as they are and in ocean.html's order,
+ * in one vm context over a small DOM: the elements ocean.html declares (made
+ * on first use) and the ones the page makes, events that bubble, listeners
+ * whose exceptions are reported, not thrown (as a browser's). The real
+ * module (a fresh instance per page, its oc_init / oc_set_param calls
+ * logged) and the real worker (makeWorker) behind the page's Worker, whose
+ * messages to the page can be held and let through in their order (a slow
+ * channel, as a busy page or worker makes it). Stubs only where the page
+ * draws (the 3-D scene, the charts) and schedules (requestAnimationFrame:
+ * the test runs a frame when it wants one). The page's lexical state is
+ * read through an accessor appended inside its closure (__oceanPage), with
+ * its start-up's URL-import block, a verbatim slice, as a function of the
+ * query (urlImport); each marker must occur exactly once.
+ * --------------------------------------------------------------------- */
+const PAGE_IDS = (() => {
+    const m = new Map(), html = fs.readFileSync(path.join(WEB, 'ocean.html'), 'utf8');
+    for (const x of html.matchAll(/<([a-zA-Z][\w-]*)\b[^>]*?\sid="([^"]+)"/g)) if (!m.has(x[2])) m.set(x[2], x[1]);
+    return m;
+})();
+function onceIn(src, marker, file) {
+    const i = src.indexOf(marker);
+    if (i < 0 || src.indexOf(marker, i + 1) >= 0) throw new Error(file + ': ' + JSON.stringify(marker) + ' is not there exactly once');
+    return i;
+}
+const PAGE_SRC = (() => {
+    const src = fs.readFileSync(path.join(WEB, 'ocean.js'), 'utf8');
+    const a = onceIn(src, '    var rawCfg = P.get("cfg") || ""', 'web/ocean.js');
+    const b = onceIn(src, '    scene = EvoOceanScene.create(canvas, {', 'web/ocean.js');
+    const end = onceIn(src, '\n})();\n', 'web/ocean.js');
+    if (!(a < b && b < end)) throw new Error('web/ocean.js: the markers are out of order');
+    const access = '\n  globalThis.__oceanPage = {\n' +
+        '    get M() { return M; }, get turboState() { return turboState; }, get turboWorker() { return turboWorker; },\n' +
+        '    get runCfg() { return runCfg; }, get initArgs() { return initArgs; }, get live() { return live; },\n' +
+        '    get W() { return W; }, get H() { return H; }, get D() { return D; }, get WALLS() { return WALLS; },\n' +
+        '    getVal: getVal, importWorld: importWorld, wiringNow: wiringNow, frame: frame,\n' +
+        '    urlImport: function (P) {\n' + src.slice(a, b) + '    }\n  };';
+    return src.slice(0, end) + access + src.slice(end);
+})();
+const SCENE_STUB = `window.EvoOceanScene = { load: function () { return Promise.resolve(); }, create: function () {
+  var fixed = { following: false, flashlight: false, quality: 3, flashlightLevel: 0, pick: -1, project: null, view: null, degrade: false };
+  return new Proxy({}, { get: function (t, k) { return function () { return fixed[k]; }; } });
+} };`;
+const CHARTS_STUB = `(function () {
+  var charts = [];
+  function Chart(box, kind) { this.box = box; this.kind = kind; this.data = undefined; charts.push(this); }
+  Chart.prototype.draw = function (d) { this.data = d; };
+  window.EvoCharts = { T: { series: ["#1", "#2", "#3", "#4", "#5", "#6", "#7", "#8"], other: "#9" }, Chart: Chart,
+    lines: "lines", stack: "stack", phase: "phase", heat: "heat", legend: function () {}, tip: function () {},
+    seq: function () { return "#0"; }, esc: function (s) { return String(s); }, tipRow: function () { return ""; },
+    fmtTime: function (s) { return s + " s"; }, charts: charts };
+})();`;
+
+function makeDom(page) {
+    const byId = new Map();
+    const parse = (s) => {
+        const m = /^([a-zA-Z][\w-]*)?((?:[#.][\w-]+)*)$/.exec(s);
+        if (!m) throw new Error('the test DOM has no selector ' + JSON.stringify(s));
+        const parts = m[2].match(/[#.][\w-]+/g) || [];
+        return { tag: (m[1] || '').toUpperCase(), id: (parts.find(x => x[0] === '#') || '#').slice(1),
+                 cls: parts.filter(x => x[0] === '.').map(x => x.slice(1)) };
+    };
+    const one = (e, p) => (!p.tag || e.tagName === p.tag) && (!p.id || e._id === p.id) && p.cls.every(c => e._cls.has(c));
+    const matches = (e, sel) => sel.split(',').some(alt => {
+        const chain = alt.trim().split(/\s+/).map(parse);
+        if (!one(e, chain[chain.length - 1])) return false;
+        let k = chain.length - 2;
+        for (let n = e.parentNode; n && k >= 0; n = n.parentNode) if (one(n, chain[k])) k--;
+        return k < 0;
+    });
+    function* walk(e) { for (const c of e.children) { yield c; yield* walk(c); } }
+    function fireOn(n, ev) {
+        ev.currentTarget = n;
+        for (const f of (n._ls[ev.type] || []).slice()) {
+            try { f.call(n, ev); } catch (e) { page.uncaught.push(e); }   /* a browser reports it and goes on */
+        }
+    }
+    class Ev {
+        constructor(type, o) { this.type = type; this.bubbles = !!(o && o.bubbles); this.defaultPrevented = false; this.target = null; }
+        preventDefault() { this.defaultPrevented = true; }
+        stopPropagation() { this.stopped = true; }
+    }
+    const ctx2d = new Proxy({}, { get: (t, k) => (k in t ? t[k] : k === 'measureText' ? () => ({ width: 0 }) : () => {}),
+                                  set: (t, k, v) => { t[k] = v; return true; } });
+    let head = null;
+    class El {
+        constructor(tag) {
+            this.tagName = this.nodeName = String(tag).toUpperCase();
+            this.children = []; this.parentNode = null; this.style = {}; this.dataset = {}; this.attrs = {};
+            this._cls = new Set(); this._ls = {}; this._id = ''; this._text = ''; this._html = ''; this._auto = false;
+            this.hidden = false; this.disabled = false; this.checked = false; this.value = ''; this.type = '';
+            this.width = 0; this.height = 0; this.tabIndex = 0; this.scrollTop = 0;
+        }
+        get id() { return this._id; }
+        set id(v) { this._id = String(v); byId.set(this._id, this); }
+        get className() { return Array.from(this._cls).join(' '); }
+        set className(v) { this._cls = new Set(String(v).split(/\s+/).filter(Boolean)); }
+        get classList() {
+            const s = this._cls;
+            return { add: (...c) => c.forEach(x => s.add(x)), remove: (...c) => c.forEach(x => s.delete(x)),
+                     toggle: (c, on) => { if (on === undefined) on = !s.has(c); if (on) s.add(c); else s.delete(c); return !!on; },
+                     contains: c => s.has(c) };
+        }
+        get textContent() { return this._text; }
+        set textContent(v) { for (const c of this.children) c.parentNode = null; this.children = []; this._text = String(v); this._html = ''; }
+        get innerHTML() { return this._html; }
+        set innerHTML(v) {   /* the elements in it, flat (the page reads them by id, class or tag) */
+            v = String(v);
+            for (const c of this.children) c.parentNode = null;
+            this.children = []; this._html = v; this._text = v.replace(/<[^>]*>/g, '');
+            for (const m of v.matchAll(/<([a-zA-Z][\w-]*)([^>]*)>/g)) {
+                const c = new El(m[1]), cl = /\sclass=(['"])(.*?)\1/.exec(m[2]), id = /\sid=(['"])(.*?)\1/.exec(m[2]);
+                if (cl) c.className = cl[2];
+                if (id) c.id = id[2];
+                this.appendChild(c);
+            }
+        }
+        get firstChild() { return this.firstElementChild; }
+        get firstElementChild() {
+            if (!this.children.length && this._auto) this.appendChild(new El('i'));   /* ocean.html's own child */
+            return this.children[0] || null;
+        }
+        get parentElement() { return this.parentNode; }
+        get offsetWidth() { return 0; } get offsetHeight() { return 0; } get clientWidth() { return 0; } get clientHeight() { return 0; }
+        appendChild(c) {
+            if (c.parentNode) c.parentNode.removeChild(c);
+            c.parentNode = this;
+            this.children.push(c);
+            if (this === head && c.tagName === 'SCRIPT') page.onScript(c);
+            return c;
+        }
+        removeChild(c) { const i = this.children.indexOf(c); if (i >= 0) this.children.splice(i, 1); c.parentNode = null; return c; }
+        remove() { if (this.parentNode) this.parentNode.removeChild(this); }
+        setAttribute(k, v) { this.attrs[k] = String(v); if (k === 'id') this.id = v; else if (k === 'class') this.className = v; }
+        getAttribute(k) { return Object.prototype.hasOwnProperty.call(this.attrs, k) ? this.attrs[k] : null; }
+        removeAttribute(k) { delete this.attrs[k]; }
+        addEventListener(t, f) { (this._ls[t] = this._ls[t] || []).push(f); }
+        removeEventListener(t, f) { const l = this._ls[t] || [], i = l.indexOf(f); if (i >= 0) l.splice(i, 1); }
+        dispatchEvent(ev) {
+            if (!ev.target) ev.target = this;
+            for (let n = this; n; n = ev.bubbles && !ev.stopped ? n.parentNode : null) fireOn(n, ev);
+            return !ev.defaultPrevented;
+        }
+        click() { this.dispatchEvent(new Ev('click', { bubbles: true })); }
+        focus() { doc.activeElement = this; }
+        blur() { if (doc.activeElement === this) doc.activeElement = null; }
+        getBoundingClientRect() { return { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0, x: 0, y: 0 }; }
+        getContext() { return ctx2d; }
+        setPointerCapture() {}
+        releasePointerCapture() {}
+        querySelectorAll(sel) { const out = []; for (const e of walk(this)) if (matches(e, sel)) out.push(e); return out; }
+        querySelector(sel) {
+            for (const e of walk(this)) if (matches(e, sel)) return e;
+            if (!this._auto) return null;
+            const p = parse(sel.split(',')[0].trim().split(/\s+/).pop());   /* ocean.html's own child */
+            const c = new El(p.tag || 'div');
+            if (p.cls.length) c.className = p.cls.join(' ');
+            if (p.id) c.id = p.id;
+            c._auto = true;
+            return this.appendChild(c);
+        }
+        closest(sel) { for (let n = this; n; n = n.parentNode) if (matches(n, sel)) return n; return null; }
+    }
+    const docEl = new El('html'), body = new El('body');
+    head = new El('head');
+    docEl.appendChild(head); docEl.appendChild(body);
+    const doc = {
+        documentElement: docEl, head, body, activeElement: null, hidden: false, _ls: {},
+        createElement: t => new El(t),
+        getElementById(id) {
+            let e = byId.get(id);
+            if (!e && PAGE_IDS.has(id)) { e = new El(PAGE_IDS.get(id)); e._auto = true; e.id = id; body.appendChild(e); }
+            return e || null;
+        },
+        querySelector: s => docEl.querySelector(s),
+        querySelectorAll: s => docEl.querySelectorAll(s),
+        addEventListener(t, f) { (this._ls[t] = this._ls[t] || []).push(f); },
+        removeEventListener() {},
+        dispatchEvent(ev) { fireOn(doc, ev); return true; }
+    };
+    return { doc, Ev, fireOn };
+}
+
+const tick = () => new Promise(r => setImmediate(r));
+async function until(pred, what, ms) {
+    const t0 = Date.now();
+    while (!pred()) {
+        if (Date.now() - t0 > (ms || 30000)) throw new Error('timed out waiting for ' + what);
+        await new Promise(r => setTimeout(r, 2));
+    }
+}
+const unref = (t) => { if (t && t.unref) t.unref(); return t; };
+
+/* A page at ocean.html?query, started (or refused: page.failed). */
+async function bootPage(query) {
+    const page = { hooks: {}, workers: [], uncaught: [], logs: [], inits: [], sets: [], raf: null };
+    const { doc, Ev, fireOn } = makeDom(page);
+    const loc = {};
+    const setLoc = (u) => { const x = new URL(u); Object.assign(loc, { href: x.href, search: x.search, origin: x.origin, protocol: x.protocol, pathname: x.pathname }); };
+    setLoc('http://ocean.test/ocean.html' + (query || ''));
+    const storage = new Map(), winLs = {};
+    const say = (level) => (...a) => page.logs.push([level, a.map(String).join(' ')]);
+    const ctx = {
+        document: doc, location: loc, navigator: { userAgent: 'node' },
+        history: { replaceState: (s, t, u) => setLoc(String(u)) },
+        localStorage: { getItem: k => (storage.has(k) ? storage.get(k) : null), setItem: (k, v) => storage.set(k, String(v)), removeItem: k => storage.delete(k) },
+        matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {}, addListener() {} }),
+        getComputedStyle: () => ({ fontFamily: 'sans-serif', getPropertyValue: () => '' }),
+        requestAnimationFrame: (cb) => { page.raf = cb; return 1; }, cancelAnimationFrame() {},
+        innerWidth: 1920, innerHeight: 1080, devicePixelRatio: 1, _ls: winLs,
+        addEventListener: (t, f) => { (winLs[t] = winLs[t] || []).push(f); }, removeEventListener() {},
+        dispatchEvent: (ev) => { fireOn(ctx, ev); return true; },
+        Event: Ev, URL, URLSearchParams, Blob, ImageData: class {}, performance, WebAssembly, TextEncoder, TextDecoder,
+        console: { log: say('log'), info: say('info'), warn: say('warn'), error: say('error'), debug: say('debug') },
+        setTimeout: (f, ms) => unref(setTimeout(f, ms)), clearTimeout, setInterval: (f, ms) => unref(setInterval(f, ms)), clearInterval,
+        EVO_ASSETS: { ocean: 'evo_ocean.js', oceanWasm: 'evo_ocean.wasm', worker: 'ocean_worker.js', handoff: 'ocean_handoff.js', mock: 'ocean_mock.js' },
+        Worker: function () { return page.newWorker(); }
+    };
+    ctx.window = ctx.self = ctx;
+    vm.createContext(ctx);
+    /* the module: ocean.html's script tag for it, loaded as the real one, its init and live calls logged */
+    page.onScript = (s) => setImmediate(() => {
+        if (!/evo_ocean\.js$/.test(s.src)) { if (s.onerror) s.onerror(); return; }
+        ctx.createEvoOcean = () => create({ locateFile: p => p.endsWith('.wasm') ? WASM : p }).then((M) => {
+            const init = M._oc_init, set = M._oc_set_param;
+            M._oc_init = function (seed, w, h, d, pop, p) { page.inits.push(HO.cString(M, p)); return init.apply(this, arguments); };
+            M._oc_set_param = function (p, v) {
+                const key = HO.cString(M, p), r = set(p, v);
+                if (r) page.sets.push([frame(M), key, v]);
+                return r;
+            };
+            return M;
+        });
+        if (s.onload) s.onload();
+    });
+    /* the page's Worker: web/ocean_worker.js (makeWorker), its messages to the page through an
+     * ordered channel the test can pause (they queue) and let through up to a message (release) */
+    page.newWorker = () => {
+        if (page.hooks.ctor) { const h = page.hooks.ctor; page.hooks.ctor = null; h(); }
+        const sh = { onmessage: null, onerror: null, terminated: 0, toWorker: [], fromWorker: [], delivered: [], queue: [], paused: false };
+        const deliver = (m) => { if (sh.terminated || !sh.onmessage) return; sh.delivered.push(m); sh.onmessage({ data: m }); };
+        const w = makeWorker({ out: (m) => {
+            if (sh.terminated) return;
+            sh.fromWorker.push(m);
+            if (sh.paused) sh.queue.push(m); else setImmediate(() => deliver(m));
+        } });
+        Object.defineProperty(sh, 'M', { get: () => w.M });
+        sh.postMessage = (msg) => {
+            if (msg && msg.cmd === 'start' && page.hooks.post) { const h = page.hooks.post; page.hooks.post = null; h(); }
+            if (sh.terminated) return;
+            sh.toWorker.push(msg);
+            w.send(msg.cmd !== 'start' ? msg : Object.assign({}, msg, { js: path.join(WEB, 'evo_ocean.js'), wasm: WASM, handoff: path.join(WEB, 'ocean_handoff.js') }));
+        };
+        sh.terminate = () => { sh.terminated++; w.kill(); };
+        sh.pause = () => { sh.paused = true; };
+        sh.resume = () => { sh.paused = false; for (const m of sh.queue.splice(0)) deliver(m); };
+        sh.queued = (pred) => sh.queue.some(pred);
+        sh.release = async (pred, what) => {   /* everything queued up to and with the first message pred takes */
+            await until(() => sh.queue.some(pred), what || 'a queued message');
+            while (sh.queue.length) { const m = sh.queue.shift(); deliver(m); if (pred(m)) return m; }
+            return null;
+        };
+        page.workers.push(sh);
+        if (page.hooks.onWorker) page.hooks.onWorker(sh);
+        return sh;
+    };
+    const run = (name, src) => vm.runInContext(src !== undefined ? src : fs.readFileSync(path.join(WEB, name), 'utf8'), ctx, { filename: path.join(WEB, name) });
+    run('ocean_handoff.js'); run('ocean_scene_stub.js', SCENE_STUB); run('ocean_config.js');
+    run('charts_stub.js', CHARTS_STUB); run('ocean_dash.js'); run('ocean.js', PAGE_SRC);
+    page.ctx = ctx; page.doc = doc; page.Ev = Ev; page.T = ctx.__oceanPage; page.KEYS = ctx.EvoOceanConfig.KEYS;
+    page.el = (id) => doc.getElementById(id);
+    await until(() => (ctx.EvoApp && ctx.EvoApp.ready) || page.el('splashstate').className === 'error', 'the page to start', 60000);
+    page.failed = page.el('splashstate').className === 'error' ? page.el('splashstate').textContent : '';
+    page.M = page.T.M;
+    page.click = (id) => page.el(id).click();
+    page.msg = () => page.el('err').textContent;
+    page.worker = () => page.workers[page.workers.length - 1];
+    /* a field changed by hand: its input, then its change (the live ones apply on change) */
+    page.edit = (key, v) => {
+        const i = page.el('o_' + key);
+        if (i.type === 'checkbox') i.checked = v === true || v === 1; else i.value = String(v);
+        i.dispatchEvent(new Ev('input', { bubbles: true }));
+        i.dispatchEvent(new Ev('change', { bubbles: true }));
+    };
+    page.note = (key) => { const r = page.el('f_' + key), n = r && r.querySelector('.pendnote'); return n ? n.textContent : ''; };
+    page.form = () => JSON.stringify(Object.keys(page.KEYS).filter(k => page.el('o_' + k)).map(k => [k, page.T.getVal(k)]));
+    /* Load setup's file input, given a file */
+    page.loadFile = (file) => { const i = page.el('cpfile'); i.files = [file]; i.dispatchEvent(new Ev('change', { bubbles: true })); };
+    page.state = () => JSON.stringify({ initArgs: page.T.initArgs, runCfg: page.T.runCfg, W: page.T.W, H: page.T.H, D: page.T.D,
+                                        walls: page.T.WALLS, url: loc.href, form: page.form() });
+    page.loc = loc;
+    return page;
+}
+/* the Turbo controls, as they read: off ("live") or on */
+function turboControls(p) {
+    const locked = ['restart', 'savecp', 'loadcp', 'pausebtn', 'slower', 'faster', 'randombtn', 'randombig', 'newworld', 'replay']
+        .filter(id => p.el(id).classList.contains('locked'));
+    return { card: !p.el('turbo').hidden, button: !p.el('turbobtn').disabled, locked };
+}
+/* a world like the page's from an image of its memory (the control's start),
+ * edits [frame, key, value] applied at their frames, stepped to toFrame */
+async function controlRun(img, edits, toFrame) {
+    const ref = await mk(1, {}, 300, 300, 0);
+    HO.take(ref, img.slice(0), 'the control');
+    for (const [f, key, v] of edits) {
+        if (f < frame(ref)) throw new Error('control: an edit at frame ' + f + ' before ' + frame(ref));
+        ref._oc_step(f - frame(ref)); setParam(ref, key, v);
+    }
+    if (toFrame < frame(ref)) throw new Error('control: frame ' + toFrame + ' before ' + frame(ref));
+    ref._oc_step(toFrame - frame(ref));
+    return ref;
+}
+/* the edits a page's worker applied: [frame, key, value] */
+const workerEdits = (sh) => sh.fromWorker.filter(m => m.type === 'set' && m.ok).map(m => [m.frame, m.key, m.value]);
+/* the worker's next oc_step traps (its world is lost: no memory comes with the error) */
+function trapNext(sh) { sh.M._oc_step = function () { throw new WebAssembly.RuntimeError('injected: a trap mid-step'); }; }
+const PAGE_Q = '?seed=4242&pop=60&w=1920&h=1080&walls=1';
+/* a page in Turbo, its world's image and frame from just before */
+async function pageInTurbo(q) {
+    const p = await bootPage(q || PAGE_Q);
+    const img = HO.buffer(p.M).slice(0), f0 = frame(p.M), sets0 = p.sets.length;
+    p.click('turbobtn');
+    await until(() => p.T.turboState === 'turbo', 'Turbo to start');
+    const sh = p.worker();
+    await until(() => sh.fromWorker.some(m => m.type === 'stats' && m.frame >= f0 + 120), 'Turbo to run a while');
+    return { p, img, f0, sets0, sh };
+}
 
 /* --------------------------------------------------------------------- */
 async function roundTrip(label, cfg) {
@@ -521,7 +854,7 @@ async function liveLedger() {
         L.start();
         L.sent('a', 1); L.answered('a', true); L.sent('a', 5); L.answered('a', false); L.sent('b', 2); L.hold('a', 3); L.hold('a', 4);
         const lost = L.back(true).map(e => e.key + e.num + e.from).join(' ');
-        ok(lost === 'a1acked b2sent a4held', 'without it: the acknowledged ones first, a refused one never, the newest held edit last (' + lost + ')');
+        ok(lost === 'a1acked b2sent a3held a4held', 'without it: the acknowledged ones first, a refused one never, every held edit in order (' + lost + ')');
         L.start();
         L.hold('x', 1); L.hold('y', 2);
         const fl = L.takeHeld(); fl.forEach(e => L.sent(e.key, e.num, e.seq));
@@ -648,20 +981,128 @@ async function repeatedKeys() {
     ok(off.ok && twice.ok && off.print === twice.print, '{"toroidal":false,"toroidal":true} runs with walls on the page too (the first: false), as in oc_init');
 }
 
+/* ---- the page itself (bootPage): its live edits around Turbo ---- */
+
+/* the three edits whose order matters: from 30-150, minSpeed 0, maxSpeed 10,
+ * minSpeed 5 is valid only as a sequence (maxSpeed 10 is refused against 30) */
+const SEQ3 = [['minSpeed', 0], ['maxSpeed', 10], ['minSpeed', 5]];
+function edit3(p) { for (const [k, v] of SEQ3) p.edit(k, v); }
+/* the page after the three edits: 5-10 in the world's bookkeeping and the fields, no note left */
+function at5to10(p) {
+    return p.T.runCfg.minSpeed === 5 && p.T.runCfg.maxSpeed === 10 && p.T.getVal('minSpeed') === 5 && p.T.getVal('maxSpeed') === 10 &&
+           p.note('minSpeed') === '' && p.note('maxSpeed') === '' && JSON.stringify(p.T.live.held()) === '{}';
+}
+const speeds = (p) => 'runCfg ' + p.T.runCfg.minSpeed + '-' + p.T.runCfg.maxSpeed + ', fields ' + p.T.getVal('minSpeed') + '-' + p.T.getVal('maxSpeed') +
+                      (p.note('minSpeed') || p.note('maxSpeed') ? ', notes "' + p.note('minSpeed') + '" / "' + p.note('maxSpeed') + '"' : '');
+const setsTo = (sh) => sh.toWorker.filter(m => m.cmd === 'set').map(m => m.key + '=' + m.value).join(',');
+
+/* (#1) Every held edit is applied, in order: edits made while Turbo is
+ * starting or stopping (neither side owns the world) are held; main kept
+ * only the newest of each key, so minSpeed 0, maxSpeed 10, minSpeed 5 lost
+ * the 0, maxSpeed 10 was refused against 30 and the run went on at 5-150.
+ * Through the page itself, entering, after a Stop, after a lost world and
+ * after a hand-back the page could not take (Turbo resumes). */
+async function pageHeld() {
+    section('The page: every held live edit applies, in order (entering, Stop, a lost world, a resumed hand-back)');
+    {   /* entering: the first stats held, so the worker has the world and the page does not know yet */
+        const p = await bootPage(PAGE_Q);
+        const img = HO.buffer(p.M).slice(0), f0 = frame(p.M);
+        p.hooks.onWorker = (sh) => sh.pause();
+        p.click('turbobtn');
+        const sh = p.worker();
+        await until(() => sh.queued(isType('stats')), 'the first stats');
+        const entering = p.T.turboState;
+        edit3(p);
+        const notes = p.note('minSpeed') + ' | ' + p.note('maxSpeed');
+        sh.resume();
+        await until(() => p.T.turboState === 'turbo' && sh.delivered.filter(isType('set')).length === sh.toWorker.filter(m => m.cmd === 'set').length,
+                    'the edits\' answers');
+        ok(entering === 'entering' && /as soon as Turbo has started/.test(notes), 'entering: the edits are held ("' + notes + '")');
+        ok(setsTo(sh) === 'minSpeed=0,maxSpeed=10,minSpeed=5' && sh.fromWorker.filter(isType('set')).every(m => m.ok),
+           'entering: the worker receives all three in order, each accepted (' + setsTo(sh) + ')');
+        p.click('turboexit');
+        await until(() => p.T.turboState === 'live', 'the hand-back');
+        ok(at5to10(p), 'entering, after Stop: 5-10 in runCfg and the fields, no note left (' + speeds(p) + ')');
+        const ref = await controlRun(img, workerEdits(sh), frame(p.M));
+        const d = sameFor(p.M, ref, 150);
+        ok(f0 < frame(p.M) && d === '', 'entering: 150 further steps bit-identical to the edits applied at the worker\'s frames' + (d ? ': ' + d : ''));
+    }
+    {   /* a Stop: the memory held, the edits made while it comes */
+        const { p, img, sets0, sh } = await pageInTurbo();
+        sh.pause();
+        p.click('turboexit');
+        await until(() => sh.queued(isType('memory')), 'the memory');
+        edit3(p);
+        const notes = p.note('minSpeed') + ' | ' + p.note('maxSpeed');
+        sh.resume();
+        await until(() => p.T.turboState === 'live', 'the hand-back');
+        ok(/as soon as Turbo hands the world back/.test(notes) && at5to10(p),
+           'Stop: the three held edits apply on the world handed back, in order (' + speeds(p) + ')');
+        const ref = await controlRun(img, workerEdits(sh).concat(p.sets.slice(sets0)), frame(p.M));
+        const d = sameFor(p.M, ref, 150);
+        ok(p.sets.slice(sets0).map(e => e[1] + '=' + e[2]).join(',') === 'minSpeed=0,maxSpeed=10,minSpeed=5' && d === '',
+           'Stop: the page applied 0, 10, 5; 150 further steps bit-identical to that' + (d ? ': ' + d : ''));
+    }
+    {   /* a lost world: the worker traps (no memory comes back); the edits held while that is on its way */
+        const { p, img, f0, sets0, sh } = await pageInTurbo();
+        sh.pause();
+        trapNext(sh);
+        await until(() => sh.queued(isType('error')), 'the trap');
+        p.click('turboexit');
+        edit3(p);
+        await sh.release(isType('error'), 'the error');
+        await until(() => p.T.turboState === 'live', 'the recovery');
+        ok(frame(p.M) === f0 && at5to10(p), 'a lost world: the page goes on from its own copy (frame ' + f0 + ') with all three, in order (' + speeds(p) + ')');
+        const ref = await controlRun(img, p.sets.slice(sets0), f0);
+        const d = sameFor(p.M, ref, 150);
+        ok(d === '', 'a lost world: 150 further steps bit-identical to the three edits applied at frame ' + f0 + (d ? ': ' + d : ''));
+    }
+    {   /* a hand-back the page cannot take: Turbo resumes, then the held edits go to the worker */
+        const { p, img, sh } = await pageInTurbo();
+        sh.pause();
+        p.click('turboexit');
+        await until(() => sh.queued(isType('memory')), 'the memory');
+        edit3(p);
+        const H = p.ctx.EvoOceanHandoff, take = H.take;
+        H.take = function () { H.take = take; throw new Error('injected: the page could not grow its memory'); };
+        sh.resume();
+        await until(() => p.T.turboState === 'turbo' && sh.toWorker.some(m => m.cmd === 'resume') &&
+                          sh.delivered.filter(isType('set')).length === sh.toWorker.filter(m => m.cmd === 'set').length, 'the resumed run\'s answers');
+        const order = sh.toWorker.filter(m => m.cmd !== 'rec').map(m => m.cmd === 'set' ? m.key + '=' + m.value : m.cmd).join(',');
+        ok(order === 'start,stop,resume,minSpeed=0,maxSpeed=10,minSpeed=5' && sh.fromWorker.filter(isType('set')).every(m => m.ok),
+           'a refused hand-back: the page resumes Turbo, then sends the three in order, each accepted (' + order + ')');
+        p.click('turboexit');
+        await until(() => p.T.turboState === 'live', 'the second hand-back');
+        ok(at5to10(p), 'a refused hand-back: the next Stop returns 5-10 (' + speeds(p) + ')');
+        const ref = await controlRun(img, workerEdits(sh), frame(p.M));
+        const d = sameFor(p.M, ref, 150);
+        ok(d === '', 'a refused hand-back: 150 further steps bit-identical to the edits at the worker\'s frames' + (d ? ': ' + d : ''));
+        ok(p.uncaught.length === 0, 'no exception escaped the page\'s handlers' + (p.uncaught.length ? ': ' + p.uncaught[0] : ''));
+    }
+}
+
+/* Every section, in order; `node tests/ocean_turbo_handoff.js NAME...` runs only those. */
+const SECTIONS = {
+    repeatedKeys, liveLedger, growthPage, randomize, imports,
+    roundTripDefault: () => roundTrip('the default world', {}),
+    roundTripE1: async () => {
+        const probe = await mk(1);
+        const e1 = JSON.parse(HO.cString(probe, probe._oc_e1_preset()));
+        await roundTrip('E1 physics, 3 predators with their economy, patchy food',
+                        Object.assign({}, e1, { predatorCount: 3, predatorEconomy: true, predatorMeal: 7, predatorMaxPopulation: 12,
+                                                foodPatches: 5, foodDepthMode: 1, bodyModel: true }));
+    },
+    failures: failures_,
+    pageHeld
+};
+const unhandled = [];
+process.on('unhandledRejection', (e) => { unhandled.push(e); });
 (async () => {
-    const t0 = Date.now();
-    await repeatedKeys();
-    await liveLedger();
-    await growthPage();
-    await randomize();
-    await imports();
-    await roundTrip('the default world', {});
-    const probe = await mk(1);
-    const e1 = JSON.parse(HO.cString(probe, probe._oc_e1_preset()));
-    await roundTrip('E1 physics, 3 predators with their economy, patchy food',
-                    Object.assign({}, e1, { predatorCount: 3, predatorEconomy: true, predatorMeal: 7, predatorMaxPopulation: 12,
-                                            foodPatches: 5, foodDepthMode: 1, bodyModel: true }));
-    await failures_();
+    const t0 = Date.now(), only = process.argv.slice(2);
+    const bad = only.filter(n => !SECTIONS[n]);
+    if (bad.length) throw new Error('no section ' + bad.join(', ') + ' (sections: ' + Object.keys(SECTIONS).join(', ') + ')');
+    for (const name of Object.keys(SECTIONS)) if (!only.length || only.includes(name)) await SECTIONS[name]();
+    ok(unhandled.length === 0, 'no unhandled promise rejection' + (unhandled.length ? ': ' + unhandled[0] : ''));
     console.log('\n' + (checks - failures) + ' / ' + checks + ' checks passed in ' + ((Date.now() - t0) / 1000).toFixed(1) + ' s');
     process.exit(failures ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(2); });

@@ -30,7 +30,10 @@
  * after anything that may have grown it.
  *
  * URL: ?seed=42 &pop=300 &depth=240 &w=1920 &h=1080 (1080 x 1920 on a
- *      portrait screen) &cfg={"key":value,...} (SimConfig + OceanConfig keys,
+ *      portrait screen; each in oc_init's limits, or the link is refused)
+ *      &walls=1|0 (glass walls or wrapping sides; every Restart writes it; a
+ *      link without it — from before walls — wraps, a bare address starts
+ *      with glass walls) &cfg={"key":value,...} (SimConfig + OceanConfig keys,
  *      as oc_init takes them; the settings show them) &speed=1 (steps per
  *      frame) &e1=1 (the E1 physics preset, oc_e1_preset, under &cfg)
  *      &colour=appearance|family|brain (else the visitor's last choice,
@@ -70,7 +73,7 @@
                   "oc_food_count", "oc_food_xy", "oc_food_depth", "oc_predator_count", "oc_predator_data",
                   "oc_predator_depth", "oc_stats", "oc_stats_len", "oc_width", "oc_height", "oc_depth_max"];
   var KEYS = CFG.KEYS, LIVE = CFG.LIVE, LABELS = CFG.LABELS;
-  var ARGS = { seed: 1, population: 1, depth: 1 };   /* oc_init's own arguments, not cfg keys */
+  var ARGS = { seed: 1, population: 1, depth: 1, width: 1, height: 1 };   /* oc_init's own arguments, not cfg keys */
   var ACTION_LABELS = ["steer x", "steer y", "swim forward", "wander", "speed", "signal",
                        "oscillator period", "respond", "share food", "reproduce", "fight", "ignore", "steer z (depth)"];
   var ACTION_SHORT = ["steer x", "steer y", "forward", "wander", "speed", "signal",
@@ -150,7 +153,12 @@
   function has(fn) { return !!M && typeof M["_" + fn] === "function"; }
   function withCString(str, fn) { return HO.withCString(M, str, fn); }
   function cString(ptr) { return HO.cString(M, ptr); }
-  function lastError() { return M._oc_last_error ? cString(M._oc_last_error()) : "(no oc_last_error)"; }
+  /* a refusal the page made itself (before oc_init), read once by lastError */
+  var pageError = "";
+  function lastError() {
+    if (pageError) { var e = pageError; pageError = ""; return e; }
+    return M._oc_last_error ? cString(M._oc_last_error()) : "(no oc_last_error)";
+  }
   /* Take a whole memory image of this same module (the Turbo hand-off): grown
    * to its size by exactly the pages missing, copied in, the rest zeroed
    * (web/ocean_handoff.js take(); web/ocean_worker.js says why this carries
@@ -158,6 +166,7 @@
   function takeMemory(src) { HO.take(M, src, "the page's"); }
 
   var W = 0, H = 0, D = 0, statsLen = 0, HAS_VZ = false, HAS_EYE = false, HAS_APP = false;
+  var WALLS = false;   /* the running world has glass walls (oc_walls_enabled) */
   var LIGHT = { on: false, L0: 1, k: 0 };
   function readLight() {
     var on = has("oc_light_enabled") && !!M._oc_light_enabled();
@@ -179,42 +188,59 @@
   var initArgs = null;       /* the last successful oc_init's {seed, population, depth, cfg} (Replay) */
   var extraCfg = {};         /* cfg keys from ?cfg= or a setup file that the sheet has no field for */
   function cfgVal(key) { return Object.prototype.hasOwnProperty.call(runCfg, key) ? runCfg[key] : KEYS[key][0]; }
-  /* World size for a (re)start: the native 1920 x 1080, or the same area on
-   * its side on a portrait screen (the same food density and crowding, and a
-   * tank that fills a phone), unless it is fixed: by ?w= / ?h=, or by a
-   * loaded setup's size. A Restart writes the size into the address, so a
-   * shared link is the same world on a screen the other way up. */
-  var URL_W = parseFloat(P.get("w")), URL_H = parseFloat(P.get("h"));
-  function side(v) { return Math.round(Math.max(100, Math.min(20000, v))); }
-  var fixedW = isFinite(URL_W) ? side(URL_W) : null, fixedH = isFinite(URL_H) ? side(URL_H) : null;
+  /* The tank's size, oc_init's width / height (the sheet's Tank width /
+   * length, like the depth): a new page's is the native 1920 x 1080, or the
+   * same area on its side on a portrait screen (the same food density and
+   * crowding, and a tank that fills a phone), unless ?w= / ?h= give it. Once
+   * a world runs its size is explicit: a Restart writes it into the address
+   * (so a shared link is the same world on a screen the other way up), Save
+   * setup into the file. The size limits are oc_init's own (SIZE_LIMITS) and
+   * the same for the link, the sheet and a setup file: a value outside them
+   * is refused with the reason, never quietly changed. */
+  var LIM = CFG.SIZE_LIMITS;
+  function wholeIn(v, lim) { return typeof v === "number" && Number.isInteger(v) && v >= lim[0] && v <= lim[1]; }
+  function depthOk(v) { return typeof v === "number" && isFinite(v) && v >= LIM.depth[0] && v <= LIM.depth[1]; }
+  /* ?w= / ?h=: null when absent, else the number written (checked at start) */
+  function urlNum(k) { return P.has(k) ? Number(P.get(k)) : null; }
+  var URL_W = urlNum("w"), URL_H = urlNum("h");
   function isPortrait() { return innerHeight > innerWidth * 1.15; }
   function screenWorld() { return isPortrait() ? [1080, 1920] : [1920, 1080]; }
   function fittedWorld() {
     var f = screenWorld();
-    return [fixedW !== null ? fixedW : f[0], fixedH !== null ? fixedH : f[1]];
+    return [URL_W !== null ? URL_W : f[0], URL_H !== null ? URL_H : f[1]];
   }
   /* "Fit the world to this screen": offered when the world has the other
    * orientation's size (the phone turned, or a link from a screen the other
-   * way up); a size of its own (?w=300&h=300) stays as it is */
+   * way up); a size of its own (?w=300&h=300) stays as it is. Turning the
+   * device only refits the camera: changing the world's orientation is this
+   * explicit Restart. */
   function updateFitButton() {
     var f = screenWorld();
     el("fitbtn").hidden = !M || !(W === f[1] && H === f[0]);
   }
   function fitToScreen() {
     if (!M || guardTurbo()) return;
-    var w0 = fixedW, h0 = fixedH;
-    fixedW = fixedH = null;
-    if (!restart()) { fixedW = w0; fixedH = h0; }
+    var w0 = getVal("width"), h0 = getVal("height"), f = screenWorld();
+    setVal("width", f[0]); setVal("height", f[1]);
+    if (!restart()) { setVal("width", w0); setVal("height", h0); }
   }
+  /* the tank's sides: glass walls in the running world (oc_walls_enabled), and
+   * whether this module knows them at all */
+  function hasWalls() { return has("oc_walls_enabled"); }
+  function wallsOn() { return hasWalls() && !!M._oc_walls_enabled(); }
   var worldReady = false;
   /* repeats: the later occurrences of cfg's repeated keys (HO.parseFirst), so
-   * oc_init checks each and takes the first, as it does for its own JSON */
-  function initWorld(seed, population, depth, cfg, rawCfg, repeats) {
-    var size = fittedWorld();
+   * oc_init checks each and takes the first, as it does for its own JSON.
+   * size: [width, height] (the sheet's, the link's, a setup's). */
+  function initWorld(seed, population, depth, cfg, rawCfg, repeats, size) {
+    if (cfg && cfg.walls === true && !hasWalls()) {   /* a stale module: it would ignore the key */
+      pageError = "glass walls need a newer engine module (this one has no oc_walls_enabled: rebuild web/evo_ocean)";
+      return false;
+    }
     var json = rawCfg !== undefined ? rawCfg : HO.cfgJson(cfg, repeats);
     var ok = withCString(json, function (ptr) { return M._oc_init(seed >>> 0, size[0], size[1], depth, population, ptr); });
     if (!ok) return false;
-    initArgs = { seed: seed >>> 0, population: population, depth: depth, cfg: cfg };
+    initArgs = { seed: seed >>> 0, population: population, depth: depth, width: size[0], height: size[1], cfg: cfg };
     runCfg = Object.assign({}, cfg);
     clearFieldNotes();
     afterNewWorld();
@@ -233,7 +259,7 @@
    * (HO.parseFirst; cfg holds the first): each is checked here too, and
    * goes on to oc_init, which checks it and runs the first, as the sheet
    * then shows. */
-  function importWorld(seed, population, depth, cfg, raw, repeats) {
+  function importWorld(seed, population, depth, cfg, raw, repeats, size) {
     var clean = {}, more = [], bad = [];
     function aSwitch(k, v) {
       if (KEYS[k] && typeof KEYS[k][0] === "boolean" && typeof v !== "boolean")
@@ -250,9 +276,10 @@
       aSwitch(r.key, r.value);
     });
     if (bad.length) return bad.join("; ");
-    if (!initWorld(seed, population, depth, clean, raw, more)) return lastError();
+    if (!initWorld(seed, population, depth, clean, raw, more, size)) return lastError();
     resetForm();
     setVal("seed", seed >>> 0); setVal("population", population); setVal("depth", depth);
+    setVal("width", W); setVal("height", H);
     cfgToForm(clean);
     updateNeeds(); updateTabDots(); setPending(false);
     var odd = Object.keys(clean).filter(function (k) {
@@ -265,11 +292,12 @@
   }
   /* a new world (oc_init or oc_reset), or one handed back by Turbo */
   function afterNewWorld(fromTurbo) {
-    var w0 = W, h0 = H, d0 = D;
+    var w0 = W, h0 = H, d0 = D, g0 = WALLS;
     readWorld();
+    WALLS = wallsOn();
     M._oc_sync();         /* the last snapshot's views are the old world's: */
     lastS = snapshot();   /* the new world's now, not at the next frame */
-    if (scene && (W !== w0 || H !== h0 || D !== d0)) { scene.setWorld(W, H, D); labelHist(); }
+    if (scene && (W !== w0 || H !== h0 || D !== d0 || WALLS !== g0)) { scene.setWorld(W, H, D, { walls: WALLS }); labelHist(); }
     applyDisplaySwitches();
     updateModeline();     /* the world's appearance genes may differ */
     estPrev.n = 0;
@@ -413,7 +441,17 @@
       if (typeof def === "boolean" ? v !== def : v !== def) cfg[k] = v;
     });
     Object.keys(extraCfg).forEach(function (k) { if (!(k in cfg)) cfg[k] = extraCfg[k]; });
-    return { seed: getVal("seed") >>> 0, population: getVal("population"), depth: getVal("depth"), cfg: cfg };
+    return { seed: getVal("seed") >>> 0, population: getVal("population"), depth: getVal("depth"),
+             width: getVal("width"), height: getVal("height"), cfg: cfg };
+  }
+  /* the sheet's size fields against oc_init's limits: "" or why not */
+  function sizeProblem(f) {
+    var bad = [];
+    if (!wholeIn(f.width, LIM.side)) bad.push("the tank width must be a whole number from " + LIM.side[0] + " to " + LIM.side[1] + " (got " + f.width + ")");
+    if (!wholeIn(f.height, LIM.side)) bad.push("the tank length must be a whole number from " + LIM.side[0] + " to " + LIM.side[1] + " (got " + f.height + ")");
+    if (!depthOk(f.depth)) bad.push("the sea depth must be from " + LIM.depth[0] + " to " + LIM.depth[1] + " (got " + f.depth + ")");
+    if (!wholeIn(f.population, LIM.population)) bad.push("the starting fish must be a whole number from 0 to " + LIM.population[1] + " (got " + f.population + ")");
+    return bad.join("; ");
   }
   /* ---- live settings ----
    * A live field shows what the running world uses, or says why not:
@@ -531,6 +569,7 @@
       panel.dataset.tab = tab.id;
       panel.setAttribute("role", "tabpanel");
       if (tab.id === "ocean") panel.appendChild(presetBox());
+      if (tab.id === "world") panel.appendChild(bigTankBox());
       tab.groups.forEach(function (g) {
         var h = document.createElement("h3");
         h.textContent = g[0];
@@ -562,6 +601,32 @@
     });
     return box;
   }
+  /* the World tab's "Big tank": a whole recipe for a tank four times the
+   * standard volume (EvoOceanConfig.BIG_TANK: 3840 x 2160 x 240, 2000 fish,
+   * glass walls, four times the food, a 2000-fish cap), started at once.
+   * Editing the size by hand changes only the size; this (and Randomize)
+   * are the actions that rebalance the whole world. */
+  function bigTankBox() {
+    var b = CFG.BIG_TANK, box = document.createElement("div");
+    box.className = "preset";
+    box.innerHTML = "<button type='button' class='btn' id='bigbtn'><svg class='i'><use href='#i-restart'/></svg>Start the Big tank</button>" +
+      "<p>A glass tank four times the standard volume (" + b.width + " × " + b.height + " × " + b.depth + "), with " + b.population +
+      " fish, four times the food and the tuned water (waves, a gentle deep current, light, depth costs). Births stop at " +
+      b.cfg.maxPopulation + " fish. It starts a new world at once (this seed).</p>";
+    box.querySelector("#bigbtn").addEventListener("click", function () { startBigTank(); this.blur(); });
+    return box;
+  }
+  function startBigTank() {
+    if (!M || guardTurbo()) return;
+    if (!hasWalls()) { showError("The Big tank needs glass walls: this engine module has none (rebuild web/evo_ocean)."); return; }
+    var b = CFG.BIG_TANK, seed = getVal("seed");
+    resetForm();
+    setVal("seed", seed);
+    setVal("width", b.width); setVal("height", b.height); setVal("depth", b.depth); setVal("population", b.population);
+    cfgToForm(b.cfg);
+    updateNeeds(); updateTabDots();
+    if (restart()) toast("The Big tank: " + b.width + " × " + b.height + " × " + b.depth + ", " + b.population + " fish, glass walls.");
+  }
   function setSheetTab(id) {
     currentTab = id;
     CFG.TABS.forEach(function (tab) {
@@ -585,8 +650,13 @@
   function updateTabDots() {
     CFG.TABS.forEach(function (tab) {
       if (!tab.groups) return;
+      /* against what a new page starts with: the screen's size, glass walls */
+      var sw = screenWorld();
+      var pageDef = function (k) {
+        return k === "width" ? sw[0] : k === "height" ? sw[1] : (k in CFG.FRESH && hasWalls()) ? CFG.FRESH[k] : KEYS[k][0];
+      };
       var changed = tab.groups.some(function (g) {
-        return g[1].some(function (k) { return k !== "seed" && k !== "population" && getVal(k) !== KEYS[k][0]; });
+        return g[1].some(function (k) { return k !== "seed" && k !== "population" && getVal(k) !== pageDef(k); });
       });
       var b = el("tab-" + tab.id), dot = b.querySelector(".dot");
       if (changed && !dot) { dot = document.createElement("span"); dot.className = "dot"; dot.title = "changed from the default"; b.appendChild(dot); }
@@ -598,6 +668,9 @@
   function hasCurrent() { return getVal("currentStrength") > 0; }
   function hasPredators() { return getVal("predatorCount") > 0; }
   var NEEDS = [
+    [["walls"], function () { return M && !hasWalls() ? "needs a newer engine module (this one has no glass walls)" : ""; }],
+    [["sideWallBand", "sideWallTurnRate"], function () { return getVal("walls") ? "" : "needs glass walls on"; }],
+    [["toroidal"], function () { return getVal("walls") ? "off with glass walls: a walled tank has no seam to sense across" : ""; }],
     [["foodPatchRadius", "foodDepthMode"], function () { return getVal("foodPatches") > 0 ? "" : "needs food patches above 0"; }],
     [["foodDepthSpread"], function () { return getVal("foodPatches") > 0 && getVal("foodDepthMode") === 1 ? "" : "needs food patches, each at its own depth"; }],
     [["foodDrift", "currentMode", "currentDrift", "deepCurrent"], function () { return hasCurrent() ? "" : "needs a current (strength above 0)"; }],
@@ -639,6 +712,11 @@
         hint.textContent = why;
       });
     });
+    /* glass walls and wrap-around senses exclude each other (the engine
+     * refuses both): with walls checked the wrap switch is off and locked */
+    var tor = el("o_toroidal"), wl = el("o_walls");
+    if (tor) tor.disabled = !!getVal("walls");
+    if (wl) wl.disabled = !!M && !hasWalls();
   }
   function setPending(on) {
     var b = el("restart");
@@ -647,6 +725,7 @@
   }
   function onEdit(e) {
     var t = e.target;
+    if (t && t.id === "o_walls" && t.checked) setVal("toroidal", false);   /* walls need toroidal off */
     updateNeeds();
     updateTabDots();
     if (!t || !t.id || t.id.indexOf("o_") !== 0 || LIVE[t.id.slice(2)]) return;   /* live ones apply by themselves */
@@ -662,8 +741,9 @@
   function restart() {
     if (!M || guardTurbo()) return false;
     clearError();
-    var f = readForm();
-    if (!initWorld(f.seed, f.population, f.depth, f.cfg)) {
+    var f = readForm(), why = sizeProblem(f);
+    if (why) { showError("Couldn't start that world: " + why + "."); return false; }
+    if (!initWorld(f.seed, f.population, f.depth, f.cfg, undefined, undefined, [f.width, f.height])) {
       showError("Couldn't start that world: " + lastError());
       return false;
     }
@@ -684,16 +764,23 @@
     if (!M._oc_reset()) { showError("oc_reset failed: " + lastError()); return; }
     resetForm();
     setVal("seed", initArgs.seed); setVal("population", initArgs.population); setVal("depth", initArgs.depth);
+    setVal("width", initArgs.width); setVal("height", initArgs.height);
     cfgToForm(initArgs.cfg);
     runCfg = Object.assign({}, initArgs.cfg);
     updateNeeds(); updateTabDots(); setPending(false);
     afterNewWorld();
     toast("Replaying seed " + initArgs.seed + " from its start.");
   }
+  /* Randomize keeps the tank as it is set (its size, depth and sides) and
+   * draws a recipe for it: drawn for the standard tank, scaled once to this
+   * volume (EvoOceanConfig.draw); with glass walls it never wraps */
   function randomize() {
     if (!M || guardTurbo()) return;
-    var pick = CFG.draw(Math.random, KEYS.population[0], e1Preset(), fittedWorld());   /* the size it will start at */
+    var keep = { width: getVal("width"), height: getVal("height"), depth: getVal("depth"), walls: getVal("walls"),
+                 sideWallBand: getVal("sideWallBand"), sideWallTurnRate: getVal("sideWallTurnRate") };
+    var pick = CFG.draw(Math.random, KEYS.population[0], e1Preset(), [keep.width, keep.height, keep.depth, keep.walls]);
     resetForm();
+    Object.keys(keep).forEach(function (k) { setVal(k, keep[k]); });
     Object.keys(pick.set).forEach(function (k) { setVal(k, pick.set[k]); });
     setVal("population", pick.population);
     setVal("seed", (Math.random() * 0x100000000) >>> 0);
@@ -714,7 +801,11 @@
       u.searchParams.set("w", String(W)); u.searchParams.set("h", String(H));
       if (initArgs.population !== KEYS.population[0]) u.searchParams.set("pop", String(initArgs.population)); else u.searchParams.delete("pop");
       if (initArgs.depth !== KEYS.depth[0]) u.searchParams.set("depth", String(initArgs.depth)); else u.searchParams.delete("depth");
-      if (Object.keys(initArgs.cfg).length) u.searchParams.set("cfg", JSON.stringify(initArgs.cfg)); else u.searchParams.delete("cfg");
+      /* the sides, always explicit (a link without walls= is an old one, which wraps) */
+      if (hasWalls()) u.searchParams.set("walls", WALLS ? "1" : "0");
+      var cfgOut = Object.assign({}, initArgs.cfg);
+      delete cfgOut.walls;
+      if (Object.keys(cfgOut).length) u.searchParams.set("cfg", JSON.stringify(cfgOut)); else u.searchParams.delete("cfg");
       u.searchParams.delete("e1");   /* its keys are in cfg now */
       history.replaceState(null, "", u);
     } catch (e) { /* file:// or a sandboxed frame */ }
@@ -722,10 +813,15 @@
   /* Save setup: the running world's — its seed, size and settings, with the
    * live changes that applied since it started. Edits still waiting for a
    * Restart are not in it (they are not the running world's), and it says so. */
+  /* Version 2 (glass walls): `walls` is its own field, always written; a
+   * version-1 file (before walls existed) loads as a wrapping world. */
+  var SETUP_VERSION = 2;
   function saveSetup() {
     if (!initArgs) return;
-    var setup = { format: "evo_ocean_setup", version: 1, seed: initArgs.seed, population: initArgs.population,
-                  depth: initArgs.depth, width: W, height: H, config: Object.assign({}, runCfg) };
+    var config = Object.assign({}, runCfg);
+    delete config.walls;
+    var setup = { format: "evo_ocean_setup", version: SETUP_VERSION, seed: initArgs.seed, population: initArgs.population,
+                  depth: initArgs.depth, width: W, height: H, walls: WALLS, config: config };
     var url = URL.createObjectURL(new Blob([JSON.stringify(setup, null, 2)], { type: "application/json" }));
     var a = document.createElement("a");
     a.href = url; a.download = "evo_ocean_setup_seed" + initArgs.seed + ".json";
@@ -751,6 +847,10 @@
         top.some(function (r) { return r.key === "format" && r.value !== "evo_ocean_setup"; })) {
       showError("That file is not an Ocean setup (Save setup makes one)."); return;
     }
+    var version = s.version === undefined ? 1 : s.version;
+    if (version !== 1 && version !== SETUP_VERSION) {
+      showError("That setup is version " + JSON.stringify(s.version) + "; this page reads versions 1 and " + SETUP_VERSION + "."); return;
+    }
     var bad = [];
     function arg(name, def, ok) {
       top.forEach(function (r) { if (r.key === name && r.value !== null && !ok(r.value)) bad.push(name + " " + JSON.stringify(r.value)); });
@@ -759,17 +859,20 @@
       return s[name];
     }
     function whole(lo, hi) { return function (v) { return Number.isInteger(v) && v >= lo && v <= hi; }; }
-    var seed = arg("seed", KEYS.seed[0], whole(0, 4294967295)), pop = arg("population", KEYS.population[0], whole(0, 100000));
-    var depth = arg("depth", KEYS.depth[0], function (v) { return typeof v === "number" && isFinite(v); });
-    var w = arg("width", null, whole(100, 100000)), h = arg("height", null, whole(100, 100000));
-    if (bad.length) { showError("That setup can't start: " + bad.join(", ") + " (whole numbers in range)."); return; }
-    var w0 = fixedW, h0 = fixedH;
-    if (w !== null) fixedW = w;
-    if (h !== null) fixedH = h;
+    var seed = arg("seed", KEYS.seed[0], whole(0, 4294967295)), pop = arg("population", KEYS.population[0], whole(LIM.population[0], LIM.population[1]));
+    var depth = arg("depth", KEYS.depth[0], depthOk);
+    var fw = fittedWorld();
+    var w = arg("width", fw[0], whole(LIM.side[0], LIM.side[1])), h = arg("height", fw[1], whole(LIM.side[0], LIM.side[1]));
+    /* the sides: version 2 says (a bool); version 1 is from before walls, so
+     * it wraps unless its config itself asks for them */
+    var walls = version === 1 ? s.config.walls === true : arg("walls", null, function (v) { return typeof v === "boolean"; });
+    if (version !== 1 && walls === null) bad.push("walls (missing: a version-2 setup says true or false)");
+    if (bad.length) { showError("That setup can't start: " + bad.join(", ") + " (whole numbers in range; walls true or false)."); return; }
+    var config = Object.assign({}, s.config);
+    if (walls) config.walls = true; else delete config.walls;
     clearError();
-    var why = importWorld(seed, pop, depth, s.config, undefined, cfgRepeats);
+    var why = importWorld(seed, pop, depth, config, undefined, cfgRepeats, [w, h]);
     if (why) {
-      fixedW = w0; fixedH = h0;
       showError("That setup was refused: " + why);
       return;
     }
@@ -1818,7 +1921,9 @@
                : ", coloured by family (" + (HAS_APP ? "the appearance genes are off in this world" : "this module has no appearance genes") + ")")
       : (flags & 2 ? ", each fish in its inherited body shape" : "") + (colourBrain ? ", coloured by brain" : ", coloured by family");
     el("modeline").textContent = "Running the single-threaded Ocean module, reproducible from the seed" +
-      (HAS_EYE ? " (the eye build)" : "") + ". Drawing: the 3D tank" + (scene ? ", detail " + scene.quality() + " of 3" : "") +
+      (HAS_EYE ? " (the eye build)" : "") + ". The tank: " + W + " × " + H + " × " + D +
+      (WALLS ? ", glass walls" : ", the sides wrap around") +
+      ". Drawing: the 3D tank" + (scene ? ", detail " + scene.quality() + " of 3" : "") +
       what + ".";
   }
   setPaused(false);
@@ -2003,11 +2108,42 @@
     }
     if (E1 && !has("oc_e1_preset")) throw new Error("?e1=1 needs oc_e1_preset: rebuild web/evo_ocean (wasm/build_ocean.sh)");
     var cfg0 = badCfg ? {} : Object.assign({}, E1 ? e1Preset() : {}, userCfg);
-    var num = function (key, def, lo, hi) { var v = parseFloat(P.get(key)); return isFinite(v) ? Math.max(lo, Math.min(hi, v)) : def; };
-    var refused = importWorld(num("seed", KEYS.seed[0], 0, 4294967295) >>> 0, Math.round(num("pop", KEYS.population[0], 0, 100000)),
-                              num("depth", KEYS.depth[0], 10, 100000), cfg0, badCfg ? rawCfg : undefined, badCfg ? [] : cfgRepeats);
+    /* The link's numbers, as written: a value outside oc_init's limits (or
+     * not a number) refuses the link with the reason, as a setup file does;
+     * nothing is clamped into range. */
+    var linkBad = [];
+    var num = function (key, def, ok, what) {
+      if (!P.has(key)) return def;
+      var v = Number(P.get(key));
+      if (!ok(v)) linkBad.push(key + "=" + P.get(key) + " (" + what + ")");
+      return v;
+    };
+    var seed0 = num("seed", KEYS.seed[0], function (v) { return wholeIn(v, [0, 4294967295]); }, "a whole number from 0 to 4294967295");
+    var pop0 = num("pop", KEYS.population[0], function (v) { return wholeIn(v, LIM.population); }, "a whole number from 0 to " + LIM.population[1]);
+    var depth0 = num("depth", KEYS.depth[0], depthOk, "from " + LIM.depth[0] + " to " + LIM.depth[1]);
+    var sideWhat = "a whole number from " + LIM.side[0] + " to " + LIM.side[1];
+    num("w", 0, function (v) { return wholeIn(v, LIM.side); }, sideWhat);
+    num("h", 0, function (v) { return wholeIn(v, LIM.side); }, sideWhat);
+    /* the sides: ?walls=1 / 0 (written by every Restart); a link without it
+     * from before walls existed wraps as it always did (and so does a ?cfg=
+     * without "walls"); a bare address — a new visit — starts with glass
+     * walls (CFG.FRESH), when this module has them */
+    var freshVisit = ["seed", "pop", "depth", "w", "h", "cfg", "e1", "walls"].every(function (k) { return !P.has(k); });
+    if (P.has("walls")) {
+      var wv = P.get("walls");
+      if (wv === "1") cfg0.walls = true;
+      else if (wv === "0") delete cfg0.walls;
+      else linkBad.push("walls=" + wv + " (1 or 0)");
+    } else if (freshVisit && hasWalls()) {
+      Object.keys(CFG.FRESH).forEach(function (k) { if (!(k in cfg0)) cfg0[k] = CFG.FRESH[k]; });
+    }
+    if (linkBad.length) {
+      linkRefused = true;
+      throw new Error("This link's setup was refused: " + linkBad.join("; ") + ".");
+    }
+    var refused = importWorld(seed0 >>> 0, pop0, depth0, cfg0, badCfg ? rawCfg : undefined, badCfg ? [] : cfgRepeats, fittedWorld());
     if (refused) {
-      linkRefused = !!(rawCfg || E1);
+      linkRefused = !!(rawCfg || E1 || P.has("walls"));
       throw new Error("This link's settings were refused: " + refused);
     }
     scene = EvoOceanScene.create(canvas, {
@@ -2018,7 +2154,7 @@
     });
     if (!scene) throw new Error("WebGL2 is unavailable, and the 3-D Ocean has only the 3D tank");
     detail0 = scene.quality();
-    scene.setWorld(W, H, D);
+    scene.setWorld(W, H, D, { walls: WALLS });
     scene.setLight(LIGHT);
     if (scene.setAppearance) scene.setAppearance(colourMode === "appearance");
     labelHist();
@@ -2070,7 +2206,7 @@
                  runCfg: Object.assign({}, runCfg), light: LIGHT, flashlight: scene.flashlight(), flashlightLevel: scene.flashlightLevel(),
                  stepMs: stepMs, fps: fps, following: scene.following(), selectedId: selectedId, selIdx: s.selIdx,
                  turbo: turboState, colourBrain: colourBrain, frame: s.stats[1],
-                 held: live.held(), inflight: live.inflight(), fixedSize: [fixedW, fixedH],
+                 held: live.held(), inflight: live.inflight(), fixedSize: [URL_W, URL_H], walls: WALLS, hasWalls: hasWalls(),
                  stats: Array.prototype.slice.call(s.stats), depthMin: s.n ? lo : 0, depthMax: s.n ? hi : 0,
                  dashRows: dash() ? dash()._rows().length : 0 };
       }
@@ -2087,7 +2223,7 @@
     splashSay("The 3-D Ocean could not start.\n" + why, true);
     if (linkRefused) {   /* the same link without its settings */
       var u = new URL(location.href), a = document.createElement("a");
-      u.searchParams.delete("cfg"); u.searchParams.delete("e1");
+      ["cfg", "e1", "walls", "w", "h", "pop", "depth", "seed"].forEach(function (k) { u.searchParams.delete(k); });
       a.href = u.href; a.id = "splashplain"; a.className = "btn";
       a.textContent = "Open it with the default settings";
       el("splashstate").parentNode.appendChild(a);

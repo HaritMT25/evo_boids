@@ -1650,6 +1650,14 @@ private:
     // p_L(q) = max(0, 1 − q/b) − max(0, 1 − (L − q)/b)) turns toward a / |a| by
     // at most sideWallTurnRate · max(|p_W|, |p_H|) · dt (portable atan2 / sin /
     // cos); head-on (exactly π away), the positive way. Speed is not touched.
+    // "Toward the wall" grows with the depth into the band, d = max(|p_W|,
+    // |p_H|) (0 at its inner edge, 1 at the glass): the heading must point
+    // INWARD by at least d (h · a/|a| >= d), so a fish deep in the band turns
+    // back into the tank instead of settling parallel to the glass. (Turning
+    // only while h · a < 0, the design's first rule, left every heading just
+    // parallel to the glass: in the Big tank 52-60% of the fish cruised in the
+    // 80-unit band — 11% of the area — within 2000-4000 steps, with the
+    // interior's food uneaten; the Gemini Argon q17 "wall highway".)
     void wallAvoid(Vec2 p, Vec2& h, float dt) const {
         auto push = [](float q, float L, float b) {
             if (!(b > 0.0f)) return 0.0f;
@@ -1659,8 +1667,9 @@ private:
         const float ax = push(p.x, W, std::min(ocfg.sideWallBand, 0.5f * W));
         const float ay = push(p.y, H, std::min(ocfg.sideWallBand, 0.5f * H));
         if (ax == 0.0f && ay == 0.0f) return;
-        if (h.x * ax + h.y * ay >= 0.0f) return;   // along or away from the glass
-        const float maxStep = ocfg.sideWallTurnRate * std::max(std::abs(ax), std::abs(ay)) * dt;
+        const float depth = std::max(std::abs(ax), std::abs(ay));
+        if (h.x * ax + h.y * ay >= depth * std::sqrt(ax * ax + ay * ay)) return;   // inward enough for this depth
+        const float maxStep = ocfg.sideWallTurnRate * depth * dt;
         if (!(maxStep > 0.0f)) return;
         const float th = evomath::atan2f(h.y, h.x), ta = evomath::atan2f(ay, ax);
         float dl = ta - th;

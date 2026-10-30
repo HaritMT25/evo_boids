@@ -77,13 +77,19 @@
    * standard 50, x4), a 48 touch radius (2.4x the encounter volume of 36, for
    * pairing where fish are as sparse as 500 in the standard tank), no
    * predators, and the tuned E1 water (waves, a gentle deep current, light,
-   * depth costs) with the walls' flow. wasm/ocean_parity.sh BIGTANK is this
+   * depth costs) with the walls' flow. Steering in the fish's own frame
+   * (steerFrame 1): with world-frame steering a fish whose net outputs a
+   * steady STEER_X / STEER_Y is pushed toward one wall like a constant force
+   * and held in the glass's turn-away band — 35-40% of the Big tank's fish
+   * within 80 units of the glass (11% of its area) over its first ~20k
+   * steps, fading as fish evolve; in their own frame a steady steer only
+   * turns them, and 14-15% are there. wasm/ocean_parity.sh BIGTANK is this
    * cfg verbatim (its walls_bigtank_s9 case). */
   var BIG_TANK = {
     width: 3840, height: 2160, depth: 240, population: 2000,
     cfg: { walls: true, maxPopulation: 2000, minPopulation: 200, targetFood: 9600, foodSpawnBase: 12, foodSpawnAmp: 8,
            foodEnergy: 5, interactRadius: 48, waveSpeed: 6, deepCurrent: true, currentStrength: 5, foodDrift: true,
-           lightEnabled: true, depthCostScaled: true, cHold: 0.05, cPress: 0.03 }
+           lightEnabled: true, depthCostScaled: true, cHold: 0.05, cPress: 0.03, steerFrame: 1 }
   };
   /* The tank sizes a setup may have (oc_init's own limits) */
   var SIZE_LIMITS = { side: [100, 100000], depth: [10, 100000], population: [0, 100000] };

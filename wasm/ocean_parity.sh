@@ -396,7 +396,7 @@ add app_long_s42  '42 20000 --every 500 --expect appOffspring>0' "20k steps, def
 # predator outside the closed tank after any step) and the branch it is for.
 # BIGTANK = the page's "Big tank" preset (web/ocean_config.js BIG_TANK) verbatim
 # (checked below). ----
-BIGTANK='"walls":true,"maxPopulation":2000,"minPopulation":200,"targetFood":9600,"foodSpawnBase":12,"foodSpawnAmp":8,"foodEnergy":5,"interactRadius":48,"waveSpeed":6,"deepCurrent":true,"currentStrength":5,"foodDrift":true,"lightEnabled":true,"depthCostScaled":true,"cHold":0.05,"cPress":0.03'
+BIGTANK='"walls":true,"maxPopulation":2000,"minPopulation":200,"targetFood":9600,"foodSpawnBase":12,"foodSpawnAmp":8,"foodEnergy":5,"interactRadius":48,"waveSpeed":6,"deepCurrent":true,"currentStrength":5,"foodDrift":true,"lightEnabled":true,"depthCostScaled":true,"cHold":0.05,"cPress":0.03,"steerFrame":1'
 WALLX='--expect wallSteps>0 --expect outside=0'
 add walls_def_s1  "1 3000 --cfg {\"walls\":true} $WALLX --expect wallTouch>0" "glass walls, defaults: soft turns, contact, trails held inside"
 add walls_def_s999 "999 3000 --cfg {\"walls\":true} $WALLX" "glass walls, another seed"

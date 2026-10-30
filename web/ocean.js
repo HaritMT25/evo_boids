@@ -235,15 +235,21 @@
    * oc_init checks each and takes the first, as it does for its own JSON.
    * size: [width, height] (the sheet's, the link's, a setup's). */
   function initWorld(seed, population, depth, cfg, rawCfg, repeats, size) {
-    if (cfg && cfg.walls === true && !hasWalls()) {   /* a stale module: it would ignore the key */
+    if (cfg && (cfg.walls === true || cfg.walls === 1) && !hasWalls()) {   /* a stale module: it would ignore the key */
       pageError = "glass walls need a newer engine module (this one has no oc_walls_enabled: rebuild web/evo_ocean)";
       return false;
     }
     var json = rawCfg !== undefined ? rawCfg : HO.cfgJson(cfg, repeats);
     var ok = withCString(json, function (ptr) { return M._oc_init(seed >>> 0, size[0], size[1], depth, population, ptr); });
     if (!ok) return false;
-    initArgs = { seed: seed >>> 0, population: population, depth: depth, width: size[0], height: size[1], cfg: cfg };
-    runCfg = Object.assign({}, cfg);
+    /* the bookkeeping, once the engine has taken it: an on / off key as
+     * true / false (the Ocean's own also come as 0 / 1: oc_init takes those) */
+    var accepted = Object.assign({}, cfg);
+    Object.keys(accepted).forEach(function (k) {
+      if (KEYS[k] && typeof KEYS[k][0] === "boolean") accepted[k] = accepted[k] === true || accepted[k] === 1;
+    });
+    initArgs = { seed: seed >>> 0, population: population, depth: depth, width: size[0], height: size[1], cfg: accepted };
+    runCfg = Object.assign({}, accepted);
     clearFieldNotes();
     afterNewWorld();
     return true;
@@ -254,30 +260,19 @@
    * drop what they can't hold (0.5 for a count, 2 for an on / off key or a
    * choice). On a refusal nothing changes: the running world, the sheet.
    * raw: the cfg as text instead (a ?cfg= that is not JSON). Returns "", or
-   * why not. A switch must be true or false: the engine reads Classic's
-   * switches (toroidal, bodyModel, ...) only as JSON booleans and passes over
-   * anything else, so {"toroidal":1} would run without it under a sheet
-   * showing it on. repeats: the later occurrences of a repeated key
-   * (HO.parseFirst; cfg holds the first): each is checked here too, and
-   * goes on to oc_init, which checks it and runs the first, as the sheet
-   * then shows. */
+   * why not. The on / off keys are the engine's to check, as every value is
+   * (one rule, in one place): a SimConfig switch (toroidal, bodyModel, ...)
+   * must be a JSON true / false, the Ocean's own (lightEnabled, walls, ...)
+   * may also be the number 0 / 1, and oc_init checks every occurrence before
+   * it replaces the world (wasm/ocean_wasm.cpp). The sheet shows what it
+   * runs (setVal: true or 1 is on); initWorld keeps true / false.
+   * repeats: the later occurrences of a repeated key (HO.parseFirst; cfg
+   * holds the first): they go on to oc_init, which checks each and runs the
+   * first, as the sheet then shows. */
   function importWorld(seed, population, depth, cfg, raw, repeats, size) {
-    var clean = {}, more = [], bad = [];
-    function aSwitch(k, v) {
-      if (KEYS[k] && typeof KEYS[k][0] === "boolean" && typeof v !== "boolean")
-        bad.push(k + " must be true or false (got " + JSON.stringify(v) + ")");
-    }
-    Object.keys(cfg || {}).forEach(function (k) {
-      if (ARGS[k]) return;
-      clean[k] = cfg[k];
-      aSwitch(k, cfg[k]);
-    });
-    (repeats || []).forEach(function (r) {
-      if (ARGS[r.key]) return;
-      more.push(r);
-      aSwitch(r.key, r.value);
-    });
-    if (bad.length) return bad.join("; ");
+    var clean = {}, more = [];
+    Object.keys(cfg || {}).forEach(function (k) { if (!ARGS[k]) clean[k] = cfg[k]; });
+    (repeats || []).forEach(function (r) { if (!ARGS[r.key]) more.push(r); });
     if (!initWorld(seed, population, depth, clean, raw, more, size)) return lastError();
     resetForm();
     setVal("seed", seed >>> 0); setVal("population", population); setVal("depth", depth);
@@ -871,13 +866,14 @@
     var depth = arg("depth", KEYS.depth[0], depthOk);
     var fw = fittedWorld();
     var w = arg("width", fw[0], whole(LIM.side[0], LIM.side[1])), h = arg("height", fw[1], whole(LIM.side[0], LIM.side[1]));
-    /* the sides: version 2 says (a bool); version 1 is from before walls, so
-     * it wraps unless its config itself asks for them */
-    var walls = version === 1 ? s.config.walls === true : arg("walls", null, function (v) { return typeof v === "boolean"; });
+    /* the sides: version 2 says (its own field, a bool, over its config's);
+     * version 1 is from before walls, so it wraps unless its config itself
+     * asks for them, which oc_init checks as any Ocean switch (true / 1 on) */
+    var walls = version === 1 ? null : arg("walls", null, function (v) { return typeof v === "boolean"; });
     if (version !== 1 && walls === null) bad.push("walls (missing: a version-2 setup says true or false)");
     if (bad.length) { showError("That setup can't start: " + bad.join(", ") + " (whole numbers in range; walls true or false)."); return; }
     var config = Object.assign({}, s.config);
-    if (walls) config.walls = true; else delete config.walls;
+    if (version !== 1) { if (walls) config.walls = true; else delete config.walls; }
     clearError();
     var why = importWorld(seed, pop, depth, config, undefined, cfgRepeats, [w, h]);
     if (why) {

@@ -821,7 +821,7 @@ async function imports() {
     /* Classic's switches used to be read only as JSON booleans, anything else
      * passed over ({"toroidal":1} ran with walls while the sheet showed it on).
      * The engine now refuses a switch that is not true / false (ocean_config.hpp
-     * readOceanJson), and the page refuses it before that (importWorld). */
+     * readOceanJson), and the page leaves that to it (pageBools). */
     const one = HO.withCString(M, '{"toroidal":1}', p => M._oc_init(1, 1920, 1080, 240, 50, p));
     const why = HO.cString(M, M._oc_last_error());
     const yes = HO.withCString(M, '{"toroidal":true}', p => M._oc_init(1, 1920, 1080, 240, 50, p));
@@ -1343,6 +1343,67 @@ async function pageOverflow() {
     ok(p.uncaught.length === 0, 'no exception escaped the page\'s handlers');
 }
 
+/* (#6) Which values an on / off key takes is the engine's rule, and only
+ * the engine's: a SimConfig switch a JSON true / false, an Ocean switch
+ * also the number 0 / 1, every occurrence checked (ocean_config.hpp
+ * readOceanJson). main's importWorld had a narrower rule of its own (only
+ * true / false for every switch), so {"lightEnabled":true,"lightEnabled":0}
+ * or {"mouthGate":0,"mouthGate":1}, valid to oc_init, were refused on the
+ * page; a version-1 setup took config.walls only as true. Every switch key,
+ * every value (alone, after a valid one, before one), through the page's
+ * three ways in, against oc_init itself: the same verdict, the same world,
+ * the first value in the sheet, true / false in the page's bookkeeping. */
+async function pageBools() {
+    section('The page: on / off keys take what oc_init takes (SimConfig: true / false; the Ocean\'s: also 0 / 1)');
+    const SIM = ['toroidal', 'bodyModel', 'triangularMotion', 'foodDrift', 'predatorEconomy', 'predatorInheritance', 'fastTanh'];
+    const OCEAN = ['deepCurrent', 'lightEnabled', 'depthCostScaled', 'sizeDrift', 'sizeFight', 'mouthGate', 'walls'];
+    const truth = (t) => t === 'true' || Number(t) === 1;
+    /* [doc, the table's verdict, key, its first value's text] */
+    const docs = (key, good, bad) => {
+        const out = good.map(g => ['{"' + key + '":' + g + '}', true, key, g]);
+        for (const b of bad)
+            for (const form of [0, 1, 2]) {
+                const kb = '"' + key + '":' + b, kg = '"' + key + '":true';
+                out.push(['{' + (form === 0 ? kb : form === 1 ? kg + ',' + kb : kb + ',' + kg) + '}', false, key, form === 1 ? 'true' : b]);
+            }
+        return out;
+    };
+    const groups = SIM.map(k => [k + ' (SimConfig)', docs(k, ['true', 'false'], ['0', '1', '1.0', '-0', '2', '"true"', 'null'])])
+        .concat(OCEAN.map(k => [k + ' (Ocean)', docs(k, ['true', 'false', '0', '1', '1.0', '-0'], ['2', '0.5', '-1', '"true"', 'null'])]))
+        .concat([['mixed repeats', [['{"lightEnabled":true,"lightEnabled":0}', true, 'lightEnabled', 'true'],
+                                    ['{"mouthGate":0,"mouthGate":1}', true, 'mouthGate', '0'],
+                                    ['{"deepCurrent":1,"deepCurrent":false}', true, 'deepCurrent', '1']]],
+                 ['walls with wrap-around senses', [['{"walls":true,"toroidal":true}', false, 'walls', 'true'],
+                                                    ['{"walls":1,"toroidal":true}', false, 'walls', '1']]]]);
+    const direct = await mk(1, {}, 300, 300, 0);
+    const p = await bootPage(PAGE_Q7);
+    const KEYS = p.KEYS;
+    for (const [what, list] of groups) {
+        const bad = [];
+        let acc = 0, ref = 0;
+        for (const [doc, table, key, first] of list) {
+            const d = directInit(direct, doc);
+            if (d.ok !== table) bad.push('oc_init ' + (d.ok ? 'accepts ' : 'refuses ') + doc + ' (the fixture says otherwise' + (d.why ? ': ' + d.why : '') + ')');
+            d.ok ? acc++ : ref++;
+            for (const how of PAGE_WAYS) {
+                const print0 = fingerprint(p.M), state0 = p.state();
+                const r = await viaPage(p, how, doc);
+                if (r.ok !== d.ok) { bad.push(how + (r.ok ? ' accepted ' : ' refused ') + doc + (r.ok ? '' : ' (' + r.why + ')')); continue; }
+                if (!d.ok) { if (fingerprint(p.M) !== print0 || p.state() !== state0) bad.push(how + ' changed the page on ' + doc); continue; }
+                if (fingerprint(p.M) !== d.print) bad.push(how + ' ran another world for ' + doc);
+                if (KEYS[key]) {
+                    const want = truth(first), box = p.el('o_' + key).checked, a = p.T.initArgs.cfg[key], b = p.T.runCfg[key];
+                    if (box !== want || a !== want || b !== want)
+                        bad.push(how + ' ' + doc + ': the sheet ' + box + ', initArgs ' + JSON.stringify(a) + ', runCfg ' + JSON.stringify(b) + ' (want ' + want + ')');
+                }
+            }
+        }
+        ok(!bad.length, what + ': ' + list.length + ' documents (' + acc + ' accepted, ' + ref + ' refused by oc_init), the same through importWorld, ' +
+           '?cfg= and a setup file' + (bad.length ? ' — ' + bad.length + ' differ: ' + bad.slice(0, 4).join('; ') : ''));
+    }
+    ok(p.uncaught.length === 0, 'no exception escaped the page\'s handlers');
+}
+
 /* Every section, in order; `node tests/ocean_turbo_handoff.js NAME...` runs only those. */
 const SECTIONS = {
     repeatedKeys, liveLedger, growthPage, randomize, imports,
@@ -1355,7 +1416,7 @@ const SECTIONS = {
                                                 foodPatches: 5, foodDepthMode: 1, bodyModel: true }));
     },
     failures: failures_,
-    pageHeld, pageRefusal, pageAsyncSetup, pageStartFailures, pageOverflow
+    pageHeld, pageRefusal, pageAsyncSetup, pageStartFailures, pageOverflow, pageBools
 };
 const unhandled = [];
 process.on('unhandledRejection', (e) => { unhandled.push(e); });

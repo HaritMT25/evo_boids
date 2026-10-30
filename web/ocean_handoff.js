@@ -26,7 +26,12 @@
  * oc_inspect, oc_wiring, oc_sensor_names, ...), and any allocation can grow the
  * memory, which detaches every view cut before it. f64 / f32 take the
  * buffer inside, after their arguments (the export's call among them) have
- * run, and copy the numbers out, so a growth can't strand them. */
+ * run, and copy the numbers out, so a growth can't strand them.
+ *
+ * Also here, so the tests run the page's own logic: ledger(), the page's live
+ * edits around a Turbo session and what it applies when the world comes back
+ * (or doesn't); parseFirst() / cfgJson(), the engine's rule for a repeated
+ * JSON key on the page's way in (?cfg=, a setup file). */
 (function (root) {
   var PAGE = 65536;
   var enc = typeof TextEncoder !== "undefined" ? new TextEncoder() : null;
@@ -106,8 +111,123 @@
     return { st: st, su: su, fam: f64(M, M._oc_families_data(), 2 * k) };
   }
 
+  /* ---- the page's live edits around a Turbo session (web/ocean.js) ----
+   * Every edit gets a sequence number, and is held (neither side owns the
+   * world: Turbo is starting or stopping), in flight (sent to the worker, not
+   * answered yet) or acknowledged (the worker applied it). back(lost), when
+   * the page owns the world again, is what the page must apply, in the order
+   * the edits were made: the unanswered and held ones; and, when the
+   * worker's world is lost (the page goes on from its own copy, from where
+   * Turbo took it), the acknowledged ones first, so that edits which depend
+   * on each other (minSpeed 200 only after maxSpeed 300) apply in the order
+   * the worker applied them. A newer edit of a key always lands after an
+   * older one, never under it. Entries: {key, num, seq, from: "acked" |
+   * "sent" | "held"}. */
+  function ledger() {
+    var seq = 0, held = {}, inflight = [], acked = [];
+    function byseq(a, b) { return a.seq - b.seq; }
+    function heldList() { return Object.keys(held).map(function (k) { return held[k]; }).sort(byseq); }
+    return {
+      /* a new Turbo session: nothing in flight, nothing acknowledged yet */
+      start: function () { inflight = []; acked = []; },
+      /* an edit made while neither side owns the world (the newest per key) */
+      hold: function (key, num) { held[key] = { key: key, num: num, seq: ++seq, from: "held" }; },
+      /* an edit sent to the worker; seq: a held edit's own, when it is flushed */
+      sent: function (key, num, s) { inflight.push({ key: key, num: num, seq: s === undefined ? ++seq : s, from: "sent" }); },
+      /* the worker's answer to the oldest in-flight edit of key (it answers in order) */
+      answered: function (key, ok) {
+        for (var i = 0; i < inflight.length; i++) if (inflight[i].key === key) {
+          var e = inflight.splice(i, 1)[0];
+          if (ok) acked.push({ key: e.key, num: e.num, seq: e.seq, from: "acked" });
+          return e;
+        }
+        return null;
+      },
+      /* a newer edit of key is still on its way */
+      pending: function (key) { return inflight.some(function (e) { return e.key === key; }); },
+      /* the held edits, oldest first, now that one side owns the world */
+      takeHeld: function () { var l = heldList(); held = {}; return l; },
+      /* the page owns the world again: what it applies, oldest first */
+      back: function (lost) {
+        var l = (lost ? acked : []).concat(inflight, heldList()).sort(byseq);
+        held = {}; inflight = []; acked = [];
+        return l;
+      },
+      held: function () { var o = {}; Object.keys(held).forEach(function (k) { o[k] = held[k].num; }); return o; },
+      inflight: function () { return inflight.map(function (e) { return [e.key, e.num]; }); }
+    };
+  }
+
+  /* ---- JSON from outside the sheet (?cfg=, a setup file) ----
+   * The engine reads a repeated key's FIRST occurrence (src/core/json_min.hpp
+   * find) and checks every occurrence (ocean_config.hpp readOceanJson);
+   * JSON.parse keeps the LAST, so {"toroidal":false,"toroidal":true} ran one
+   * way on the page and the other in oc_init, and {"toroidal":1,"toroidal":
+   * true} slipped past both checks. parseFirst is JSON.parse (the same syntax
+   * check and error, the same values) with the engine's rule: a repeated
+   * key's first occurrence is the value, and every later one is listed in
+   * repeats [{path, key, value}] (path: the keys / indices down to its
+   * object), so the caller can check it and hand it on. cfgJson writes a cfg
+   * object for oc_init with those later occurrences after it, so oc_init sees
+   * (and checks) every occurrence and takes the same first one. */
+  function parseFirst(text) {
+    JSON.parse(text);   /* the syntax check, and its message */
+    var i = 0, repeats = [];
+    function ws() { while (i < text.length && " \t\n\r".indexOf(text.charAt(i)) >= 0) i++; }
+    function str() {
+      var s = i++;
+      while (text.charAt(i) !== '"') i += text.charAt(i) === "\\" ? 2 : 1;
+      i++;
+      return JSON.parse(text.slice(s, i));
+    }
+    function val(path) {
+      ws();
+      var c = text.charAt(i), k, v;
+      if (c === "{") {
+        var o = {}, seen = Object.create(null);
+        i++; ws();
+        if (text.charAt(i) === "}") { i++; return o; }
+        for (;;) {
+          ws(); k = str(); ws(); i++;   /* the ':' */
+          v = val(path.concat([k]));
+          if (seen[k]) repeats.push({ path: path, key: k, value: v });
+          else { seen[k] = true; Object.defineProperty(o, k, { value: v, enumerable: true, writable: true, configurable: true }); }
+          ws();
+          if (text.charAt(i++) === ",") continue;
+          return o;
+        }
+      }
+      if (c === "[") {
+        var a = [];
+        i++; ws();
+        if (text.charAt(i) === "]") { i++; return a; }
+        for (;;) {
+          a.push(val(path.concat([a.length])));
+          ws();
+          if (text.charAt(i++) === ",") continue;
+          return a;
+        }
+      }
+      if (c === '"') return str();
+      var s = i;
+      while (i < text.length && ",}] \t\n\r".indexOf(text.charAt(i)) < 0) i++;
+      return JSON.parse(text.slice(s, i));
+    }
+    return { value: val([]), repeats: repeats };
+  }
+  /* a cfg object as oc_init's JSON ("" for nothing), the later occurrences of
+   * its repeated keys ([{key, value}], parseFirst's at its level) after it */
+  function cfgJson(cfg, repeats) {
+    var keys = Object.keys(cfg || {}), more = repeats || [];
+    if (!keys.length && !more.length) return "";
+    var s = JSON.stringify(cfg || {});
+    more.forEach(function (r) { s = s.slice(0, -1) + (s.length > 2 ? "," : "") + JSON.stringify(r.key) + ":" + JSON.stringify(r.value) + "}"; });
+    return s;
+  }
+
   var api = { PAGE: PAGE, buffer: buffer, growTo: growTo, take: take, cString: cString,
-              withCString: withCString, f64: f64, f32: f32, row: row };
+              withCString: withCString, f64: f64, f32: f32, row: row,
+              ledger: ledger, parseFirst: parseFirst, cfgJson: cfgJson };
   root.EvoOceanHandoff = api;
   if (typeof module === "object" && module && module.exports) module.exports = api;   /* node: the tests */
 })(typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : globalThis);

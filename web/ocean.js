@@ -33,7 +33,8 @@
  *      portrait screen) &cfg={"key":value,...} (SimConfig + OceanConfig keys,
  *      as oc_init takes them; the settings show them) &speed=1 (steps per
  *      frame) &e1=1 (the E1 physics preset, oc_e1_preset, under &cfg)
- *      &colour=family|brain|appearance &guide=0|1 &intro=1 (web/guide.js)
+ *      &colour=appearance|family|brain (else the visitor's last choice,
+ *      appearance the first time) &guide=0|1 &intro=1 (web/guide.js)
  *      ?mock=1 loads ocean_mock.js from beside the page instead of the engine
  *      (a JS stand-in for page development, not part of web/).
  *      The link's setup goes to oc_init as it is; one it refuses stops the
@@ -206,9 +207,11 @@
     if (!restart()) { fixedW = w0; fixedH = h0; }
   }
   var worldReady = false;
-  function initWorld(seed, population, depth, cfg, rawCfg) {
+  /* repeats: the later occurrences of cfg's repeated keys (HO.parseFirst), so
+   * oc_init checks each and takes the first, as it does for its own JSON */
+  function initWorld(seed, population, depth, cfg, rawCfg, repeats) {
     var size = fittedWorld();
-    var json = rawCfg !== undefined ? rawCfg : (Object.keys(cfg).length ? JSON.stringify(cfg) : "");
+    var json = rawCfg !== undefined ? rawCfg : HO.cfgJson(cfg, repeats);
     var ok = withCString(json, function (ptr) { return M._oc_init(seed >>> 0, size[0], size[1], depth, population, ptr); });
     if (!ok) return false;
     initArgs = { seed: seed >>> 0, population: population, depth: depth, cfg: cfg };
@@ -226,17 +229,28 @@
    * why not. A switch must be true or false: the engine reads Classic's
    * switches (toroidal, bodyModel, ...) only as JSON booleans and passes over
    * anything else, so {"toroidal":1} would run without it under a sheet
-   * showing it on. */
-  function importWorld(seed, population, depth, cfg, raw) {
-    var clean = {}, bad = [];
+   * showing it on. repeats: the later occurrences of a repeated key
+   * (HO.parseFirst; cfg holds the first): each is checked here too, and
+   * goes on to oc_init, which checks it and runs the first, as the sheet
+   * then shows. */
+  function importWorld(seed, population, depth, cfg, raw, repeats) {
+    var clean = {}, more = [], bad = [];
+    function aSwitch(k, v) {
+      if (KEYS[k] && typeof KEYS[k][0] === "boolean" && typeof v !== "boolean")
+        bad.push(k + " must be true or false (got " + JSON.stringify(v) + ")");
+    }
     Object.keys(cfg || {}).forEach(function (k) {
       if (ARGS[k]) return;
       clean[k] = cfg[k];
-      if (KEYS[k] && typeof KEYS[k][0] === "boolean" && typeof cfg[k] !== "boolean")
-        bad.push(k + " must be true or false (got " + JSON.stringify(cfg[k]) + ")");
+      aSwitch(k, cfg[k]);
+    });
+    (repeats || []).forEach(function (r) {
+      if (ARGS[r.key]) return;
+      more.push(r);
+      aSwitch(r.key, r.value);
     });
     if (bad.length) return bad.join("; ");
-    if (!initWorld(seed, population, depth, clean, raw)) return lastError();
+    if (!initWorld(seed, population, depth, clean, raw, more)) return lastError();
     resetForm();
     setVal("seed", seed >>> 0); setVal("population", population); setVal("depth", depth);
     cfgToForm(clean);
@@ -257,6 +271,7 @@
     lastS = snapshot();   /* the new world's now, not at the next frame */
     if (scene && (W !== w0 || H !== h0 || D !== d0)) { scene.setWorld(W, H, D); labelHist(); }
     applyDisplaySwitches();
+    updateModeline();     /* the world's appearance genes may differ */
     estPrev.n = 0;
     stepMs = 0;
     if (!fromTurbo) {
@@ -410,8 +425,10 @@
    *     that moment) it is held, marked so, and applied as soon as one does
    *   - one the engine refuses: the field goes back to the running value,
    *     with the engine's reason. */
-  var heldLive = {};    /* key -> value: waiting for Turbo's hand-off */
-  var inflight = [];    /* [key, value] sent to the Turbo worker, not answered yet */
+  /* the live edits around a Turbo session: held (waiting for Turbo's hand-off),
+   * in flight (sent to the worker, not answered), acknowledged; in the order
+   * they were made (web/ocean_handoff.js ledger, which the tests run) */
+  var live = HO ? HO.ledger() : null;
   function numOf(key, v) { return typeof v === "boolean" ? (v ? 1 : 0) : v; }
   function valOf(key, num) { return typeof KEYS[key][0] === "boolean" ? num === 1 : num; }
   function shown(v) { return typeof v === "boolean" ? (v ? "on" : "off") : String(v); }
@@ -441,23 +458,27 @@
       return;
     }
     if (turboState === "entering" || turboState === "exiting") {
-      heldLive[key] = num;
+      live.hold(key, num);
       fieldNote(key, turboState === "entering" ? "Applies as soon as Turbo has started." : "Applies as soon as Turbo hands the world back.");
       return;
     }
     fieldNote(key, "");
     sendLive(key, num);
   }
-  function sendLive(key, num, quiet) {
+  /* true: applied here; false: refused here (keep: the field stays, a newer
+   * edit of the key follows); null: sent to the Turbo worker (seq: a held
+   * edit's own sequence number, so it keeps its place) */
+  function sendLive(key, num, quiet, keep, seq) {
     if (turboState === "turbo") {   /* Turbo owns the world: the worker applies it */
-      inflight.push([key, num]);
+      live.sent(key, num, seq);
       turboWorker.postMessage({ cmd: "set", key: key, value: num });
-      return;
+      return null;
     }
-    if (!has("oc_set_param")) return;
+    if (!has("oc_set_param")) return false;
     var ok = withCString(key, function (p) { return M._oc_set_param(p, num); });
     if (ok) liveApplied(key, valOf(key, num), quiet);
-    else refuse(key, lastError());
+    else refuse(key, lastError(), keep);
+    return !!ok;
   }
   function liveApplied(key, v, quiet) {
     if (v === KEYS[key][0]) delete runCfg[key]; else runCfg[key] = v;
@@ -474,12 +495,23 @@
     }
     showError((LABELS[key] || key) + ": " + why + (keep ? "" : " (back to " + shown(cfgVal(key)) + ")"));
   }
-  /* the held edits, now that one side owns the world */
-  function flushHeld(quiet) {
-    var held = heldLive;
-    heldLive = {};
-    Object.keys(held).forEach(function (k) { fieldNote(k, ""); sendLive(k, held[k], quiet); });
+  /* Edits in the order they were made (ledger entries): to the worker while
+   * Turbo owns the world, else to this one. A refused edit keeps its field
+   * when a later edit of the key follows in the list. Returns what this
+   * world did: {applied: [entry], refused: [[entry, why]]}. */
+  function replay(list, quiet) {
+    var out = { applied: [], refused: [] };
+    list.forEach(function (e, i) {
+      fieldNote(e.key, "");
+      var later = list.some(function (f, j) { return j > i && f.key === e.key; });
+      var r = sendLive(e.key, e.num, quiet, later, e.seq);
+      if (r === true) out.applied.push(e);
+      else if (r === false) out.refused.push([e, lastError()]);
+    });
+    return out;
   }
+  /* the held edits, now that one side owns the world */
+  function flushHeld(quiet) { return replay(live.takeHeld(), quiet); }
 
   var tabsEl = el("tabs"), panelsEl = el("panels"), currentTab = "run";
   function buildSettings() {
@@ -707,13 +739,21 @@
    * (importWorld: a value the engine refuses is reported, and nothing
    * changes). A setup without a size takes this screen's. */
   function loadSetup(text) {
-    var s;
-    try { s = JSON.parse(text); } catch (e) { showError("That file is not JSON: " + e.message); return; }
-    if (!s || s.format !== "evo_ocean_setup" || !s.config || typeof s.config !== "object" || Array.isArray(s.config)) {
+    var s, pf;
+    try { pf = HO.parseFirst(text); s = pf.value; } catch (e) { showError("That file is not JSON: " + e.message); return; }
+    /* a repeated key, as for ?cfg=: the first occurrence counts, every one is
+     * checked (a setup's own keys here, its config's here and by oc_init); a
+     * second config would be a second setup, so it is refused */
+    var top = pf.repeats.filter(function (r) { return !r.path.length; });
+    var cfgRepeats = pf.repeats.filter(function (r) { return r.path.length === 1 && r.path[0] === "config"; });
+    if (top.some(function (r) { return r.key === "config"; })) { showError("That setup has more than one config; a setup has one."); return; }
+    if (!s || s.format !== "evo_ocean_setup" || !s.config || typeof s.config !== "object" || Array.isArray(s.config) ||
+        top.some(function (r) { return r.key === "format" && r.value !== "evo_ocean_setup"; })) {
       showError("That file is not an Ocean setup (Save setup makes one)."); return;
     }
     var bad = [];
     function arg(name, def, ok) {
+      top.forEach(function (r) { if (r.key === name && r.value !== null && !ok(r.value)) bad.push(name + " " + JSON.stringify(r.value)); });
       if (s[name] === undefined || s[name] === null) return def;
       if (!ok(s[name])) bad.push(name + " " + JSON.stringify(s[name]));
       return s[name];
@@ -727,7 +767,7 @@
     if (w !== null) fixedW = w;
     if (h !== null) fixedH = h;
     clearError();
-    var why = importWorld(seed, pop, depth, s.config);
+    var why = importWorld(seed, pop, depth, s.config, undefined, cfgRepeats);
     if (why) {
       fixedW = w0; fixedH = h0;
       showError("That setup was refused: " + why);
@@ -1333,9 +1373,9 @@
     } else if (msg.type === "rec") {
       if (dash()) dash().ingest(msg.rows);
     } else if (msg.type === "set") {
-      for (var i = 0; i < inflight.length; i++) if (inflight[i][0] === msg.key) { inflight.splice(i, 1); break; }
+      live.answered(msg.key, !!msg.ok);
       if (msg.ok) liveApplied(msg.key, valOf(msg.key, msg.value));
-      else refuse(msg.key, msg.error, inflight.some(function (f) { return f[0] === msg.key; }));
+      else refuse(msg.key, msg.error, live.pending(msg.key));
     } else if (msg.type === "memory") {
       if (turboState !== "exiting") return;
       try { takeMemory(msg.mem); }
@@ -1354,23 +1394,25 @@
       turboFailed("Turbo stopped: " + (msg.message || "unknown error"), msg.mem);
     }
   }
-  /* the page owns the world again (its memory: the worker's, or its own) */
-  function turboBack(quiet) {
+  /* The page owns the world again: its memory is the worker's, or (lost) its
+   * own, from where Turbo took it. It applies, in the order they were made,
+   * the edits never answered (never applied) and the held ones, and, lost,
+   * the acknowledged ones before them (ledger back). Returns replay's result. */
+  function turboBack(quiet, lost) {
     turboState = "live";
-    inflight.forEach(function (f) { heldLive[f[0]] = f[1]; });   /* never answered: never applied */
-    inflight = [];
+    var plan = live.back(!!lost);
     afterNewWorld(true);
     sampleBucket = Math.floor(M._oc_stats ? frameNow() / (dash() ? dash().every() : 60) : -1);
     setPaused(false);
     updateLocks();
-    flushHeld(quiet);
+    return replay(plan, quiet);
   }
   /* The worker stopped on an error, or died. With its memory (the world was
    * whole), the run goes on from where Turbo got it, as after a Stop.
    * Without, from where Turbo took it: this page's own copy, untouched
-   * since; Turbo's steps are lost, and the live changes that applied in the
-   * worker are applied again here. Either way the worker is done: a fresh
-   * one runs the next Turbo. */
+   * since; Turbo's steps are lost, and the live changes the worker applied
+   * are applied again here, in the order it applied them (turboBack). Either
+   * way the worker is done: a fresh one runs the next Turbo. */
   function turboFailed(why, mem) {
     var was = turboState;
     dropWorker();
@@ -1379,21 +1421,20 @@
     if (mem && was !== "entering") {
       try { takeMemory(mem); back = true; } catch (err) { why += "; the world it had could not come back (" + (err.message || err) + ")"; }
     }
-    var redo = [];
-    if (!back && was !== "entering" && turboEntryCfg) {
-      var now = runCfg, before = turboEntryCfg;
-      Object.keys(Object.assign({}, now, before)).forEach(function (k) {
-        var a = Object.prototype.hasOwnProperty.call(now, k) ? now[k] : KEYS[k] && KEYS[k][0];
-        var b = Object.prototype.hasOwnProperty.call(before, k) ? before[k] : KEYS[k] && KEYS[k][0];
-        if (LIVE[k] && a !== b && !(k in heldLive)) { heldLive[k] = numOf(k, a); redo.push(LABELS[k] || k); }
-      });
-      runCfg = Object.assign({}, before);
-    }
-    turboBack(true);
-    if (!back && was !== "entering" && dash() && dash().rewind) dash().rewind(frameNow());
+    var lost = !back && was !== "entering";
+    if (lost && turboEntryCfg) runCfg = Object.assign({}, turboEntryCfg);
+    var res = turboBack(true, lost);
+    if (lost && dash() && dash().rewind) dash().rewind(frameNow());
+    /* what this world took again (the acknowledged edits), and what it refused, truthfully */
+    var again = [], seen = {};
+    res.applied.forEach(function (e) {
+      if (e.from === "acked" && !seen[e.key]) { seen[e.key] = true; again.push(LABELS[e.key] || e.key); }
+    });
+    var refused = res.refused.map(function (r) { return (LABELS[r[0].key] || r[0].key) + " " + shown(valOf(r[0].key, r[0].num)) + " (" + r[1] + ")"; });
     showError(why + (back ? ". The world is back where Turbo got it." :
               was === "entering" ? "." : ". Its steps are lost: the world is back where Turbo took it" +
-              (redo.length ? ", with " + redo.join(", ") + " applied again." : ".")));
+              (again.length ? ", with " + again.join(", ") + " applied again." : ".")) +
+              (refused.length ? " Refused: " + refused.join("; ") + "." : ""));
   }
   function dropWorker() {
     if (!turboWorker) return;
@@ -1408,7 +1449,7 @@
     turboState = "entering";
     turboStats = null;
     turboEntryCfg = Object.assign({}, runCfg);
-    inflight = [];
+    live.start();
     select(null);
     unfollow();
     updateLocks();
@@ -1746,14 +1787,17 @@
     this.blur();
   });
   el("followLight").checked = followLight;
-  /* Fish colour: by family line (the default), by brain similarity, or the
-   * fish's own appearance genome (skin pattern and body shape; the Ocean
-   * only). Family / brain is shared with Classic (the same key and ?colour=);
-   * Classic reads "appearance" as family. Display only. */
+  /* Fish colour: the fish's own appearance genome (its skin pattern; the
+   * Ocean only, and the default), by family line, or by brain similarity.
+   * Every mode draws each fish in its inherited body shape when the module
+   * exports the genome (HAS_APP); family and brain only recolour the skin.
+   * ?colour= wins, then the visitor's own last choice (stored only when they
+   * pick one), else appearance. The key and ?colour= are shared with
+   * Classic, which reads "appearance" as family. Display only. */
   (function () {
     var want = P.get("colour"), saved = store("evo_boids.colourBy");
     if (want !== "brain" && want !== "family" && want !== "appearance")
-      want = saved === "brain" || saved === "appearance" ? saved : "family";
+      want = saved === "brain" || saved === "family" ? saved : "appearance";
     colourMode = want;
     colourBrain = want === "brain";
     el("colourMode").value = colourMode;
@@ -1767,10 +1811,15 @@
     this.blur();
   });
   function updateModeline() {
+    /* the world's appearance genes (bit 1 patterns, bit 2 shapes; 0 = off, or a module without them) */
+    var flags = HAS_APP ? (has("oc_appearance_flags") ? M._oc_appearance_flags() : 3) : 0;
+    var what = colourMode === "appearance"
+      ? (flags ? ", each fish drawn from its appearance genes (skin pattern and body shape)"
+               : ", coloured by family (" + (HAS_APP ? "the appearance genes are off in this world" : "this module has no appearance genes") + ")")
+      : (flags & 2 ? ", each fish in its inherited body shape" : "") + (colourBrain ? ", coloured by brain" : ", coloured by family");
     el("modeline").textContent = "Running the single-threaded Ocean module, reproducible from the seed" +
       (HAS_EYE ? " (the eye build)" : "") + ". Drawing: the 3D tank" + (scene ? ", detail " + scene.quality() + " of 3" : "") +
-      (colourMode === "appearance" ? (HAS_APP ? ", each fish drawn from its appearance genes" : ", coloured by family (this module has no appearance genes)")
-       : colourBrain ? ", coloured by brain" : ", coloured by family") + ".";
+      what + ".";
   }
   setPaused(false);
   changeSpeed(0);
@@ -1792,7 +1841,11 @@
         { drawer: false, title: "The tank",
           target: function () { return h.rectOf("#tank"); },
           body: function () {
-            return "Glowing specks are food, each family has its own colour, and the dark fish with glowing eyes are " +
+            var looks = colourMode === "appearance" && HAS_APP
+              ? "each fish wears the skin pattern and body shape it inherited from its parents (the settings can " +
+                "colour them by family or by brain instead)"
+              : colourBrain ? "a fish's colour follows its brain's wiring" : "each family has its own colour";
+            return "Glowing specks are food, " + looks + ", and the dark fish with glowing eyes are " +
                    "predators. Light fades and turns blue with depth. " +
                    (h.touch() ? "Drag to move, pinch to zoom, twist with two fingers to turn (below the horizon too)."
                               : "Drag to move, scroll to zoom, right-drag to turn (below the horizon too). Or fly: " +
@@ -1936,14 +1989,23 @@
      * goes to oc_init as it is, so it says why), ?e1=1 under it. The setup
      * goes to oc_init as it is (importWorld), and into the sheet only once
      * accepted: a value the sheet would round or drop is refused with the
-     * engine's reason, not quietly changed. */
-    var rawCfg = P.get("cfg") || "", userCfg = {}, badCfg = false;
-    if (rawCfg) { try { userCfg = JSON.parse(rawCfg); if (!userCfg || typeof userCfg !== "object" || Array.isArray(userCfg)) badCfg = true; } catch (e) { badCfg = true; } }
+     * engine's reason, not quietly changed. A repeated key: the engine's
+     * rule (HO.parseFirst), its first occurrence counts and every one is
+     * checked, here and by oc_init. */
+    var rawCfg = P.get("cfg") || "", userCfg = {}, cfgRepeats = [], badCfg = false;
+    if (rawCfg) {
+      try {
+        var pf = HO.parseFirst(rawCfg);
+        userCfg = pf.value;
+        cfgRepeats = pf.repeats.filter(function (r) { return !r.path.length; });
+        if (!userCfg || typeof userCfg !== "object" || Array.isArray(userCfg)) badCfg = true;
+      } catch (e) { badCfg = true; }
+    }
     if (E1 && !has("oc_e1_preset")) throw new Error("?e1=1 needs oc_e1_preset: rebuild web/evo_ocean (wasm/build_ocean.sh)");
     var cfg0 = badCfg ? {} : Object.assign({}, E1 ? e1Preset() : {}, userCfg);
     var num = function (key, def, lo, hi) { var v = parseFloat(P.get(key)); return isFinite(v) ? Math.max(lo, Math.min(hi, v)) : def; };
     var refused = importWorld(num("seed", KEYS.seed[0], 0, 4294967295) >>> 0, Math.round(num("pop", KEYS.population[0], 0, 100000)),
-                              num("depth", KEYS.depth[0], 10, 100000), cfg0, badCfg ? rawCfg : undefined);
+                              num("depth", KEYS.depth[0], 10, 100000), cfg0, badCfg ? rawCfg : undefined, badCfg ? [] : cfgRepeats);
     if (refused) {
       linkRefused = !!(rawCfg || E1);
       throw new Error("This link's settings were refused: " + refused);
@@ -2008,7 +2070,7 @@
                  runCfg: Object.assign({}, runCfg), light: LIGHT, flashlight: scene.flashlight(), flashlightLevel: scene.flashlightLevel(),
                  stepMs: stepMs, fps: fps, following: scene.following(), selectedId: selectedId, selIdx: s.selIdx,
                  turbo: turboState, colourBrain: colourBrain, frame: s.stats[1],
-                 held: Object.assign({}, heldLive), fixedSize: [fixedW, fixedH],
+                 held: live.held(), inflight: live.inflight(), fixedSize: [fixedW, fixedH],
                  stats: Array.prototype.slice.call(s.stats), depthMin: s.n ? lo : 0, depthMax: s.n ? hi : 0,
                  dashRows: dash() ? dash()._rows().length : 0 };
       }

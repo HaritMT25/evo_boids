@@ -2049,6 +2049,8 @@
   /* Fish colour: by family line (the default) or by brain similarity — the
    * genome colour the native app draws. ?colour=brain / ?colour=family, else
    * this visitor's last choice (remembered only when they flip the switch).
+   * The key is shared with the Ocean, whose "appearance" (its default) and
+   * anything else but "brain" read as family here.
    * Display only: the shim fills the one colour buffer every renderer reads
    * from one or the other (evo_set_colour_mode), and the run is the same. */
   var COLOUR_KEY = "evo_boids.colourBy", colourBrain = false;

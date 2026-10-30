@@ -26,13 +26,18 @@
  *   - the flashlight (setFlashlight, viewer only): a cone of clear light from
  *     the camera onto the followed fish or the point it looks at; inside it
  *     the fish, food and sand show their true colours (BEAM_FN)
- *   - the appearance genome (setAppearance; web/ocean_appearance.js): with it
- *     on and the snapshot carrying s.app (oc_creature_appearance's 63 floats
- *     per fish), every fish is drawn from its own genes: the M1 deformable
- *     body (shape, fins, barbels) skinned with pattern law 3, lit and fogged
- *     exactly like the plain fish, in one instanced draw (plus one for the
- *     barbels when a fish has any, and the shadow). appearanceParity() is
- *     the GPU == CPU check of the pattern law (the gallery's K12)
+ *   - the appearance genome (web/ocean_appearance.js): whenever the snapshot
+ *     carries s.app (oc_creature_appearance's 63 floats per fish), every fish
+ *     is drawn in its own inherited body: the M1 deformable template (shape,
+ *     fins, barbels), lit and fogged exactly like the plain fish, in one
+ *     instanced draw (plus one for the barbels when a fish has any, and the
+ *     shadow). setAppearance(on) picks its skin: on, pattern law 3 from its
+ *     genes; off, its family / brain colour (s.colors) with the plain fish's
+ *     darker back, pale belly and paler fins. Without s.app the plain fish
+ *     mesh is drawn instead. appearanceParity() is the GPU == CPU check of
+ *     the pattern law (the gallery's K12); appearancePathCheck() that of the
+ *     production vertex path (the gene texture's slot lookup, every body
+ *     part's position and material site, the decoded pattern genes)
  *
  * Every fish is a faceted low-poly body bent along the six spine points the
  * core exports; the floor below catches its shadow and slow caustic light.
@@ -261,15 +266,23 @@
    * law 3 from the 33 pattern floats, at the vertex's canonical material
    * site, evaluated before the bend and the swim, so the pattern never
    * slides. 7 vertex attributes. The legacy base / countershade / fin tint stage is not
-   * applied here (the genes carry their own). */
+   * applied to the skin (the genes carry their own).
+   * uColourBy = 1 (the page's Family / Brain colours) keeps the body and
+   * swaps only the skin: the fish's family / brain colour, packed 0xRRGGBB in
+   * iX.w (exact in a float: < 2^24) and passed on in the flat vPart.w (no
+   * extra attribute or varying), through the plain fish's base stage (darker
+   * back, pale belly, paler fins) at the legacy template's height, (1 − 2v)
+   * times the canonical profile, which equals FISH_FS's vOy on a neutral
+   * body. The lighting, eyes, selection, fog and flashlight are shared. */
   function appearanceShaders(EA) {
     var G = EA.GLSL;
     var CORE = [
       "attribute vec4 aT; attribute vec4 aPattern;",
       "attribute vec4 iA; attribute vec4 iB; attribute vec4 iC;",
       "attribute vec4 iBody;",  /* radius, height, highlight, ember */
-      "attribute vec4 iX;",     /* pitch (vz), tail-beat phase, lambda, 0 */
+      "attribute vec4 iX;",     /* pitch (vz), tail-beat phase, lambda, family / brain colour 0xRRGGBB */
       "uniform vec2 uHalf; uniform float uTime; uniform float uWag; uniform float uPxPerUnit;",
+      "uniform float uColourBy;",   /* 0: the skin from the genes (pattern law 3); 1: the family / brain colour */
       G.COMMON,
       G.GENES,
       G.MORPH,
@@ -314,20 +327,33 @@
       "varying vec3 vWorld; varying vec4 vMatV; flat varying vec4 vPart;",
       "void main() {",
       "  fetchGenes(gl_InstanceID);",
-      "  patternDecode(GT[0], GT[1], GT[2], GT[3], GT[4], GT[5], GT[6], GT[7].xyz, vec2(GT[7].w, GT[8].x), iX.z);",
+      "  if (uColourBy < 0.5) patternDecode(GT[0], GT[1], GT[2], GT[3], GT[4], GT[5], GT[6], GT[7].xyz, vec2(GT[7].w, GT[8].x), iX.z);",
       "  Morph M = mDecode(iX.z);",
       "  vec3 geo, mat; float mar;",
       "  mBuild(M, aT, aPattern, uTime, uWag, minWidth(), geo, mat, mar);",
       "  vec3 w = appWorld(geo);",
-      "  vWorld = w; vMatV = vec4(mat, mar); vPart = vec4(aPattern.x, aPattern.z, iBody.z, iBody.w);",
+      /* vPart: fin, side, highlight, the packed family / brain colour (the FS reads x, z, w) */
+      "  vWorld = w; vMatV = vec4(mat, mar); vPart = vec4(aPattern.x, aPattern.z, iBody.z, iX.w);",
       "  gl_Position = projectionMatrix * viewMatrix * vec4(w, 1.0);",
       "}"
     ].join("\n");
     var fs = [
-      "uniform vec3 uLight; uniform float uTime; uniform vec3 uSelect;",
+      "uniform vec3 uLight; uniform float uTime; uniform vec3 uSelect; uniform float uColourBy;",
       FOG_FN, DEPTH_FN, BEAM_FN,
       G.COMMON, G.VARY, G.SKIN,
       "varying vec3 vWorld; varying vec4 vMatV; flat varying vec4 vPart;",
+      /* the family / brain colour (vPart.w = 0xRRGGBB) through FISH_FS's base
+       * stage; oy = the legacy template's height in body radii */
+      "vec3 colourBase(int fin, float oy) {",
+      "  float c = vPart.w;",
+      "  float r = floor(c / 65536.0);",
+      "  float g = floor((c - 65536.0 * r) / 256.0);",
+      "  vec3 base = vec3(r, g, c - 65536.0 * r - 256.0 * g) / 255.0;",
+      "  base = mix(base, base * 0.56, smoothstep(0.30, 0.85, oy) * (fin == 0 ? 1.0 : 0.0));",        /* darker back */
+      "  base = mix(base, mix(base, vec3(0.93, 0.97, 0.90), 0.5), 1.0 - smoothstep(-0.7, -0.15, oy));", /* pale belly */
+      "  if (fin != 0) base = mix(base, vec3(0.92, 0.98, 0.95), 0.22);",                              /* fins, barbels */
+      "  return base;",
+      "}",
       "void main() {",
       "  int fin = int(vPart.x + 0.5);",
       /* the material site: body (t, θ, ρ) and barbels (root t, θ) use v = .5(1 − ρ sin θ) */
@@ -336,8 +362,12 @@
       "  float u = vMatV.x;",
       "  float v = bodyLike ? 0.5 * (1.0 - sn) : vMatV.y;",
       "  float zL = bodyLike ? sn * pProfileH(u) : 0.0;",
-      "  vec3 base = patternSkinM(u, v, zL, fin == 7 ? 0 : fin, vMatV.w);",
-      "  if (fin == 7) base = mix(base, patternBase(u, v), pS(0.0, 1.0, vMatV.z));",
+      "  vec3 base;",
+      "  if (uColourBy > 0.5) base = colourBase(fin, (1.0 - 2.0 * v) * pProfileH(u));",
+      "  else {",
+      "    base = patternSkinM(u, v, zL, fin == 7 ? 0 : fin, vMatV.w);",
+      "    if (fin == 7) base = mix(base, patternBase(u, v), pS(0.0, 1.0, vMatV.z));",
+      "  }",
       "  vec3 N = normalize(cross(dFdx(vWorld), dFdy(vWorld)));",
       "  vec3 V = normalize(cameraPosition - vWorld);",
       "  if (dot(N, V) < 0.0) N = -N;",
@@ -405,6 +435,237 @@
       "void main() { float u = vUV.x, v = vUV.y; gl_FragColor = vec4(patternSkinM(u, v, pProfileH(u) * (1.0 - 2.0 * v), 0, 1000.0), 1.0); }"
     ].join("\n");
     return { vs: vs, fs: fs, shadowVs: shadowVs, chartVs: chartVs, chartFs: chartFs };
+  }
+
+  /* The genes' GPU layout (EvoAppearance GENES fetchGenes): a fish's 63
+   * floats and one zero in 16 RGBA32F texels, 512 texels a texture row. The
+   * renderer (AppKind, fillApp) and the production-path check pack it with these. */
+  var GENES_W = 512, GENE_TEXELS = 16;
+  function genesRows(cap) { return Math.ceil(cap * GENE_TEXELS / GENES_W); }
+  function packGenes(T, R, r, c, ST) {
+    var to = 4 * GENE_TEXELS * c;
+    for (var j = 0; j < ST; j++) T[to + j] = R[r + j];
+    T[to + 63] = 0;
+  }
+  /* the renderer's capacity for n fish (AppKind ensure) */
+  function capFor(n) { var cap = 256; while (cap < n) cap *= 2; return cap; }
+
+  /* GPU == CPU through the production vertex path. appearanceParity feeds
+   * the pattern genes as attributes and checks the skin only, so a wrong
+   * gene-texture row or slot would pass it. Here the fish program's own
+   * vertex shader (appearanceShaders vs, with three's WebGL2 prefix) runs
+   * on a gene texture packed and laid out as the renderer packs it
+   * (packGenes, genesRows at the renderer's capacity; more fish than one
+   * texture row holds, so the lookup crosses rows), for the medium and
+   * coarse bodies and the barbel strips (every part: body, tail, dorsal,
+   * pectoral, eye, anal, pelvic fins, barbels). Transform feedback reads
+   * back every vertex of every fish: its world position, material site and
+   * fin margin, its part, and the pattern varyings it decoded from the
+   * texture; each is compared with the CPU mirror (EvoAppearance
+   * morphDecode / morphBuild / patternVaryings, appWorldCPU). opts.mutate
+   * ("row0", "nextRow", "slot") breaks the texture lookup on purpose: the
+   * check must then fail. Returns a Promise of the report (the read-back
+   * waits on a fence, so it never stalls the pipeline). */
+  var PATH_TOL = { world: 0.02, mat: 0.005, mar: 0.005, decode: 0.0005 };
+  var TF_OUT = [["vWorld", 3], ["vMatV", 4], ["vPart", 4], ["vG0", 4], ["vG1", 4], ["vG2", 4], ["vG3", 4],
+                ["vG4", 4], ["vG5", 4], ["vG6", 4], ["vG7", 4], ["vAux", 4], ["vMeta", 4]];
+  function appearancePathCheck(gl, EA, rows, lams, opts) {
+    opts = opts || {};
+    if (!EA || !EA.morphBuild) return Promise.resolve({ error: "web/ocean_appearance.js (with its CPU mirror) not loaded" });
+    var FETCH = "int li = 16 * inst + k;";
+    var MUT = { row0: "int li = 16 * 0 + k;", nextRow: "int li = 16 * (inst + 1) + k;", slot: "int li = 16 * inst + (k ^ 1);" };
+    var vsrc = appearanceShaders(EA).vs;
+    if (vsrc.indexOf(FETCH) < 0) return Promise.resolve({ error: "the gene fetch is not where the check expects it" });
+    if (opts.mutate) {
+      if (!MUT[opts.mutate]) return Promise.resolve({ error: "unknown mutation " + opts.mutate });
+      vsrc = vsrc.split(FETCH).join(MUT[opts.mutate]);
+    }
+    var pre = "#version 300 es\n#define attribute in\n#define varying out\nprecision highp float;\nprecision highp int;\n" +
+              "uniform mat4 projectionMatrix;\nuniform mat4 viewMatrix;\nuniform vec3 cameraPosition;\n";
+    var fsrc = "#version 300 es\nprecision highp float;\nout vec4 pcOut;\nvoid main() { pcOut = vec4(0.0); }\n";
+    function compile(type, src) {
+      var o = gl.createShader(type); gl.shaderSource(o, src); gl.compileShader(o);
+      if (!gl.getShaderParameter(o, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(o));
+      return o;
+    }
+    var NC = 0;
+    TF_OUT.forEach(function (v) { NC += v[1]; });
+    if (gl.getParameter(gl.MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS) < NC) return Promise.resolve({ error: "transform feedback holds fewer than " + NC + " floats" });
+    var prog = gl.createProgram();
+    try {
+      gl.attachShader(prog, compile(gl.VERTEX_SHADER, pre + vsrc));
+      gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, fsrc));
+    } catch (e) { return Promise.resolve({ error: "compile: " + (e.message || e) }); }
+    gl.transformFeedbackVaryings(prog, TF_OUT.map(function (v) { return v[0]; }), gl.INTERLEAVED_ATTRIBS);
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) return Promise.resolve({ error: "link: " + gl.getProgramInfoLog(prog) });
+
+    /* the fish: their genes in the renderer's texture, a bent spine each */
+    var n = rows.length, ST = EA.STRIDE, cap = capFor(n), texRows = genesRows(cap);
+    var T = new Float32Array(GENES_W * texRows * 4), R = new Float32Array(n * ST);
+    for (var c = 0; c < n; c++) { for (var j = 0; j < ST; j++) R[c * ST + j] = rows[c][j]; packGenes(T, R, c * ST, c, ST); }
+    var U = { half: [960, 540], px: 500, cam: [120, 380, 900] };
+    var inst = { iA: new Float32Array(4 * n), iB: new Float32Array(4 * n), iC: new Float32Array(4 * n), iBody: new Float32Array(4 * n), iX: new Float32Array(4 * n) };
+    for (c = 0; c < n; c++) {
+      var lam = Math.fround(lams[c]), Rb = Math.fround(4.6 * (0.8 + 0.4 * ((c * 0.37) % 1))), sp = lam * Rb / 5;
+      var a = c * 0.7, bend = 0.15 * Math.sin(c), px = 300 + (37 * c) % 1300, py = 200 + (53 * c) % 700, pts = [px, py];
+      for (var k = 1; k < 6; k++) { px -= sp * Math.cos(a + bend * k); py -= sp * Math.sin(a + bend * k); pts.push(px, py); }
+      inst.iA.set(pts.slice(0, 4), 4 * c); inst.iB.set(pts.slice(4, 8), 4 * c); inst.iC.set(pts.slice(8, 12), 4 * c);
+      inst.iBody.set([Rb, -20 - (3 * c) % 200, 0, 0], 4 * c);
+      inst.iX.set([0.3 * Math.sin(c * 1.3), (c * 0.618) % 1, lam, 0], 4 * c);
+    }
+    var tex = gl.createTexture();
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, GENES_W, texRows, 0, gl.RGBA, gl.FLOAT, T);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.useProgram(prog);
+    function uni(name) { return gl.getUniformLocation(prog, name); }
+    var I4 = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
+    gl.uniformMatrix4fv(uni("projectionMatrix"), false, I4); gl.uniformMatrix4fv(uni("viewMatrix"), false, I4);
+    gl.uniform3fv(uni("cameraPosition"), U.cam); gl.uniform2fv(uni("uHalf"), U.half);
+    gl.uniform1f(uni("uTime"), 0); gl.uniform1f(uni("uWag"), 0); gl.uniform1f(uni("uPxPerUnit"), U.px);
+    gl.uniform1f(uni("uColourBy"), 0); gl.uniform1i(uni("uGenes"), 0);
+
+    var tpls = [["medium", EA.buildTemplate("medium")], ["coarse", EA.buildTemplate("coarse")], ["barbels", EA.buildBarbels("medium")]];
+    var bufs = [], jobs = [];
+    gl.enable(gl.RASTERIZER_DISCARD);
+    var tfo = gl.createTransformFeedback();
+    tpls.forEach(function (tp) {
+      var tpl = tp[1];
+      if (!tpl) return;
+      var ringT = new Float32Array(16);
+      for (var i = 0; i < 16; i++) ringT[i] = i < tpl.ringT.length ? tpl.ringT[i] : 0;
+      gl.uniform1fv(uni("uRingT[0]") || uni("uRingT"), ringT); gl.uniform1i(uni("uRingN"), tpl.ringT.length); gl.uniform1f(uni("uHalfRing"), tpl.half);
+      var vao = gl.createVertexArray();
+      gl.bindVertexArray(vao);
+      function attr(name, data, divisor) {
+        var loc = gl.getAttribLocation(prog, name);
+        if (loc < 0) return;
+        var b = gl.createBuffer(); bufs.push(b);
+        gl.bindBuffer(gl.ARRAY_BUFFER, b); gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+        gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 4, gl.FLOAT, false, 0, 0); gl.vertexAttribDivisor(loc, divisor);
+      }
+      attr("aT", tpl.pos, 0); attr("aPattern", tpl.pat, 0);
+      Object.keys(inst).forEach(function (nm) { attr(nm, inst[nm], 1); });
+      var out = gl.createBuffer(); bufs.push(out);
+      gl.bindBuffer(gl.TRANSFORM_FEEDBACK_BUFFER, out);
+      gl.bufferData(gl.TRANSFORM_FEEDBACK_BUFFER, tpl.verts * n * NC * 4, gl.STREAM_READ);
+      gl.bindBuffer(gl.TRANSFORM_FEEDBACK_BUFFER, null);
+      gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, tfo);
+      gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER, 0, out);
+      gl.beginTransformFeedback(gl.POINTS);
+      gl.drawArraysInstanced(gl.POINTS, 0, tpl.verts, n);
+      gl.endTransformFeedback();
+      gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER, 0, null);
+      gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, null);
+      gl.bindVertexArray(null);
+      gl.deleteVertexArray(vao);
+      jobs.push({ name: tp[0], tpl: tpl, ringT: ringT, buf: out });
+    });
+    gl.disable(gl.RASTERIZER_DISCARD);
+    var sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+    gl.flush();
+    /* leave nothing bound (a renderer resets its own state after this);
+     * the read-back later binds only COPY_READ_BUFFER, which three never uses */
+    gl.useProgram(null); gl.bindBuffer(gl.ARRAY_BUFFER, null); gl.bindTexture(gl.TEXTURE_2D, null);
+    function cleanup() {
+      gl.bindBuffer(gl.COPY_READ_BUFFER, null);
+      gl.deleteSync(sync); gl.deleteTransformFeedback(tfo); gl.deleteTexture(tex); gl.deleteProgram(prog);
+      bufs.forEach(function (b) { gl.deleteBuffer(b); });
+    }
+    return new Promise(function (resolve) {
+      var t0 = Date.now();
+      (function poll() {
+        var st = gl.clientWaitSync(sync, 0, 0);
+        if (st === gl.TIMEOUT_EXPIRED && Date.now() - t0 < 10000) { setTimeout(poll, 2); return; }
+        if (st === gl.WAIT_FAILED || st === gl.TIMEOUT_EXPIRED) { cleanup(); resolve({ error: "the GPU did not finish (" + st + ")" }); return; }
+        var res = { fish: n, texRows: texRows, mutate: opts.mutate || "", tol: PATH_TOL, templates: {}, ok: true };
+        jobs.forEach(function (jb) {
+          var V = jb.tpl.verts, data = new Float32Array(V * n * NC);
+          gl.bindBuffer(gl.COPY_READ_BUFFER, jb.buf);
+          gl.getBufferSubData(gl.COPY_READ_BUFFER, 0, data);
+          res.templates[jb.name] = compareTemplate(EA, jb, data, n, NC, rows, lams, inst, U);
+        });
+        cleanup();
+        var fins = {};
+        Object.keys(res.templates).forEach(function (k) {
+          var r = res.templates[k];
+          if (!r.pass) res.ok = false;
+          Object.keys(r.fins).forEach(function (f) { fins[f] = (fins[f] || 0) + r.fins[f]; });
+        });
+        res.fins = fins;
+        res.allParts = [0, 1, 2, 3, 4, 5, 6, 7].every(function (f) { return fins[f] > 0; });
+        res.barbelFish = rows.filter(function (g) { return g[EA.MO + 26] > 0.2; }).length;
+        if (!res.allParts || !res.barbelFish) res.ok = false;
+        resolve(res);
+      })();
+    });
+  }
+  /* the vertex stage's spine and placement (CORE seg / spine / appWorld /
+   * minWidth) for instance c, at uWag = 0 */
+  function instSeg(inst, c, i) {
+    var a = i < 2 ? inst.iA : (i < 4 ? inst.iB : inst.iC), o = 4 * c + 2 * (i % 2);
+    return [a[o], a[o + 1]];
+  }
+  function spineCPU(inst, c, s) {
+    var seg = function (i) { return instSeg(inst, c, i); };
+    if (s <= 0) { var a0 = seg(0), a1 = seg(1); return [a0[0] + (a0[0] - a1[0]) * (-s), a0[1] + (a0[1] - a1[1]) * (-s)]; }
+    if (s >= 5) { var b5 = seg(5), b4 = seg(4); return [b5[0] + (b5[0] - b4[0]) * (s - 5), b5[1] + (b5[1] - b4[1]) * (s - 5)]; }
+    var i = Math.floor(s), t = s - i, p0 = seg(Math.max(i - 1, 0)), p1 = seg(i), p2 = seg(Math.min(i + 1, 5)), p3 = seg(Math.min(i + 2, 5));
+    var t2 = t * t, t3 = t2 * t, out = [0, 0];
+    for (var q = 0; q < 2; q++)
+      out[q] = 0.5 * ((2 * p1[q]) + (-p0[q] + p2[q]) * t + (2 * p0[q] - 5 * p1[q] + 4 * p2[q] - p3[q]) * t2 + (-p0[q] + 3 * p1[q] - 3 * p2[q] + p3[q]) * t3);
+    return out;
+  }
+  function appWorldCPU(inst, c, geo, U) {
+    var Rb = inst.iBody[4 * c], u = geo[0] / inst.iX[4 * c + 2];
+    var s = Math.min(3, Math.max(-1.5, u)) * 5, cc = spineCPU(inst, c, s);
+    var f1 = spineCPU(inst, c, s - 0.15), f2 = spineCPU(inst, c, s + 0.15), f = [f1[0] - f2[0], f1[1] - f2[1]], fl = Math.hypot(f[0], f[1]);
+    f = fl > 1e-4 ? [f[0] / fl, f[1] / fl] : [1, 0];
+    var side = [-f[1], f[0]], p = [cc[0] + side[0] * geo[1] * Rb, cc[1] + side[1] * geo[1] * Rb];
+    var s0 = instSeg(inst, c, 0), along = Math.hypot(cc[0] - s0[0], cc[1] - s0[1]) * (s < 0 ? -1 : 1);
+    var lift = along * Math.min(1.2, Math.max(-1.2, inst.iX[4 * c]));
+    return [p[0] - U.half[0], inst.iBody[4 * c + 1] + geo[2] * Rb + lift, p[1] - U.half[1]];
+  }
+  function minWidthCPU(inst, c, U) {
+    var hx = inst.iA[4 * c] - U.half[0], hy = inst.iBody[4 * c + 1], hz = inst.iA[4 * c + 1] - U.half[1];
+    var d = Math.hypot(U.cam[0] - hx, U.cam[1] - hy, U.cam[2] - hz);
+    return 0.7 * Math.max(1, d) / Math.max(1e-3, inst.iBody[4 * c] * U.px);
+  }
+  function compareTemplate(EA, jb, data, n, NC, rows, lams, inst, U) {
+    var V = jb.tpl.verts, rings = { ringT: Array.prototype.slice.call(jb.ringT, 0, jb.tpl.ringT.length), half: jb.tpl.half };
+    var r = { verts: V, maxWorld: 0, maxMat: 0, maxMar: 0, maxDecode: 0, partBad: 0, nan: 0, fins: {}, worst: "" }, worstE = 0;
+    var VN = ["vG0", "vG1", "vG2", "vG3", "vG4", "vG5", "vG6", "vG7", "vAux", "vMeta"];
+    for (var c = 0; c < n; c++) {
+      var lam = Math.fround(lams[c]), M = EA.morphDecode(rows[c], lam), P = EA.patternVaryings(rows[c], lam), minW = minWidthCPU(inst, c, U);
+      for (var v = 0; v < V; v++) {
+        var o = (c * V + v) * NC;
+        var aT = [jb.tpl.pos[4 * v], jb.tpl.pos[4 * v + 1], jb.tpl.pos[4 * v + 2], jb.tpl.pos[4 * v + 3]];
+        var pat = [jb.tpl.pat[4 * v], jb.tpl.pat[4 * v + 1], jb.tpl.pat[4 * v + 2], jb.tpl.pat[4 * v + 3]];
+        var fin = Math.floor(pat[0] + 0.5);
+        r.fins[fin] = (r.fins[fin] || 0) + 1;
+        var b = EA.morphBuild(M, rings, aT, pat, 0, 0, minW), w = appWorldCPU(inst, c, b.geo, U);
+        var eW = Math.max(Math.abs(data[o] - w[0]), Math.abs(data[o + 1] - w[1]), Math.abs(data[o + 2] - w[2]));
+        var eM = Math.max(Math.abs(data[o + 3] - b.mat[0]), Math.abs(data[o + 4] - b.mat[1]), Math.abs(data[o + 5] - b.mat[2]));
+        var eR = Math.abs(Math.min(data[o + 6], 10) - Math.min(b.mar, 10));
+        if (Math.abs(data[o + 7] - pat[0]) > 1e-6 || Math.abs(data[o + 8] - pat[2]) > 1e-6 || data[o + 9] !== inst.iBody[4 * c + 2] || data[o + 10] !== inst.iX[4 * c + 3]) r.partBad++;
+        var eD = 0;
+        for (var q = 0; q < VN.length; q++) for (var k = 0; k < 4; k++) {
+          var g = data[o + 11 + 4 * q + k], ref = P[VN[q]][k], d = Math.abs(g - ref);
+          if (q === 0 && k === 0) d = Math.min(d, 1 - d);   /* a hue: circular */
+          eD = Math.max(eD, d / Math.max(1, Math.abs(ref)));
+        }
+        var where = "fish " + c + " vertex " + v + " (part " + fin + ")";
+        if (eW !== eW || eM !== eM || eR !== eR || eD !== eD) { if (!r.nan++) r.worst = where + ": NaN"; continue; }
+        r.maxWorld = Math.max(r.maxWorld, eW); r.maxMat = Math.max(r.maxMat, eM);
+        r.maxMar = Math.max(r.maxMar, eR); r.maxDecode = Math.max(r.maxDecode, eD);
+        var score = Math.max(eW / PATH_TOL.world, eM / PATH_TOL.mat, eR / PATH_TOL.mar, eD / PATH_TOL.decode);
+        if (score > worstE && !r.nan) { worstE = score; r.worst = where + ": world " + eW.toExponential(2) + ", mat " + eM.toExponential(2) + ", mar " + eR.toExponential(2) + ", decode " + eD.toExponential(2); }
+      }
+    }
+    r.pass = !r.nan && r.maxWorld <= PATH_TOL.world && r.maxMat <= PATH_TOL.mat && r.maxMar <= PATH_TOL.mar && r.maxDecode <= PATH_TOL.decode && r.partBad === 0;
+    return r;
   }
 
   var FLOOR_VS = [
@@ -916,14 +1177,15 @@
     }
     var fish = Kind(false), preds = Kind(true);
 
-    /* The appearance genome's fish (setAppearance; null without
-     * web/ocean_appearance.js or float textures): the M1 template at two
-     * qualities (medium; coarse while the tank's detail is below 3), the
-     * barbel strips as a second instanced draw sharing every instance
-     * attribute, and the 30 shape genes per fish in a RGBA32F texture
-     * (8 texels a fish, 512 wide). Rebuilt only when it has to grow. */
+    /* The appearance genome's fish (built on the first snapshot with s.app;
+     * null without web/ocean_appearance.js or float textures): the M1
+     * template at two qualities (medium; coarse while the tank's detail is
+     * below 3), the barbel strips as a second instanced draw sharing every
+     * instance attribute, and a fish's 63 genes in a RGBA32F texture (16
+     * texels a fish, 512 wide). Rebuilt only when it has to grow. appSkin
+     * (setAppearance): the skin from the genes, else the family / brain colour. */
     var EA = window.EvoAppearance || null;
-    var appWant = false, appStatus = EA ? "ready" : "web/ocean_appearance.js not loaded";
+    var appSkin = false, appStatus = EA ? "ready" : "web/ocean_appearance.js not loaded";
     var appKind = null;
     function AppKind() {
       var sh = appearanceShaders(EA);
@@ -933,7 +1195,7 @@
         uHalf: common.uHalf, uTime: common.uTime, uFog: common.uFog, uFogDensity: common.uFogDensity,
         uLight: common.uLight, uWag: fishUniforms.uWag, uSelect: fishUniforms.uSelect,
         uDepth: common.uDepth, uLightOn: common.uLightOn, uL0: common.uL0, uKWater: common.uKWater,
-        uIntrinsic: { value: 0 }, uPxPerUnit: { value: 500 },
+        uIntrinsic: { value: 0 }, uPxPerUnit: { value: 500 }, uColourBy: { value: 0 },
         uGenes: { value: null }, uRingT: { value: new Float32Array(16) }, uRingN: { value: 0 }, uHalfRing: { value: 4 }
       });
       var mat = new THREE.ShaderMaterial({ vertexShader: sh.vs, fragmentShader: sh.fs, uniforms: U, side: THREE.DoubleSide });
@@ -970,11 +1232,11 @@
           at[name] = a;
         });
         var g = geometry(tpls[lod], at), bg = barbTpl ? geometry(barbTpl, at) : null;
-        var rows = Math.ceil(cap * 16 / 512);   /* 16 texels a fish */
-        var data = new Float32Array(512 * rows * 4);
+        var rows = genesRows(cap);   /* 16 texels a fish */
+        var data = new Float32Array(GENES_W * rows * 4);
         /* RGBA32F, nearest, no mipmaps (three's RGBAFormat 1023, FloatType 1015,
          * NearestFilter 1003: the trimmed bundle does not export the names) */
-        var tex = new THREE.DataTexture(data, 512, rows, 1023, 1015);
+        var tex = new THREE.DataTexture(data, GENES_W, rows, 1023, 1015);
         tex.magFilter = tex.minFilter = 1003;
         tex.generateMipmaps = false;
         tex.needsUpdate = true;
@@ -1375,10 +1637,11 @@
      * else keyed off the fish id as in the shallow tank */
     var heights = null;
     var SX = new Float64Array(6), SY = new Float64Array(6);
-    /* Is this snapshot drawn from the appearance genome? (on, the module
-     * exports it, one row per fish, and the kind could be built) */
+    /* Is this snapshot drawn in the fish's own bodies? (the module exports the
+     * appearance genome, one row per fish, and the kind could be built), in
+     * every colour mode; the skin is appSkin's */
     function appearanceDrawn(s) {
-      if (!appWant || !EA || !s.app || s.app.length < s.n * EA.STRIDE) return false;
+      if (!EA || !s.app || s.app.length < s.n * EA.STRIDE) return false;
       if (!appKind) {
         try { appKind = AppKind(); appStatus = "drawing"; }
         catch (e) { appStatus = "unavailable: " + (e && e.message || e); EA = null; console.warn("evo_boids: appearance renderer", e); return false; }
@@ -1391,7 +1654,7 @@
       var at = appKind.attrs;
       var A = at.iA.array, B = at.iB.array, Cc = at.iC.array, BODY = at.iBody.array, X = at.iX.array;
       var T = appKind.texData, R = s.app, ST = EA.STRIDE, MO = EA.MO;
-      var segs = s.segs, body = s.body, ids = s.ids, depth = s.depth, vz = s.vz;
+      var segs = s.segs, cols = s.colors, body = s.body, ids = s.ids, depth = s.depth, vz = s.vz;
       if (!heights || heights.length < n) heights = new Float32Array(Math.max(n, 2048));
       var xs = SX, ys = SY, barbels = false;
       for (var c = 0; c < n; c++) {
@@ -1417,14 +1680,13 @@
         var t = vz ? vz[c] : 0;
         X[o] = t === t ? t : 0; X[o + 1] = hash01(id);
         X[o + 2] = 20 * size * elong / BODY[o];   /* lambda: body length / radius */
-        X[o + 3] = 0;
-        var to = 64 * c;   /* 16 texels: the 63 genes, one zero */
-        for (var j = 0; j < ST; j++) T[to + j] = R[r + j];
-        T[to + 63] = 0;
+        X[o + 3] = cols ? cols[3 * c] * 65536 + cols[3 * c + 1] * 256 + cols[3 * c + 2] : 0;   /* the family / brain colour */
+        packGenes(T, R, r, c, ST);   /* 16 texels: the 63 genes, one zero */
         if (R[r + MO + 26] > 0.2) barbels = true;
       }
       var tanHalf = Math.tan(camera.fov * Math.PI / 360);
       appKind.mat.uniforms.uPxPerUnit.value = ch / (2 * tanHalf);
+      appKind.mat.uniforms.uColourBy.value = appSkin ? 0 : 1;
       appKind.commit(n, barbels);
     }
     function fillFish(s, selIdx, hovIdx) {
@@ -1944,15 +2206,26 @@
       setReducedMotion: function (on) { reduced = !!on; fishUniforms.uWag.value = reduced ? 0 : 1; },
       /* the flashlight: clear light on the followed fish, or where the camera
        * looks (aimBeam). Viewer only: nothing here reaches the simulation. */
-      /* the appearance genome (web/ocean_appearance.js): draw each fish from
-       * its 63 appearance floats (s.app) instead of the family / brain colour */
-      setAppearance: function (on) { appWant = !!on; },
+      /* the appearance genome (web/ocean_appearance.js): each fish is drawn in
+       * its own body whenever the snapshot has s.app; on, its skin is pattern
+       * law 3 from its genes, off, its family / brain colour (s.colors) */
+      setAppearance: function (on) { appSkin = !!on; },
+      /* want / skin: the skin from the genes; shapes: the inherited bodies are
+       * drawn (any colour mode); drawing: both */
       appearance: function () {
-        return { want: appWant, drawing: !!(appWant && appKind && appKind.mesh && appKind.mesh.visible),
+        var shapes = !!(appKind && appKind.mesh && appKind.mesh.visible);
+        return { want: appSkin, skin: appSkin, shapes: shapes, drawing: appSkin && shapes,
                  status: appStatus, lod: appKind ? appKind.lod : "", verts: appKind ? appKind.tpls[appKind.lod || "medium"].verts : 0,
                  barbels: !!(appKind && appKind.bmesh && appKind.bmesh.visible) };
       },
       appearanceParity: function (rows, lams, cellW, cellH) { return appearanceParity(rows, lams, cellW, cellH); },
+      /* GPU == CPU through the production vertex path and gene texture
+       * (appearancePathCheck): a Promise of the report */
+      appearancePathCheck: function (rows, lams, opts) {
+        var p = appearancePathCheck(renderer.getContext(), window.EvoAppearance, rows, lams, opts);
+        renderer.resetState();
+        return p;
+      },
       setFlashlight: function (on) { beamWant = !!on; },
       flashlight: function () { return beamWant; },
       flashlightLevel: function () { return beamAmt; },
@@ -1965,5 +2238,9 @@
     };
   }
 
-  window.EvoOceanScene = { load: load, create: create };
+  window.EvoOceanScene = {
+    load: load, create: create,
+    /* the production-path check on any WebGL2 context (no three needed) */
+    appearancePathCheck: function (gl, rows, lams, opts) { return appearancePathCheck(gl, window.EvoAppearance, rows, lams, opts); }
+  };
 })();

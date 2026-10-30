@@ -437,6 +437,9 @@
   input.switch:checked { background: var(--plankton); border-color: transparent; }
   input.switch:checked::before { transform: translateX(20px); background: var(--plankton-ink); }
   input.switch:disabled { cursor: default; }
+  .field .ctl.stack { flex-direction: column; align-items: flex-end; gap: 2px; }
+  input.range { width: 9.5em; height: 28px; accent-color: var(--plankton); cursor: pointer; }
+  .rangeval { font-size: 12px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
 
   .run-hero { margin-top: 14px; padding: 16px; border-radius: var(--r-md); background: var(--surface-2); border: 1px solid var(--line-soft); }
   .run-hero .btn { width: 100%; min-height: 50px; font-size: 15px; }
@@ -817,6 +820,10 @@
         <div class="field" id="f_colourBrain">
           <span><span class="name"><span class="lt">Fish colours</span></span><span class="desc">Every fish is drawn in the body shape it inherited. Appearance (the default): its own inherited skin pattern too. Family: each family line has its own colour, the same one it has in the dashboards. Brain: a fish's colour comes from its genome, so similar brains look alike.</span></span>
           <span class="ctl"><select id="colourMode" aria-label="fish colours"><option value="appearance">Appearance</option><option value="family">Family</option><option value="brain">Brain</option></select></span>
+        </div>
+        <div class="field" id="f_clarity">
+          <span><span class="name"><span class="lt">Water clarity</span></span><span class="desc">Clear (the default): fish keep their colour at depth and stand out over a teal floor, as in Classic. Realistic: light fades and turns blue with depth, toward dark water over bright sand. Drawing only; the flashlight always shows true colours.</span></span>
+          <span class="ctl stack"><input id="clarity" class="range" type="range" min="0" max="100" step="5" value="100" aria-label="water clarity" aria-valuetext="Clear"><span id="clarityval" class="rangeval">Clear</span></span>
         </div>
         <p id="modeline"></p>
         <h3>Save &amp; load</h3>

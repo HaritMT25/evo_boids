@@ -33,7 +33,8 @@
  *      portrait screen) &cfg={"key":value,...} (SimConfig + OceanConfig keys,
  *      as oc_init takes them; the settings show them) &speed=1 (steps per
  *      frame) &e1=1 (the E1 physics preset, oc_e1_preset, under &cfg)
- *      &colour=family|brain|appearance &guide=0|1 &intro=1 (web/guide.js)
+ *      &colour=appearance|family|brain (else the visitor's last choice,
+ *      appearance the first time) &guide=0|1 &intro=1 (web/guide.js)
  *      ?mock=1 loads ocean_mock.js from beside the page instead of the engine
  *      (a JS stand-in for page development, not part of web/).
  *      The link's setup goes to oc_init as it is; one it refuses stops the
@@ -257,6 +258,7 @@
     lastS = snapshot();   /* the new world's now, not at the next frame */
     if (scene && (W !== w0 || H !== h0 || D !== d0)) { scene.setWorld(W, H, D); labelHist(); }
     applyDisplaySwitches();
+    updateModeline();     /* the world's appearance genes may differ */
     estPrev.n = 0;
     stepMs = 0;
     if (!fromTurbo) {
@@ -1746,14 +1748,17 @@
     this.blur();
   });
   el("followLight").checked = followLight;
-  /* Fish colour: by family line (the default), by brain similarity, or the
-   * fish's own appearance genome (skin pattern and body shape; the Ocean
-   * only). Family / brain is shared with Classic (the same key and ?colour=);
-   * Classic reads "appearance" as family. Display only. */
+  /* Fish colour: the fish's own appearance genome (its skin pattern; the
+   * Ocean only, and the default), by family line, or by brain similarity.
+   * Every mode draws each fish in its inherited body shape when the module
+   * exports the genome (HAS_APP); family and brain only recolour the skin.
+   * ?colour= wins, then the visitor's own last choice (stored only when they
+   * pick one), else appearance. The key and ?colour= are shared with
+   * Classic, which reads "appearance" as family. Display only. */
   (function () {
     var want = P.get("colour"), saved = store("evo_boids.colourBy");
     if (want !== "brain" && want !== "family" && want !== "appearance")
-      want = saved === "brain" || saved === "appearance" ? saved : "family";
+      want = saved === "brain" || saved === "family" ? saved : "appearance";
     colourMode = want;
     colourBrain = want === "brain";
     el("colourMode").value = colourMode;
@@ -1767,10 +1772,15 @@
     this.blur();
   });
   function updateModeline() {
+    /* the world's appearance genes (bit 1 patterns, bit 2 shapes; 0 = off, or a module without them) */
+    var flags = HAS_APP ? (has("oc_appearance_flags") ? M._oc_appearance_flags() : 3) : 0;
+    var what = colourMode === "appearance"
+      ? (flags ? ", each fish drawn from its appearance genes (skin pattern and body shape)"
+               : ", coloured by family (" + (HAS_APP ? "the appearance genes are off in this world" : "this module has no appearance genes") + ")")
+      : (flags & 2 ? ", each fish in its inherited body shape" : "") + (colourBrain ? ", coloured by brain" : ", coloured by family");
     el("modeline").textContent = "Running the single-threaded Ocean module, reproducible from the seed" +
       (HAS_EYE ? " (the eye build)" : "") + ". Drawing: the 3D tank" + (scene ? ", detail " + scene.quality() + " of 3" : "") +
-      (colourMode === "appearance" ? (HAS_APP ? ", each fish drawn from its appearance genes" : ", coloured by family (this module has no appearance genes)")
-       : colourBrain ? ", coloured by brain" : ", coloured by family") + ".";
+      what + ".";
   }
   setPaused(false);
   changeSpeed(0);
@@ -1792,7 +1802,11 @@
         { drawer: false, title: "The tank",
           target: function () { return h.rectOf("#tank"); },
           body: function () {
-            return "Glowing specks are food, each family has its own colour, and the dark fish with glowing eyes are " +
+            var looks = colourMode === "appearance" && HAS_APP
+              ? "each fish wears the skin pattern and body shape it inherited from its parents (the settings can " +
+                "colour them by family or by brain instead)"
+              : colourBrain ? "a fish's colour follows its brain's wiring" : "each family has its own colour";
+            return "Glowing specks are food, " + looks + ", and the dark fish with glowing eyes are " +
                    "predators. Light fades and turns blue with depth. " +
                    (h.touch() ? "Drag to move, pinch to zoom, twist with two fingers to turn (below the horizon too)."
                               : "Drag to move, scroll to zoom, right-drag to turn (below the horizon too). Or fly: " +

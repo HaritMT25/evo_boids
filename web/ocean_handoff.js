@@ -224,12 +224,30 @@
     return { value: val([]), repeats: repeats };
   }
   /* a cfg object as oc_init's JSON ("" for nothing), the later occurrences of
-   * its repeated keys ([{key, value}], parseFirst's at its level) after it */
+   * its repeated keys ([{key, value}], parseFirst's at its level) after it.
+   * A number too big for a double (1e400) parses to ±Infinity, which
+   * JSON.stringify writes as null: {"maxPopulation":300,"maxPopulation":1e400}
+   * reached oc_init as ...:null, which its whole-number check passes over.
+   * So an infinity goes on as a number that is one in oc_init too (±1e400):
+   * the engine checks every occurrence, of every key, as it does its own
+   * JSON. Everything else is written as JSON.stringify writes it. (The
+   * values are JSON's: from JSON.parse / parseFirst, or the sheet's.) */
+  function literal(v) {
+    if (v === Infinity) return "1e400";
+    if (v === -Infinity) return "-1e400";
+    if (typeof v === "number" && v !== v) throw new Error("NaN is not a JSON value");
+    var none = function (x) { return x === undefined || typeof x === "function"; };   /* as JSON.stringify skips them */
+    if (Array.isArray(v)) return "[" + v.map(function (x) { return none(x) ? "null" : literal(x); }).join(",") + "]";
+    if (v && typeof v === "object")
+      return "{" + Object.keys(v).filter(function (k) { return !none(v[k]); })
+                     .map(function (k) { return JSON.stringify(k) + ":" + literal(v[k]); }).join(",") + "}";
+    return JSON.stringify(v);
+  }
   function cfgJson(cfg, repeats) {
     var keys = Object.keys(cfg || {}), more = repeats || [];
     if (!keys.length && !more.length) return "";
-    var s = JSON.stringify(cfg || {});
-    more.forEach(function (r) { s = s.slice(0, -1) + (s.length > 2 ? "," : "") + JSON.stringify(r.key) + ":" + JSON.stringify(r.value) + "}"; });
+    var s = literal(cfg || {});
+    more.forEach(function (r) { s = s.slice(0, -1) + (s.length > 2 ? "," : "") + JSON.stringify(r.key) + ":" + literal(r.value) + "}"; });
     return s;
   }
 

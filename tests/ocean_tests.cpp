@@ -3603,9 +3603,15 @@ void testShimInts() {
         }
     }
     // A repeated key: every occurrence is checked, not only the one the reader takes.
+    // A number past a double's range (1e400: strtod's ±inf) in either occurrence,
+    // as the page now passes it on (web/ocean_handoff.js cfgJson), SimConfig's int
+    // key and the Ocean's alike.
     for (const char* c : {R"({"predatorCount":2,"predatorCount":3e9})", R"({"maxPopulation":2147483648})",
                           R"({"foodPatches":-1e10})", R"({"minPopulation":1e999})", R"({"currentMode":0.5})",
-                          R"({"currentMode":1e300})", R"({"currentEddies":2.5})", R"({"predatorCount":2,"predatorCount":2.5})"}) {
+                          R"({"currentMode":1e300})", R"({"currentEddies":2.5})", R"({"predatorCount":2,"predatorCount":2.5})",
+                          R"({"maxPopulation":300,"maxPopulation":1e400})", R"({"maxPopulation":1e400,"maxPopulation":300})",
+                          R"({"maxPopulation":300,"maxPopulation":-1e400})", R"({"appearance":3,"appearance":1e400})",
+                          R"({"appearance":1e400,"appearance":3})"}) {
         const int initRc = oc_init(1301, 1920, 1080, 240.0, 50, c);   // before oc_last_error() is read
         t.expect(initRc == 0 && std::strstr(oc_last_error(), "whole number"), "%s: %s", c, oc_last_error());
     }

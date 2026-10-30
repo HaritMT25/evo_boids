@@ -955,6 +955,11 @@ async function liveLedger() {
     }
 }
 
+/* a number too big for a double, in either occurrence of a repeated key (int, Ocean int, Ocean bool) */
+const OVERFLOW_DOCS = ['{"maxPopulation":300,"maxPopulation":1e400}', '{"maxPopulation":1e400,"maxPopulation":300}',
+                       '{"maxPopulation":300,"maxPopulation":-1e400}', '{"maxPopulation":-1e400,"maxPopulation":300}',
+                       '{"appearance":3,"appearance":1e400}', '{"appearance":1e400,"appearance":3}',
+                       '{"lightEnabled":true,"lightEnabled":1e400}', '{"lightEnabled":1e400,"lightEnabled":true}'];
 /* A key twice in ?cfg= or a setup file: the page now follows the engine's
  * rule (web/ocean_handoff.js parseFirst / cfgJson, as web/ocean.js
  * importWorld / loadSetup use them): the first occurrence counts, every one
@@ -980,9 +985,16 @@ async function repeatedKeys() {
         const r = HO.withCString(M, json, p => M._oc_init(3, 1920, 1080, 240, 60, p));
         return { ok: r === 1, why: r ? '' : HO.cString(M, M._oc_last_error()), print: r ? fingerprint(M) : '' };
     };
+    /* what cfgJson writes for finite values is JSON.stringify's, byte for byte (every sheet,
+     * preset and finite import reaches oc_init as it did) */
+    const finite = [{}, { a: 1, b: -0, c: 0.006, d: 1e21, e: -2.5e-7, f: true, g: null, h: 'x"y\\zé', i: [1, [2, { j: 3 }], null], k: {} },
+                    CFG.BIG_TANK.cfg, JSON.parse(HO.cString(M, M._oc_e1_preset())), { walls: true, maxPopulation: 2147483647 }];
+    ok(finite.every(c => !Object.keys(c).length ? HO.cfgJson(c) === '' : HO.cfgJson(c) === JSON.stringify(c)),
+       'cfgJson writes finite values as JSON.stringify does (' + finite.length + ' configs: nesting, -0, exponents, escapes, the Big tank, E1)');
     /* the URL's text (URLSearchParams decodes it), and a setup file with it as its config */
     for (const doc of ['{"toroidal":1,"toroidal":true}', '{"toroidal":true,"toroidal":1}', '{"toroidal":false,"toroidal":true}',
-                       '{"foodEnergy":5,"foodEnergy":9}', '{"maxPopulation":300,"maxPopulation":0.5}', '{"maxPopulation":0.5,"maxPopulation":300}']) {
+                       '{"foodEnergy":5,"foodEnergy":9}', '{"maxPopulation":300,"maxPopulation":0.5}', '{"maxPopulation":0.5,"maxPopulation":300}']
+                      .concat(OVERFLOW_DOCS)) {
         const direct = init(doc);
         const url = new URLSearchParams('cfg=' + encodeURIComponent(doc)).get('cfg');
         const pf = HO.parseFirst(url), top = pf.repeats.filter(r => !r.path.length);
@@ -1269,6 +1281,68 @@ async function pageStartFailures() {
     }
 }
 
+/* oc_init of doc as it is, on module M: {ok, why, print} */
+function directInit(M, doc) {
+    const r = HO.withCString(M, doc, ptr => M._oc_init(7, 1920, 1080, 240, 12, ptr));
+    return { ok: r === 1, why: r ? '' : HO.cString(M, M._oc_last_error()), print: r ? fingerprint(M) : '' };
+}
+const PAGE_Q7 = '?seed=7&pop=12&w=1920&h=1080&walls=0';
+/* A cfg document into a running page by one of its three ways in:
+ * importWorld (as its callers call it: parseFirst, the top-level repeats),
+ * the start-up's URL-import block (?cfg=; seed 7, 12 fish, 1920 x 1080),
+ * Load setup (a version-1 file, the document its config). {ok, why} */
+async function viaPage(p, how, doc) {
+    if (how === 'importWorld') {
+        const pf = p.ctx.EvoOceanHandoff.parseFirst(doc);
+        const why = p.T.importWorld(7, 12, 240, pf.value, undefined, pf.repeats.filter(r => !r.path.length), [1920, 1080]);
+        return { ok: why === '', why };
+    }
+    if (how === 'url') {
+        try { p.T.urlImport(new URLSearchParams('seed=7&pop=12&w=1920&h=1080&cfg=' + encodeURIComponent(doc))); return { ok: true, why: '' }; }
+        catch (e) { return { ok: false, why: String(e && e.message || e) }; }
+    }
+    p.el('err').textContent = '';
+    p.loadFile({ name: 'setup.json', text: () => Promise.resolve('{"format":"evo_ocean_setup","seed":7,"population":12,"depth":240,' +
+                                                                '"width":1920,"height":1080,"config":' + doc + '}') });
+    await until(() => p.msg() !== '', 'the setup\'s answer');
+    return { ok: /^Setup loaded/.test(p.msg()), why: p.msg() };
+}
+const PAGE_WAYS = ['importWorld', 'url', 'setup'];
+
+/* (#5) A number too big for a double (1e400) parses to Infinity, which
+ * JSON.stringify wrote as null on the page's way to oc_init:
+ * {"maxPopulation":300,"maxPopulation":1e400} went as ...:null, which the
+ * engine's whole-number check passes over, and ran with 300 (the other order
+ * with the default). Now the infinity goes on as a number, and oc_init
+ * refuses it as it does in its own JSON. Through the page's three ways in,
+ * on a running page (a refusal changes nothing), against oc_init itself. */
+async function pageOverflow() {
+    section('The page: a number too big for a double reaches oc_init as a number, and is refused there');
+    {
+        const p = await bootPage('?seed=7&pop=12&w=1920&h=1080&cfg=' + encodeURIComponent(OVERFLOW_DOCS[0]));
+        const sent = p.inits[0] || '';
+        ok(/This link's settings were refused/.test(p.failed) && /maxPopulation/.test(p.failed) && /1e400/.test(sent) && !/null/.test(sent),
+           'a link with ' + OVERFLOW_DOCS[0] + ' is refused at start-up ("' + (p.failed.split('\n').pop() || 'it started') + '"); oc_init got ' + sent);
+    }
+    const direct = await mk(1, {}, 300, 300, 0);
+    const p = await bootPage(PAGE_Q7);
+    for (const doc of OVERFLOW_DOCS.concat(['{"maxPopulation":300,"maxPopulation":400}', '{"foodEnergy":5,"foodEnergy":9}',
+                                            '{"lightEnabled":true,"lightEnabled":false}'])) {
+        const d = directInit(direct, doc), bad = [];
+        for (const how of PAGE_WAYS) {
+            const print0 = fingerprint(p.M), state0 = p.state(), n0 = p.inits.length;
+            const r = await viaPage(p, how, doc), sent = p.inits.slice(n0);
+            if (sent.some(s => /null/.test(s) || (/e400/.test(doc) && !/1e400/.test(s)))) bad.push(how + ' sent ' + sent.join(' | '));
+            if (r.ok !== d.ok) bad.push(how + (r.ok ? ' accepted it' : ' refused it: ' + r.why));
+            else if (!d.ok && (fingerprint(p.M) !== print0 || p.state() !== state0)) bad.push(how + ' changed the page');
+            else if (d.ok && fingerprint(p.M) !== d.print) bad.push(how + ' ran another world');
+        }
+        ok(!bad.length, doc + ': ' + (d.ok ? 'accepted, the same world' : 'refused (' + d.why + ')') + ' by oc_init, importWorld, ?cfg= and a setup file' +
+           (bad.length ? ' — ' + bad.join('; ') : ''));
+    }
+    ok(p.uncaught.length === 0, 'no exception escaped the page\'s handlers');
+}
+
 /* Every section, in order; `node tests/ocean_turbo_handoff.js NAME...` runs only those. */
 const SECTIONS = {
     repeatedKeys, liveLedger, growthPage, randomize, imports,
@@ -1281,7 +1355,7 @@ const SECTIONS = {
                                                 foodPatches: 5, foodDepthMode: 1, bodyModel: true }));
     },
     failures: failures_,
-    pageHeld, pageRefusal, pageAsyncSetup, pageStartFailures
+    pageHeld, pageRefusal, pageAsyncSetup, pageStartFailures, pageOverflow
 };
 const unhandled = [];
 process.on('unhandledRejection', (e) => { unhandled.push(e); });

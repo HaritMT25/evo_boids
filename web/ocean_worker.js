@@ -21,7 +21,14 @@
  *   in : {cmd:'stop'}              -> finish the chunk, post the memory back
  *   in : {cmd:'resume'}            -> the page could not take the memory
  *                                     back: carry on running this world
- *   out: {type:'stats', frame, pop, food, pred, stepsPerSec, totalSteps} ~4x/s
+ *   in : {cmd:'wiring'}            -> the Brains dashboard's wiring of the
+ *                                     world now (oc_wiring), answered between
+ *                                     chunks; the page asks only while that
+ *                                     panel shows, every 2 s at most
+ *   out: {type:'stats', frame, pop, food, pred, stepsPerSec, totalSteps, st, su}
+ *        ~4x/s; st: oc_stats, su: oc_summary of the world now (the page's
+ *        readout and stat panel show them while Turbo owns the world)
+ *   out: {type:'wiring', n, senses, actions, path, direct, frame}
  *   out: {type:'rec', rows}        -> dashboard samples (web/ocean_dash.js row())
  *   out: {type:'set', key, value, ok, error, frame}  (frame: the world's frame
  *        it applied at; every 'set' gets one, ok false when nothing runs)
@@ -110,8 +117,19 @@ onmessage = function (e) {
       postMessage({ type: "set", key: key, value: value, ok: !!ok, error: ok ? "" : H.cString(M, M._oc_last_error()),
                     frame: frameNow() });
     } catch (err) { fail(err, "on a live setting"); }
+  } else if (msg.cmd === "wiring") {
+    if (!M || !owns) return;   /* no world here (yet, or any more): the page asks again later */
+    try { postMessage(wiring()); } catch (err) { fail(err, "on the wiring"); }
   }
 };
+
+/* the Brains dashboard's wiring of the world now (web/ocean.js wiringNow's
+ * numbers): oc_wiring allocates, so the view is cut after it */
+function wiring() {
+  var nS = M._oc_num_senses(), nA = M._oc_num_actions(), n = M._oc_wiring();
+  var data = H.f32(M, M._oc_wiring_data(), 2 * nS * nA);
+  return { type: "wiring", n: n, senses: nS, actions: nA, path: data.slice(0, nS * nA), direct: data.slice(nS * nA), frame: frameNow() };
+}
 
 /* the frame counter, from the stats (oc_stats needs an oc_sync) */
 function frameNow() { M._oc_sync(); return H.f64(M, M._oc_stats(), statsLen())[1]; }
@@ -155,8 +173,12 @@ function postStats(now) {
     for (var i = 0; i < samples.length; i++) sum += samples[i][1];
     if (span > 0.05) sps = sum / span;
   }
-  postMessage({ type: "stats", frame: frameNow(), pop: M._oc_creature_count(), food: M._oc_food_count(),
-                pred: M._oc_predator_count(), stepsPerSec: Math.round(sps), totalSteps: totalSteps });
+  /* the world's numbers now, for the page's readout: the stats copied
+   * before oc_summary allocates (web/ocean_handoff.js row's order) */
+  M._oc_sync();
+  var st = H.f64(M, M._oc_stats(), statsLen()), su = H.f64(M, M._oc_summary(), M._oc_summary_len());
+  postMessage({ type: "stats", frame: st[1], pop: M._oc_creature_count(), food: M._oc_food_count(),
+                pred: M._oc_predator_count(), stepsPerSec: Math.round(sps), totalSteps: totalSteps, st: st, su: su });
 }
 function finishStop() {
   running = false;

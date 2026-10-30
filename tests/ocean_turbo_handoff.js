@@ -1404,6 +1404,94 @@ async function pageBools() {
     ok(p.uncaught.length === 0, 'no exception escaped the page\'s handlers');
 }
 
+/* Turbo dashboards. While Turbo owned the world, the Brains dashboard
+ * showed "Waiting for the world…" (or the wiring from before Turbo) and the
+ * readout and stat panel the page's frozen copy. Now the worker's stats
+ * messages carry its oc_stats / oc_summary, and it answers the page's
+ * wiring questions (asked only while Brains shows, every 2 s at most); after
+ * the hand-back (or a lost world) the page's own world is the source again.
+ * Through the page and the real dashboards (charts stubbed): the Brains
+ * panel opened first during Turbo (an empty cache) and before it (a
+ * cache of the page's world), the readout, a Stop and a lost world; and the
+ * round trip stays bit-identical to a run without any of this. */
+async function waitFor(pred, ms) {
+    try { await until(pred, '', ms); return true; } catch (e) { return false; }
+}
+function hud(p, now) {   /* one frame of the page at time now: the readout and the stat panel */
+    p.raf(now);
+    const m = /frame ([\d,]+)/.exec(p.el('statlist').innerHTML);
+    return { fish: Number(p.el('ro-fish').textContent.replace(/,/g, '')), frame: m ? Number(m[1].replace(/,/g, '')) : NaN,
+             notes: p.el('statnotes').textContent };
+}
+const brainsNote = (p) => { const n = p.el('dgrid').querySelector('.cnote'); return n ? n.textContent : ''; };
+async function wiringOf(img, f) {   /* oc_wiring of the world from img, stepped to frame f */
+    const ref = await controlRun(img, [], f), nS = ref._oc_num_senses(), nA = ref._oc_num_actions(), n = ref._oc_wiring();
+    const data = HO.f32(ref, ref._oc_wiring_data(), 2 * nS * nA);
+    return { n, path: data.slice(0, nS * nA), direct: data.slice(nS * nA) };
+}
+async function pageDashboards() {
+    section('The page: the readout and the Brains dashboard show the Turbo world, then the page\'s again');
+    let now = 1e6;
+    for (const end of ['handed back', 'lost']) {
+        const p = await bootPage(PAGE_Q);
+        const img = HO.buffer(p.M).slice(0), f0 = frame(p.M), dash = p.ctx.EvoOceanDash;
+        p.click('readout');
+        if (end === 'lost') {   /* Brains opened before Turbo: its cache holds the page's world */
+            dash.showTab('brains');
+            await waitFor(() => /^From \d+ fish;/.test(brainsNote(p)), 5000);
+        }
+        const before = brainsNote(p);
+        p.click('turbobtn');
+        await until(() => p.T.turboState === 'turbo', 'Turbo');
+        const sh = p.worker();
+        await until(() => sh.delivered.some(m => m.type === 'stats' && m.frame >= f0 + 300), 'Turbo to run a while');
+        if (end !== 'lost') dash.showTab('brains');   /* opened first during Turbo: an empty cache */
+        const first = brainsNote(p);
+        const turboNote = await waitFor(() => / in the Turbo run/.test(brainsNote(p)), 8000);
+        const got = sh.delivered.filter(isType('wiring')), w = got[got.length - 1];
+        const shown = Number((/^From (\d+)/.exec(brainsNote(p)) || [])[1]);
+        let same = false;
+        if (w) {
+            const ref = await wiringOf(img, w.frame);
+            same = w.frame > f0 && ref.n === w.n && w.path.length === ref.path.length && w.path.every((v, i) => Object.is(v, ref.path[i])) &&
+                   w.direct.every((v, i) => Object.is(v, ref.direct[i])) && got.some(m => m.n === shown);
+        }
+        ok(turboNote && same, end + ': the Brains panel ' + (end === 'lost' ? 'kept "' + before + '", then' : 'said "' + first + '", then') +
+           ' shows the worker\'s wiring ("' + brainsNote(p) + '"; ' + got.length + ' asked for, the last at frame ' + (w ? w.frame : '–') +
+           ' equal to oc_wiring of that frame\'s world)');
+        const asks = sh.toWorker.filter(m => m.cmd === 'wiring').length;
+        const stats = sh.delivered.filter(isType('stats')), last = stats[stats.length - 1];
+        const h = hud(p, now += 1000);
+        ok(h.frame === last.frame && h.frame > f0 && last.st && h.fish === last.st[0] && h.fish === last.pop && /its numbers/.test(h.notes),
+           end + ': the readout and stat panel show the worker\'s world: frame ' + h.frame + ' (its latest stats ' + (last && last.frame) + ', Turbo took ' + f0 +
+           '), ' + h.fish + ' fish');
+        dash.showTab('pop');   /* Brains hidden: no more questions */
+        const asks2 = sh.toWorker.filter(m => m.cmd === 'wiring').length;
+        await new Promise(r => setTimeout(r, 2600));
+        ok(asks >= 1 && asks <= 3 && sh.toWorker.filter(m => m.cmd === 'wiring').length === asks2,
+           end + ': the page asked for the wiring only while Brains showed (' + asks + ' times), not after');
+        dash.showTab('brains');
+        if (end === 'lost') {
+            sh.pause(); trapNext(sh);
+            await sh.release(isType('error'), 'the trap');
+        } else p.click('turboexit');
+        await until(() => p.T.turboState === 'live', 'the world back');
+        const at = frame(p.M);
+        const own = p.T.wiringNow();
+        const back = await waitFor(() => /^From \d+ fish;/.test(brainsNote(p)), 5000);
+        ok(back && own && !own.turbo && (end !== 'lost' || at === f0),
+           end + ': back on the page, the Brains panel reads its own world again ("' + brainsNote(p) + '")');
+        const h2 = hud(p, now += 1000);
+        ok(h2.frame === frame(p.M) && !/Turbo/.test(h2.notes), end + ': and the readout too (frame ' + h2.frame + ')');
+        if (end !== 'lost') {
+            const ref = await controlRun(img, [], frame(p.M)), d = sameFor(p.M, ref, 150);
+            ok(d === '', 'the round trip with the dashboards reading the worker is bit-identical to the run without (150 steps)' + (d ? ': ' + d : ''));
+        }
+        dash.close();
+        ok(p.uncaught.length === 0 && !p.logs.some(l => l[0] === 'error'), end + ': no exception escaped the page, no console error');
+    }
+}
+
 /* Every section, in order; `node tests/ocean_turbo_handoff.js NAME...` runs only those. */
 const SECTIONS = {
     repeatedKeys, liveLedger, growthPage, randomize, imports,
@@ -1416,7 +1504,7 @@ const SECTIONS = {
                                                 foodPatches: 5, foodDepthMode: 1, bodyModel: true }));
     },
     failures: failures_,
-    pageHeld, pageRefusal, pageAsyncSetup, pageStartFailures, pageOverflow, pageBools
+    pageHeld, pageRefusal, pageAsyncSetup, pageStartFailures, pageOverflow, pageBools, pageDashboards
 };
 const unhandled = [];
 process.on('unhandledRejection', (e) => { unhandled.push(e); });

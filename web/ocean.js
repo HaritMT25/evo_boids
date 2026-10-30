@@ -1134,40 +1134,45 @@
   function updateHud(s, now) {
     if (!dirtyHud && now - hudT < 500) return;
     dirtyHud = false; hudT = now;
-    if (has("oc_summary") && (!summary || now - summaryT > 450)) {
+    /* while Turbo owns the world, its numbers: the worker's latest stats and
+     * summary (turboView); this page's copy is the world as Turbo took it */
+    var tv = turboState !== "live" ? turboView : null;
+    if (!tv && has("oc_summary") && (!summary || now - summaryT > 450)) {
       summary = HO.f64(M, M._oc_summary(), M._oc_summary_len());   /* it allocates: the views after it */
       summaryT = now;
       s = fresh(s);
     }
-    var st = s.stats, g = function (k) { return STATS[k] < st.length ? st[STATS[k]] : NaN; };
+    var st = tv ? tv.st : s.stats, su = tv ? tv.su : summary, g = function (k) { return STATS[k] < st.length ? st[STATS[k]] : NaN; };
+    var nFish = tv ? g("pop") : s.n, nFood = tv ? su[0] : s.fc, nPred = tv ? su[1] : s.pc;
     var frame = g("frame");
     rates.push(frame, g("births"), g("deaths"));
-    setTxt("ro-fish", fmtInt(s.n));
-    setTxt("ro-gen", summary ? String(Math.round(summary[13])) : "–");
+    setTxt("ro-fish", fmtInt(nFish));
+    setTxt("ro-gen", su ? String(Math.round(su[13])) : "–");
     setTxt("ro-depth", g("depthMean").toFixed(0));
     setTxt("ro-fps", String(fps));
     el("ro-fps").className = "num" + (fps && fps < 45 ? " warn" : "");
     if (!statOpen) return;
     var rb = rates.perSec("b"), rd = rates.perSec("d");
     var rows = [
-      ["fish", fmtInt(s.n)],
-      ["food", fmtInt(s.fc)],
-      ["predators", String(s.pc)],
+      ["fish", fmtInt(nFish)],
+      ["food", fmtInt(nFood)],
+      ["predators", String(nPred)],
       ["time", fmtTime(frame * DT) + " <small>· frame " + fmtInt(frame) + "</small>"],
       ["seed", initArgs ? String(initArgs.seed) : "–"],
       ["births", fmtInt(g("births")) + (rb !== null ? " <small>· " + rb.toFixed(1) + "/s</small>" : "")],
       ["deaths", fmtInt(g("deaths")) + (rd !== null ? " <small>· " + rd.toFixed(1) + "/s</small>" : "")],
       ["founders added", fmtInt(g("reseeds"))]
     ];
-    if (summary) {
-      rows.push(["died", "<small>starved </small>" + fmtInt(summary[3]) + "<small> · old </small>" + fmtInt(summary[4]) + "<small> · caught </small>" + fmtInt(summary[2])]);
-      rows.push(["generation", summary[12].toFixed(1) + " <small>avg · " + Math.round(summary[13]) + " max</small>"]);
-      rows.push(["family lines", fmtInt(summary[19])]);
-      rows.push(["neutral depth", (summary[14] * D).toFixed(0) + " <small>± " + (summary[15] * D).toFixed(0) + "</small>"]);
+    if (su) {
+      rows.push(["died", "<small>starved </small>" + fmtInt(su[3]) + "<small> · old </small>" + fmtInt(su[4]) + "<small> · caught </small>" + fmtInt(su[2])]);
+      rows.push(["generation", su[12].toFixed(1) + " <small>avg · " + Math.round(su[13]) + " max</small>"]);
+      rows.push(["family lines", fmtInt(su[19])]);
+      rows.push(["neutral depth", (su[14] * D).toFixed(0) + " <small>± " + (su[15] * D).toFixed(0) + "</small>"]);
     }
     rows.push(["depth", g("depthMean").toFixed(0) + " ± " + g("depthSd").toFixed(0) + " <small>of " + D.toFixed(0) + "</small>"]);
     var ask = speed(), ran = paused ? ask : lastSteps;
-    rows.push(["steps / frame", ran + (ran !== ask ? "<small>/" + ask + "</small>" : "") + " <small>· " + fps + " fps</small>"]);
+    if (tv && turboStats) rows.push(["steps / s", fmtInt(turboStats.stepsPerSec) + " <small>· Turbo</small>"]);
+    else rows.push(["steps / frame", ran + (ran !== ask ? "<small>/" + ask + "</small>" : "") + " <small>· " + fps + " fps</small>"]);
     setHtml("statlist", rows.map(function (r) { return "<dt>" + r[0] + "</dt><dd>" + r[1] + "</dd>"; }).join(""));
     for (var i = 0; i < 8; i++) {
       var k = STATS.hist0 + i, v = k < st.length ? st[k] : 0;
@@ -1177,7 +1182,7 @@
     }
     var notes = [];
     if (paused) notes.push("Paused. Space or ▶ runs it; . steps once.");
-    if (turboState !== "live") notes.push("Turbo is running: this picture waits for it.");
+    if (turboState !== "live") notes.push(tv ? "Turbo is running: these are its numbers; the picture waits for it." : "Turbo is running: this picture waits for it.");
     if (scene && scene.following()) notes.push("Following a fish" + (lightOn() ? ", with the flashlight on." : "."));
     setTxt("statnotes", notes.join(" "));
   }
@@ -1434,8 +1439,11 @@
     sampleBucket = b;
     dash().push(HO.row(M, dash().famK, statsLen));
   }
+  /* the Brains dashboard's wiring: this world's, or, while Turbo owns the
+   * world, the worker's (turboWiring) */
   function wiringNow() {
-    if (!M || turboState !== "live" || !has("oc_wiring")) return null;
+    if (!M || !has("oc_wiring")) return null;
+    if (turboState !== "live") return turboWiring();
     var sh = brainShape(), n = M._oc_wiring();   /* both allocate: the view after them */
     var data = new Float32Array(heap(), M._oc_wiring_data(), 2 * sh.nS * sh.nA);
     return { at: performance.now(), n: n, senses: sh.nS, actions: sh.nA,
@@ -1446,9 +1454,29 @@
   /* ---------------- TURBO (web/ocean_worker.js) ----------------
    * live -> entering -> turbo -> exiting -> live. The worker gets a copy of
    * this module's memory and hands its own back on Stop; meanwhile this page
-   * keeps drawing the frozen world under the Turbo card, and live settings
-   * go to the worker. */
+   * keeps drawing the frozen world under the Turbo card, live settings go
+   * to the worker, and the readout and dashboards show the worker's world
+   * (its stats messages, its samples, the wiring it is asked for). */
   var turboState = "live", turboWorker = null, turboStats = null;
+  /* What the dashboards read while Turbo owns the world, from the worker:
+   * turboView {st, su}, its latest oc_stats / oc_summary (each stats message
+   * brings them: the readout and the stat panel); turboWire, the Brains
+   * panel's wiring, which the worker computes when asked (the panel asks
+   * when its copy is 2 s old, and only while it shows), stamped when it
+   * arrives here; wireAsked, when that was asked (-1: answered). Cleared at
+   * each start and hand-back: the page's own world is the source again. */
+  var turboView = null, turboWire = null, wireAsked = -1;
+  function turboWiring() {
+    var w = turboWire;
+    turboWire = null;
+    if (w) return w;   /* the panel keeps it until it wants a fresh one */
+    var now = performance.now();
+    if (turboState === "turbo" && turboWorker && (wireAsked < 0 || now - wireAsked > 2000)) {
+      wireAsked = now;   /* unanswered (the worker between worlds): asked again after 2 s */
+      turboWorker.postMessage({ cmd: "wiring" });
+    }
+    return null;   /* nothing new yet: the panel keeps what it shows */
+  }
   function updateLocks() {
     var tb = el("turbobtn"), on = turboState === "turbo" || turboState === "exiting";
     tb.setAttribute("aria-pressed", on ? "true" : "false");
@@ -1475,8 +1503,15 @@
     var msg = e.data || {};
     if (msg.type === "stats") {
       turboStats = msg;
+      if (msg.st && msg.su) turboView = { st: msg.st, su: msg.su };
       if (turboState === "entering") { turboState = "turbo"; updateLocks(); flushHeld(); }
       paintTurbo();
+    } else if (msg.type === "wiring") {
+      if (turboState === "live") return;   /* the world is back here: the page's own is the source */
+      brainShape();   /* the names: this page's module is the same build */
+      wireAsked = -1;
+      turboWire = { at: performance.now(), n: msg.n, senses: msg.senses, actions: msg.actions, path: msg.path, direct: msg.direct,
+                    senseNames: sensorNames, actionNames: actionNames, frame: msg.frame, turbo: true };
     } else if (msg.type === "rec") {
       if (dash()) dash().ingest(msg.rows);
     } else if (msg.type === "set") {
@@ -1510,6 +1545,8 @@
    * the acknowledged ones before them (ledger back). Returns replayEdits'. */
   function turboBack(quiet, lost) {
     turboState = "live";
+    turboView = null; turboWire = null; wireAsked = -1;
+    summary = null;   /* the readout's summary: this world's again, at the next refresh */
     var plan = live.back(!!lost);
     afterNewWorld(true);
     sampleBucket = Math.floor(M._oc_stats ? frameNow() / (dash() ? dash().every() : 60) : -1);
@@ -1563,6 +1600,7 @@
     try {
       turboState = "entering";
       turboStats = null;
+      turboView = null; turboWire = null; wireAsked = -1;
       turboEntryCfg = Object.assign({}, runCfg);
       live.start();
       select(null);

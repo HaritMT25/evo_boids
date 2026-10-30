@@ -138,7 +138,7 @@ Two worlds, each on its own page with the same controls:
 
 A **3-D | 2-D** switch beside the live readout, on both pages, moves between them ("3-D Ocean | 2-D Classic", or "3-D | 2-D" under 760 px). The current world is highlighted and is not a link, so pressing it never restarts the run; each world runs on its own, so switching starts the other one fresh. Classic's tank and flat views stay a setting of Classic (Settings → Run → Tank view): both are pictures of the 2-D world. Both tours point at the switch.
 
-**Links from before.** Until 2026-10-28 the root was Classic. A query on `/` (or `/ocean.html`) with one of the keys only Classic reads (`view`, `fish`, `gl`, `bench`, `threads`, `nthreads`) and none of the keys only the Ocean reads (`seed`, `pop`, `depth`, `w`, `h`, `cfg`, `speed`, `e1`, `mock`) goes to `/classic.html` with its query and hash, before the Ocean starts (a script at the top of `web/ocean.html`). So `/?view=flat`, `/?threads=0` and `/?bench` open Classic as they did, and the Ocean's own links, which carry `?seed=` from the first restart on, stay. Keys both pages read the same way (`colour`, `guide`, `intro`) decide nothing: `/?guide=0` is the Ocean. Classic reads no `seed` and no `cfg`, so no key means one thing on one page and another on the other. A query with keys of both, which neither page writes, stays on the Ocean.
+**Links from before.** Until 2026-10-28 the root was Classic. A query on `/` (or `/ocean.html`) with one of the keys only Classic reads (`view`, `fish`, `gl`, `bench`, `threads`, `nthreads`) and none of the keys only the Ocean reads (`seed`, `pop`, `depth`, `w`, `h`, `cfg`, `speed`, `e1`, `mock`, `walls`) goes to `/classic.html` with its query and hash, before the Ocean starts (a script at the top of `web/ocean.html`). So `/?view=flat`, `/?threads=0` and `/?bench` open Classic as they did, and the Ocean's own links, which carry `?seed=` from the first restart on, stay. Keys both pages read the same way (`colour`, `guide`, `intro`) decide nothing: `/?guide=0` is the Ocean. Classic reads no `seed` and no `cfg`, so no key means one thing on one page and another on the other. A query with keys of both, which neither page writes, stays on the Ocean.
 
 **Embedded.** Both pages run inside an iframe on a page without COOP/COEP (the portfolio's EvoBoids.exe window frames `/` at about 890×453): Classic then runs single-threaded, the Ocean as always. Windows 560 px tall or less, such as that one, get each page's compact layout; there the Ocean's fish card drops its bars and sizes the brain to fit between the top bar and the dock.
 
@@ -148,11 +148,16 @@ The Ocean's page options (`web/ocean.js` lists them):
 |---|---|
 | `?seed=N` `&pop=N` `&depth=D` | the world's seed, starting population and depth; a restart writes them back, so the address replays the world |
 | `?cfg={...}` | settings as JSON (the config keys the settings show) |
-| `?w=` `&h=` | the world's size (1920×1080, or on its side on a portrait screen) |
+| `?w=` `&h=` | the tank's size (1920×1080, or on its side on a portrait screen; any whole number from 100 to 100000, as the settings' Tank width / length) |
+| `?walls=1` / `0` | glass walls (fish turn back at the glass) or wrapping sides (a fish swimming out of one comes back through the opposite one). A bare address starts with glass walls; a link from before walls existed (no `walls=`) keeps wrapping; every restart writes it |
 | `?speed=N` | steps per frame |
 | `?e1=1` | the E1 physics preset, under `?cfg` |
 | `?colour=appearance` / `family` / `brain` | each fish's inherited skin pattern / its family line's colour / its brain colour, always on its inherited body shape (otherwise the visitor's last choice; appearance the first time). The choice is shared with Classic, which shows family for appearance |
 | `?guide=`, `?intro=1` | as Classic's, above |
+
+A value outside the engine's limits makes the page refuse the link with the reason (and offer the default settings) rather than quietly changing it.
+
+**A bigger tank.** Settings → World holds the tank's size and its sides, and **Start the Big tank**: 3840 × 2160 × 240 (four times the standard volume) with 2,000 fish, glass walls, four times the food, the tuned water and a 2,000-fish birth cap. Over 100,000 steps (3 seeds, and a fourth from 500 founders) it never reaches its reseed floor of 200: after one dip to 600–740 fish around step 8,000, when the founders (all born together, and capped at 2,000) reach their 120 s lifespan, it climbs back and stays near 2,000 (at least 1,880 from step 20,000 on). Randomize keeps the tank's size and sides and scales its recipe to the volume.
 
 ### Phones and touch screens
 

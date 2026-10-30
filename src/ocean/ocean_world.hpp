@@ -198,8 +198,9 @@
 //     streamfunction tapered to zero at the side faces): divergence-free, no
 //     flow through any of the six faces; every reader (food, fish, predators,
 //     CURRENT_FWD / LR, the harness) gets it.
-//   * food rides it by a midpoint transport with deterministic substeps, every
-//     excursion mirror-folded (never projected onto the glass); patch food
+//   * food rides it with deterministic substeps (one forward step in a gentle
+//     flow, midpoint substeps in a strong one; wallAdvect), every excursion
+//     mirror-folded (never projected onto the glass); patch food
 //     is drawn over the patch ∩ the tank (one draw per coordinate, as open);
 //     a predator's bud is mirror-folded into the tank (the same draws).
 // No wall step draws from the rng.
@@ -1771,14 +1772,26 @@ public:
         if (r < 0.0f) r += L2;
         return (r <= L) ? r : L2 - r;
     }
-    // One particle's midpoint (RK2) transport over dt in n substeps through the
-    // wall flow, frozen at this step's time (ensureFlow done); every trial and
-    // final coordinate mirror-folded into the tank. Not claimed to preserve
+    // One particle's transport over dt through the wall flow, frozen at this
+    // step's time (ensureFlow done); every trial and final coordinate
+    // mirror-folded into the tank. n = 1 (wallFoodSubsteps: the step's
+    // displacement bound is under a quarter of the flow's shortest length
+    // scale): one forward step, one evaluation; n > 1: n midpoint (RK2)
+    // substeps. (At the Big tank preset's gentle flow the forward step and
+    // the midpoint gave the same 5% face-band shares, 0.049-0.052, and tracers
+    // within 0.05 units of each other over 3000 steps; the midpoint's second
+    // evaluation was half the walls' food cost.) Not claimed to preserve
     // volume exactly: tests/ocean_tests.cpp "wall_transport" checks uniform
     // tracers for wall accumulation and convergence in n.
     void wallAdvect(Vec2& p, float& d, float dt, int n) const {
-        const float h = dt / (float)n, hh = 0.5f * h;
         const float W = (float)width, H = (float)height;
+        if (n == 1) {
+            const Flow U = wallFlowFast(p, d);
+            p = {mirrorFold(p.x + dt * U.x, W), mirrorFold(p.y + dt * U.y, H)};
+            d = mirrorFold(d + dt * U.d, D);
+            return;
+        }
+        const float h = dt / (float)n, hh = 0.5f * h;
         for (int k = 0; k < n; ++k) {
             const Flow U1 = wallFlowFast(p, d);
             const Vec2 pm = {mirrorFold(p.x + hh * U1.x, W), mirrorFold(p.y + hh * U1.y, H)};

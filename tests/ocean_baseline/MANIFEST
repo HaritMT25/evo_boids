@@ -47,3 +47,6 @@ the change that moved them. Each rewrite is logged below (newest last).
 2026-10-29T22:57Z  engine 7698912 + 5 uncommitted engine path(s)  format=4  g++ 13 / 6.0.4 (fe5be6afdff43ad58860d821fcc8572a23f92d19)
   reason: glass walls (OceanConfig::walls, default off): the new walls_* / eye_walls_* cases; every existing case runs walls off, the old path, and is byte-identical
   wrote: walls_def_s1 walls_def_s999 walls_e1_s42 walls_e1_long walls_rich_s5 walls_econ_s42 walls_gyre_s13 walls_patch_s11 walls_tri_body_s9 walls_size_s9 walls_capture_s17 walls_live_s21 walls_steer_life_s1 walls_x_band0_s3 walls_x_shallow_s4 walls_x_small_s6 walls_bigtank_s9 eye_walls_s1 eye_walls_e1_capture_s17 eye_walls_only_steer_s3
+2026-10-30T04:00Z  engine 8eb641e + 1 uncommitted engine path(s)  format=4  g++ 13 / 6.0.4 (fe5be6afdff43ad58860d821fcc8572a23f92d19)
+  reason: glass walls: the turn-back rule (an inward heading deep in the band, the wall-highway fix), the gentle-flow forward transport step, and the Big tank in own-frame steering; walls OFF untouched
+  wrote: walls_def_s1 walls_def_s999 walls_e1_s42 walls_e1_long walls_rich_s5 walls_econ_s42 walls_gyre_s13 walls_patch_s11 walls_tri_body_s9 walls_size_s9 walls_capture_s17 walls_live_s21 walls_steer_life_s1 walls_x_shallow_s4 walls_x_small_s6 walls_bigtank_s9 eye_walls_s1 eye_walls_e1_capture_s17 eye_walls_only_steer_s3

@@ -1128,18 +1128,19 @@
   /* ---- a first visit: the tank, then one hint (load + 9 s, a fish), then
    * this small Turbo coach mark, after a minute or once generation 1 is
    * born (25 s at the least), on a screen with nothing else open (no fish
-   * card, popover, settings, charts or tour). Once per visitor; not after
-   * Turbo has been used or its card seen; ?guide=0 none (the tests). The
-   * tour and "What is Turbo?" are in Help. ---- */
+   * card, popover, live numbers, settings, charts or tour) in a tab in view.
+   * Once per visitor; not after Turbo has been used or its card seen (Help's
+   * "What is Turbo?" too); ?guide=0 none (the tests). ---- */
   var COACH_KEY = "evo_boids.ocean.turboHintSeen.v1", coachTimer = 0, coachHideT = 0;
+  function coachDone() { return store(COACH_KEY) === "1" || store(window.EvoGuideConfig.introKey) === "1"; }
   function startCoach() {
-    if (P.get("guide") === "0" || P.has("renderBench") || store(COACH_KEY) === "1" || store(window.EvoGuideConfig.introKey) === "1") return;
+    if (P.get("guide") === "0" || P.has("renderBench") || coachDone()) return;
     var t0 = performance.now();
     coachTimer = setInterval(function () {
       var t = (performance.now() - t0) / 1000, gen = summary ? summary[13] : 0;
-      if (store(COACH_KEY) === "1") { clearInterval(coachTimer); return; }   /* Turbo was used meanwhile */
-      if (!(t >= 60 || (gen >= 1 && t >= 25)) || turboState !== "live" || openPop || selectedId !== null || document.getElementById("guide") ||
-          drawerEl.classList.contains("open") || (dash() && dash().isOpen())) return;
+      if (coachDone()) { clearInterval(coachTimer); return; }   /* Turbo used, or its card seen, meanwhile */
+      if (!(t >= 60 || (gen >= 1 && t >= 25)) || turboState !== "live" || openPop || statOpen || selectedId !== null || document.hidden ||
+          document.getElementById("guide") || drawerEl.classList.contains("open") || (dash() && dash().isOpen())) return;
       clearInterval(coachTimer);
       store(COACH_KEY, "1");
       el("coach").hidden = false;

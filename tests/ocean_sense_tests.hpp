@@ -25,12 +25,12 @@
 //     * mouthGate: an oversized item is seen, not smelled; size == kMouth·L is
 //       food; a NaN depth or size is counted, never the nearest (the literal
 //       !(d2 > R²) and !(size > max))
-//     * the hot state: a viewer stepping after its neighbours sees them where
-//       they moved (position, depth, heading, age), but only those whose
-//       start-of-step (x, y) was within R; the long probe reads moved depths
-//     * summed sectors (eyeCode 4): five unequal contributions in one sector,
-//       summed in the visit order (fish, food in grid order, the predator); a
-//       fixture where some other order gives other bits
+//     * NaN admission on every path: a NaN-depth food item in each slot of
+//       one cell (bounded: the four-wide batch and the scalar tail; wrapped:
+//       a translated image), a NaN-depth neighbour first / between / last,
+//       metric and topological (the cut's insertion takes it as its own
+//       comparisons fall), bounded and wrapped; summed eyes included (a NaN
+//       the definition gives compares by class: sameSense)
 //   sense_ref     randomized scenes (ties, exact-R offsets, 3-4-5 triangles,
 //                 world edges, the toroidal seam; metric and topological,
 //                 mouthGate, eye off / nearest / summed / eye-only) against a
@@ -66,6 +66,11 @@ inline std::uint32_t bitsOf(float f) {
     std::memcpy(&u, &f, 4);
     return u;
 }
+// A sensor against the scans' definition: bit for bit (signed zeros too),
+// except where the definition gives a NaN (a fixture's NaN depth or size
+// reached it): then any NaN. Which NaN payload comes out is not what these
+// fixtures pin; sameBits and the determinism harness stay exact.
+inline bool sameSense(float got, float want) { return std::isnan(want) ? std::isnan(got) : sameBits(got, want); }
 
 struct Pt { float x, y; };
 
@@ -184,12 +189,29 @@ inline void reference(const OceanWorld& w, float out[NUM_SENSES]) {
     if (w.cfg.maxNeighbors <= 0) {
         for (const Cand& k : cands) attend(k.i, k.dx, k.dy, k.dz, std::sqrt(k.d2));
     } else {
-        std::stable_sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b) {
-            return a.d2 < b.d2 || (a.d2 == b.d2 && a.i < b.i);
-        });
+        // The topological cut by its definition: a bounded insertion, in visit
+        // order, of the nearest by (d², index). Not a sort: a NaN d² is
+        // unordered (a sort's comparator would no longer be a strict weak
+        // order), and the insertion's own comparisons decide where it goes —
+        // it is never "worse" than the kept worst, so it displaces it, and no
+        // kept candidate is "before" it, so it moves to the front.
         const std::size_t keep = (std::size_t)std::min(w.cfg.maxNeighbors, MAX_TOPOLOGICAL_NEIGHBORS);
-        for (std::size_t j = 0; j < cands.size() && j < keep; ++j)
-            attend(cands[j].i, cands[j].dx, cands[j].dy, cands[j].dz, std::sqrt(cands[j].d2));
+        std::vector<Cand> best;
+        for (const Cand& k : cands) {
+            if (best.size() == keep) {
+                const Cand& worst = best.back();
+                if (k.d2 > worst.d2 || (k.d2 == worst.d2 && k.i > worst.i)) continue;
+                best.pop_back();
+            }
+            std::size_t at = best.size();
+            while (at > 0) {
+                const Cand& p = best[at - 1];
+                if (p.d2 < k.d2 || (p.d2 == k.d2 && p.i < k.i)) break;
+                --at;
+            }
+            best.insert(best.begin() + (std::ptrdiff_t)at, k);
+        }
+        for (const Cand& k : best) attend(k.i, k.dx, k.dy, k.dz, std::sqrt(k.d2));
     }
     if (labels) {
         if (count > 0) { avgDx /= count; avgDy /= count; avgDz /= count; avgHx /= count; avgHy /= count; }
@@ -287,6 +309,25 @@ inline constexpr int kNeighbourSenses[] = {
 
 struct Sensed { float s[NUM_SENSES]; };
 
+// What viewer creatures[0] of w read in its last step, every scanned input
+// against want (sameSense: bit for bit, a NaN of the definition's by class).
+inline Sensed compareCaptured(Test& t, const char* scene, const OceanWorld& w, const float want[NUM_SENSES],
+                              long* compared = nullptr) {
+    Sensed got;
+    std::memcpy(got.s, w.creatures[0].lastSensors, sizeof got.s);
+    std::vector<int> idx(std::begin(kFoodSenses), std::end(kFoodSenses));
+    idx.insert(idx.end(), std::begin(kNeighbourSenses), std::end(kNeighbourSenses));
+#ifdef EVO_OCEAN_EYE
+    for (int k = 0; k < ocean::kEyeInputs; ++k) idx.push_back(ocean::kEyeFirst + k);
+#endif
+    for (int k : idx) {
+        t.expect(sameSense(got.s[k], want[k]), "%s: %s = %.9g (0x%08x), the scan's definition gives %.9g (0x%08x)", scene,
+                 ocean::kSensorNames[k], got.s[k], bitsOf(got.s[k]), want[k], bitsOf(want[k]));
+        if (compared) ++*compared;
+    }
+    return got;
+}
+
 // One step of w (viewer creatures[0]); its sensors must equal the reference
 // bit for bit on every scanned input. Returns what it read.
 inline Sensed stepAndCompare(Test& t, const char* scene, OceanWorld& w, long* compared = nullptr) {
@@ -296,19 +337,7 @@ inline Sensed stepAndCompare(Test& t, const char* scene, OceanWorld& w, long* co
         reference(before, want);
     }
     w.update(0.016f);
-    Sensed got;
-    std::memcpy(got.s, w.creatures[0].lastSensors, sizeof got.s);
-    std::vector<int> idx(std::begin(kFoodSenses), std::end(kFoodSenses));
-    idx.insert(idx.end(), std::begin(kNeighbourSenses), std::end(kNeighbourSenses));
-#ifdef EVO_OCEAN_EYE
-    for (int k = 0; k < ocean::kEyeInputs; ++k) idx.push_back(ocean::kEyeFirst + k);
-#endif
-    for (int k : idx) {
-        t.expect(sameBits(got.s[k], want[k]), "%s: %s = %.9g (0x%08x), the scan's definition gives %.9g (0x%08x)", scene,
-                 ocean::kSensorNames[k], got.s[k], bitsOf(got.s[k]), want[k], bitsOf(want[k]));
-        if (compared) ++*compared;
-    }
-    return got;
+    return compareCaptured(t, scene, w, want, compared);
 }
 
 inline int addFood(OceanWorld& w, float x, float y, float z, float size = 1.0f) {
@@ -681,6 +710,74 @@ void testSenseEdges() {
                 t.expect(sameBits(S.s[FOOD_DENSITY], tanhCountOver10(13)), "%s: density %.9g, expected all 13 items", name,
                          S.s[FOOD_DENSITY]);
         }
+        // (6c) NaN admission, food: five items in one cell, one with a NaN
+        // depth (each slot in turn). Bounded: slots 0-3 are foodWithin's
+        // four-wide batch, 4 its scalar tail; wrapped: across the seam, through
+        // a translated image. Every path keeps the item (the literal !(d2 > R²)):
+        // it is counted, never the nearest, and a summed eye adds its NaN (to
+        // the down sector: no axis dominates a NaN). A path that took d2 <= R²
+        // instead would drop it (density 4, a finite down sector).
+        {
+            const float qnan = std::numeric_limits<float>::quiet_NaN();
+            for (int tor = 0; tor < 2; ++tor)
+                for (int bad = 0; bad < 5; ++bad) {
+                    OceanWorld w;
+                    world(w, 311, m, tor != 0);
+                    addQuiet(w, tor ? 10.0f : 620.0f, tor ? 500.0f : 520.0f, 120.0f, east);
+                    for (int j = 0; j < 5; ++j)
+                        addFood(w, (tor ? 1890.0f : 650.0f) + (float)j, tor ? 540.0f : 550.0f, j == bad ? qnan : 120.0f);
+                    std::snprintf(name, sizeof name, "NaN food %s slot %d (%s)", tor ? "wrapped" : "bounded", bad, m.name);
+                    const Sensed S = stepAndCompare(t, name, w);
+                    if (labels)
+                        t.expect(sameBits(S.s[FOOD_DENSITY], tanhCountOver10(5)), "%s: the NaN-depth item was not counted (density %.9g)",
+                                 name, S.s[FOOD_DENSITY]);
+#ifdef EVO_OCEAN_EYE
+                    if (m.eye && (m.code & kEyeCodeSummed))
+                        t.expect(std::isnan(S.s[EYE_DOWN_PROX]) && std::isnan(S.s[EYE_DOWN_SIZE]) && std::isnan(S.s[EYE_DOWN_CON]),
+                                 "%s: the summed eye did not take in the NaN-depth item (down %.9g %.9g %.9g)", name, S.s[EYE_DOWN_PROX],
+                                 S.s[EYE_DOWN_SIZE], S.s[EYE_DOWN_CON]);
+#endif
+                }
+        }
+        // (6d) NaN admission, neighbours: A (age 10), N (a NaN depth, age 50)
+        // and B (age 90), 30 / 40 / 50 along x, N added first, between or
+        // last; metric and topological (1, 2, 7 kept), bounded and across the
+        // seam. N is kept (the literal !(d2 > R²)) and counted; it never is the
+        // nearest; the topological cut's insertion takes it as its comparisons
+        // fall (the reference's definition): with one kept and A, N, B, N
+        // displaces A, then B displaces N, so B is the one attended.
+        {
+            const float qnan = std::numeric_limits<float>::quiet_NaN();
+            struct Nb { float dx, z, age; };
+            const Nb A = {0.0f, 120.0f, 10.0f}, N = {10.0f, qnan, 50.0f}, B = {20.0f, 120.0f, 90.0f};
+            for (int tor = 0; tor < 2; ++tor)
+                for (int at = 0; at < 3; ++at)
+                    for (int topo : {0, 1, 2, 7}) {
+                        OceanWorld w;
+                        world(w, 313, m, tor != 0, topo);
+                        addQuiet(w, tor ? 10.0f : 620.0f, tor ? 500.0f : 520.0f, 120.0f, east);
+                        const Nb order[3][3] = {{N, A, B}, {A, N, B}, {A, B, N}};
+                        for (const Nb& o : order[at])
+                            addQuiet(w, (tor ? 1890.0f : 650.0f) + o.dx, tor ? 540.0f : 550.0f, o.z, east, o.age);
+                        std::snprintf(name, sizeof name, "NaN neighbour %s %s topo %d (%s)", tor ? "wrapped" : "bounded",
+                                      at == 0 ? "first" : at == 1 ? "between" : "last", topo, m.name);
+                        const Sensed S = stepAndCompare(t, name, w);
+                        if (labels)
+                            t.expect(sameBits(S.s[NEIGHBOR_COUNT], tanhCountOver10(3)) && !std::isnan(S.s[NEAREST_NEIGHBOR_DIST]),
+                                     "%s: count %.9g (want 3, the NaN-depth fish among them), nearest %.9g", name, S.s[NEIGHBOR_COUNT],
+                                     S.s[NEAREST_NEIGHBOR_DIST]);
+                        if (labels && !tor && at == 1 && topo == 1)
+                            t.expect(sameBits(S.s[NEAREST_NEIGHBOR_AGE], evomath::tanhf((90.0f - 50.0f) / 50.0f)) &&
+                                         sameBits(S.s[NEAREST_NEIGHBOR_DIST], std::sqrt(3400.0f) / 100.0f),
+                                     "%s: the one kept is not B (age %.9g, dist %.9g)", name, S.s[NEAREST_NEIGHBOR_AGE],
+                                     S.s[NEAREST_NEIGHBOR_DIST]);
+#ifdef EVO_OCEAN_EYE
+                        if (m.eye && (m.code & kEyeCodeSummed))
+                            t.expect(std::isnan(S.s[EYE_DOWN_PROX]) && std::isnan(S.s[EYE_DOWN_SIZE]) && std::isnan(S.s[EYE_DOWN_CON]),
+                                     "%s: the summed eye did not take in the NaN-depth fish", name);
+#endif
+                    }
+        }
         // (7) mouthGate: X (size 2, nearest) seen but not food; Y (size 1.2 ==
         // kMouth·L) the nearest food; Z behind; N a NaN depth and S a NaN size,
         // both counted, neither the nearest. Visit order: S, Z, X, Y, N.
@@ -694,7 +791,7 @@ void testSenseEdges() {
             addFood(w, 550.0f, 500.0f, 120.0f, 1.0f);    // Z
             addFood(w, 640.0f, 520.0f, qnan, 1.0f);      // N
             addFood(w, 660.0f, 480.0f, 120.0f, qnan);    // S
-            if (m.code & kEyeCodeSummed) continue;       // N's NaN would fill a summed sector
+            // (a summed eye adds N's NaN to its sector: sameSense compares that by class)
             std::snprintf(name, sizeof name, "mouth gate %d (%s)", gate, m.name);
             const Sensed S = stepAndCompare(t, name, w);
             if (labels) {
@@ -705,7 +802,7 @@ void testSenseEdges() {
                          S.s[NEAREST_FOOD_DIST]);
             }
 #ifdef EVO_OCEAN_EYE
-            if (m.eye)   // the eye sees X whatever its size
+            if (m.eye && !(m.code & kEyeCodeSummed))   // the eye sees X whatever its size
                 t.expect(S.s[EYE_AHEAD_PROX] == 1.0f - 10.0f / R, "%s: eye ahead prox %.9g, X not seen", name,
                          S.s[EYE_AHEAD_PROX]);
 #endif

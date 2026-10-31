@@ -108,6 +108,7 @@
     this.max = o.maxQueries || 64;
     this.resCap = o.results || 65536;
     this.ext = null; this.generation = 0; this.lost = false;
+    this.capture = 0;                 /* the capture a query belongs to: a later capture never takes an earlier one's result */
     this.pool = []; this.live = 0;    /* query objects of this generation: pooled, outstanding or active */
     this.out = []; this.active = null;
     this.rFrame = new Float64Array(this.resCap); this.rLabel = new Uint8Array(this.resCap);
@@ -118,7 +119,17 @@
   GpuTimer.prototype.resetStats = function () {
     this.rN = 0;
     this.st = { attempted: 0, issued: 0, ok: 0, unsupported: 0, skippedPool: 0, refusedNest: 0, disjointEvents: 0,
-                discardedDisjoint: 0, aborted: 0, discardedLost: 0, resultOverflow: 0 };
+                discardedDisjoint: 0, aborted: 0, discardedLost: 0, resultOverflow: 0, droppedEarlier: 0 };
+  };
+  /* a new capture: fresh results and counts; queries still outstanding from
+   * an earlier one are dropped when they complete, never recorded here */
+  GpuTimer.prototype.newCapture = function () { this.capture++; this.resetStats(); };
+  GpuTimer.prototype.current = function (r) { return r.cap === this.capture; };
+  /* outstanding queries: this capture's (all: any capture's) */
+  GpuTimer.prototype.pending = function (all) {
+    var n = this.active && (all || this.current(this.active)) ? 1 : 0;
+    for (var i = 0; i < this.out.length; i++) if (all || this.current(this.out[i])) n++;
+    return n;
   };
   GpuTimer.prototype.acquire = function () {
     var gl = this.gl;
@@ -144,7 +155,7 @@
     if (!q) { this.st.skippedPool++; return false; }
     if (!this.out.length) this.gl.getParameter(this.ext.GPU_DISJOINT_EXT);   /* nothing outstanding: start clean */
     this.gl.beginQuery(this.ext.TIME_ELAPSED_EXT, q);
-    this.active = { q: q, frame: frame, label: label, gen: this.generation, aborted: false, disjoint: false };
+    this.active = { q: q, frame: frame, label: label, gen: this.generation, cap: this.capture, aborted: false, disjoint: false };
     this.st.issued++;
     return true;
   };
@@ -172,15 +183,19 @@
     while (ready < this.out.length && gl.getQueryParameter(this.out[ready].q, gl.QUERY_RESULT_AVAILABLE)) ready++;
     if (gl.getParameter(this.ext.GPU_DISJOINT_EXT)) {
       this.st.disjointEvents++;
-      for (var i = 0; i < this.out.length; i++) { this.record(this.out[i], 1); this.pool.push(this.out[i].q); }
-      this.st.discardedDisjoint += this.out.length;
+      for (var i = 0; i < this.out.length; i++) {
+        if (this.current(this.out[i])) { this.record(this.out[i], 1); this.st.discardedDisjoint++; }
+        else this.st.droppedEarlier++;
+        this.pool.push(this.out[i].q);
+      }
       this.out.length = 0;
       if (this.active) this.active.disjoint = true;
       return 0;
     }
     for (var j = 0; j < ready; j++) {
       var r = this.out[j];
-      if (r.aborted) { this.st.aborted++; this.record(r, 2); }
+      if (!this.current(r)) this.st.droppedEarlier++;   /* an earlier capture's: not this one's */
+      else if (r.aborted) { this.st.aborted++; this.record(r, 2); }
       else if (r.disjoint) { this.st.discardedDisjoint++; this.record(r, 1); }
       else { this.st.ok++; this.record(r, 0, gl.getQueryParameter(r.q, gl.QUERY_RESULT) / 1e6); }
       this.pool.push(r.q);
@@ -192,10 +207,9 @@
    * per loss: the poll's isContextLost() and the event may both report it */
   GpuTimer.prototype.onLost = function () {
     if (this.lost) return;
-    var n = this.out.length + (this.active ? 1 : 0);
-    for (var i = 0; i < this.out.length; i++) this.record(this.out[i], 3);
-    if (this.active) this.record(this.active, 3);
-    this.st.discardedLost += n;
+    var self = this, mine = this.out.concat(this.active ? [this.active] : []).filter(function (r) { return self.current(r); });
+    mine.forEach(function (r) { self.record(r, 3); });
+    this.st.discardedLost += mine.length;
     this.out = []; this.active = null; this.pool = []; this.live = 0;
     this.ext = null; this.lost = true; this.generation++;
   };
@@ -352,10 +366,12 @@
       },
       /* stop recording frames and starting queries; outstanding ones are still polled */
       stopSampling: function () { recording = false; P.active = false; if (open) closeRow(); },
-      pending: function () { return timer ? timer.out.length + (timer.active ? 1 : 0) : 0; },
+      /* queries still outstanding, of any capture (drain waits for these) */
+      pending: function () { return timer ? timer.pending(true) : 0; },
+      /* a new capture: an earlier one's queries, if any are still outstanding, are dropped, never counted here */
       resetCapture: function () {
         count = 0; row = 0; open = false; overflow = false; prevTs = NaN; submissions = 0;
-        if (timer) timer.resetStats();
+        if (timer) timer.newCapture();
       },
       /* the capture so far, in time order (typed arrays; exportCapture makes text) */
       drain: function () {
@@ -366,7 +382,9 @@
           config: P.config(), capabilities: P.capabilities(),
           frames: Math.min(count, CAP), recorded: count, overflow: overflow, valid: !overflow,
           ts: copyRing(ts, 1), raw: copyRing(raw, 1), cpu: copyRing(cpu, NS), cnt: copyRing(cnt, NK),
-          gpu: { results: g, stats: timer ? Object.assign({}, timer.st) : null, pending: P.pending(),
+          /* complete: none of this capture's queries still outstanding (else its GPU data is incomplete) */
+          gpu: { results: g, stats: timer ? Object.assign({}, timer.st) : null, pending: timer ? timer.pending(false) : 0,
+                 complete: !timer || timer.pending(false) === 0,
                  generation: timer ? timer.generation : 0, supported: !!(timer && timer.supported()) }
         };
       }
@@ -441,7 +459,7 @@
         var sums = Object.keys(perFrame).filter(function (k) { return k.indexOf(L + "@") === 0; }).map(function (k) { return perFrame[k]; });
         labels[L] = { scopes: quantiles(byLabel[L]), perFrame: quantiles(sums) };
       });
-      gpu = { supported: cap.gpu.supported, stats: st, pending: cap.gpu.pending, labels: labels,
+      gpu = { supported: cap.gpu.supported, stats: st, pending: cap.gpu.pending, complete: cap.gpu.complete !== false, labels: labels,
               validFraction: st.attempted ? st.ok / st.attempted : null };
     }
     var t0 = ticks.length ? ticks[0] : 0, t1 = ticks.length ? ticks[ticks.length - 1] : 0;

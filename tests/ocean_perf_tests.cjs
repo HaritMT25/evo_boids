@@ -282,6 +282,26 @@ section("GPU: one loss reported twice (the poll, then the event) is one generati
   ok(P.capabilities().gpuTimer === true && P.drain().gpu.stats.discardedLost === 1, "restored once; the lost query counted once");
 }
 
+section("GPU: a late result never crosses into the next capture");
+{
+  const gl = fakeGL({ latency: 10 }), c = clock(), P = Perf.create({ now: c.now });
+  P.attachGL(gl); P.configure({ cpu: true, gpu: "frame", sampleEvery: 1 });
+  /* capture A: one query, still pending when it is drained (the drain timed out) */
+  P.beginFrame(0, 1, "live", false); P.beginSubmission(); P.endSubmission(true); P.endFrame(1, 0, false);
+  P.stopSampling();
+  const A = P.drain();
+  ok(A.gpu.complete === false && A.gpu.pending === 1 && Perf.summarize(A).gpu.complete === false, "A: drained with a query outstanding: reported incomplete", A.gpu);
+  /* capture B starts before A's query completes */
+  P.resetCapture(); P.configure({ cpu: true, gpu: "frame", sampleEvery: 1 });
+  for (let f = 0; f < 3; f++) { gl.polls += 4; P.beginFrame(100 + f * 16, 1, "live", false); P.beginSubmission(); P.endSubmission(true); P.endFrame(1, f, false); }
+  gl.polls += 20; P.beginFrame(200, 1, "live", false); P.endFrame(1, 3, false);
+  const B = P.drain(), st = B.gpu.stats;
+  ok(st.issued === 3 && st.ok === 3 && B.gpu.results.n === 3, "B: its own 3 queries, no more", st);
+  ok(st.droppedEarlier === 1, "A's late result dropped, not recorded in B");
+  ok(Array.from(B.gpu.results.frame).every((f) => f < 4), "B's results are B's frames", Array.from(B.gpu.results.frame));
+  ok(B.gpu.complete === true, "B complete");
+}
+
 section("GPU: sampling and draw scopes");
 {
   const gl = fakeGL(), c = clock(), P = Perf.create({ now: c.now });

@@ -1083,10 +1083,16 @@
   }
 
   /* ---- the View menu and Help: one popover at a time; ×, Esc, its key or a
-   * press outside closes it ---- */
-  var POPS = { view: ["viewpop", "viewmenubtn"], help: ["helppop", "helpbtn"] }, openPop = null;
-  function setPop(name) {
+   * press outside closes it. [popover, trigger, its first control] ---- */
+  var POPS = { view: ["viewpop", "viewmenubtn", "lightnow"], help: ["helppop", "helpbtn", "tourbtn"] }, openPop = null, popOpener = null;
+  /* A press by the keyboard (its focus ring showing) keeps the focus; a
+   * pointer's lets it go, so Space goes back to pausing. */
+  function pointerBlur(n) { if (!n.matches(":focus-visible")) n.blur(); }
+  /* opener: the trigger, when the keyboard pressed it: the focus goes to the
+   * popover's first control, and back to the trigger when the keyboard closes it */
+  function setPop(name, opener) {
     openPop = POPS[name] ? name : null;
+    popOpener = openPop && opener || null;
     Object.keys(POPS).forEach(function (n) {
       el(POPS[n][0]).hidden = n !== openPop;
       el(POPS[n][1]).setAttribute("aria-expanded", n === openPop ? "true" : "false");
@@ -1097,9 +1103,15 @@
       if (dash() && dash().isOpen()) dash().close();
       if (!wideMQ.matches && drawerEl.classList.contains("open")) setDrawer(false);
       setStatPanel(false); hideCoach(); placePop();
+      if (popOpener) el(POPS[openPop][2]).focus();
     }
   }
-  function togglePop(name) { setPop(openPop === name ? null : name); }
+  function closePop(keyboard) {
+    var back = popOpener;
+    setPop(null);
+    if (keyboard && back) back.focus();
+  }
+  function togglePop(name, opener, keyboard) { if (openPop === name) closePop(keyboard); else setPop(name, opener); }
   /* the View menu over its button, left of a wide screen's settings panel (a
    * phone: the screen's width, from the CSS) */
   function placePop() {
@@ -1730,8 +1742,9 @@
     document.addEventListener("focusin", function (e) { if (typingIn(e.target)) releaseMoveKeys(); });
     window.addEventListener("keydown", function (e) {
       if (e.key === "Escape") {
-        if (openPop) { if (!escHandledElsewhere) setPop(null); }   /* the tour or the charts take this Esc themselves */
-        else if (drawerEl.classList.contains("open")) setDrawer(false);
+        /* the tour or the charts take this Esc themselves; else back to the popover's opener */
+        if (openPop) { if (!escHandledElsewhere) closePop(true); return; }
+        if (drawerEl.classList.contains("open")) setDrawer(false);
         else if (statOpen) setStatPanel(false);
         else if (!escHandledElsewhere) { if (scene.following()) unfollow(); else select(null); }
         if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
@@ -1751,8 +1764,8 @@
         return;
       }
       /* the dock's and the top bar's own keys (Turbo's too: T stops it; letters press no button) */
-      if (k === "?") { togglePop("help"); return; }
-      if (lk === "v") { togglePop("view"); return; }
+      if (k === "?") { togglePop("help", null, true); return; }
+      if (lk === "v") { togglePop("view", null, true); return; }
       if (lk === "t") { el("turbobtn").click(); return; }
       if (lk === "g") { setPop(null); el("dashbtn").click(); return; }
       if (lk === "o") { setPop(null); setDrawer(!drawerEl.classList.contains("open")); return; }
@@ -1928,17 +1941,21 @@
   btn("newworld", newWorld);
   btn("replay", replay);
   btn("lightbtn", toggleLight);
-  btn("viewmenubtn", function () { togglePop("view"); });
-  btn("viewclose", function () { setPop(null); });
-  btn("helpbtn", function () { togglePop("help"); });
-  btn("helpclose", function () { setPop(null); });
+  ["view", "help"].forEach(function (n) {   /* the triggers; × closes (pointerBlur, setPop: the focus) */
+    el(POPS[n][1]).addEventListener("click", function () {
+      var kb = this.matches(":focus-visible");
+      togglePop(n, kb ? this : null, kb);
+      if (!kb) this.blur();
+    });
+    el(n + "close").addEventListener("click", function () { closePop(this.matches(":focus-visible")); });
+  });
   btn("tourbtn", function () { setPop(null); if (window.EvoGuide) EvoGuide.start(); });
   btn("whatturbo", function () { setPop(null); if (window.EvoGuide && EvoGuide.turbo) EvoGuide.turbo(); });
   el("to2dmenu").href = el("to2d").href;   /* the deploy build renames Classic's page in #to2d */
   el("lightnow").addEventListener("change", function () {
     lightNow = this.checked;
     updateLight();
-    this.blur();
+    pointerBlur(this);
   });
   btn("viewbtn", function () { if (scene) { wantFollow = false; scene.resetView(true); } });
   btn("fitbtn", fitToScreen);
@@ -1971,14 +1988,14 @@
   el("governor").addEventListener("change", function () {
     governorOn = this.checked;
     if (!governorOn) restoreDetail();
-    this.blur();
+    pointerBlur(this);
   });
   el("followLight").addEventListener("change", function () {   /* the preference; following now, it applies now */
     followLight = this.checked;
     store("evo_boids.ocean.followLight", followLight ? "1" : "0");
     if (scene && scene.following()) lightNow = followLight || lightBeforeFollow;
     updateLight();
-    this.blur();
+    pointerBlur(this);
   });
   el("followLight").checked = followLight;
   /* Fish colour: the fish's own appearance genome (its skin pattern; the
@@ -2010,7 +2027,7 @@
     showColourMode();
     if (M) applyDisplaySwitches();
     updateModeline();
-    b.blur();
+    pointerBlur(b);
   });
   el("colourwhy").addEventListener("click", function (e) {   /* "Settings › Life › Appearance genes" */
     if (!e.target.closest("#colourfix")) return;

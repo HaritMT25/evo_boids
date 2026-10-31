@@ -565,7 +565,9 @@
    * texture; each is compared with the CPU mirror (EvoAppearance
    * morphDecode / morphBuild / patternVaryings, appWorldCPU). opts.mutate
    * ("row0", "nextRow", "slot") breaks the texture lookup on purpose: the
-   * check must then fail. Returns a Promise of the report (the read-back
+   * check must then fail. Every captured component must be finite before
+   * any arithmetic (report.nan: the vertices with any non-finite one).
+   * Returns a Promise of the report (the read-back
    * waits on a fence, so it never stalls the pipeline). */
   var PATH_TOL = { world: 0.02, mat: 0.005, mar: 0.005, decode: 0.0005 };
   var TF_OUT = [["vWorld", 3], ["vMatV", 4], ["vPart", 4], ["vG0", 4], ["vG1", 4], ["vG2", 4], ["vG3", 4],
@@ -751,6 +753,17 @@
         var pat = [jb.tpl.pat[4 * v], jb.tpl.pat[4 * v + 1], jb.tpl.pat[4 * v + 2], jb.tpl.pat[4 * v + 3]];
         var fin = Math.floor(pat[0] + 0.5);
         r.fins[fin] = (r.fins[fin] || 0) + 1;
+        var where = "fish " + c + " vertex " + v + " (part " + fin + ")";
+        /* every captured component finite, before any arithmetic: |NaN - x| >
+         * tol is false, and min(Infinity, 10) would hide an infinity */
+        var badComponent = -1;
+        for (var component = 0; component < NC; component++) {
+          if (!Number.isFinite(data[o + component])) { badComponent = component; break; }
+        }
+        if (badComponent >= 0) {
+          if (!r.nan++) r.worst = where + ": non-finite feedback component " + badComponent;
+          continue;
+        }
         var b = EA.morphBuild(M, rings, aT, pat, 0, 0, minW), w = appWorldCPU(inst, c, b.geo, U);
         var eW = Math.max(Math.abs(data[o] - w[0]), Math.abs(data[o + 1] - w[1]), Math.abs(data[o + 2] - w[2]));
         var eM = Math.max(Math.abs(data[o + 3] - b.mat[0]), Math.abs(data[o + 4] - b.mat[1]), Math.abs(data[o + 5] - b.mat[2]));
@@ -762,8 +775,7 @@
           if (q === 0 && k === 0) d = Math.min(d, 1 - d);   /* a hue: circular */
           eD = Math.max(eD, d / Math.max(1, Math.abs(ref)));
         }
-        var where = "fish " + c + " vertex " + v + " (part " + fin + ")";
-        if (eW !== eW || eM !== eM || eR !== eR || eD !== eD) { if (!r.nan++) r.worst = where + ": NaN"; continue; }
+        if (![eW, eM, eR, eD].every(Number.isFinite)) { if (!r.nan++) r.worst = where + ": NaN"; continue; }
         r.maxWorld = Math.max(r.maxWorld, eW); r.maxMat = Math.max(r.maxMat, eM);
         r.maxMar = Math.max(r.maxMar, eR); r.maxDecode = Math.max(r.maxDecode, eD);
         var score = Math.max(eW / PATH_TOL.world, eM / PATH_TOL.mat, eR / PATH_TOL.mar, eD / PATH_TOL.decode);

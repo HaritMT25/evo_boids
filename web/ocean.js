@@ -819,6 +819,7 @@
       delete cfgOut.walls;
       if (Object.keys(cfgOut).length) u.searchParams.set("cfg", JSON.stringify(cfgOut)); else u.searchParams.delete("cfg");
       u.searchParams.delete("e1");   /* its keys are in cfg now */
+      u.searchParams.delete("renderBench"); u.searchParams.delete("perf");   /* measurement, never a setup's */
       history.replaceState(null, "", u);
     } catch (e) { /* file:// or a sandboxed frame */ }
   }

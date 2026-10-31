@@ -1475,16 +1475,18 @@
    * brings them: the readout and the stat panel); turboWire, the Brains
    * panel's wiring, which the worker computes when asked (the panel asks
    * when its copy is 2 s old, and only while it shows), stamped when it
-   * arrives here; wireAsked, when that was asked (-1: answered). Cleared at
-   * each start and hand-back: the page's own world is the source again. */
-  var turboView = null, turboWire = null, wireAsked = -1;
+   * arrives here; wireAsked: a question is out (one at a time: an answer
+   * held up behind a long chunk is not asked for again, so the questions
+   * never pile up; the worker answers every one, {none} without a world).
+   * Cleared at each start and hand-back: the page's own world is the source
+   * again. */
+  var turboView = null, turboWire = null, wireAsked = false;
   function turboWiring() {
     var w = turboWire;
     turboWire = null;
     if (w) return w;   /* the panel keeps it until it wants a fresh one */
-    var now = performance.now();
-    if (turboState === "turbo" && turboWorker && (wireAsked < 0 || now - wireAsked > 2000)) {
-      wireAsked = now;   /* unanswered (the worker between worlds): asked again after 2 s */
+    if (turboState === "turbo" && turboWorker && !wireAsked) {
+      wireAsked = true;
       turboWorker.postMessage({ cmd: "wiring" });
     }
     return null;   /* nothing new yet: the panel keeps what it shows */
@@ -1519,9 +1521,9 @@
       if (turboState === "entering") { turboState = "turbo"; updateLocks(); flushHeld(); }
       paintTurbo();
     } else if (msg.type === "wiring") {
-      if (turboState === "live") return;   /* the world is back here: the page's own is the source */
+      wireAsked = false;   /* answered: the next one may be asked */
+      if (msg.none || turboState === "live") return;   /* no world there; or it is back here, the page's own the source */
       brainShape();   /* the names: this page's module is the same build */
-      wireAsked = -1;
       turboWire = { at: performance.now(), n: msg.n, senses: msg.senses, actions: msg.actions, path: msg.path, direct: msg.direct,
                     senseNames: sensorNames, actionNames: actionNames, frame: msg.frame, turbo: true };
     } else if (msg.type === "rec") {
@@ -1557,7 +1559,7 @@
    * the acknowledged ones before them (ledger back). Returns replayEdits'. */
   function turboBack(quiet, lost) {
     turboState = "live";
-    turboView = null; turboWire = null; wireAsked = -1;
+    turboView = null; turboWire = null; wireAsked = false;
     summary = null;   /* the readout's summary: this world's again, at the next refresh */
     var plan = live.back(!!lost);
     afterNewWorld(true);
@@ -1612,7 +1614,7 @@
     try {
       turboState = "entering";
       turboStats = null;
-      turboView = null; turboWire = null; wireAsked = -1;
+      turboView = null; turboWire = null; wireAsked = false;
       turboEntryCfg = Object.assign({}, runCfg);
       live.start();
       select(null);

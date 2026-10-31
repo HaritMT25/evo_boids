@@ -1475,6 +1475,15 @@ async function pageDashboards() {
         ok(h.frame === last.frame && h.frame > f0 && last.st && h.fish === last.st[0] && h.fish === last.pop && /its numbers/.test(h.notes),
            end + ': the readout and stat panel show the worker\'s world: frame ' + h.frame + ' (its latest stats ' + (last && last.frame) + ', Turbo took ' + f0 +
            '), ' + h.fish + ' fish');
+        {   /* one question at a time: an answer held up (the channel held 5.5 s, as behind a long chunk) is not asked again */
+            const q0 = sh.toWorker.filter(m => m.cmd === 'wiring').length;
+            sh.pause();
+            await new Promise(r => setTimeout(r, 5500));
+            const q1 = sh.toWorker.filter(m => m.cmd === 'wiring').length;
+            sh.resume();
+            await waitFor(() => / in the Turbo run/.test(brainsNote(p)) && sh.delivered.filter(isType('wiring')).length > got.length, 5000);
+            ok(q1 - q0 === 1, end + ': while an answer is held up the page asks once, not every 2 s (' + (q1 - q0) + ' questions in 5.5 s)');
+        }
         dash.showTab('pop');   /* Brains hidden: no more questions */
         const asks2 = sh.toWorker.filter(m => m.cmd === 'wiring').length;
         await new Promise(r => setTimeout(r, 2600));

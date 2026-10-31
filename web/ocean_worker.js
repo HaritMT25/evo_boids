@@ -24,11 +24,13 @@
  *   in : {cmd:'wiring'}            -> the Brains dashboard's wiring of the
  *                                     world now (oc_wiring), answered between
  *                                     chunks; the page asks only while that
- *                                     panel shows, every 2 s at most
+ *                                     panel shows, every 2 s at most, one
+ *                                     question at a time
  *   out: {type:'stats', frame, pop, food, pred, stepsPerSec, totalSteps, st, su}
  *        ~4x/s; st: oc_stats, su: oc_summary of the world now (the page's
  *        readout and stat panel show them while Turbo owns the world)
- *   out: {type:'wiring', n, senses, actions, path, direct, frame}
+ *   out: {type:'wiring', n, senses, actions, path, direct, frame}, or
+ *        {type:'wiring', none: true} with no world here: every question is answered
  *   out: {type:'rec', rows}        -> dashboard samples (web/ocean_dash.js row())
  *   out: {type:'set', key, value, ok, error, frame}  (frame: the world's frame
  *        it applied at; every 'set' gets one, ok false when nothing runs)
@@ -118,7 +120,7 @@ onmessage = function (e) {
                     frame: frameNow() });
     } catch (err) { fail(err, "on a live setting"); }
   } else if (msg.cmd === "wiring") {
-    if (!M || !owns) return;   /* no world here (yet, or any more): the page asks again later */
+    if (!M || !owns) { postMessage({ type: "wiring", none: true }); return; }   /* no world here (yet, or any more) */
     try { postMessage(wiring()); } catch (err) { fail(err, "on the wiring"); }
   }
 };

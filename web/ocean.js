@@ -2144,12 +2144,12 @@
             return "Fish, generations, their average depth and the frame rate. " + tap() + " it (or press I) for the " +
                    "rest: food, births and deaths, family lines, and where in the depth the fish are.";
           } },
-        { drawer: false, title: "Two worlds",
-          target: function () { return h.rectOf("#worlds"); },
+        { drawer: false, title: "Two worlds",   /* a phone: the switch is in the live numbers' panel (ocean.html #worlds-alt) */
+          target: function () { return h.rectOf(innerWidth < 600 ? "#readout" : "#worlds"); },
           body: function () {
             return "You are in the <b>3-D Ocean</b>. <b>2-D Classic</b>" +
-                   (innerWidth < 600 ? ", at the bottom of the live numbers," : "") + " opens the original flat " +
-                   "world on its own page; the native app runs it too. Each world runs on its own, so switching " +
+                   (innerWidth < 600 ? " (tap the live numbers here; it is at the bottom)" : "") + " opens the original " +
+                   "flat world on its own page; the native app runs it too. Each world runs on its own, so switching " +
                    "starts the other one fresh.";
           } },
         { desktopOnly: true, drawer: false, title: "Keyboard",

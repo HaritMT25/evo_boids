@@ -31,6 +31,20 @@
 //       metric and topological (the cut's insertion takes it as its own
 //       comparisons fall), bounded and wrapped; summed eyes included (a NaN
 //       the definition gives compares by class: sameSense)
+//     * five items exactly R away in one cell (batch and tail; wrapped); the
+//       viewer alone (never its own neighbour); the mouth gate's edges
+//       (size == the limit, a NaN size, an oversized item the eye still
+//       sees), bounded and wrapped; -0 offsets on each axis keep their sign
+//     * the food's own step before the scans (stepAndCompareFoodPhase: the
+//       reference reads the food as the step leaves it): an item expiring
+//       exactly at foodLife, items spawned this step, a replacement at the
+//       cap, E1 drift moving items and changing their depths and contrasts
+//     * the hot state: a viewer stepping after its neighbours sees them where
+//       they moved (position, depth, heading, age), but only those whose
+//       start-of-step (x, y) was within R; the long probe reads moved depths
+//     * summed sectors (eyeCode 4): five unequal contributions in one sector,
+//       summed in the visit order (fish, food in grid order, the predator); a
+//       fixture where some other order gives other bits
 //   sense_ref     randomized scenes (ties, exact-R offsets, 3-4-5 triangles,
 //                 world edges, the toroidal seam; metric and topological,
 //                 mouthGate, eye off / nearest / summed / eye-only) against a
@@ -340,6 +354,26 @@ inline Sensed stepAndCompare(Test& t, const char* scene, OceanWorld& w, long* co
     return compareCaptured(t, scene, w, want, compared);
 }
 
+// As stepAndCompare, for the food's own step: drift, ageing / expiry and
+// spawning run before the scans, so the reference reads the food as the
+// step leaves it (the expired erased, the newborn added, the drifted moved,
+// their depths and contrasts updated) and the viewer as it was when it
+// sensed. For a world with the viewer alone and pickupRadius 0: nothing is
+// eaten, so the food after the step is what the scans should have seen
+// (checked). Independent of the grid's payload, which it checks.
+inline Sensed stepAndCompareFoodPhase(Test& t, const char* scene, OceanWorld& w) {
+    const Fish viewer = w.creatures[0];
+    const auto eaten = w.totalFoodEaten;
+    w.update(0.016f);
+    t.expect(w.totalFoodEaten == eaten && w.creatures.size() == 1, "%s: fixture: food eaten (%lld) or other fish (%zu)", scene,
+             (long long)(w.totalFoodEaten - eaten), w.creatures.size());
+    OceanWorld expected = w;
+    expected.creatures[0] = viewer;
+    float want[NUM_SENSES];
+    reference(expected, want);
+    return compareCaptured(t, scene, w, want);
+}
+
 inline int addFood(OceanWorld& w, float x, float y, float z, float size = 1.0f) {
     OceanFood f;
     f.pos = {x, y};
@@ -635,37 +669,40 @@ void testSenseEdges() {
                                  S.s[GENETIC_SIM_FWD], wantB ? "B" : "A");
                 }
         }
-        // (5) Exactly R: counted, never the nearest; R + 2e-5 by depth: not counted.
-        for (int topo : {0, 3}) {
-            OceanWorld w;
-            world(w, 307, m, false, topo);
-            const float zFar = std::nextafter(220.0f, 1000.0f);
-            addQuiet(w, 600.0f, 500.0f, 120.0f, east);
-            addFood(w, 700.0f, 500.0f, 120.0f);
-            addFood(w, 600.0f, 500.0f, zFar);
-            addQuiet(w, 700.0f, 500.0f, 120.0f, east, 10.0f);
-            addQuiet(w, 600.0f, 500.0f, zFar, east, 20.0f);
-            t.expect(zFar - 120.0f > R, "fixture: past-R depth offset %.9g", zFar - 120.0f);
-            std::snprintf(name, sizeof name, "exactly R topo %d (%s)", topo, m.name);
-            const Sensed S = stepAndCompare(t, name, w);
-            if (labels) {
-                t.expect(sameBits(S.s[FOOD_DENSITY], tanhCountOver10(1)) && S.s[NEAREST_FOOD_DIST] == 1.0f &&
-                             sameBits(S.s[NEAREST_FOOD_DX], 0.0f),
-                         "%s: food at R: density %.9g nearest %.9g dx %.9g", name, S.s[FOOD_DENSITY], S.s[NEAREST_FOOD_DIST],
-                         S.s[NEAREST_FOOD_DX]);
-                t.expect(sameBits(S.s[NEIGHBOR_COUNT], tanhCountOver10(1)) && S.s[NEAREST_NEIGHBOR_DIST] == 1.0f &&
-                             sameBits(S.s[NEAREST_NEIGHBOR_AGE], 0.0f) && S.s[GENETIC_SIM_FWD] == 0.5f &&
-                             S.s[AVG_NEIGHBOR_DX] == evomath::tanhf(1.0f),
-                         "%s: neighbour at R: count %.9g nearest %.9g age %.9g", name, S.s[NEIGHBOR_COUNT],
-                         S.s[NEAREST_NEIGHBOR_DIST], S.s[NEAREST_NEIGHBOR_AGE]);
-            }
+        // (5) Exactly R: counted, never the nearest; R + 2e-5 by depth: not
+        // counted. Bounded (R ahead) and across the seam (R behind, wrapped).
+        for (int tor = 0; tor < 2; ++tor)
+            for (int topo : {0, 3}) {
+                OceanWorld w;
+                world(w, 307, m, tor != 0, topo);
+                const float zFar = std::nextafter(220.0f, 1000.0f);
+                const float vx = tor ? 10.0f : 600.0f, rx = tor ? 1830.0f : 700.0f;   // the item / fish exactly R away
+                addQuiet(w, vx, 500.0f, 120.0f, east);
+                addFood(w, rx, 500.0f, 120.0f);
+                addFood(w, vx, 500.0f, zFar);
+                addQuiet(w, rx, 500.0f, 120.0f, east, 10.0f);
+                addQuiet(w, vx, 500.0f, zFar, east, 20.0f);
+                t.expect(zFar - 120.0f > R, "fixture: past-R depth offset %.9g", zFar - 120.0f);
+                std::snprintf(name, sizeof name, "exactly R%s topo %d (%s)", tor ? " wrapped" : "", topo, m.name);
+                const Sensed S = stepAndCompare(t, name, w);
+                if (labels) {
+                    t.expect(sameBits(S.s[FOOD_DENSITY], tanhCountOver10(1)) && S.s[NEAREST_FOOD_DIST] == 1.0f &&
+                                 sameBits(S.s[NEAREST_FOOD_DX], 0.0f),
+                             "%s: food at R: density %.9g nearest %.9g dx %.9g", name, S.s[FOOD_DENSITY], S.s[NEAREST_FOOD_DIST],
+                             S.s[NEAREST_FOOD_DX]);
+                    t.expect(sameBits(S.s[NEIGHBOR_COUNT], tanhCountOver10(1)) && S.s[NEAREST_NEIGHBOR_DIST] == 1.0f &&
+                                 sameBits(S.s[NEAREST_NEIGHBOR_AGE], 0.0f) && S.s[GENETIC_SIM_FWD] == 0.5f &&
+                                 S.s[AVG_NEIGHBOR_DX] == evomath::tanhf(tor ? -1.0f : 1.0f),
+                             "%s: neighbour at R: count %.9g nearest %.9g age %.9g", name, S.s[NEIGHBOR_COUNT],
+                             S.s[NEAREST_NEIGHBOR_DIST], S.s[NEAREST_NEIGHBOR_AGE]);
+                }
 #ifdef EVO_OCEAN_EYE
-            if (m.eye && !(m.code & kEyeCodeSummed))
-                t.expect(S.s[EYE_AHEAD_PROX] == 0.0f && S.s[EYE_DOWN_SIZE] == 0.0f,
-                         "%s: eye ahead prox %.9g (want 0: at R), down size %.9g (want 0: past R)", name, S.s[EYE_AHEAD_PROX],
-                         S.s[EYE_DOWN_SIZE]);
+                if (m.eye && !(m.code & kEyeCodeSummed))
+                    t.expect(S.s[tor ? EYE_BEHIND_PROX : EYE_AHEAD_PROX] == 0.0f && S.s[EYE_DOWN_SIZE] == 0.0f,
+                             "%s: eye prox %.9g (want 0: at R), down size %.9g (want 0: past R)", name,
+                             S.s[tor ? EYE_BEHIND_PROX : EYE_AHEAD_PROX], S.s[EYE_DOWN_SIZE]);
 #endif
-        }
+            }
         // (6) Ties across cells (bounded) and across the seam (toroidal).
         for (int tor = 0; tor < 2; ++tor)
             for (int topo : {0, 2}) {
@@ -806,6 +843,190 @@ void testSenseEdges() {
                 t.expect(S.s[EYE_AHEAD_PROX] == 1.0f - 10.0f / R, "%s: eye ahead prox %.9g, X not seen", name,
                          S.s[EYE_AHEAD_PROX]);
 #endif
+        }
+        // (12) Five equal items exactly R away, in one cell: all counted, none
+        // the nearest. Bounded: four in foodWithin's batch, one in its tail
+        // (the 2-D test q2 <= R² and the 3-D test both at equality); wrapped:
+        // across the seam, through a translated image. The eye sees them at R
+        // (proximity 0, size not).
+        for (int tor = 0; tor < 2; ++tor) {
+            OceanWorld w;
+            world(w, 314, m, tor != 0);
+            addQuiet(w, tor ? 10.0f : 600.0f, 500.0f, 120.0f, east);
+            for (int j = 0; j < 5; ++j) addFood(w, tor ? 1830.0f : 700.0f, 500.0f, 120.0f);
+            std::snprintf(name, sizeof name, "five at R %s (%s)", tor ? "wrapped" : "bounded", m.name);
+            const Sensed S = stepAndCompare(t, name, w);
+            if (labels)
+                t.expect(sameBits(S.s[FOOD_DENSITY], tanhCountOver10(5)) && S.s[NEAREST_FOOD_DIST] == 1.0f &&
+                             sameBits(S.s[NEAREST_FOOD_DX], 0.0f),
+                         "%s: density %.9g (want 5), nearest %.9g (want none)", name, S.s[FOOD_DENSITY], S.s[NEAREST_FOOD_DIST]);
+#ifdef EVO_OCEAN_EYE
+            if (m.eye) {
+                const int sz = tor ? EYE_BEHIND_SIZE : EYE_AHEAD_SIZE;
+                t.expect(S.s[sz] > 0.0f, "%s: the eye does not see the items at R (%s %.9g)", name, ocean::kSensorNames[sz], S.s[sz]);
+            }
+#endif
+        }
+        // (13) The viewer alone: the grid lists it for its own query, and it is
+        // never its own neighbour.
+        for (int tor = 0; tor < 2; ++tor) {
+            OceanWorld w;
+            world(w, 315, m, tor != 0);
+            addQuiet(w, tor ? 10.0f : 600.0f, 500.0f, 120.0f, east);
+            std::snprintf(name, sizeof name, "alone %s (%s)", tor ? "wrapped" : "bounded", m.name);
+            const Sensed S = stepAndCompare(t, name, w);
+            if (labels)
+                t.expect(sameBits(S.s[NEIGHBOR_COUNT], tanhCountOver10(0)) && S.s[NEAREST_NEIGHBOR_DIST] == 1.0f,
+                         "%s: count %.9g nearest %.9g: it sensed itself", name, S.s[NEIGHBOR_COUNT], S.s[NEAREST_NEIGHBOR_DIST]);
+        }
+        // (14) The mouth gate at its edges (kMouth 1.2, body size 1): items 30
+        // (size 2: seen, not food), 50 (size 1.2, the limit: food, the nearest)
+        // and 70 away (a NaN size: food, counted, not the nearest), ahead
+        // bounded, behind across the seam.
+        for (int tor = 0; tor < 2; ++tor) {
+            OceanWorld w;
+            world(w, 316, m, tor != 0, 0, /*mouthGate*/ true);
+            const int v = addQuiet(w, tor ? 10.0f : 600.0f, 500.0f, 120.0f, east);
+            w.creatures[v].bodySize = 1.0f;
+            const float sgn = tor ? -1.0f : 1.0f, x0 = tor ? 1930.0f : 600.0f;
+            const float offs[3] = {30.0f, 50.0f, 70.0f}, sizes[3] = {2.0f, 1.2f, std::numeric_limits<float>::quiet_NaN()};
+            for (int k = 0; k < 3; ++k) addFood(w, x0 + sgn * offs[k], 500.0f, 120.0f, sizes[k]);
+            std::snprintf(name, sizeof name, "mouth edges %s (%s)", tor ? "wrapped" : "bounded", m.name);
+            const Sensed S = stepAndCompare(t, name, w);
+            if (labels)
+                t.expect(sameBits(S.s[FOOD_DENSITY], tanhCountOver10(2)) && S.s[NEAREST_FOOD_DIST] == 50.0f / R &&
+                             S.s[NEAREST_FOOD_DX] == sgn * (50.0f * (1.0f / 50.0f)),
+                         "%s: density %.9g (want 2), nearest %.9g dx %.9g (want the size-1.2 item at 50)", name, S.s[FOOD_DENSITY],
+                         S.s[NEAREST_FOOD_DIST], S.s[NEAREST_FOOD_DX]);
+#ifdef EVO_OCEAN_EYE
+            if (m.eye && !(m.code & kEyeCodeSummed)) {
+                const int px = tor ? EYE_BEHIND_PROX : EYE_AHEAD_PROX;
+                t.expect(S.s[px] == 1.0f - 30.0f / R, "%s: the eye's nearest %.9g, not the size-2 item at 30", name, S.s[px]);
+            }
+#endif
+        }
+        // (15) Signed zeros carried through: the viewer at +0 and the items at
+        // -0 on one axis (x, y or depth), so the offset is -0 and so is the
+        // nearest item's direction on that axis; bounded and wrapped.
+        for (int tor = 0; tor < 2; ++tor)
+            for (int axis = 0; axis < 3; ++axis) {
+                OceanWorld w;
+                world(w, 317, m, tor != 0);
+                const float pz = 0.0f, nz = -0.0f;
+                addQuiet(w, axis == 0 ? pz : 600.0f, axis == 1 ? pz : 500.0f, axis == 2 ? pz : 120.0f, east);
+                for (int j = 0; j < 5; ++j)
+                    addFood(w, axis == 0 ? nz : 650.0f + (float)j, axis == 0 ? 550.0f + (float)j : axis == 1 ? nz : 500.0f,
+                            axis == 2 ? nz : 120.0f);
+                std::snprintf(name, sizeof name, "-0 along %c %s (%s)", "xyz"[axis], tor ? "wrapped" : "bounded", m.name);
+                const Sensed S = stepAndCompare(t, name, w);
+                const int k = axis == 0 ? NEAREST_FOOD_DX : axis == 1 ? NEAREST_FOOD_DY : NEAREST_FOOD_DZ;
+                if (labels)
+                    t.expect(bitsOf(S.s[k]) == 0x80000000u, "%s: %s = %.9g (0x%08x), want -0", name, ocean::kSensorNames[k], S.s[k],
+                             bitsOf(S.s[k]));
+            }
+        // (16) Expiry before the scans: foodLife 2·dt; an item aged dt reaches it
+        // exactly this step (expired: unseen), a survivor aged 0 is seen; the
+        // next step the survivor reaches it too (the grid rebuilt after the
+        // erase sees nothing).
+        for (int tor = 0; tor < 2; ++tor) {
+            OceanWorld w;
+            world(w, 318, m, tor != 0);
+            const float dt = 0.016f;
+            w.ocfg.foodLife = 2.0f * dt;
+            w.cfg.pickupRadius = 0.0f;
+            addQuiet(w, 600.0f, 500.0f, 120.0f, east);
+            w.food[addFood(w, 640.0f, 500.0f, 120.0f)].age = dt;
+            w.food[addFood(w, 660.0f, 500.0f, 130.0f)].age = 0.0f;
+            t.expect(dt + dt == w.ocfg.foodLife, "fixture: dt + dt %.9g, foodLife %.9g", dt + dt, w.ocfg.foodLife);
+            const long long exp0 = w.totalFoodExpired;
+            std::snprintf(name, sizeof name, "expiry %s (%s)", tor ? "wrapped" : "bounded", m.name);
+            const Sensed S = stepAndCompareFoodPhase(t, name, w);
+            t.expect(w.totalFoodExpired == exp0 + 1 && w.food.size() == 1, "%s: %lld expired, %zu left (want 1, 1)", name,
+                     (long long)(w.totalFoodExpired - exp0), w.food.size());
+            if (labels) {
+                const float d = std::sqrt(3700.0f), inv = 1.0f / d;
+                t.expect(sameBits(S.s[FOOD_DENSITY], tanhCountOver10(1)) && sameBits(S.s[NEAREST_FOOD_DIST], d / R) &&
+                             sameBits(S.s[NEAREST_FOOD_DX], 60.0f * inv) && sameBits(S.s[NEAREST_FOOD_DZ], 10.0f * inv),
+                         "%s: density %.9g, nearest %.9g dx %.9g dz %.9g: not the survivor alone", name, S.s[FOOD_DENSITY],
+                         S.s[NEAREST_FOOD_DIST], S.s[NEAREST_FOOD_DX], S.s[NEAREST_FOOD_DZ]);
+            }
+            std::snprintf(name, sizeof name, "expiry, next step %s (%s)", tor ? "wrapped" : "bounded", m.name);
+            const Sensed S2 = stepAndCompareFoodPhase(t, name, w);
+            t.expect(w.totalFoodExpired == exp0 + 2 && w.food.empty(), "%s: the survivor did not expire on time", name);
+            if (labels)
+                t.expect(sameBits(S2.s[FOOD_DENSITY], tanhCountOver10(0)) && S2.s[NEAREST_FOOD_DIST] == 1.0f,
+                         "%s: density %.9g: an expired item was seen", name, S2.s[FOOD_DENSITY]);
+        }
+        // (17) Spawning before the scans, and (18) a replacement at the cap:
+        // one patch at (650, 500), depth 120, radius and spread 0. (17) an
+        // empty world, five spawned this step (rate 5, target 3: cap 6), all
+        // seen, aged 0; (18) target 1 (cap 2) and a stock of two, one reaching
+        // foodLife this step: its place is free at once, so one is spawned
+        // (the stock stays two) and the scans see the survivor and the newborn.
+        for (int replace = 0; replace < 2; ++replace)
+            for (int tor = 0; tor < 2; ++tor) {
+                OceanWorld w;
+                world(w, 319, m, tor != 0);
+                const float dt = 0.016f;
+                w.cfg.pickupRadius = 0.0f;
+                w.cfg.foodSpawnBase = replace ? 1.0f : 5.0f;
+                w.cfg.foodSpawnAmp = 0.0f;
+                w.cfg.targetFood = replace ? 1 : 3;
+                w.cfg.foodPatchRadius = 0.0f;
+                w.ocfg.foodDepthMode = 1;
+                w.ocfg.foodDepthSpread = 0.0f;
+                ofp::field<ofp::peek::OwPatches>(w).assign(1, Vec2{650.0f, 500.0f});
+                ofp::field<ofp::peek::OwPatchDepth>(w).assign(1, 120.0f);
+                addQuiet(w, 600.0f, 500.0f, 120.0f, east);
+                if (replace) {
+                    w.ocfg.foodLife = 2.0f * dt;
+                    w.food[addFood(w, 640.0f, 500.0f, 120.0f)].age = dt;   // expires this step
+                    w.food[addFood(w, 660.0f, 500.0f, 130.0f)].age = 0.0f;
+                }
+                std::snprintf(name, sizeof name, "%s %s (%s)", replace ? "replacement" : "spawn", tor ? "wrapped" : "bounded", m.name);
+                const Sensed S = stepAndCompareFoodPhase(t, name, w);
+                int born = 0;
+                for (const OceanFood& f : w.food)
+                    born += f.pos.x == 650.0f && f.pos.y == 500.0f && f.depth == 120.0f && f.age == 0.0f;
+                t.expect(replace ? (w.food.size() == 2 && born == 1 && w.totalFoodExpired == 1) : (w.food.size() == 5 && born == 5),
+                         "%s: %zu items, %d newborn at the patch, %lld expired", name, w.food.size(), born, (long long)w.totalFoodExpired);
+                if (labels)
+                    t.expect(sameBits(S.s[FOOD_DENSITY], tanhCountOver10(replace ? 2 : 5)) && S.s[NEAREST_FOOD_DIST] == 50.0f / R &&
+                                 S.s[NEAREST_FOOD_DX] == 50.0f * (1.0f / 50.0f),
+                             "%s: density %.9g, nearest %.9g: the newborn not seen this step", name, S.s[FOOD_DENSITY],
+                             S.s[NEAREST_FOOD_DIST]);
+            }
+        // (19) Drift before the scans: the E1 flow (waves 6, a deep current of
+        // 40, food drifting) moves five items and changes their depths; over
+        // two steps the scans see the food where the step left it (position,
+        // depth and, with the eye, contrast), bounded and wrapped.
+        for (int tor = 0; tor < 2; ++tor) {
+            OceanWorld w;
+            OceanConfig oc;
+#ifdef EVO_OCEAN_EYE
+            oc.eye = m.eye;
+            oc.eyeCode = m.code;
+            oc.eyeOnly = m.only;
+#endif
+            oc.waveSpeed = 6.0f;
+            oc.deepCurrent = true;
+            initQuiet(w, 312, 240.0f, oc, /*capture*/ true, tor != 0, /*current*/ 40.0f);
+            w.cfg.foodDrift = true;
+            w.cfg.pickupRadius = 0.0f;
+            addQuiet(w, 600.0f, 500.0f, 120.0f, east);
+            for (int j = 0; j < 5; ++j) addFood(w, 650.0f + (float)j, 530.0f, 80.0f + 20.0f * (float)j);
+            for (int s = 1; s <= 2; ++s) {
+                const std::vector<OceanFood> before = w.food;
+                std::snprintf(name, sizeof name, "drift step %d %s (%s)", s, tor ? "wrapped" : "bounded", m.name);
+                stepAndCompareFoodPhase(t, name, w);
+                int moved = 0, deeper = 0;
+                for (std::size_t j = 0; j < w.food.size() && j < before.size(); ++j) {
+                    moved += w.food[j].pos.x != before[j].pos.x || w.food[j].pos.y != before[j].pos.y;
+                    deeper += w.food[j].depth != before[j].depth;
+                }
+                t.expect(w.food.size() == 5 && moved > 0 && deeper > 0, "%s: fixture: %d of 5 items moved, %d changed depth", name, moved,
+                         deeper);
+            }
         }
     }
 

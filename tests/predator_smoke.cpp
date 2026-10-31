@@ -20,7 +20,11 @@
 //     ceiling of 20 and heritable traits. Asserts every step that the count sits
 //     in [floor, ceiling], that every trait stays finite and inside [0.5, 2], that
 //     the refill counter never decreases, and that budding (with inheritance)
-//     happened.
+//     happened. It does NOT require a predator death: held at the ceiling, the
+//     well-fed predators starve only now and then (1-7 deaths in 12,000 steps
+//     across OpenMP runs, sometimes none), and the OpenMP and thread-pool builds
+//     are not reproducible at a fixed seed, so that check flaked. The plain
+//     Stage B run above asserts deaths (27-46 per run).
 //
 // It also prints the predator CSV columns so the output can be eyeballed.
 
@@ -158,7 +162,7 @@ void runWorld(const char* tag, bool econ, int steps, int logEvery,
         check(r.predEnergyFinite,  "predator energy stayed finite (no NaN/inf)");
         check(r.countersMonotone,  "predator birth/death counters never decreased");
         check(predBornEver,        "Stage B: predator reproduction occurred (economy live)");
-        check(predDiedEver,        "Stage B: predator death occurred (economy live)");
+        if (!limits) check(predDiedEver, "Stage B: predator death occurred (economy live)");
         if (limits) {
             check(r.withinLimits,  "predator count stayed inside [floor, ceiling] every tick");
             check(r.traitsInBand,  "every predator trait stayed finite and in [0.5, 2]");

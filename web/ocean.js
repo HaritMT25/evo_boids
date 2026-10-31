@@ -7,13 +7,14 @@
  * (web/renderer.js), so the two pages are one product:
  *   - the top bar (live readout -> the stat panel with the depth histogram;
  *     📊 dashboards, web/ocean_dash.js; the settings) and the toasts
- *   - the dock: pause, speed (steps per frame), Turbo, 🎲 Randomize, the
- *     flashlight, fit the view
+ *   - the dock: pause, speed (steps per frame), Turbo, 🎲 Randomize | the
+ *     flashlight, View (the light while following, water clarity, fish
+ *     colours, Hold 60 fps: drawing only), fit the tank
  *   - the settings sheet, built from web/ocean_config.js: every key the
  *     Ocean takes, "live" ones (oc_set_param) applying at once, the rest on
  *     Restart ("Restart to apply"); settings that do nothing with the others as
  *     they are are dimmed with the reason (NEEDS); the Run tab: Randomize, New
- *     world / Replay, playback and view switches, save / load a setup
+ *     world / Replay, save / load a setup
  *   - the fish card (click or tap a fish): oc_inspect's numbers and its live
  *     brain (oc_set_capture keeps its senses while a fish is selected)
  *   - Turbo: web/ocean_worker.js steps a copy of the module's memory at full
@@ -51,7 +52,8 @@
  * Keys: space pause, + / - (or arrows) steps per frame, F follow (the selected
  *       fish, else a random one; again: another), Esc close / stop following
  *       / let go, R a new world (new seed), shift+R replay this one, C fit the
- *       view, L the flashlight, . one step while paused, ? the keys legend.
+ *       view, L the flashlight (now; never "Light while following"), . one
+ *       step while paused, V the View menu, ? the keys legend.
  *       The camera, held (scene.setMove; by key position, never while a field
  *       has the focus): W / S forward / back along the view, A / D left /
  *       right, E / Q or PageUp / PageDown up / down, Shift faster. Following a
@@ -581,11 +583,7 @@
       });
       panelsEl.appendChild(panel);
     });
-    el("panel-run").setAttribute("role", "tabpanel");
-    attachTip(el("f_governor"), "governor");
-    attachTip(el("f_colourBrain"), "colourBrain");
-    attachTip(el("f_followLight"), "followLight");
-    attachTip(el("f_clarity"), "clarity");
+    el("panel-run").setAttribute("role", "tabpanel");   /* (its view switches are in the View menu now) */
     var saved = store("evo_boids.ocean.tab");
     setSheetTab(saved && el("panel-" + saved) ? saved : "run");
   }
@@ -1029,6 +1027,9 @@
     if (!on) wantFollow = false;
     if (on) toast(coarseMQ.matches ? "Following. Drag to circle around it."
                                    : "Following. Drag or A / D to circle it, W / S to come closer or back off; Esc stops.");
+    /* Light while following: on as the follow starts, back as it was when it ends */
+    if (on) { lightBeforeFollow = lightNow; if (followLight) lightNow = true; }
+    else lightNow = lightBeforeFollow;
     updateKeysLegend(on);
     updateLight();
   }
@@ -1058,29 +1059,48 @@
   });
 
   /* ---- the flashlight (drawing only; scene.setFlashlight) ----
-   * While following: on unless "Flashlight while following" is off. Else:
-   * the dock button / L. The button shows the light as it is and toggles
-   * whichever of the two is in charge. */
-  var followLight = store("evo_boids.ocean.followLight") !== "0", lightAnywhere = false;
-  function lightOn() { return scene && scene.following() ? followLight : lightAnywhere; }
+   * One light, on or off now: the dock's button, L and the View menu's
+   * switch turn it on and off, and nothing else changes it but a follow. One
+   * preference, "Light while following" (the View menu's switch, stored):
+   * following a fish turns the light on, letting go puts it back as it was
+   * (onFollowChange). L never writes the preference. */
+  var followLight = store("evo_boids.ocean.followLight") !== "0", lightNow = false, lightBeforeFollow = false;
+  function lightOn() { return lightNow; }
   function updateLight() {
-    var on = !!lightOn();
+    var on = lightNow;
     if (scene) scene.setFlashlight(on);
     var b = el("lightbtn");
     b.setAttribute("aria-pressed", on ? "true" : "false");
-    b.title = (on ? "Flashlight on (L)" : "Flashlight (L)") + ": clear light where you look; on by itself while you follow a fish";
+    b.title = (on ? "Flashlight on (L)" : "Flashlight (L)") + ": clear light where you look, in true colours";
+    el("lightnow").checked = on;
   }
   function toggleLight() {
-    if (scene && scene.following()) {
-      followLight = !followLight;
-      el("followLight").checked = followLight;
-      store("evo_boids.ocean.followLight", followLight ? "1" : "0");
-    } else {
-      lightAnywhere = !lightAnywhere;
-      if (lightAnywhere) toast("Flashlight on: true colours where you look, without the water's tint.");
-    }
+    lightNow = !lightNow;
+    if (lightNow && !(scene && scene.following())) toast("Flashlight on: true colours where you look, without the water's tint.");
     updateLight();
   }
+
+  /* ---- the View menu (a popover): ×, Esc, V or a press outside closes it ---- */
+  var POPS = { view: ["viewpop", "viewmenubtn"] }, openPop = null;
+  function setPop(name) {
+    openPop = POPS[name] ? name : null;
+    Object.keys(POPS).forEach(function (n) {
+      el(POPS[n][0]).hidden = n !== openPop;
+      el(POPS[n][1]).setAttribute("aria-expanded", n === openPop ? "true" : "false");
+    });
+    if (openPop) { setStatPanel(false); placePop(); }
+  }
+  function togglePop(name) { setPop(openPop === name ? null : name); }
+  /* the View menu over its button (a phone: the screen's width, from the CSS) */
+  function placePop() {
+    var pop = el("viewpop");
+    if (openPop !== "view" || innerWidth < 600) { pop.style.left = ""; return; }
+    var r = el("viewmenubtn").getBoundingClientRect(), w = pop.offsetWidth;
+    pop.style.left = Math.round(Math.max(10, Math.min(innerWidth - w - 10, r.left + r.width / 2 - w / 2))) + "px";
+  }
+  document.addEventListener("pointerdown", function (e) {
+    if (openPop && !e.target.closest("#" + POPS[openPop][0] + ", #" + POPS[openPop][1])) setPop(null);
+  });
 
   /* ---------------- the readout and the stat panel ---------------- */
   var dirtyHud = true, hudT = 0, histRows = [];
@@ -1666,7 +1686,8 @@
     document.addEventListener("focusin", function (e) { if (typingIn(e.target)) releaseMoveKeys(); });
     window.addEventListener("keydown", function (e) {
       if (e.key === "Escape") {
-        if (drawerEl.classList.contains("open")) setDrawer(false);
+        if (openPop) setPop(null);
+        else if (drawerEl.classList.contains("open")) setDrawer(false);
         else if (statOpen) setStatPanel(false);
         else if (!escHandledElsewhere) { if (scene.following()) unfollow(); else select(null); }
         if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
@@ -1686,6 +1707,7 @@
         return;
       }
       if (k === "?") { setKeysShown(!keysShown); return; }
+      if (lk === "v") { togglePop("view"); return; }
       if (t && t.tagName === "BUTTON") return;   /* Space / Enter belong to the button */
       /* the view: always */
       if (lk === "c") { wantFollow = false; scene.resetView(true); return; }
@@ -1726,7 +1748,7 @@
     window.addEventListener("resize", function () {
       scene.resize(); updateInsets();
       clearTimeout(fitTimer);
-      fitTimer = setTimeout(function () { updateFitButton(); updateInsets(); }, 250);
+      fitTimer = setTimeout(function () { updateFitButton(); updateInsets(); placePop(); }, 250);
     });
     if (reducedMQ.addEventListener) reducedMQ.addEventListener("change", function () { scene.setReducedMotion(reducedMQ.matches); });
   }
@@ -1757,7 +1779,7 @@
     document.body.classList.toggle("sheet-open", open);
     menuBtn.setAttribute("aria-expanded", open ? "true" : "false");
     if (!open) hideTip();
-    if (open) setStatPanel(false);
+    if (open) { setStatPanel(false); setPop(null); }
     if (scene) { updateInsets(); setTimeout(updateInsets, 320); }
   }
   menuBtn.addEventListener("click", function () { setDrawer(!drawerEl.classList.contains("open")); this.blur(); });
@@ -1854,6 +1876,13 @@
   btn("newworld", newWorld);
   btn("replay", replay);
   btn("lightbtn", toggleLight);
+  btn("viewmenubtn", function () { togglePop("view"); });
+  btn("viewclose", function () { setPop(null); });
+  el("lightnow").addEventListener("change", function () {
+    lightNow = this.checked;
+    updateLight();
+    this.blur();
+  });
   btn("viewbtn", function () { if (scene) { wantFollow = false; scene.resetView(true); } });
   btn("fitbtn", fitToScreen);
   btn("followbtn", function () {
@@ -1888,9 +1917,10 @@
     if (!governorOn) restoreDetail();
     this.blur();
   });
-  el("followLight").addEventListener("change", function () {
+  el("followLight").addEventListener("change", function () {   /* the preference; following now, it applies now */
     followLight = this.checked;
     store("evo_boids.ocean.followLight", followLight ? "1" : "0");
+    if (scene && scene.following()) lightNow = followLight || lightBeforeFollow;
     updateLight();
     this.blur();
   });
@@ -1908,15 +1938,29 @@
       want = saved === "brain" || saved === "family" ? saved : "appearance";
     colourMode = want;
     colourBrain = want === "brain";
-    el("colourMode").value = colourMode;
+    showColourMode();
   })();
-  el("colourMode").addEventListener("change", function () {
-    colourMode = this.value === "brain" || this.value === "appearance" ? this.value : "family";
+  /* the View menu's three buttons; the line under them says what the mode
+   * shows, or why Appearance can't (updateModeline), with the way to fix it */
+  function showColourMode() {
+    el("colourMode").querySelectorAll("button").forEach(function (b) { b.setAttribute("aria-pressed", b.dataset.c === colourMode ? "true" : "false"); });
+  }
+  el("colourMode").addEventListener("click", function (e) {
+    var b = e.target.closest("button[data-c]");
+    if (!b) return;
+    colourMode = b.dataset.c === "brain" || b.dataset.c === "appearance" ? b.dataset.c : "family";
     colourBrain = colourMode === "brain";
     store("evo_boids.colourBy", colourMode);
+    showColourMode();
     if (M) applyDisplaySwitches();
     updateModeline();
-    this.blur();
+    b.blur();
+  });
+  el("colourwhy").addEventListener("click", function (e) {   /* "Settings › Life › Appearance genes" */
+    if (!e.target.closest("#colourfix")) return;
+    setPop(null); setDrawer(true); setSheetTab("life");
+    var row = el("f_appearance");
+    if (row) row.scrollIntoView({ block: "center" });
   });
   /* Water clarity: how murky the water is drawn (scene.setClarity; drawing
    * only, live), 0 realistic (the Ocean's first look, kept for reference)
@@ -1965,6 +2009,15 @@
       (WALLS ? ", glass walls" : ", the sides wrap around") +
       ". Drawing: the 3D tank" + (scene ? ", detail " + scene.quality() + " of 3" : "") +
       what + ".";
+    var noApp = !!M && colourMode === "appearance" && !flags;   /* the View menu: what the colours show, or why not */
+    el("colourwhy").classList.toggle("why", noApp);
+    setHtml("colourwhy", noApp
+      ? (HAS_APP ? "Appearance genes are off in this world, so the fish show family colours. To turn them on: " +
+                   "<button type='button' class='linkbtn' id='colourfix'>Settings › Life › Appearance genes</button>, then Restart."
+                 : "This engine build has no appearance genes, so the fish show family colours.")
+      : colourMode === "appearance" ? "Each fish wears the skin pattern and body shape it inherited."
+      : colourMode === "brain" ? "Fish with similar brains get similar colours."
+      : "Each family line has its own colour, the same one it has in the charts.");
   }
   setPaused(false);
   changeSpeed(0);
@@ -1987,11 +2040,10 @@
           target: function () { return h.rectOf("#tank"); },
           body: function () {
             var looks = colourMode === "appearance" && HAS_APP
-              ? "each fish wears the skin pattern and body shape it inherited from its parents (the settings can " +
-                "colour them by family or by brain instead)"
+              ? "each fish wears the skin pattern and body shape it inherited from its parents"
               : colourBrain ? "a fish's colour follows its brain's wiring" : "each family has its own colour";
             return "Glowing specks are food, " + looks + ", and the dark fish with glowing eyes are " +
-                   "predators. Light fades and turns blue with depth. " +
+                   "predators. <b>View</b>, in the dock, colours them by family or brain and makes the water realistic. " +
                    (h.touch() ? "Drag to move, pinch to zoom, twist with two fingers to turn (below the horizon too)."
                               : "Drag to move, scroll to zoom, right-drag to turn (below the horizon too). Or fly: " +
                                 "<kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> move where you look, <kbd>Q</kbd> " +
@@ -2036,8 +2088,9 @@
           target: function () { return h.rectOf("#dock"); },
           body: function () {
             return "Pause and change speed. <b>Turbo</b> runs the world headless in a background thread, many times " +
-                   "faster, and hands it back exactly. The dice draws a new world; the lamp is the flashlight; the " +
-                   "corners fit the whole tank back on screen.";
+                   "faster, and hands it back exactly. The dice draws a new world; the lamp is the flashlight, and " +
+                   "<b>View</b> beside it sets the light, the water and the fish colours; the tank button fits the " +
+                   "whole tank back on screen.";
           } },
         { drawer: false, title: "Dashboards",
           target: function () { return h.rectOf("#dashbtn"); },

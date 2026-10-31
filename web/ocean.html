@@ -76,7 +76,7 @@
     --dock-h: 60px;
     --dock-b: calc(12px + var(--safe-b));
     /* z scale (the Turbo scrim dims the world, under every control) */
-    --z-turbo: 5; --z-hud: 10; --z-card: 20; --z-dock: 30; --z-sheet: 40;
+    --z-turbo: 5; --z-hud: 10; --z-card: 20; --z-dock: 30; --z-pop: 35; --z-sheet: 40;
     --z-dash: 50; --z-toast: 60; --z-guide: 70; --z-tip: 80; --z-splash: 90;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -224,33 +224,38 @@
     position: fixed; z-index: var(--z-dock);
     left: 50%; bottom: var(--dock-b);
     transform: translateX(-50%);
-    width: min(calc(100vw - 20px), 470px);
+    width: max-content; max-width: calc(100vw - 20px);
     height: var(--dock-h);
     display: flex; align-items: center; justify-content: space-between; gap: 2px;
     padding: 0 6px;
     border-radius: 999px;
     transition: transform 260ms var(--ease), opacity 200ms var(--ease);
   }
+  /* two groups: time (pause, speed, Turbo; Randomize) | watch (flashlight, View, fit the tank) */
+  #dock .dock-sep { flex: none; width: 1px; height: 26px; margin: 0 4px; background: var(--line-soft); }
   #dock .speed { display: flex; align-items: center; }
   #dock .speed .icon-btn { width: 38px; }
   #speedlabel { min-width: 3.2em; text-align: center; font-family: var(--mono); font-size: 14px; color: var(--ink); }
   #pausebtn { color: var(--ink); background: var(--surface-3); }
   #turbobtn { width: auto; padding: 0 12px; gap: 6px; border-radius: 999px; font-size: 13px; font-weight: 600; color: var(--ink-2); display: inline-flex; }
   #turbobtn[aria-pressed="true"] { background: var(--ember-soft); color: var(--ember); }
-  #turbobtn span { display: none; }
+  #turbobtn span, #viewmenubtn span, #viewmenubtn .caret { display: none; }
   #lightbtn[aria-pressed="true"] { background: var(--beam-soft); color: var(--beam); }
+  /* View: its own icon and (wider screens) its name, so it doesn't read as "more light" */
+  #viewmenubtn .caret { width: 14px; height: 14px; transition: transform 200ms var(--ease); }
+  #viewmenubtn[aria-expanded="true"] .caret { transform: rotate(180deg); }
   body.sheet-open #dock { transform: translateX(-50%) translateY(140%); opacity: 0; pointer-events: none; }
 
   /* ---------- the keys: a legend beside the dock (a wide screen with a mouse) ---------- */
   #keys {
     position: fixed; z-index: var(--z-hud);
     left: 12px; bottom: var(--dock-b);
-    max-width: calc(50vw - 235px - 24px);
+    max-width: calc(50vw - 290px - 24px);
     padding: 7px 38px 7px 12px; border-radius: var(--r-md);
     font-size: 12px; line-height: 1.8; color: var(--ink-3);
     display: none;
   }
-  #keys kbd {
+  #keys kbd, .pop kbd {
     display: inline-block; min-width: 1.6em; margin-right: 2px; padding: 0 4px;
     border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px;
     background: var(--surface-2); color: var(--ink); text-align: center;
@@ -263,6 +268,36 @@
     body.keys-on #keys { display: block; }
     body.keys-on.sheet-open #keys { display: none; }
   }
+
+  /* ---------- the View popover (above the dock) ---------- */
+  .pop {
+    position: fixed; z-index: var(--z-pop);
+    width: min(340px, calc(100vw - 20px));
+    max-height: calc(100dvh - var(--dock-h) - var(--dock-b) - 84px - var(--safe-t));
+    overflow-y: auto; overscroll-behavior: contain;
+    padding: 8px 16px 12px; border-radius: var(--r-lg);
+    font-size: 13px; color: var(--ink-2); line-height: 1.45;
+    animation: card-in 200ms var(--ease);
+  }
+  .pop[hidden] { display: none; }
+  .pop-head { display: flex; align-items: center; justify-content: space-between; min-height: 36px; }
+  .pop-head h2 { font-size: 15px; font-weight: 650; color: var(--ink); }
+  .pop-head .icon-btn { width: 36px; height: 36px; margin-right: -8px; }
+  .pop-head .icon-btn svg.i { width: 18px; height: 18px; }
+  .pop-acts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+  .pop-acts .btn { min-height: 40px; padding: 0 14px; }
+  #viewpop { bottom: calc(var(--dock-b) + var(--dock-h) + 10px); left: 10px; }
+  .vrow { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 4px 12px; padding: 10px 0; border-top: 1px solid var(--line-soft); }
+  .vrow .n { color: var(--ink); font-size: 14px; }
+  .vrow .d { grid-column: 1 / -1; font-size: 12px; color: var(--ink-3); line-height: 1.4; }
+  .vrow .d.why { color: var(--beam); }
+  .vrow .ctl.stack { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
+  .seg3 { display: inline-flex; gap: 2px; padding: 2px; border-radius: 10px; background: var(--surface-2); border: 1px solid var(--line-soft); }
+  .seg3 button { min-height: 34px; padding: 0 10px; border: 0; border-radius: 8px; background: none; color: var(--ink-2); font-size: 13px; font-weight: 600; }
+  .seg3 button:hover { color: var(--ink); }
+  .seg3 button[aria-pressed="true"] { background: var(--surface-3); color: var(--ink); }
+  @media (pointer: coarse) { .seg3 button { min-height: 40px; } }
+  .linkbtn { border: 0; background: none; padding: 0; color: var(--ink); font: inherit; text-decoration: underline; text-underline-offset: 2px; }
 
   /* ---------- fit-to-screen and toasts ---------- */
   #fitbtn {
@@ -622,7 +657,9 @@
   @media (min-width: 600px) {
     #readout .mark span { display: inline; }
     #readout .ro-depth { display: inline; }
-    #turbobtn span { display: inline; }
+    #turbobtn span, #viewmenubtn span { display: inline; }
+    #viewmenubtn { width: auto; padding: 0 10px 0 12px; gap: 6px; display: inline-flex; align-items: center; font-size: 13px; font-weight: 600; }
+    #viewmenubtn .caret { display: block; }
     #fishcard { left: auto; right: 16px; width: 380px; }
     #fishcard.flip { left: 16px; right: auto; top: auto; bottom: calc(var(--dock-b) + var(--dock-h) + 10px); }
     #dgrid { grid-template-columns: repeat(auto-fill, minmax(440px, 1fr)); padding: 14px 16px 28px; gap: 14px; }
@@ -632,11 +669,16 @@
     .dcard .cbox.tall { height: 340px; }
     .dcard .cbox.xtall { height: 700px; }
   }
+  @media (max-width: 599px) {
+    #dock { width: calc(100vw - 20px); }
+    #viewpop { right: 10px; width: auto; }
+  }
   @media (max-width: 420px) {
     #dock { padding: 0 3px; }
     #dock .speed .icon-btn { width: 32px; }
     #speedlabel { min-width: 2.6em; }
     #dock > .icon-btn { width: 40px; }
+    #dock .dock-sep { margin: 0 2px; }
   }
   @media (min-width: 960px) {
     #drawer {
@@ -713,6 +755,8 @@
     <symbol id="i-frame" viewBox="0 0 24 24"><path d="M4 9V5.5A1.5 1.5 0 0 1 5.5 4H9M15 4h3.5A1.5 1.5 0 0 1 20 5.5V9M20 15v3.5a1.5 1.5 0 0 1-1.5 1.5H15M9 20H5.5A1.5 1.5 0 0 1 4 18.5V15"/></symbol>
     <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m6 15 6-6 6 6"/></symbol>
     <symbol id="i-light" viewBox="0 0 24 24"><path d="M8.5 3.5h7l-1.2 5.2 .9 1.8v9a1 1 0 0 1-1 1h-4.4a1 1 0 0 1-1-1v-9l.9-1.8-1.2-5.2Z"/><path d="M10.2 13.5h3.6"/><path d="M4.5 4.5 6 6M19.5 4.5 18 6M3 9.5h2M19 9.5h2"/></symbol>
+    <symbol id="i-tank" viewBox="0 0 24 24"><path d="M3.5 9 8 6h12.5L16 9H3.5Z"/><path d="M3.5 9v8.5H16V9M16 17.5l4.5-3V6"/><path d="M6.5 13.5h6" opacity=".6"/></symbol>
+    <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z"/><circle cx="12" cy="12" r="3"/></symbol>
   </svg>
 
   <canvas id="tank" aria-label="the ocean as a deep 3D tank: drag to move (up and down when looking through the side), right-drag or two fingers to turn, scroll or pinch to zoom, W A S D to move, Q and E down and up, click or tap a fish to inspect it"></canvas>
@@ -742,7 +786,7 @@
     </div>
     <div class="notes" id="statnotes"></div>
   </div>
-  <button id="fitbtn" class="btn chip-surface" hidden><svg class="i"><use href="#i-frame"/></svg>Fit the world to this screen</button>
+  <button id="fitbtn" class="btn chip-surface" hidden title="Starts this world again, sized for this screen: the same settings and seed"><svg class="i"><use href="#i-restart"/></svg>Fit the world to this screen</button>
   <div id="toasts" aria-live="polite"></div>
   <div id="keys" class="chip-surface" role="note" aria-label="keyboard shortcuts">
     <button id="keysclose" class="icon-btn x" title="Hide the keys (? shows them again)" aria-label="hide the keys"><svg class="i"><use href="#i-close"/></svg></button>
@@ -774,7 +818,7 @@
     </div>
   </section>
 
-  <nav id="dock" class="chip-surface" aria-label="playback">
+  <nav id="dock" class="chip-surface" aria-label="playback and view">
     <button id="pausebtn" class="icon-btn" title="Pause (Space)" aria-label="pause"><svg class="i"><use href="#i-pause"/></svg></button>
     <div class="speed" role="group" aria-label="speed">
       <button id="slower" class="icon-btn" title="Fewer steps per frame (− or ↓)" aria-label="slower"><svg class="i"><use href="#i-minus"/></svg></button>
@@ -783,9 +827,41 @@
     </div>
     <button id="turbobtn" class="icon-btn" aria-pressed="false" title="Turbo: run headless in a worker at full speed; the hand-off is exact"><svg class="i"><use href="#i-bolt"/></svg><span>Turbo</span></button>
     <button id="randombtn" class="icon-btn" title="Randomize: a new world from tested ranges" aria-label="randomize the world"><svg class="i"><use href="#i-dice"/></svg></button>
-    <button id="lightbtn" class="icon-btn" aria-pressed="false" title="Flashlight (L): clear light where you look; on by itself while you follow a fish" aria-label="flashlight"><svg class="i"><use href="#i-light"/></svg></button>
-    <button id="viewbtn" class="icon-btn" title="Fit the view (C)" aria-label="fit the view"><svg class="i"><use href="#i-frame"/></svg></button>
+    <span class="dock-sep" aria-hidden="true"></span>
+    <button id="lightbtn" class="icon-btn" aria-pressed="false" title="Flashlight (L): clear light where you look, in true colours" aria-label="flashlight"><svg class="i"><use href="#i-light"/></svg></button>
+    <button id="viewmenubtn" class="icon-btn" aria-expanded="false" aria-controls="viewpop" title="View (V): the flashlight, water clarity, fish colours" aria-label="view"><svg class="i"><use href="#i-eye"/></svg><span>View</span><svg class="i caret" aria-hidden="true"><use href="#i-chevron"/></svg></button>
+    <button id="viewbtn" class="icon-btn" title="Fit the tank on screen (C)" aria-label="fit the tank on screen"><svg class="i"><use href="#i-tank"/></svg></button>
   </nav>
+
+  <!-- View: how the tank looks (drawing only; nothing here changes the world) -->
+  <div id="viewpop" class="pop chip-surface" role="dialog" aria-label="view" hidden>
+    <div class="pop-head"><h2>View</h2><button id="viewclose" class="icon-btn" aria-label="close the view menu"><svg class="i"><use href="#i-close"/></svg></button></div>
+    <div class="vrow">
+      <label class="n" for="lightnow">Flashlight</label>
+      <input id="lightnow" class="switch" type="checkbox" role="switch">
+      <span class="d">Clear light where you look: true colours, without the water's tint. <kbd>L</kbd> turns it on and off.</span>
+    </div>
+    <div class="vrow">
+      <label class="n" for="followLight">Light while following</label>
+      <input id="followLight" class="switch" type="checkbox" role="switch" checked>
+      <span class="d">Following a fish turns the flashlight on; letting go puts it back as it was. <kbd>L</kbd> never changes this.</span>
+    </div>
+    <div class="vrow">
+      <label class="n" for="clarity">Water clarity</label>
+      <span class="ctl stack"><input id="clarity" class="range" type="range" min="0" max="100" step="5" value="100" aria-valuetext="Clear"><span id="clarityval" class="rangeval">Clear</span></span>
+      <span class="d">Clear keeps the fish's colours at depth; Realistic fades them to blue over bright sand. The flashlight always shows true colours.</span>
+    </div>
+    <div class="vrow">
+      <span class="n" id="colour-l">Fish colours</span>
+      <span id="colourMode" class="seg3" role="group" aria-labelledby="colour-l"><button type="button" data-c="appearance" aria-pressed="true">Appearance</button><button type="button" data-c="family" aria-pressed="false">Family</button><button type="button" data-c="brain" aria-pressed="false">Brain</button></span>
+      <span class="d" id="colourwhy"></span>
+    </div>
+    <div class="vrow">
+      <label class="n" for="governor">Hold 60 fps</label>
+      <input id="governor" class="switch" type="checkbox" role="switch" checked>
+      <span class="d">When this device can't keep up: fewer steps per frame first, then less detail. The simulation itself never changes.</span>
+    </div>
+  </div>
 
   <aside id="drawer" role="dialog" aria-label="settings" aria-modal="false">
     <div class="sheet-grip" id="grip" aria-hidden="true"></div>
@@ -807,25 +883,8 @@
           <button id="newworld" class="btn" title="the same settings, a new seed (R)"><svg class="i"><use href="#i-restart"/></svg>New world</button>
           <button id="replay" class="btn" title="this world again from its start (Shift+R)"><svg class="i"><use href="#i-replay"/></svg>Replay</button>
         </div>
-        <h3>Playback</h3>
-        <div class="field" id="f_governor">
-          <span><span class="name"><span class="lt">Hold 60 fps</span></span><span class="desc">Runs fewer steps per frame, then draws the tank with less detail, when this device can't keep up.</span></span>
-          <span class="ctl"><input id="governor" class="switch" type="checkbox" role="switch" checked aria-label="hold 60 fps"></span>
-        </div>
-        <h3>View</h3>
-        <div class="field" id="f_followLight">
-          <span><span class="name"><span class="lt">Flashlight while following</span></span><span class="desc">While you follow a fish, clear light shows it and what is around it in true colours. The dock's flashlight (L) lights where you look.</span></span>
-          <span class="ctl"><input id="followLight" class="switch" type="checkbox" role="switch" checked aria-label="flashlight while following"></span>
-        </div>
-        <div class="field" id="f_colourBrain">
-          <span><span class="name"><span class="lt">Fish colours</span></span><span class="desc">Every fish is drawn in the body shape it inherited. Appearance (the default): its own inherited skin pattern too. Family: each family line has its own colour, the same one it has in the dashboards. Brain: a fish's colour comes from its genome, so similar brains look alike.</span></span>
-          <span class="ctl"><select id="colourMode" aria-label="fish colours"><option value="appearance">Appearance</option><option value="family">Family</option><option value="brain">Brain</option></select></span>
-        </div>
-        <div class="field" id="f_clarity">
-          <span><span class="name"><span class="lt">Water clarity</span></span><span class="desc">Clear (the default): fish keep their colour at depth and stand out over a teal floor, as in Classic. Realistic: light fades and turns blue with depth, toward dark water over bright sand. Drawing only; the flashlight always shows true colours.</span></span>
-          <span class="ctl stack"><input id="clarity" class="range" type="range" min="0" max="100" step="5" value="100" aria-label="water clarity" aria-valuetext="Clear"><span id="clarityval" class="rangeval">Clear</span></span>
-        </div>
         <p id="modeline"></p>
+        <p class="hint">The flashlight, water clarity, fish colours and Hold 60 fps are in <b>View</b>, beside the flashlight in the dock (key V).</p>
         <h3>Save &amp; load</h3>
         <div class="row2">
           <button id="savecp" class="btn" title="the settings and seed, as a file"><svg class="i"><use href="#i-save"/></svg>Save setup</button>

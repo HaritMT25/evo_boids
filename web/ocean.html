@@ -713,9 +713,19 @@
     #dock > .icon-btn { width: 40px; }
     #dock .dock-sep { margin: 0 2px; }
   }
+  /* a 320-370 px phone: the dock fits paused too (eight buttons with the
+   * step), the live numbers keep their room beside the three tools, and
+   * Fish colours' three buttons take their own row */
   @media (max-width: 370px) {
-    #dock > .icon-btn { width: 36px; }
-    #dock .speed .icon-btn { width: 28px; }
+    #dock { gap: 0; }
+    #dock > .icon-btn { width: 34px; }
+    #dock .speed .icon-btn { width: 26px; }
+    #speedlabel { min-width: 2.2em; }
+    #dock .dock-sep { margin: 0 1px; }
+    #tools .icon-btn { width: 44px; height: 44px; }
+    #readout { max-width: calc(100vw - 174px); gap: 6px; padding: 0 10px; }
+    #readout .mark, #readout .sep { display: none; }
+    .vrow .seg3 { grid-column: 1 / -1; justify-self: start; }
   }
   @media (min-width: 960px) {
     #drawer {

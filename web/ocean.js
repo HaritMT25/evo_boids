@@ -2220,8 +2220,13 @@
      * walls (CFG.FRESH), when this module has them. walls= is written into
      * the cfg's own (first) "walls" either way, never deleted: a later
      * "walls" in ?cfg= (cfgRepeats) still goes to oc_init to be checked, and
-     * would be the one it runs if the first were gone. */
-    var freshVisit = ["seed", "pop", "depth", "w", "h", "cfg", "e1", "walls"].every(function (k) { return !P.has(k); });
+     * would be the one it runs if the first were gone. An Ocean link is one
+     * with any of the keys only the Ocean reads (ocean.html's OCEAN_ONLY, the
+     * same list: tests/ocean_turbo_handoff.js holds them equal), ?speed= among
+     * them; the keys both pages read (colour, guide, intro) and those newer
+     * than walls (clarity) make no link old. */
+    var OCEAN_KEYS = ["seed", "pop", "depth", "w", "h", "cfg", "speed", "e1", "mock", "walls"];
+    var freshVisit = OCEAN_KEYS.every(function (k) { return !P.has(k); });
     if (P.has("walls")) {
       var wv = P.get("walls");
       if (wv === "1") cfg0.walls = true;

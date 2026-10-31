@@ -1547,6 +1547,27 @@ async function pageWallsOverride() {
     }
 }
 
+/* Deployed-audit PR #30-31, finding 3: a link from before walls keeps
+ * wrapping, a new visit gets glass walls. The page took a link with only
+ * ?speed=2 (an Ocean key since before walls) for a new visit. The keys that
+ * make a link the Ocean's are ocean.html's OCEAN_ONLY (its redirect's list),
+ * and web/ocean.js uses that same list. */
+async function pageFreshVisit() {
+    section('The page: glass walls for a new visit, wrapping for a link from before them (deployed audit #30-31, finding 3)');
+    const list = (src, name) => { const m = new RegExp('var ' + name + ' = (\\[[^\\]]*\\])').exec(src); return m ? JSON.parse(m[1]) : null; };
+    const html = list(fs.readFileSync(path.join(WEB, 'ocean.html'), 'utf8'), 'OCEAN_ONLY');
+    const js = list(fs.readFileSync(path.join(WEB, 'ocean.js'), 'utf8'), 'OCEAN_KEYS');
+    ok(html && js && JSON.stringify(html) === JSON.stringify(js) && js.includes('speed'),
+       'web/ocean.js\'s link keys are ocean.html\'s OCEAN_ONLY (' + JSON.stringify(js) + ')');
+    for (const [q, want] of [['', 1], ['?seed=4242', 0], ['?speed=2', 0], ['?speed=2&colour=family', 0], ['?e1=1', 0],
+                             ['?colour=family', 1], ['?guide=0', 1], ['?clarity=realistic', 1], ['?seed=4242&walls=1', 1]]) {
+        const p = await bootPage(q);
+        const got = p.failed ? 'refused: ' + p.failed : p.M._oc_walls_enabled();
+        ok(got === want && p.el('o_walls').checked === !!want,
+           (q || 'a bare address') + ': ' + (want ? 'glass walls' : 'wrapping, as before walls') + ' (walls ' + got + ')');
+    }
+}
+
 /* Every section, in order; `node tests/ocean_turbo_handoff.js NAME...` runs only those. */
 const SECTIONS = {
     repeatedKeys, liveLedger, growthPage, randomize, imports,
@@ -1560,7 +1581,7 @@ const SECTIONS = {
     },
     failures: failures_,
     pageHeld, pageRefusal, pageAsyncSetup, pageStartFailures, pageOverflow, pageBools, pageDashboards,
-    pageWallsOverride
+    pageWallsOverride, pageFreshVisit
 };
 const unhandled = [];
 process.on('unhandledRejection', (e) => { unhandled.push(e); });

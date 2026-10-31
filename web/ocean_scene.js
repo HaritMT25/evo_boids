@@ -1748,13 +1748,14 @@
       var shMat = new THREE.ShaderMaterial({ vertexShader: sh.shadowVs, fragmentShader: SHADOW_FS, uniforms: shadowU,
                                              transparent: true, depthWrite: true, depthFunc: THREE.LessDepth, side: THREE.DoubleSide });
       var self = { cap: 0, n: 0, lod: "", attrs: null, geo: null, bgeo: null, mesh: null, bmesh: null, shadow: null,
-                   tex: null, texData: null, mat: mat, shaders: sh, barbels: false, tpls: tpls, barbTpl: barbTpl, plan: null };
+                   tex: null, texData: null, mat: mat, shaders: sh, barbels: false, tpls: tpls, barbTpl: barbTpl, planBytes: 0 };
       var INST = ["iA", "iB", "iC", "iBody", "iX"];
       self.inst = INST;   /* the instance attributes the probes share */
-      /* three uploaded the gene texture (DataTexture.onUpdate): the pending plan's bytes */
+      /* three uploaded the gene texture (DataTexture.onUpdate): the pending
+       * upload's bytes (a number: nothing allocated a frame) */
       function onGeneUpload() {
-        var bytes = self.plan ? self.plan.bytes : self.texData.byteLength;
-        self.plan = null;
+        var bytes = self.planBytes || self.texData.byteLength;
+        self.planBytes = 0;
         geneIO.uploads++; geneIO.bytes += bytes;
         profiler.add(PK.geneUploads, 1); profiler.add(PK.geneUploadBytes, bytes);
       }
@@ -1791,7 +1792,7 @@
         tex.generateMipmaps = false;
         tex.needsUpdate = true;
         tex.onUpdate = onGeneUpload;
-        self.plan = { full: true, bytes: data.byteLength };   /* its allocation's upload */
+        self.planBytes = data.byteLength;   /* its allocation's upload */
         geneIO.allocs++;
         profiler.add(PK.texAllocs, 1); profiler.add(PK.instAllocBytes, INST.length * cap * 16);
         if (self.geo) {
@@ -1833,10 +1834,10 @@
           a.needsUpdate = true;
         });
         /* the gene texture's upload: the whole texture every frame (one full
-         * upload, no ranges); the plan is what onGeneUpload counts */
+         * upload, no ranges); planBytes is what onGeneUpload counts */
         var tg = profiler.beginCpu();
         if (!testFaults.holdGeneUploads) {
-          self.plan = { full: true, bytes: self.texData.byteLength };
+          self.planBytes = self.texData.byteLength;
           self.tex.needsUpdate = true;
         }
         profiler.endCpu(SP.geneRanges, tg);

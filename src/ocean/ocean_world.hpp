@@ -253,9 +253,14 @@
 // (tools/ocean_probe.cpp). Main.cpp's clamps minus its min / max swaps (the
 // Ocean refuses a reversed pair instead). perceptionRadius is the neighbour
 // grids' cell size, so it must be >= 1: at 0 SpatialGrid::init divided by
-// zero and cast the infinity to int.
+// zero and cast the infinity to int. Only a finite radius is raised: -inf
+// (a cfg's -1e400) is not a small radius but an invalid one, so it stays as
+// it is for the radius check to refuse ("must be finite and >= 0",
+// OceanWorld::radiusError), the previous world kept, as NaN and +inf are.
+// (Raised to 1 it was accepted, while the page, keeping -1e400 in its
+// bookkeeping, wrote it out as null: the world came back with the default.)
 inline void clampOceanSimConfig(SimConfig& c) {
-    if (c.perceptionRadius < 1.0f) c.perceptionRadius = 1.0f;
+    if (std::isfinite(c.perceptionRadius) && c.perceptionRadius < 1.0f) c.perceptionRadius = 1.0f;
     if (c.maxNeighbors < 0) c.maxNeighbors = 0;
     if (c.maxNeighbors > MAX_TOPOLOGICAL_NEIGHBORS) c.maxNeighbors = MAX_TOPOLOGICAL_NEIGHBORS;
     if (c.predatorMinPopulation < 0) c.predatorMinPopulation = 0;

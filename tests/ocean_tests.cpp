@@ -3693,9 +3693,22 @@ void testShimInts() {
                           // arithmetic-safe motion bounds (the live-code audit, finding 4): 3e38 x 4/3
                           // overflowed; OWN_SPEED = 80 / 1e-38 was inf on the first captured step
                           R"({"triangularMotion":true,"maxTurnRate":3e38})", R"({"maxTurnRate":-10001})",
-                          R"({"minPopulation":0,"minSpeed":0,"maxSpeed":1e-38})", R"({"minSpeed":0,"maxSpeed":0.0099})"}) {
+                          R"({"minPopulation":0,"minSpeed":0,"maxSpeed":1e-38})", R"({"minSpeed":0,"maxSpeed":0.0099})",
+                          // the shared clamp raises only a finite radius to 1 (PR #34 review): -inf
+                          // (-1e400, or -1e39 as a float) was stored as 1, now refused as NaN / +inf are
+                          R"({"perceptionRadius":-1e400})", R"({"perceptionRadius":-1e39})", R"({"perceptionRadius":1e400})",
+                          R"({"perceptionRadius":-1e400,"perceptionRadius":100})"}) {
         const int initRc = oc_init(1307, 1920, 1080, 240.0, 50, c);
         refusedNew += t.expect(initRc == 0, "%s accepted", c);
+        if (std::strstr(c, "perceptionRadius"))
+            t.expect(std::strstr(oc_last_error(), "perceptionRadius") != nullptr, "%s: refused without naming the radius (%s)", c,
+                     oc_last_error());
+    }
+    {   // the probe's builder too (tools/ocean_probe.cpp: the same clamp, then the radius check)
+        OceanWorld pw;
+        const std::string perr = probeInitWorld(pw, 1307, 1920, 1080, 240.0, 50, false, R"({"perceptionRadius":-1e400})");
+        refusedNew += t.expect(perr.find("perceptionRadius") != std::string::npos, "the probe took perceptionRadius -1e400 (%s)",
+                               perr.c_str());
     }
     const struct { int W, H, pop; const char* cfg; } dims[] = {
         {100001, 1080, 50, nullptr}, {1920, 100001, 50, nullptr}, {1920, 1080, 100001, nullptr}, {99, 1080, 50, nullptr},
@@ -3716,6 +3729,12 @@ void testShimInts() {
                           R"({"perceptionRadius":2,"interactRadius":1,"pickupRadius":1})"}) {
         const int initRc = oc_init(1308, 1920, 1080, 240.0, 50, c);
         acceptedEdge += t.expect(initRc == 1, "%s refused: %s", c, oc_last_error());
+    }
+    for (const char* c : {R"({"perceptionRadius":-5})", R"({"perceptionRadius":-3e38})", R"({"perceptionRadius":0.5})"}) {
+        // a finite radius below 1 is still raised to 1, as before
+        const int initRc = oc_init(1308, 1920, 1080, 240.0, 50, c);
+        acceptedEdge += t.expect(initRc == 1 && g_world->cfg.perceptionRadius == 1.0f, "%s: rc %d, radius %.9g (want 1): %s", c, initRc,
+                                 initRc ? (double)g_world->cfg.perceptionRadius : 0.0, oc_last_error());
     }
     {
         const int initRc = oc_init(1308, 100000, 1080, 240.0, 50, nullptr);

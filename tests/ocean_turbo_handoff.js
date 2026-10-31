@@ -111,6 +111,9 @@ function fingerprint(M) {
     }
     return h.digest('hex');
 }
+/* M's world after `steps` more steps (60), fingerprinted: what a setting changes that the first
+ * frame does not show (a radius, a gate, a switch that only steers) shows by then */
+function stepped(M, steps) { M._oc_step(steps === undefined ? 60 : steps); return fingerprint(M); }
 /* the appearance genome rows of this sync, with their count and state */
 function appRows(M) {
     M._oc_sync();
@@ -956,11 +959,14 @@ async function liveLedger() {
     }
 }
 
-/* a number too big for a double, in either occurrence of a repeated key (int, Ocean int, Ocean bool) */
+/* a number too big for a double, in either occurrence of a repeated key (int, Ocean int, Ocean bool),
+ * and in a float the engine clamps (perceptionRadius: only a finite one is raised to 1; -1e400 was
+ * stored as 1, PR #34's review) — every one of them refused by oc_init */
 const OVERFLOW_DOCS = ['{"maxPopulation":300,"maxPopulation":1e400}', '{"maxPopulation":1e400,"maxPopulation":300}',
                        '{"maxPopulation":300,"maxPopulation":-1e400}', '{"maxPopulation":-1e400,"maxPopulation":300}',
                        '{"appearance":3,"appearance":1e400}', '{"appearance":1e400,"appearance":3}',
-                       '{"lightEnabled":true,"lightEnabled":1e400}', '{"lightEnabled":1e400,"lightEnabled":true}'];
+                       '{"lightEnabled":true,"lightEnabled":1e400}', '{"lightEnabled":1e400,"lightEnabled":true}',
+                       '{"perceptionRadius":-1e400}', '{"perceptionRadius":-1e400,"perceptionRadius":100}'];
 /* A key twice in ?cfg= or a setup file: the page now follows the engine's
  * rule (web/ocean_handoff.js parseFirst / cfgJson, as web/ocean.js
  * importWorld / loadSetup use them): the first occurrence counts, every one
@@ -984,7 +990,7 @@ async function repeatedKeys() {
     const M = await mk(1);
     const init = (json) => {
         const r = HO.withCString(M, json, p => M._oc_init(3, 1920, 1080, 240, 60, p));
-        return { ok: r === 1, why: r ? '' : HO.cString(M, M._oc_last_error()), print: r ? fingerprint(M) : '' };
+        return { ok: r === 1, why: r ? '' : HO.cString(M, M._oc_last_error()), print: r ? stepped(M) : '' };
     };
     /* what cfgJson writes for finite values is JSON.stringify's, byte for byte (every sheet,
      * preset and finite import reaches oc_init as it did) */
@@ -1285,7 +1291,7 @@ async function pageStartFailures() {
 /* oc_init of doc as it is, on module M: {ok, why, print} */
 function directInit(M, doc) {
     const r = HO.withCString(M, doc, ptr => M._oc_init(7, 1920, 1080, 240, 12, ptr));
-    return { ok: r === 1, why: r ? '' : HO.cString(M, M._oc_last_error()), print: r ? fingerprint(M) : '' };
+    return { ok: r === 1, why: r ? '' : HO.cString(M, M._oc_last_error()), print: r ? stepped(M) : '' };
 }
 const PAGE_Q7 = '?seed=7&pop=12&w=1920&h=1080&walls=0';
 /* A cfg document into a running page by one of its three ways in:
@@ -1327,16 +1333,19 @@ async function pageOverflow() {
     }
     const direct = await mk(1, {}, 300, 300, 0);
     const p = await bootPage(PAGE_Q7);
+    /* the controls: valid repeats; and a float key's later occurrence, which oc_init does not read (nor
+     * check: which occurrences it checks is the engine's), so the first runs, as the page shows and writes out */
     for (const doc of OVERFLOW_DOCS.concat(['{"maxPopulation":300,"maxPopulation":400}', '{"foodEnergy":5,"foodEnergy":9}',
-                                            '{"lightEnabled":true,"lightEnabled":false}'])) {
+                                            '{"lightEnabled":true,"lightEnabled":false}', '{"perceptionRadius":100,"perceptionRadius":-1e400}'])) {
         const d = directInit(direct, doc), bad = [];
+        if (OVERFLOW_DOCS.includes(doc) && d.ok) bad.push('oc_init accepted it');   /* an overflow is never a value */
         for (const how of PAGE_WAYS) {
             const print0 = fingerprint(p.M), state0 = p.state(), n0 = p.inits.length;
             const r = await viaPage(p, how, doc), sent = p.inits.slice(n0);
             if (sent.some(s => /null/.test(s) || (/e400/.test(doc) && !/1e400/.test(s)))) bad.push(how + ' sent ' + sent.join(' | '));
             if (r.ok !== d.ok) bad.push(how + (r.ok ? ' accepted it' : ' refused it: ' + r.why));
             else if (!d.ok && (fingerprint(p.M) !== print0 || p.state() !== state0)) bad.push(how + ' changed the page');
-            else if (d.ok && fingerprint(p.M) !== d.print) bad.push(how + ' ran another world');
+            else if (d.ok && stepped(p.M) !== d.print) bad.push(how + ' ran another world');
         }
         ok(!bad.length, doc + ': ' + (d.ok ? 'accepted, the same world' : 'refused (' + d.why + ')') + ' by oc_init, importWorld, ?cfg= and a setup file' +
            (bad.length ? ' — ' + bad.join('; ') : ''));
@@ -1391,7 +1400,7 @@ async function pageBools() {
                 const r = await viaPage(p, how, doc);
                 if (r.ok !== d.ok) { bad.push(how + (r.ok ? ' accepted ' : ' refused ') + doc + (r.ok ? '' : ' (' + r.why + ')')); continue; }
                 if (!d.ok) { if (fingerprint(p.M) !== print0 || p.state() !== state0) bad.push(how + ' changed the page on ' + doc); continue; }
-                if (fingerprint(p.M) !== d.print) bad.push(how + ' ran another world for ' + doc);
+                if (stepped(p.M) !== d.print) bad.push(how + ' ran another world for ' + doc);
                 if (KEYS[key]) {
                     const want = truth(first), box = p.el('o_' + key).checked, a = p.T.initArgs.cfg[key], b = p.T.runCfg[key];
                     if (box !== want || a !== want || b !== want)
@@ -1597,6 +1606,74 @@ async function pageSizeFields() {
     ok(p.uncaught.length === 0, 'no exception escaped the page\'s handlers');
 }
 
+/* PR #34 review: what the page writes out (Save setup's file, the address
+ * a load or Restart writes) must start the world it ran. perceptionRadius
+ * -1e400 (now reaching oc_init as a number) was raised to 1 by the
+ * engine's clamp before its finite check, so it ran radius 1, while the
+ * page kept -Infinity and wrote it out as null: reloaded, the default 100.
+ * Now the clamp raises only a finite radius and oc_init refuses -inf. Here:
+ * the review's file (refused, nothing changed); every key the engine reads
+ * as a number at +-1e400 is refused or not read at all (so no accepted
+ * setup holds a non-finite value that matters); and accepted setups,
+ * clamped and repeated values among them, come back as the same world and
+ * sheet from Save setup's file and from their address on a new page. */
+async function pageRoundTrip() {
+    section('The page: Save setup\'s file and the address start the world that ran (PR #34 review)');
+    const setup = (config) => '{"format":"evo_ocean_setup","version":1,"seed":7,"population":12,"width":300,"height":300,"depth":240,' +
+                              '"config":' + config + '}';
+    const load = async (p, text) => {
+        p.el('err').textContent = '';
+        p.loadFile({ name: 'setup.json', text: () => Promise.resolve(text) });
+        await until(() => p.msg() !== '', 'the setup\'s answer');
+        return p.msg();
+    };
+    const REVIEW = '{"perceptionRadius":-1e400}';
+    {   /* every number key the engine's readers know (SimConfig's and the Ocean's) */
+        const keys = [...new Set(['src/core/checkpoint_io.hpp', 'src/ocean/ocean_config.hpp'].flatMap(f =>
+            [...fs.readFileSync(path.join(ROOT, f), 'utf8').matchAll(/(?:floatOr|numOr|intOr|doubleOr|readFloat|readNum)\("([A-Za-z0-9_]+)"/g)].map(m => m[1])))];
+        const M = await mk(1, {}, 300, 300, 0), base = directInit(M, '{}').print, bad = [];
+        let refused = 0, unread = 0;
+        for (const k of keys)
+            for (const v of ['1e400', '-1e400']) {
+                const r = directInit(M, '{"' + k + '":' + v + '}');
+                if (!r.ok) refused++;
+                else if (r.print === base) unread++;
+                else bad.push(k + '=' + v);
+            }
+        ok(keys.length > 60 && !bad.length, keys.length + ' number keys the engine reads, at +-1e400: ' + refused + ' refused, ' + unread +
+           ' accepted only where oc_init does not read the key (the world is {}\'s)' + (bad.length ? ' — accepted and run: ' + bad.join(' ') : ''));
+    }
+    const p = await bootPage(PAGE_Q7);
+    {
+        const print0 = fingerprint(p.M), state0 = p.state();
+        const why = await load(p, setup(REVIEW));
+        ok(/refused/.test(why) && /perceptionRadius/.test(why) && fingerprint(p.M) === print0 && p.state() === state0,
+           'the review\'s setup (version 1, 300 x 300, perceptionRadius -1e400) is refused, the world, sheet and address kept ("' + why + '")');
+    }
+    const probe = await mk(1, {}, 300, 300, 0), e1 = HO.cString(probe, probe._oc_e1_preset());
+    for (const config of ['{}', '{"perceptionRadius":0}', '{"perceptionRadius":0.5,"interactRadius":0}', '{"perceptionRadius":-5}',
+                          '{"perceptionRadius":120}', '{"foodEnergy":5,"foodEnergy":9}', '{"lightEnabled":true,"lightEnabled":0}',
+                          '{"mouthGate":1,"kMouth":1.5}', '{"walls":1}', '{"bodyLen":1e400}', '{"perceptionRadius":100,"perceptionRadius":-1e400}',
+                          e1, REVIEW]) {
+        const said = await load(p, setup(config));
+        if (!/^Setup loaded/.test(said)) {
+            ok(config === REVIEW, config + ': ' + (config === REVIEW ? 'refused (above)' : 'not loaded: "' + said + '"'));
+            continue;
+        }
+        const print1 = stepped(p.M), form1 = p.form(), href = p.loc.href;
+        p.click('savecp');
+        const said2 = await load(p, p.blobs[p.blobs.length - 1]);
+        const print2 = stepped(p.M), form2 = p.form();
+        const fresh = await bootPage(new URL(href).search);
+        const print3 = fresh.failed ? 'refused: ' + fresh.failed : stepped(fresh.M), form3 = fresh.failed ? '' : fresh.form();
+        ok(/^Setup loaded/.test(said2) && print2 === print1 && form2 === form1 && print3 === print1 && form3 === form1,
+           config.slice(0, 60) + (config.length > 60 ? '…' : '') + ': Save setup -> load, and its address -> a new page: the same world and sheet' +
+           (print2 !== print1 ? ' — the saved file runs another world' : '') + (form2 !== form1 ? ' — the saved file shows another sheet' : '') +
+           (print3 !== print1 ? ' — the address runs another world (' + print3.slice(0, 40) + ')' : '') + (form3 !== form1 && print3 === print1 ? ' — the address shows another sheet' : ''));
+    }
+    ok(p.uncaught.length === 0, 'no exception escaped the page\'s handlers');
+}
+
 /* Every section, in order; `node tests/ocean_turbo_handoff.js NAME...` runs only those. */
 const SECTIONS = {
     repeatedKeys, liveLedger, growthPage, randomize, imports,
@@ -1610,7 +1687,7 @@ const SECTIONS = {
     },
     failures: failures_,
     pageHeld, pageRefusal, pageAsyncSetup, pageStartFailures, pageOverflow, pageBools, pageDashboards,
-    pageWallsOverride, pageFreshVisit, pageSizeFields
+    pageWallsOverride, pageFreshVisit, pageSizeFields, pageRoundTrip
 };
 const unhandled = [];
 process.on('unhandledRejection', (e) => { unhandled.push(e); });

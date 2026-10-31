@@ -1092,15 +1092,22 @@
       el(POPS[n][1]).setAttribute("aria-expanded", n === openPop ? "true" : "false");
     });
     document.body.classList.toggle("help-open", openPop === "help");
-    if (openPop) { setStatPanel(false); hideCoach(); placePop(); }
+    if (openPop) {
+      /* never under a layer above it: the charts, a narrow screen's settings sheet */
+      if (dash() && dash().isOpen()) dash().close();
+      if (!wideMQ.matches && drawerEl.classList.contains("open")) setDrawer(false);
+      setStatPanel(false); hideCoach(); placePop();
+    }
   }
   function togglePop(name) { setPop(openPop === name ? null : name); }
-  /* the View menu over its button (a phone: the screen's width, from the CSS) */
+  /* the View menu over its button, left of a wide screen's settings panel (a
+   * phone: the screen's width, from the CSS) */
   function placePop() {
     var pop = el("viewpop");
     if (openPop !== "view" || innerWidth < 600) { pop.style.left = ""; return; }
     var r = el("viewmenubtn").getBoundingClientRect(), w = pop.offsetWidth;
-    pop.style.left = Math.round(Math.max(10, Math.min(innerWidth - w - 10, r.left + r.width / 2 - w / 2))) + "px";
+    var right = wideMQ.matches && drawerEl.classList.contains("open") ? drawerEl.getBoundingClientRect().left : innerWidth;
+    pop.style.left = Math.round(Math.max(10, Math.min(right - w - 10, r.left + r.width / 2 - w / 2))) + "px";
   }
   document.addEventListener("pointerdown", function (e) {
     if (openPop && !e.target.closest("#" + POPS[openPop][0] + ", #" + POPS[openPop][1])) setPop(null);
@@ -1723,7 +1730,7 @@
     document.addEventListener("focusin", function (e) { if (typingIn(e.target)) releaseMoveKeys(); });
     window.addEventListener("keydown", function (e) {
       if (e.key === "Escape") {
-        if (openPop) setPop(null);
+        if (openPop) { if (!escHandledElsewhere) setPop(null); }   /* the tour or the charts take this Esc themselves */
         else if (drawerEl.classList.contains("open")) setDrawer(false);
         else if (statOpen) setStatPanel(false);
         else if (!escHandledElsewhere) { if (scene.following()) unfollow(); else select(null); }

@@ -2212,7 +2212,7 @@
       coarse: coarseMQ.matches,
       reducedMotion: reducedMQ.matches,
       bodyScale: bodyScale, onFollowChange: onFollowChange,
-      profiler: PROF, visualRandom: BENCH ? PERF.visualRandom(2463534242) : null
+      profiler: PERF ? PROF : null, visualRandom: BENCH ? PERF.visualRandom(2463534242) : null
     });
     if (!scene) throw new Error("WebGL2 is unavailable, and the 3-D Ocean has only the 3D tank");
     detail0 = scene.quality();

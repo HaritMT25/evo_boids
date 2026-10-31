@@ -31,7 +31,8 @@
 //       metric and topological (the cut's insertion takes it as its own
 //       comparisons fall), bounded and wrapped; summed eyes included (a NaN
 //       the definition gives compares by class: sameSense)
-//     * five items exactly R away in one cell (batch and tail; wrapped); the
+//     * five items exactly R away in one cell (batch and tail; wrapped), and
+//       one alone in its eye sector as the batch's last or the tail; the
 //       viewer alone (never its own neighbour); the mouth gate's edges
 //       (size == the limit, a NaN size, an oversized item the eye still
 //       sees), bounded and wrapped; -0 offsets on each axis keep their sign
@@ -865,6 +866,28 @@ void testSenseEdges() {
                 const int sz = tor ? EYE_BEHIND_SIZE : EYE_AHEAD_SIZE;
                 t.expect(S.s[sz] > 0.0f, "%s: the eye does not see the items at R (%s %.9g)", name, ocean::kSensorNames[sz], S.s[sz]);
             }
+#endif
+        }
+        // (12b) One item exactly R away, alone in its sector (ahead): the last
+        // of foodWithin's four-wide batch (three nearer items behind it, in the
+        // same row's run) or its scalar tail (four behind). A nearest-only eye
+        // sees it at R too (in (12) the other four at R fill the bin), so a
+        // strict R on either path shows in every mode.
+        for (int tail = 0; tail < 2; ++tail) {
+            OceanWorld w;
+            world(w, 320, m, false);
+            addQuiet(w, 600.0f, 500.0f, 120.0f, east);
+            for (int k = 0; k < 3 + tail; ++k) addFood(w, 510.0f + (float)k, 500.0f, 120.0f);
+            addFood(w, 700.0f, 500.0f, 120.0f);
+            std::snprintf(name, sizeof name, "one at R, %s (%s)", tail ? "the tail" : "the batch's last", m.name);
+            const Sensed S = stepAndCompare(t, name, w);
+            if (labels)
+                t.expect(sameBits(S.s[FOOD_DENSITY], tanhCountOver10(4 + tail)), "%s: density %.9g (want %d)", name, S.s[FOOD_DENSITY],
+                         4 + tail);
+#ifdef EVO_OCEAN_EYE
+            if (m.eye && !(m.code & kEyeCodeSummed))
+                t.expect(S.s[EYE_AHEAD_PROX] == 0.0f && S.s[EYE_AHEAD_SIZE] > 0.0f, "%s: the eye does not see the item at R (%.9g %.9g)",
+                         name, S.s[EYE_AHEAD_PROX], S.s[EYE_AHEAD_SIZE]);
 #endif
         }
         // (13) The viewer alone: the grid lists it for its own query, and it is

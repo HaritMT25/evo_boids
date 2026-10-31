@@ -42,6 +42,8 @@
  *      the visitor's last choice, clear the first time; never stored)
  *      ?mock=1 loads ocean_mock.js from beside the page instead of the engine
  *      (a JS stand-in for page development, not part of web/).
+ *      ?renderBench=1 the render benchmark (web/ocean_perf.js: EvoOcean.bench,
+ *      paused from the first frame, Hold 60 fps off); ?perf=1 its profiler only.
  *      The link's setup goes to oc_init as it is; one it refuses stops the
  *      page with the engine's reason (and a link without it).
  *      A Restart writes seed / pop / depth / w / h / cfg back, so a reload, or
@@ -66,6 +68,10 @@
   var P = new URLSearchParams(location.search);
   var MOCK = P.get("mock") === "1";
   var E1 = P.get("e1") === "1";
+  /* measurement only (web/ocean_perf.js): off, a profiler that records nothing (also without the file) */
+  var PERF = window.EvoOceanPerf, BENCH = !!PERF && P.get("renderBench") === "1";
+  var PROF = PERF ? PERF.forPage(BENCH || P.get("perf") === "1") : { enabled: false, active: false, SPAN: {}, beginFrame: function () {},
+    recordStep: function () {}, beginCpu: function () { return 0; }, lap: function () { return 0; }, endCpu: function () {} }, SP = PROF.SPAN;
   var DT = 0.016;                      /* oc_step's fixed step */
   var SPEEDS = [1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64];
   var STEP_BUDGET_MS = 11;             /* of a 16.7 ms frame: what stepping may take (Hold 60 fps) */
@@ -230,7 +236,7 @@
    * whether this module knows them at all */
   function hasWalls() { return has("oc_walls_enabled"); }
   function wallsOn() { return hasWalls() && !!M._oc_walls_enabled(); }
-  var worldReady = false;
+  var worldReady = false, worldEpoch = 0;   /* epoch: a new world's (fish ids start over); Turbo keeps it */
   /* repeats: the later occurrences of cfg's repeated keys (HO.parseFirst), so
    * oc_init checks each and takes the first, as it does for its own JSON.
    * size: [width, height] (the sheet's, the link's, a setup's). */
@@ -289,6 +295,7 @@
   }
   /* a new world (oc_init or oc_reset), or one handed back by Turbo */
   function afterNewWorld(fromTurbo) {
+    if (!fromTurbo) worldEpoch++;
     var w0 = W, h0 = H, d0 = D, g0 = WALLS;
     readWorld();
     WALLS = wallsOn();
@@ -817,6 +824,7 @@
       delete cfgOut.walls;
       if (Object.keys(cfgOut).length) u.searchParams.set("cfg", JSON.stringify(cfgOut)); else u.searchParams.delete("cfg");
       u.searchParams.delete("e1");   /* its keys are in cfg now */
+      u.searchParams.delete("renderBench"); u.searchParams.delete("perf");   /* measurement, never a setup's */
       history.replaceState(null, "", u);
     } catch (e) { /* file:// or a sandboxed frame */ }
   }
@@ -903,7 +911,7 @@
     var buf = heap();
     var n = M._oc_creature_count(), fc = M._oc_food_count(), pc = M._oc_predator_count();
     return {
-      buf: buf, n: n, fc: fc, pc: pc, selIdx: -1,
+      buf: buf, worldEpoch: worldEpoch, n: n, fc: fc, pc: pc, selIdx: -1,
       segs: new Float32Array(buf, M._oc_creature_segments(), n * 12),
       depth: new Float32Array(buf, M._oc_creature_depth(), n),
       ids: new Float64Array(buf, M._oc_creature_ids(), n),
@@ -925,7 +933,9 @@
    * rewrite them, and both cut a new snapshot), on the live memory */
   function fresh(s) {
     if (!s || s.buf === heap()) return s;   /* (the appearance rows: a view of this sync's too) */
+    var pt = PROF.beginCpu();
     var t = snapshot();
+    PROF.endCpu(SP.snapshot, pt);
     t.selIdx = s.selIdx;
     if (!HAS_VZ) t.vz = s.vz;   /* the estimate lives in JS */
     if (lastS === s) lastS = t;
@@ -975,13 +985,13 @@
 
   /* ---------------- state ---------------- */
   var scene = null, lastS = null;
-  var paused = false, stepOnce = false;
+  var paused = BENCH, stepOnce = false;
   var speedIdx = Math.max(0, SPEEDS.indexOf(Math.round(Math.max(1, Math.min(64, parseFloat(P.get("speed")) || 1)))));
   var stepMs = 0, lastSteps = 0;
   var selectedId = null, wantFollow = false, everSelected = false;
   var animT = 0, lastNow = 0;
   var fpsFrames = 0, fpsT = 0, fps = 0;
-  var governorOn = true, colourBrain = false, colourMode = "family";
+  var governorOn = !BENCH, colourBrain = false, colourMode = "family";
   var summary = null, summaryT = 0;   /* oc_summary, refreshed twice a second for the readout */
   function speed() { return SPEEDS[speedIdx]; }
   function stepsThisFrame() {
@@ -1662,6 +1672,7 @@
   var splashDone = false;
   function frame(now) {
     requestAnimationFrame(frame);
+    PROF.beginFrame(now, worldEpoch, turboState, paused);   /* the raw rAF interval, before the clamp below */
     var dt = lastNow ? Math.min(0.1, (now - lastNow) / 1000) : 0;
     lastNow = now;
     var steps = 0;
@@ -1670,14 +1681,20 @@
       stepOnce = false;
       var t0 = performance.now();
       M._oc_step(steps);
-      var per = (performance.now() - t0) / steps;
+      var stepElapsed = performance.now() - t0;
+      PROF.recordStep(stepElapsed, steps);
+      var per = stepElapsed / steps;
       stepMs = stepMs ? stepMs * 0.9 + per * 0.1 : per;
       if (!paused) animT += dt * Math.min(steps, 2);
     }
     lastSteps = steps;
+    var pt = PROF.beginCpu();
     M._oc_sync();
+    pt = PROF.lap(SP.sync, pt);
     var s = snapshot();
+    pt = PROF.lap(SP.snapshot, pt);
     if (turboState === "live") { takeSample(s.stats); s = fresh(s); }
+    pt = PROF.lap(SP.dashboard, pt);
     if (!HAS_VZ) s.vz = vzEstimate(s, steps > 0);
     var ax = { f: 0, r: 0, u: 0 };
     for (var key in heldMoveKeys) ax[heldMoveKeys[key][0]] += heldMoveKeys[key][1];
@@ -1690,12 +1707,17 @@
     }
     s.selIdx = idx;
     lastS = s;
+    PROF.lap(SP.controller, pt);
     if (!(dash() && dash().isOpen())) scene.render(s, { animT: animT, dtSim: steps * DT, selIdx: idx });
+    pt = PROF.beginCpu();
     s = updateCard(s);
+    pt = PROF.lap(SP.card, pt);
     fpsFrames++;
     if (now - fpsT >= 1000) { fps = Math.round(fpsFrames * 1000 / (now - fpsT)); fpsFrames = 0; fpsT = now; dirtyHud = true; govern(now); }
     updateHud(s, now);
+    PROF.lap(SP.hud, pt);
     if (!splashDone) { splashDone = true; el("splash").classList.add("done"); }
+    if (PROF.active) PROF.endFrame(s.n, s.stats[1], !!(dash() && dash().isOpen()));
   }
 
   /* ---------------- input ---------------- */
@@ -1975,7 +1997,7 @@
   el("colourMode").addEventListener("change", function () {
     colourMode = this.value === "brain" || this.value === "appearance" ? this.value : "family";
     colourBrain = colourMode === "brain";
-    store("evo_boids.colourBy", colourMode);
+    if (!BENCH) store("evo_boids.colourBy", colourMode);   /* a benchmark's cases are not the visitor's choice */
     if (M) applyDisplaySwitches();
     updateModeline();
     this.blur();
@@ -2028,7 +2050,7 @@
       ". Drawing: the 3D tank" + (scene ? ", detail " + scene.quality() + " of 3" : "") +
       what + ".";
   }
-  setPaused(false);
+  setPaused(BENCH);
   changeSpeed(0);
 
   /* ---------------- the tour (web/guide.js reads this) ---------------- */
@@ -2260,7 +2282,8 @@
       tankDepth: D,
       coarse: coarseMQ.matches,
       reducedMotion: reducedMQ.matches,
-      bodyScale: bodyScale, onFollowChange: onFollowChange
+      bodyScale: bodyScale, onFollowChange: onFollowChange,
+      profiler: PERF ? PROF : null, visualRandom: BENCH ? PERF.visualRandom(2463534242) : null
     });
     if (!scene) throw new Error("WebGL2 is unavailable, and the 3-D Ocean has only the 3D tank");
     detail0 = scene.quality();
@@ -2319,9 +2342,13 @@
                  turbo: turboState, colourBrain: colourBrain, frame: s.stats[1],
                  held: live.held(), inflight: live.inflight(), fixedSize: [URL_W, URL_H], walls: WALLS, hasWalls: hasWalls(),
                  stats: Array.prototype.slice.call(s.stats), depthMin: s.n ? lo : 0, depthMax: s.n ? hi : 0,
-                 dashRows: dash() ? dash()._rows().length : 0 };
+                 dashRows: dash() ? dash()._rows().length : 0, worldEpoch: worldEpoch };
       }
     };
+    if (PROF.enabled) EvoOcean.perf = PROF;   /* ?renderBench=1 / ?perf=1 (web/ocean_perf.js) */
+    if (BENCH) EvoOcean.bench = PERF.bench({ module: M, scene: scene, profiler: PROF, page: EvoOcean, setPaused: setPaused,
+      last: function () { return fresh(lastS); }, epoch: function () { return worldEpoch; }, initArgs: function () { return initArgs; },
+      importWorld: importWorld });
     requestAnimationFrame(frame);
     window.EvoApp.ready = true;
     window.dispatchEvent(new Event("evo:ready"));

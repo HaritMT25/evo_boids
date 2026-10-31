@@ -222,7 +222,7 @@
   }
   function fitToScreen() {
     if (!M || guardTurbo()) return;
-    var w0 = getVal("width"), h0 = getVal("height"), f = screenWorld();
+    var w0 = el("o_width").value, h0 = el("o_height").value, f = screenWorld();   /* as typed, to put back */
     setVal("width", f[0]); setVal("height", f[1]);
     if (!restart()) { setVal("width", w0); setVal("height", h0); }
   }
@@ -438,16 +438,26 @@
       if (typeof def === "boolean" ? v !== def : v !== def) cfg[k] = v;
     });
     Object.keys(extraCfg).forEach(function (k) { if (!(k in cfg)) cfg[k] = extraCfg[k]; });
-    return { seed: getVal("seed") >>> 0, population: getVal("population"), depth: getVal("depth"),
-             width: getVal("width"), height: getVal("height"), cfg: cfg };
+    return { seed: argVal("seed"), population: argVal("population"), depth: argVal("depth"),
+             width: argVal("width"), height: argVal("height"), cfg: cfg };
   }
-  /* the sheet's size fields against oc_init's limits: "" or why not */
+  /* oc_init's own arguments as the sheet holds them: no rounding, no default
+   * for an empty field (getVal's convenience for the other fields), so
+   * sizeProblem checks the very number shown, as a link's or a setup's is
+   * checked, and 99.6 is refused rather than run as 100 under a field
+   * showing 99.6. (The steppers' clamping is theirs, before this.) */
+  function argVal(key) {
+    var s = String(el("o_" + key).value).trim();
+    return s === "" ? NaN : Number(s);
+  }
+  /* the sheet's oc_init arguments against oc_init's limits: "" or why not */
   function sizeProblem(f) {
-    var bad = [];
-    if (!wholeIn(f.width, LIM.side)) bad.push("the tank width must be a whole number from " + LIM.side[0] + " to " + LIM.side[1] + " (got " + f.width + ")");
-    if (!wholeIn(f.height, LIM.side)) bad.push("the tank length must be a whole number from " + LIM.side[0] + " to " + LIM.side[1] + " (got " + f.height + ")");
-    if (!depthOk(f.depth)) bad.push("the sea depth must be from " + LIM.depth[0] + " to " + LIM.depth[1] + " (got " + f.depth + ")");
-    if (!wholeIn(f.population, LIM.population)) bad.push("the starting fish must be a whole number from 0 to " + LIM.population[1] + " (got " + f.population + ")");
+    var bad = [], got = function (v) { return " (got " + (v === v ? v : "no number") + ")"; };
+    if (!wholeIn(f.seed, [0, 4294967295])) bad.push("the seed must be a whole number from 0 to 4294967295" + got(f.seed));
+    if (!wholeIn(f.width, LIM.side)) bad.push("the tank width must be a whole number from " + LIM.side[0] + " to " + LIM.side[1] + got(f.width));
+    if (!wholeIn(f.height, LIM.side)) bad.push("the tank length must be a whole number from " + LIM.side[0] + " to " + LIM.side[1] + got(f.height));
+    if (!depthOk(f.depth)) bad.push("the sea depth must be from " + LIM.depth[0] + " to " + LIM.depth[1] + got(f.depth));
+    if (!wholeIn(f.population, LIM.population)) bad.push("the starting fish must be a whole number from 0 to " + LIM.population[1] + got(f.population));
     return bad.join("; ");
   }
   /* ---- live settings ----

@@ -1568,6 +1568,35 @@ async function pageFreshVisit() {
     }
 }
 
+/* Deployed-audit PR #30-31, finding 4: the sheet's oc_init arguments were
+ * read rounded (getVal: int keys), so Restart with a tank width of 99.6 ran
+ * width 100 under a field showing 99.6 (3840.5 ran 3841), where a link or a
+ * setup with those numbers is refused. Now they are read as typed and
+ * checked as such: refused with the reason, nothing changed; whole numbers
+ * in range (and a fractional depth, which oc_init takes) run as shown. */
+async function pageSizeFields() {
+    section('The page: Restart checks the tank size, depth, fish and seed as typed (deployed audit #30-31, finding 4)');
+    const p = await bootPage(PAGE_Q7);
+    const bad = [];
+    for (const [key, typed] of [['width', '99.6'], ['width', '3840.5'], ['height', '1080.25'], ['population', '12.5'], ['seed', '1.5'],
+                                ['seed', '-1'], ['seed', '4294967296'], ['width', ''], ['depth', '9.5']]) {
+        const was = p.el('o_' + key).value, print0 = fingerprint(p.M), n0 = p.inits.length, W0 = p.T.W;
+        p.edit(key, typed);
+        p.click('restart');
+        const shown = p.el('o_' + key).value;
+        if (p.inits.length !== n0 || fingerprint(p.M) !== print0 || p.T.W !== W0 || shown !== typed || !/Couldn't start that world/.test(p.msg()))
+            bad.push(key + ' ' + JSON.stringify(typed) + ': ' + (p.inits.length !== n0 ? 'oc_init ran (width ' + p.T.W + ')' : 'shown ' + shown) + ' — "' + p.msg() + '"');
+        p.edit(key, was);
+    }
+    ok(!bad.length, 'Restart refuses a tank size, fish count or seed that is not a whole number in range, as typed (99.6, 3840.5, ' +
+       '1080.25, 12.5 fish, seed 1.5 / -1 / 2^32, an empty width, depth 9.5): no oc_init, the field as typed' + (bad.length ? ' — ' + bad.join('; ') : ''));
+    p.edit('width', '3840'); p.edit('depth', '237.5');
+    p.click('restart');
+    ok(p.T.W === 3840 && p.T.D === 237.5 && /[?&]w=3840/.test(p.loc.href) && p.T.initArgs.depth === 237.5,
+       'whole numbers in range run as shown: width 3840, depth 237.5 (a depth need not be whole) (' + p.T.W + ' x ' + p.T.H + ' x ' + p.T.D + ')');
+    ok(p.uncaught.length === 0, 'no exception escaped the page\'s handlers');
+}
+
 /* Every section, in order; `node tests/ocean_turbo_handoff.js NAME...` runs only those. */
 const SECTIONS = {
     repeatedKeys, liveLedger, growthPage, randomize, imports,
@@ -1581,7 +1610,7 @@ const SECTIONS = {
     },
     failures: failures_,
     pageHeld, pageRefusal, pageAsyncSetup, pageStartFailures, pageOverflow, pageBools, pageDashboards,
-    pageWallsOverride, pageFreshVisit
+    pageWallsOverride, pageFreshVisit, pageSizeFields
 };
 const unhandled = [];
 process.on('unhandledRejection', (e) => { unhandled.push(e); });

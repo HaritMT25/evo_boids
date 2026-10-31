@@ -1765,6 +1765,7 @@
         return;
       }
       /* the dock's and the top bar's own keys (Turbo's too: T stops it; letters press no button) */
+      if (e.repeat && /^[?vtgoil]$/.test(lk)) return;   /* a held toggle acts once (the camera and speed keys repeat) */
       if (k === "?") { togglePop("help", null, true); return; }
       if (lk === "v") { togglePop("view", null, true); return; }
       if (lk === "t") { el("turbobtn").click(); return; }

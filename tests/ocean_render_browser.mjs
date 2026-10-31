@@ -1,7 +1,7 @@
 // tests/ocean_render_browser.mjs: the Ocean's render checks and benchmark on the real page, in headless Brave.
 //
 //   node tests/ocean_render_browser.mjs --base http://localhost:8152 [--out DIR]
-//        [--parts correctness,faults,timer,beam,iframe,perf] [--counts 500,1500,2500]
+//        [--parts correctness,noperf,faults,timer,beam,iframe,perf] [--counts 500,1500,2500]
 //        [--dur 15000] [--warm 10000] [--rounds 2] [--headed]
 //        [--cameras whole,dense,follow] [--colours appearance,family,brain]   (perf; default whole, appearance)
 //   env: PLAYWRIGHT  the playwright module (default C:/Users/harit/gemini_bridge/node_modules/playwright)
@@ -15,7 +15,11 @@
 //                the fragment shader), the attribute-fed reference
 //                (appearanceParity), the live gene texture (appearance-,
 //                family- and brain-colour frames), and the profiler's
-//                gene-upload counters against intercepted WebGL uploads
+//                gene-upload counters against intercepted WebGL uploads; the
+//                bench itself (a case's tick restored, its colour modes not
+//                stored, a Restart's link without renderBench / perf)
+//   noperf       web/ocean_perf.js blocked (a normal link, ?renderBench=1):
+//                the page starts and draws with no other error
 //   faults       each planted fault must be caught (and compile and run):
 //                the texture lookup (row0, nextRow, slot) and vPart.w in both
 //                vertex reports; red / blue unpacking and the colour-mode
@@ -28,7 +32,7 @@
 //                hidden (absent timer); none may raise an error or a 0 ms sample
 //   beam         the flashlight's full-strength floor (caustics included) is
 //                the same in Realistic and Clear water (deployed-audit PR #30-31,
-//                finding 5)
+//                finding 5), and its caustics are there (they move with the clock)
 //   iframe       the page at 890 x 453 in a non-isolated parent: colours,
 //                select / follow, a restart, Turbo there and back, the live
 //                texture check
@@ -54,7 +58,7 @@ const PW = process.env.PLAYWRIGHT || "C:/Users/harit/gemini_bridge/node_modules/
 const BRAVE = process.env.BRAVE_EXE || "C:/Program Files/BraveSoftware/Brave-Browser/Application/brave.exe";
 const BASE = String(arg("base", "http://localhost:8152")).replace(/\/$/, "");
 const OUT = path.resolve(String(arg("out", path.join(os.tmpdir(), "ocean_render_" + Date.now()))));
-const PARTS = String(arg("parts", "correctness,faults,timer,beam,iframe,perf")).split(",");
+const PARTS = String(arg("parts", "correctness,noperf,faults,timer,beam,iframe,perf")).split(",");
 const COUNTS = String(arg("counts", "500,1500,2500")).split(",").map(Number);
 const DUR = Number(arg("dur", 15000)), WARM = Number(arg("warm", 10000)), ROUNDS = Number(arg("rounds", 2));
 const CAMERAS = String(arg("cameras", "whole")).split(","), COLOURS = String(arg("colours", "appearance")).split(",");
@@ -82,7 +86,7 @@ async function launch(label, opts = {}) {
   const page = ctx.pages()[0] || await ctx.newPage();
   const errors = (errorsAll[label] = []);
   page.on("pageerror", (e) => errors.push("pageerror: " + String(e)));
-  page.on("console", (m) => { if (m.type() === "error") errors.push("console: " + m.text()); });
+  page.on("console", (m) => { if (m.type() === "error") errors.push("console: " + m.text() + (m.location() && m.location().url ? " @ " + m.location().url : "")); });
   page.on("requestfailed", (r) => errors.push("requestfailed: " + r.url() + " " + (r.failure() && r.failure().errorText)));
   page.on("response", (r) => { if (r.status() >= 400) errors.push("http " + r.status() + ": " + r.url()); });
   return { ctx, page, errors, browserVersion: ctx.browser() ? ctx.browser().version() : null };
@@ -217,8 +221,61 @@ async function partCorrectness() {
   check("gene-upload counters == intercepted WebGL uploads (calls and bytes)",
         up.profiler.uploads > 0 && up.profiler.uploads === up.intercepted.calls && up.profiler.bytes === up.intercepted.bytes && up.sceneIO.uploads === up.intercepted.calls, up);
   check("  PR1 baseline: one full 1 MiB gene upload a submitted frame", up.perFrameBytes === 1048576 && up.profiler.uploads === up.profiler.submitted, up.profiler);
+
+  /* the bench itself: a case's tick restored after stepping; the colour modes it used not stored; a Restart's link clean */
+  const b = await L.page.evaluate(async (cd) => {
+    const B = EvoOcean.bench, at = () => ({ tick: EvoOcean.state().frame, n: EvoOcean.state().n, epoch: EvoOcean.state().worldEpoch });
+    const a0 = at();
+    await B.stepToTick(60);
+    const a1 = at();
+    await B.prepare(Object.assign({}, cd, { camera: "whole", colourMode: "appearance", settleMs: 200 }));
+    const a2 = at();
+    const stored = localStorage.getItem("evo_boids.colourBy");
+    document.getElementById("restart").click();
+    await B.frames(5);
+    const q = new URLSearchParams(location.search);
+    return { a0, a1, a2, stored, link: { renderBench: q.get("renderBench"), perf: q.get("perf"), seed: q.get("seed") } };
+  }, c);
+  report.parts.correctness.bench = b;
+  check("prepare() of the same case after stepping to tick 60: back at tick 0, a new epoch, 2,500 fish",
+        b.a1.tick === 60 && b.a2.tick === 0 && b.a2.epoch === b.a1.epoch + 1 && b.a2.n === 2500, b);
+  check("the benchmark's colour modes (Appearance, Family, Brain) were not stored as the visitor's", b.stored === null, b.stored);
+  check("a Restart's setup link has no renderBench / perf", b.link.renderBench === null && b.link.perf === null && b.link.seed === "42", b.link);
   check("no console / page / network errors", L.errors.length === 0, L.errors.slice(0, 5));
   await L.ctx.close();
+}
+
+/* ---------------- the page without web/ocean_perf.js ---------------- */
+/* ocean_perf.js blocked (a route abort): the page and the scene fall back to
+ * profilers that record nothing; ?renderBench=1 is then off */
+async function partNoPerf() {
+  console.log("== the page without ocean_perf.js (blocked)");
+  for (const bench of [false, true]) {
+    const label = "noperf" + (bench ? "-bench" : "");
+    const L = await launch(label);
+    let blocked = 0;
+    await L.ctx.route(/ocean_perf(\.[0-9a-f]+)?\.js(\?.*)?$/, (r) => { blocked++; return r.abort(); });
+    const url = bench ? benchUrl(caseFor(1500)) : BASE + "/ocean.html?guide=0&intro=0&seed=7";
+    await L.page.goto(url);
+    /* running, or the splash saying why not */
+    await L.page.waitForFunction(() => (window.EvoApp && EvoApp.ready === true && EvoOcean.state() && EvoOcean.state().frame > 30) ||
+                                       /could not start/.test(document.body.textContent), null, { timeout: 90000 });
+    const r = await L.page.evaluate(async () => {
+      if (!(window.EvoApp && EvoApp.ready === true)) return { started: false, splash: (document.getElementById("splashstate") || {}).textContent || "", app: {} };
+      const f0 = EvoOcean.state().frame;
+      await new Promise((res) => setTimeout(res, 1000));
+      return { started: true, perfFile: !!window.EvoOceanPerf, perf: !!EvoOcean.perf, bench: !!EvoOcean.bench, paused: EvoOcean.state().paused,
+               advancing: EvoOcean.state().frame > f0, app: EvoOcean.scene.appearance(), n: EvoOcean.state().n,
+               splash: (document.getElementById("splashstate") || {}).textContent || "" };
+    });
+    /* the blocked script's own failure is expected; nothing else may fail */
+    const other = L.errors.filter((e) => !/ocean_perf/.test(e));
+    report.parts[label] = Object.assign({ blocked, errors: L.errors }, r);
+    check((bench ? "?renderBench=1, " : "") + "ocean_perf.js blocked: the page starts, runs and draws the fish's bodies (no profiler, no bench)",
+          r.started && blocked >= 1 && !r.perfFile && !r.perf && !r.bench && !r.paused && r.advancing && r.app.drawing && r.n > 0, r);
+    check("  no other console / page / network error", other.length === 0, other.slice(0, 5));
+    await L.ctx.close();
+  }
 }
 
 /* ---------------- planted faults ---------------- */
@@ -283,15 +340,23 @@ async function partTimer() {
   await ready(L.page, true);
   await L.page.evaluate((cd) => EvoOcean.bench.prepare(Object.assign({}, cd, { camera: "whole", settleMs: 500 })), c);
   const fr = await L.page.evaluate(() => EvoOcean.bench.capture({ durationMs: 4000, cpu: true, gpu: "frame", sampleEvery: 6 }));
-  const g = fr.summary.gpu;
-  report.parts.timer = { frame: { gpu: g, fps: fr.summary.fps } };
-  check("frame scope: supported, >= 90 % of attempted samples valid, ms > 0", g.supported && g.validFraction >= 0.9 && g.labels.frame && g.labels.frame.scopes.p50 > 0,
-        { valid: g.validFraction, stats: g.stats, p50: g.labels.frame && g.labels.frame.scopes.p50 });
-  const dr = await L.page.evaluate(() => EvoOcean.bench.capture({ durationMs: 3000, cpu: true, gpu: "draws", sampleEvery: 6 }));
-  report.parts.timer.draws = { labels: Object.fromEntries(Object.entries(dr.summary.gpu.labels).map(([k, v]) => [k, v.perFrame])), stats: dr.summary.gpu.stats };
-  check("draw scopes: fish bodies, shadows, floor, surface, food, snow labelled; >= 90 % valid",
-        ["fishBody", "fishShadow", "floor", "food"].every((k) => dr.summary.gpu.labels[k]) && dr.summary.gpu.validFraction >= 0.9 && dr.summary.gpu.stats.refusedNest === 0,
-        { labels: Object.keys(dr.summary.gpu.labels), valid: dr.summary.gpu.validFraction, stats: dr.summary.gpu.stats });
+  const g = fr.summary.gpu, hasTimer = g.supported;
+  report.parts.timer = { frame: { gpu: g, fps: fr.summary.fps }, timerAvailable: hasTimer };
+  if (!hasTimer) {
+    /* a GPU / browser without EXT_disjoint_timer_query_webgl2: GPU timing is unavailable, which is a status, not a failure */
+    console.log("  (this context has no EXT_disjoint_timer_query_webgl2: GPU timing unavailable; its quantitative checks are skipped)");
+    check("timer unavailable: reported as such, no samples, the CPU capture fine",
+          g.stats.ok === 0 && g.stats.unsupported > 0 && Object.keys(g.labels).length === 0 && fr.summary.fps > 0, g.stats);
+  } else {
+    check("frame scope: >= 90 % of attempted samples valid, ms > 0, the capture complete",
+          g.validFraction >= 0.9 && g.labels.frame && g.labels.frame.scopes.p50 > 0 && g.complete,
+          { valid: g.validFraction, stats: g.stats, p50: g.labels.frame && g.labels.frame.scopes.p50, complete: g.complete });
+    const dr = await L.page.evaluate(() => EvoOcean.bench.capture({ durationMs: 3000, cpu: true, gpu: "draws", sampleEvery: 6 }));
+    report.parts.timer.draws = { labels: Object.fromEntries(Object.entries(dr.summary.gpu.labels).map(([k, v]) => [k, v.perFrame])), stats: dr.summary.gpu.stats };
+    check("draw scopes: fish bodies, shadows, floor, surface, food, snow labelled; >= 90 % valid",
+          ["fishBody", "fishShadow", "floor", "food"].every((k) => dr.summary.gpu.labels[k]) && dr.summary.gpu.validFraction >= 0.9 && dr.summary.gpu.stats.refusedNest === 0,
+          { labels: Object.keys(dr.summary.gpu.labels), valid: dr.summary.gpu.validFraction, stats: dr.summary.gpu.stats });
+  }
   /* lose the context mid-capture, restore it, carry on */
   const lost = await L.page.evaluate(async () => {
     const gl = document.getElementById("tank").getContext("webgl2"), lc = gl.getExtension("WEBGL_lose_context");
@@ -307,8 +372,9 @@ async function partTimer() {
              fps: s.fps, supported: cap.gpu.supported, texture: { ok: tex.ok, error: tex.error, failures: tex.failures } };
   });
   report.parts.timer.contextLoss = lost;
-  check("context lost and restored: no error, a new generation, valid samples after, the page draws on",
-        lost.skipped || (lost.generation >= 1 && lost.supported && lost.validGens.includes(lost.generation) && lost.lostFrames > 0 && lost.texture.ok), lost);
+  check("context lost and restored: no error" + (hasTimer ? ", a new generation, valid samples after" : "") + ", the page draws on",
+        lost.skipped || (lost.lostFrames > 0 && lost.texture.ok &&
+                         (!hasTimer || (lost.generation >= 1 && lost.supported && lost.validGens.includes(lost.generation)))), lost);
   check("no console / page / network errors (context loss)", L.errors.length === 0, L.errors.slice(0, 5));
   await L.ctx.close();
   /* the timer extension absent */
@@ -351,6 +417,10 @@ async function partBeam() {
     const grab = () => new Promise((res) => window.__after.push(() => { const px = new Uint8Array(W * H * 4); gl.readPixels(0, 0, W, H, gl.RGBA, gl.UNSIGNED_BYTE, px); res(px); }));
     const shot = {};
     for (const light of [false, true]) for (const u of [0, 1]) { S.setClarity(u); S.setFlashlight(light); await B.frames(4); shot[(light ? "on" : "off") + u] = await grab(); }
+    /* and the beam keeps its caustics (not just equally none): run the clock
+     * on (their pattern slides with it; the sand does not), Clear water, light on */
+    await B.live(true); await B.frames(30); await B.live(false); await B.frames(4);
+    shot.later = await grab();
     S.setClarity(1); S.setFlashlight(false);
     /* the core's lower half: the floor there is nearer than the beam's reach, so its strength is 1 */
     function diff(a, b) {
@@ -362,12 +432,14 @@ async function partBeam() {
       }
       return { pixels: n, differing: d, maxDiff: max };
     }
-    return { n: EvoOcean.state().n, pc: EvoOcean.state().pc, on: diff(shot.on0, shot.on1), off: diff(shot.off0, shot.off1) };
+    return { n: EvoOcean.state().n, pc: EvoOcean.state().pc, on: diff(shot.on0, shot.on1), off: diff(shot.off0, shot.off1),
+             live: diff(shot.on1, shot.later) };
   });
   report.parts.beam = r;
   check("no fish or predators in the frame (no water-shaded shadows)", r.n === 0 && r.pc === 0, { n: r.n, pc: r.pc });
   check("the water changes the floor without the light (the probe sees clarity)", r.off.differing > r.off.pixels * 0.9, r.off);
   check("at full beam the floor, caustics included, is the same in Realistic and Clear", r.on.pixels > 10000 && r.on.differing === 0, r.on);
+  check("  and keeps its caustics: they slide with the clock over most of the full-beam floor", r.live.differing > r.live.pixels * 0.5, r.live);
   check("no console / page / network errors", L.errors.length === 0, L.errors.slice(0, 5));
   await L.ctx.close();
 }
@@ -478,7 +550,7 @@ async function partPerf() {
   }
 }
 
-const RUN = { correctness: partCorrectness, faults: partFaults, timer: partTimer, beam: partBeam, iframe: partIframe, perf: partPerf };
+const RUN = { correctness: partCorrectness, noperf: partNoPerf, faults: partFaults, timer: partTimer, beam: partBeam, iframe: partIframe, perf: partPerf };
 (async () => {
   for (const p of PARTS) {
     if (!RUN[p]) { console.log("unknown part " + p); fails++; continue; }

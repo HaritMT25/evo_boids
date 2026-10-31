@@ -42,8 +42,10 @@
  *     darker back, pale belly and paler fins. Without s.app the plain fish
  *     mesh is drawn instead. appearanceParity() is the GPU == CPU check of
  *     the pattern law (the gallery's K12); appearancePathCheck() that of the
- *     production vertex path (the gene texture's slot lookup, every body
- *     part's position and material site, the decoded pattern genes)
+ *     production programs (a fixed fixture through the vertex shader in both
+ *     colour modes: the gene texture's slot lookup, every body part's
+ *     position and material site, the decoded pattern genes, the packed
+ *     colour; and the fragment shader)
  *   - glass walls (setWorld(w, h, d, {walls})): the four side panes drawn as
  *     faint glass (brighter at grazing angles, GLASS_FS; not depth-written),
  *     every fish vertex held inside them (a fish against a pane flattens on
@@ -538,6 +540,64 @@
     return { vs: vs, fs: fs, shadowVs: shadowVs, chartVs: chartVs, chartFs: chartFs };
   }
 
+  /* The appearance checks: two layers, each against the CPU mirror
+   * (web/ocean_appearance.js), each a Promise of a report whose read-back
+   * waits on a fence, polled (at most 10 s), so it never stalls the pipeline.
+   * A report with .error did not run (a missing extension, a compile error,
+   * a timeout): that is never a pass, and never a planted fault caught.
+   *   appearanceParity (in create): pattern law 3 alone, the pattern genes
+   *     fed as attributes (the gallery's K12 reference); no gene texture.
+   *   appearancePathCheck: a fixed 65-fish fixture (pathFixture: it crosses
+   *     the texture's 32-fish rows twice, every fish distinct, all with
+   *     barbels; the caller's rows, if any, are added) through the production
+   *     programs, on a texture packed and laid out as the renderer packs it:
+   *     the fish's vertex shader in both colour modes by transform feedback
+   *     (appearanceVertexCheck: appearance, and recolour, whose nonzero packed
+   *     colours must reach vPart.w), and its fragment shader on known inputs
+   *     (appearanceFragmentCheck: the recolour path, Family's and Brain's
+   *     palettes, and the skin).
+   * They share the genes' layout (GENES, packGenes), the WebGL2 prefixes
+   * (VS3, FS3) and the fence polling (fenceDone). */
+  var VS3 = "#version 300 es\n#define attribute in\n#define varying out\nprecision highp float;\nprecision highp int;\n" +
+            "uniform mat4 projectionMatrix;\nuniform mat4 viewMatrix;\nuniform vec3 cameraPosition;\n";
+  var FS3 = "#version 300 es\n#define varying in\nprecision highp float;\nprecision highp int;\nuniform vec3 cameraPosition;\n" +
+            "out highp vec4 pcFrag;\n#define gl_FragColor pcFrag\n";
+  function compileProgram(gl, vs, fs, feedback) {
+    function compile(type, src) {
+      var o = gl.createShader(type); gl.shaderSource(o, src); gl.compileShader(o);
+      if (!gl.getShaderParameter(o, gl.COMPILE_STATUS)) { var log = gl.getShaderInfoLog(o); gl.deleteShader(o); throw new Error("compile: " + log); }
+      return o;
+    }
+    var prog = gl.createProgram(), a = compile(gl.VERTEX_SHADER, vs), b;
+    try { b = compile(gl.FRAGMENT_SHADER, fs); } catch (e) { gl.deleteShader(a); gl.deleteProgram(prog); throw e; }
+    gl.attachShader(prog, a); gl.attachShader(prog, b);
+    if (feedback) gl.transformFeedbackVaryings(prog, feedback, gl.INTERLEAVED_ATTRIBS);
+    gl.linkProgram(prog);
+    gl.deleteShader(a); gl.deleteShader(b);   /* freed with the program */
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) { var l = gl.getProgramInfoLog(prog); gl.deleteProgram(prog); throw new Error("link: " + l); }
+    return prog;
+  }
+  /* resolves null once the GPU passed sync, else why not (lost, failed, 10 s) */
+  function fenceDone(gl, sync, ms) {
+    return new Promise(function (resolve) {
+      var t0 = Date.now();
+      (function poll() {
+        if (gl.isContextLost && gl.isContextLost()) { resolve("the WebGL context was lost"); return; }
+        var st = gl.clientWaitSync(sync, 0, 0);
+        if (st === gl.TIMEOUT_EXPIRED && Date.now() - t0 < ms) { setTimeout(poll, 2); return; }
+        resolve(st === gl.WAIT_FAILED || st === gl.TIMEOUT_EXPIRED ? "the GPU did not finish (" + st + ")" : null);
+      })();
+    });
+  }
+  function occurrences(s, sub) { return s.split(sub).length - 1; }
+  /* a planted fault: its site must occur exactly once */
+  function plant(src, name, table) {
+    var m = table[name];
+    if (!m) return { error: "unknown mutation " + name };
+    if (occurrences(src, m[0]) !== 1) return { error: "mutation " + name + ": its site occurs " + occurrences(src, m[0]) + " times" };
+    return { src: src.split(m[0]).join(m[1]) };
+  }
+
   /* The genes' GPU layout (EvoAppearance GENES fetchGenes): a fish's 63
    * floats and one zero in 16 RGBA32F texels, 512 texels a texture row. The
    * renderer (AppKind, fillApp) and the production-path check pack it with these. */
@@ -551,63 +611,82 @@
   /* the renderer's capacity for n fish (AppKind ensure) */
   function capFor(n) { var cap = 256; while (cap < n) cap *= 2; return cap; }
 
-  /* GPU == CPU through the production vertex path. appearanceParity feeds
-   * the pattern genes as attributes and checks the skin only, so a wrong
-   * gene-texture row or slot would pass it. Here the fish program's own
-   * vertex shader (appearanceShaders vs, with three's WebGL2 prefix) runs
-   * on a gene texture packed and laid out as the renderer packs it
-   * (packGenes, genesRows at the renderer's capacity; more fish than one
-   * texture row holds, so the lookup crosses rows), for the medium and
-   * coarse bodies and the barbel strips (every part: body, tail, dorsal,
-   * pectoral, eye, anal, pelvic fins, barbels). Transform feedback reads
-   * back every vertex of every fish: its world position, material site and
-   * fin margin, its part, and the pattern varyings it decoded from the
-   * texture; each is compared with the CPU mirror (EvoAppearance
-   * morphDecode / morphBuild / patternVaryings, appWorldCPU). opts.mutate
-   * ("row0", "nextRow", "slot") breaks the texture lookup on purpose: the
-   * check must then fail. Every captured component must be finite before
-   * any arithmetic (report.nan: the vertices with any non-finite one).
-   * Returns a Promise of the report (the read-back
-   * waits on a fence, so it never stalls the pipeline). */
+  /* The fixed fixture of appearancePathCheck, whatever the caller's world:
+   * 65 distinct fish (two texture-row crossings), every one with barbels */
+  function pathFixture(EA) {
+    var rows = [], lams = [];
+    for (var c = 0; c < 65; c++) {
+      var g = [];
+      for (var j = 0; j < EA.STRIDE; j++) g.push(Math.fround(0.05 + 0.90 * ((37 * c + 17 * j + 13) % 251) / 250));
+      g[EA.MO + 26] = Math.fround(0.75);
+      rows.push(g); lams.push(Math.fround(3.5 + 0.05 * c));
+    }
+    return { rows: rows, lams: lams };
+  }
+
+  /* GPU == CPU through the production vertex path (appearanceVertexCheck).
+   * appearanceParity feeds the pattern genes as attributes and checks the
+   * skin only, so a wrong gene-texture row or slot would pass it. Here the
+   * fish program's own vertex shader (appearanceShaders vs, with three's
+   * WebGL2 prefix) runs on a gene texture packed and laid out as the
+   * renderer packs it (packGenes, genesRows at the renderer's capacity), for
+   * the medium and coarse bodies and the barbel strips (every part: body,
+   * tail, dorsal, pectoral, eye, anal, pelvic fins, barbels). Transform
+   * feedback reads back every vertex of every fish: its world position,
+   * material site and fin margin, its part (all four vPart components: fin,
+   * side, highlight, packed colour), and in appearance mode (opts.colourBy 0)
+   * the pattern varyings it decoded from the texture; each is compared with
+   * the CPU mirror (EvoAppearance morphDecode / morphBuild / patternVaryings,
+   * appWorldCPU). Recolour mode (colourBy 1, Family / Brain) skips
+   * patternDecode, so its pattern varyings are unwritten: they are neither
+   * captured nor checked. Every captured component must be finite before any
+   * arithmetic (a NaN fails no |a - b| > tol test, and min(x, 10) hides an
+   * infinity); report.nan counts the vertices with any non-finite output.
+   * opts.mutate plants a fault ("row0", "nextRow", "slot": the texture
+   * lookup; "partW": vPart.w loses the packed colour): the check must then
+   * fail. opts.injectSweep: after the run, NaN / +Inf / -Inf put into each
+   * captured component in turn (of two fish of the medium body, one on the
+   * second texture row) must each fail with that component named. */
   var PATH_TOL = { world: 0.02, mat: 0.005, mar: 0.005, decode: 0.0005 };
   var TF_OUT = [["vWorld", 3], ["vMatV", 4], ["vPart", 4], ["vG0", 4], ["vG1", 4], ["vG2", 4], ["vG3", 4],
                 ["vG4", 4], ["vG5", 4], ["vG6", 4], ["vG7", 4], ["vAux", 4], ["vMeta", 4]];
-  function appearancePathCheck(gl, EA, rows, lams, opts) {
+  var PATH_COLOURS = [0x123456, 0xe32791, 0x07c15a, 0x010203, 0xfedcba];
+  var PATH_FETCH = "int li = 16 * inst + k;";
+  var PATH_MUT = {
+    row0: [PATH_FETCH, "int li = 16 * 0 + k;"],
+    nextRow: [PATH_FETCH, "int li = 16 * (inst + 1) + k;"],
+    slot: [PATH_FETCH, "int li = 16 * inst + (k ^ 1);"],
+    partW: ["vPart = vec4(aPattern.x, aPattern.z, iBody.z, iX.w);", "vPart = vec4(aPattern.x, aPattern.z, iBody.z, 0.0);"]
+  };
+  function componentNames(layout) {
+    var out = [];
+    layout.forEach(function (v) { for (var i = 0; i < v[1]; i++) out.push(v[0] + "." + "xyzw"[i]); });
+    return out;
+  }
+  function appearanceVertexCheck(gl, EA, rows, lams, opts) {
     opts = opts || {};
     if (!EA || !EA.morphBuild) return Promise.resolve({ error: "web/ocean_appearance.js (with its CPU mirror) not loaded" });
-    var FETCH = "int li = 16 * inst + k;";
-    var MUT = { row0: "int li = 16 * 0 + k;", nextRow: "int li = 16 * (inst + 1) + k;", slot: "int li = 16 * inst + (k ^ 1);" };
+    var colourBy = opts.colourBy === 1 ? 1 : 0;
+    var feedback = colourBy ? TF_OUT.slice(0, 3) : TF_OUT, names = componentNames(feedback);
     var vsrc = appearanceShaders(EA).vs;
-    if (vsrc.indexOf(FETCH) < 0) return Promise.resolve({ error: "the gene fetch is not where the check expects it" });
+    if (vsrc.indexOf(PATH_FETCH) < 0) return Promise.resolve({ error: "the gene fetch is not where the check expects it" });
     if (opts.mutate) {
-      if (!MUT[opts.mutate]) return Promise.resolve({ error: "unknown mutation " + opts.mutate });
-      vsrc = vsrc.split(FETCH).join(MUT[opts.mutate]);
+      var pm = plant(vsrc, opts.mutate, PATH_MUT);
+      if (pm.error) return Promise.resolve({ error: pm.error });
+      vsrc = pm.src;
     }
-    var pre = "#version 300 es\n#define attribute in\n#define varying out\nprecision highp float;\nprecision highp int;\n" +
-              "uniform mat4 projectionMatrix;\nuniform mat4 viewMatrix;\nuniform vec3 cameraPosition;\n";
     var fsrc = "#version 300 es\nprecision highp float;\nout vec4 pcOut;\nvoid main() { pcOut = vec4(0.0); }\n";
-    function compile(type, src) {
-      var o = gl.createShader(type); gl.shaderSource(o, src); gl.compileShader(o);
-      if (!gl.getShaderParameter(o, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(o));
-      return o;
-    }
-    var NC = 0;
-    TF_OUT.forEach(function (v) { NC += v[1]; });
+    var NC = names.length;
     if (gl.getParameter(gl.MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS) < NC) return Promise.resolve({ error: "transform feedback holds fewer than " + NC + " floats" });
-    var prog = gl.createProgram();
-    try {
-      gl.attachShader(prog, compile(gl.VERTEX_SHADER, pre + vsrc));
-      gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, fsrc));
-    } catch (e) { return Promise.resolve({ error: "compile: " + (e.message || e) }); }
-    gl.transformFeedbackVaryings(prog, TF_OUT.map(function (v) { return v[0]; }), gl.INTERLEAVED_ATTRIBS);
-    gl.linkProgram(prog);
-    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) return Promise.resolve({ error: "link: " + gl.getProgramInfoLog(prog) });
+    var prog;
+    try { prog = compileProgram(gl, VS3 + vsrc, fsrc, feedback.map(function (v) { return v[0]; })); }
+    catch (e) { return Promise.resolve({ error: e.message || String(e) }); }
 
-    /* the fish: their genes in the renderer's texture, a bent spine each */
+    /* the fish: their genes in the renderer's texture, a bent spine each, a packed colour each */
     var n = rows.length, ST = EA.STRIDE, cap = capFor(n), texRows = genesRows(cap);
     var T = new Float32Array(GENES_W * texRows * 4), R = new Float32Array(n * ST);
     for (var c = 0; c < n; c++) { for (var j = 0; j < ST; j++) R[c * ST + j] = rows[c][j]; packGenes(T, R, c * ST, c, ST); }
-    var U = { half: [960, 540], px: 500, cam: [120, 380, 900] };
+    var U = { half: [960, 540], px: 500, cam: [120, 380, 900], colourBy: colourBy };
     var inst = { iA: new Float32Array(4 * n), iB: new Float32Array(4 * n), iC: new Float32Array(4 * n), iBody: new Float32Array(4 * n), iX: new Float32Array(4 * n) };
     for (c = 0; c < n; c++) {
       var lam = Math.fround(lams[c]), Rb = Math.fround(4.6 * (0.8 + 0.4 * ((c * 0.37) % 1))), sp = lam * Rb / 5;
@@ -615,7 +694,7 @@
       for (var k = 1; k < 6; k++) { px -= sp * Math.cos(a + bend * k); py -= sp * Math.sin(a + bend * k); pts.push(px, py); }
       inst.iA.set(pts.slice(0, 4), 4 * c); inst.iB.set(pts.slice(4, 8), 4 * c); inst.iC.set(pts.slice(8, 12), 4 * c);
       inst.iBody.set([Rb, -20 - (3 * c) % 200, 0, 0], 4 * c);
-      inst.iX.set([0.3 * Math.sin(c * 1.3), (c * 0.618) % 1, lam, 0], 4 * c);
+      inst.iX.set([0.3 * Math.sin(c * 1.3), (c * 0.618) % 1, lam, PATH_COLOURS[c % PATH_COLOURS.length]], 4 * c);
     }
     var tex = gl.createTexture();
     gl.activeTexture(gl.TEXTURE0);
@@ -628,7 +707,7 @@
     gl.uniformMatrix4fv(uni("projectionMatrix"), false, I4); gl.uniformMatrix4fv(uni("viewMatrix"), false, I4);
     gl.uniform3fv(uni("cameraPosition"), U.cam); gl.uniform2fv(uni("uHalf"), U.half);
     gl.uniform1f(uni("uTime"), 0); gl.uniform1f(uni("uWag"), 0); gl.uniform1f(uni("uPxPerUnit"), U.px);
-    gl.uniform1f(uni("uColourBy"), 0); gl.uniform1i(uni("uGenes"), 0);
+    gl.uniform1f(uni("uColourBy"), colourBy); gl.uniform1i(uni("uGenes"), 0);
 
     var tpls = [["medium", EA.buildTemplate("medium")], ["coarse", EA.buildTemplate("coarse")], ["barbels", EA.buildBarbels("medium")]];
     var bufs = [], jobs = [];
@@ -677,33 +756,247 @@
       gl.deleteSync(sync); gl.deleteTransformFeedback(tfo); gl.deleteTexture(tex); gl.deleteProgram(prog);
       bufs.forEach(function (b) { gl.deleteBuffer(b); });
     }
-    return new Promise(function (resolve) {
-      var t0 = Date.now();
-      (function poll() {
-        var st = gl.clientWaitSync(sync, 0, 0);
-        if (st === gl.TIMEOUT_EXPIRED && Date.now() - t0 < 10000) { setTimeout(poll, 2); return; }
-        if (st === gl.WAIT_FAILED || st === gl.TIMEOUT_EXPIRED) { cleanup(); resolve({ error: "the GPU did not finish (" + st + ")" }); return; }
-        var res = { fish: n, texRows: texRows, mutate: opts.mutate || "", tol: PATH_TOL, templates: {}, ok: true };
-        jobs.forEach(function (jb) {
-          var V = jb.tpl.verts, data = new Float32Array(V * n * NC);
-          gl.bindBuffer(gl.COPY_READ_BUFFER, jb.buf);
-          gl.getBufferSubData(gl.COPY_READ_BUFFER, 0, data);
-          res.templates[jb.name] = compareTemplate(EA, jb, data, n, NC, rows, lams, inst, U);
-        });
-        cleanup();
-        var fins = {};
-        Object.keys(res.templates).forEach(function (k) {
-          var r = res.templates[k];
-          if (!r.pass) res.ok = false;
-          Object.keys(r.fins).forEach(function (f) { fins[f] = (fins[f] || 0) + r.fins[f]; });
-        });
-        res.fins = fins;
-        res.allParts = [0, 1, 2, 3, 4, 5, 6, 7].every(function (f) { return fins[f] > 0; });
-        res.barbelFish = rows.filter(function (g) { return g[EA.MO + 26] > 0.2; }).length;
-        if (!res.allParts || !res.barbelFish) res.ok = false;
-        resolve(res);
-      })();
+    return fenceDone(gl, sync, 10000).then(function (why) {
+      if (why) { cleanup(); return { error: why, colourBy: colourBy }; }
+      var res = { fish: n, texRows: texRows, colourBy: colourBy, components: NC, mutate: opts.mutate || "", tol: PATH_TOL, templates: {}, ok: true };
+      var datas = {};
+      jobs.forEach(function (jb) {
+        var V = jb.tpl.verts, data = new Float32Array(V * n * NC);
+        gl.bindBuffer(gl.COPY_READ_BUFFER, jb.buf);
+        gl.getBufferSubData(gl.COPY_READ_BUFFER, 0, data);
+        datas[jb.name] = data;
+        res.templates[jb.name] = compareTemplate(EA, jb, data, n, NC, rows, lams, inst, U, null, names);
+      });
+      cleanup();
+      var fins = {};
+      Object.keys(res.templates).forEach(function (k) {
+        var r = res.templates[k];
+        if (!r.pass) res.ok = false;
+        Object.keys(r.fins).forEach(function (f) { fins[f] = (fins[f] || 0) + r.fins[f]; });
+      });
+      res.fins = fins;
+      res.allParts = [0, 1, 2, 3, 4, 5, 6, 7].every(function (f) { return fins[f] > 0; });
+      res.barbelFish = rows.filter(function (g) { return g[EA.MO + 26] > 0.2; }).length;
+      if (!res.allParts || !res.barbelFish) res.ok = false;
+      if (opts.injectSweep && jobs.length) res.sweep = injectSweep(EA, jobs[0], datas[jobs[0].name], n, NC, rows, lams, inst, U, names);
+      return res;
     });
+  }
+  /* NaN, +Inf and -Inf into each captured component of one vertex at a time
+   * (in place, restored after), compared on that fish alone: each must fail,
+   * naming its component */
+  function injectSweep(EA, jb, data, n, NC, rows, lams, inst, U, names) {
+    var V = jb.tpl.verts, at = [[0, 0], [Math.min(n - 1, 40), Math.min(V - 1, 7)]];
+    var out = { template: jb.name, positions: at, values: ["NaN", "Infinity", "-Infinity"], tried: 0, killed: 0, survivors: [], baselinePass: true };
+    at.forEach(function (p) {
+      var c = p[0], v = p[1], only = [c, c + 1];
+      if (!compareTemplate(EA, jb, data, n, NC, rows, lams, inst, U, only, names).pass) out.baselinePass = false;
+      for (var k = 0; k < NC; k++) {
+        [NaN, Infinity, -Infinity].forEach(function (x) {
+          var o = (c * V + v) * NC + k, keep = data[o];
+          data[o] = x;
+          var r = compareTemplate(EA, jb, data, n, NC, rows, lams, inst, U, only, names);
+          data[o] = keep;
+          out.tried++;
+          if (r.pass === false && r.nan > 0 && r.worst.indexOf("non-finite feedback component " + k + " (") >= 0) out.killed++;
+          else if (out.survivors.length < 12) out.survivors.push({ fish: c, vertex: v, component: k, name: names[k], value: String(x), worst: r.worst });
+        });
+      }
+    });
+    return out;
+  }
+
+  /* GPU == CPU through the production fragment shader (appearanceFragmentCheck):
+   * appearanceShaders(EA).fs unchanged (FS3: the WebGL2 dialect prefix of
+   * appearanceParity), linked to a diagnostic quad whose vertex shader hands
+   * it known material / part inputs and the decoded pattern varyings (it
+   * does no shading of its own). A 17 x 17 RGBA32F target; its centre pixel,
+   * where vWorld = (0, 0, 0) under a camera at (0, 10, 0) and a light straight
+   * down: N = V = (0, 1, 0), no rim, no depth tint (uDepth 240, the light
+   * field off), no fog, no flashlight, realistic water (CLARITY [0]: vivid
+   * off), so lit skin is base x (1.28, 1.3632, 1.2512) and an eye
+   * (0.82, 0.83, 0.83). Recolour (uColourBy 1): Family's and Brain's packed
+   * palettes, parts 0..7, heights v = 0, .5, 1 at u = .42 (profile height
+   * .72), against recolourBase, an independent statement of the base stage;
+   * appearance (uColourBy 0): body part 0 against EvoAppearance.flankAt.
+   * Constant material inputs make the derivative filters vanish. Max |error|
+   * over RGB <= .003, alpha 1. opts.fsMutate ("swapRB": red and blue
+   * exchanged in the unpacking; "branch": the colour-mode branch reversed)
+   * must fail it. */
+  var FRAG_TOL = 0.003;
+  var FRAG_MUL = [0.36 + 0.92, 0.48 + 0.92 * 0.96, 0.46 + 0.92 * 0.86];   /* ambient straight up + full diffuse */
+  var FRAG_EYE = [0.82, 0.83, 0.83];
+  var FRAG_PALETTES = { family: PATH_COLOURS, brain: [0xff0000, 0x00ff00, 0x0000ff, 0x808080, 0x3c9ae1] };
+  var FRAG_MUT = {
+    swapRB: ["vec3 base = vec3(r, g, c - 65536.0 * r - 256.0 * g) / 255.0;", "vec3 base = vec3(c - 65536.0 * r - 256.0 * g, g, r) / 255.0;"],
+    branch: ["if (uColourBy > 0.5) base = colourBase(fin, oyL, uBack);", "if (uColourBy < 0.5) base = colourBase(fin, oyL, uBack);"]
+  };
+  function recolourBase(rgb, fin, v) {
+    var base = [(rgb >>> 16) & 255, (rgb >>> 8) & 255, rgb & 255].map(function (x) { return x / 255; });
+    function smooth(a, b, x) { var t = Math.max(0, Math.min(1, (x - a) / (b - a))); return t * t * (3 - 2 * t); }
+    function mix(a, b, t) { return a.map(function (x, i) { return x + (b[i] - x) * t; }); }
+    var oy = (1 - 2 * v) * 0.72;
+    base = mix(base, base.map(function (x) { return x * 0.56; }), smooth(0.30, 0.85, oy) * (fin === 0 ? 1 : 0));
+    base = mix(base, mix(base, [0.93, 0.97, 0.90], 0.5), 1 - smooth(-0.7, -0.15, oy));
+    if (fin !== 0) base = mix(base, [0.92, 0.98, 0.95], 0.22);
+    return base;
+  }
+  function appearanceFragmentCheck(gl, EA, opts) {
+    opts = opts || {};
+    if (!EA || !EA.flankAt) return Promise.resolve({ error: "web/ocean_appearance.js not loaded" });
+    var fsrc = appearanceShaders(EA).fs;
+    if (opts.fsMutate) {
+      var pm = plant(fsrc, opts.fsMutate, FRAG_MUT);
+      if (pm.error) return Promise.resolve({ error: pm.error });
+      fsrc = pm.src;
+    }
+    if (!gl.getExtension("EXT_color_buffer_float")) return Promise.resolve({ error: "no float render targets (EXT_color_buffer_float)" });
+    var G = EA.GLSL;
+    var vsrc = [
+      G.COMMON, G.VARY, G.DECODE,
+      "attribute vec2 aXY;",
+      "uniform vec4 uG[9]; uniform float uLam;",
+      "uniform vec4 uMaterial; uniform float uFin; uniform float uPacked;",
+      "varying vec3 vWorld; varying vec4 vMatV; flat varying vec4 vPart;",
+      "void main() {",
+      "  patternDecode(uG[0], uG[1], uG[2], uG[3], uG[4], uG[5], uG[6], uG[7].xyz, vec2(uG[7].w, uG[8].x), uLam);",
+      "  vWorld = vec3(aXY.x, 0.0, aXY.y);",
+      "  vMatV = uMaterial;",
+      "  vPart = vec4(uFin, 1.0, 0.0, uPacked);",
+      "  gl_Position = vec4(aXY, 0.0, 1.0);",
+      "}"
+    ].join("\n");
+    var prog;
+    try { prog = compileProgram(gl, VS3 + vsrc, FS3 + fsrc); }
+    catch (e) { return Promise.resolve({ error: e.message || String(e) }); }
+    for (var guard = 0; guard < 32 && gl.getError() !== gl.NO_ERROR; guard++);   /* not ours */
+
+    /* the cases: [colourBy, fin, packed colour, gene row, lambda, material, expected] */
+    var U0 = Math.fround(0.42), cases = [];
+    function material(fin, v) {   /* body / barbels: v = .5(1 - rho sin(theta)); the fins: v itself */
+      if (fin === 0 || fin === 7) return [U0, Math.fround(Math.asin(1 - 2 * v)), 1, 1000];
+      return [U0, Math.fround(v), 0, 1000];
+    }
+    function vOf(fin, m) { return fin === 0 || fin === 7 ? 0.5 * (1 - m[2] * Math.sin(m[1])) : m[1]; }
+    function lit(b) { return [b[0] * FRAG_MUL[0], b[1] * FRAG_MUL[1], b[2] * FRAG_MUL[2]]; }
+    var skin = [0.13, 0.43, 0.71].map(function (hue) {
+      var g = []; for (var j = 0; j < EA.STRIDE; j++) g.push(Math.fround(0.5));
+      g[0] = Math.fround(hue); g[1] = Math.fround(0.7); g[2] = Math.fround(0.6);
+      return g;
+    });
+    Object.keys(FRAG_PALETTES).forEach(function (pal) {
+      FRAG_PALETTES[pal].forEach(function (rgb) {
+        for (var fin = 0; fin < 8; fin++) [0, 0.5, 1].forEach(function (v) {
+          var m = material(fin, v);
+          cases.push({ mode: "recolour", palette: pal, colourBy: 1, fin: fin, packed: rgb, row: skin[0], lam: 4, m: m,
+                       want: fin === 4 ? FRAG_EYE : lit(recolourBase(rgb, fin, vOf(fin, m))) });
+        });
+      });
+    });
+    skin.forEach(function (row, i) {
+      [0, 0.5, 1].forEach(function (v) {
+        var m = material(0, v), out = [0, 0, 0];
+        EA.flankAt(EA.decode(row, 4), U0, vOf(0, m), out);
+        cases.push({ mode: "appearance", palette: "skin " + i, colourBy: 0, fin: 0, packed: PATH_COLOURS[i], row: row, lam: 4, m: m, want: lit(out) });
+      });
+    });
+
+    var S = 17, tex = gl.createTexture(), fb = gl.createFramebuffer(), vao = gl.createVertexArray(), quad = gl.createBuffer(), pbo = gl.createBuffer();
+    function cleanup() {
+      gl.bindBuffer(gl.COPY_READ_BUFFER, null);
+      gl.deleteTexture(tex); gl.deleteFramebuffer(fb); gl.deleteVertexArray(vao); gl.deleteBuffer(quad); gl.deleteBuffer(pbo); gl.deleteProgram(prog);
+    }
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, S, S, 0, gl.RGBA, gl.FLOAT, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+    var fbs = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+    if (fbs !== gl.FRAMEBUFFER_COMPLETE) { gl.bindFramebuffer(gl.FRAMEBUFFER, null); cleanup(); return Promise.resolve({ error: "the float target is incomplete (" + fbs + ")" }); }
+    gl.bindVertexArray(vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+    var loc = gl.getAttribLocation(prog, "aXY");
+    gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+    gl.useProgram(prog);
+    function uni(name) { return gl.getUniformLocation(prog, name); }
+    var W = CLARITY;   /* realistic water: the [0] column */
+    gl.uniform3fv(uni("uLight"), [0, 1, 0]); gl.uniform1f(uni("uTime"), 0); gl.uniform3fv(uni("uSelect"), C.select);
+    gl.uniform3fv(uni("uFog"), W.fog[0]); gl.uniform1f(uni("uFogDensity"), 0);
+    gl.uniform1f(uni("uDepth"), 240); gl.uniform1f(uni("uLightOn"), 0); gl.uniform1f(uni("uL0"), 1); gl.uniform1f(uni("uKWater"), 0);
+    gl.uniform3fv(uni("uDeepTint"), W.deepTint[0]); gl.uniform1f(uni("uDeepDim"), W.deepDim[0]); gl.uniform3fv(uni("uDeepAdd"), W.deepAdd[0]);
+    gl.uniform1f(uni("uLKeep"), W.lKeep[0]); gl.uniform1f(uni("uFloorMin"), W.floorMin[0]); gl.uniform1f(uni("uBack"), W.back[0]);
+    gl.uniform3fv(uni("uAmbLo"), W.ambLo[0]); gl.uniform3fv(uni("uAmbHi"), W.ambHi[0]); gl.uniform3fv(uni("uVivid"), W.vivid[0]);
+    gl.uniform1f(uni("uBeamOn"), 0); gl.uniform3fv(uni("uBeamDir"), [0, -1, 0]); gl.uniform1f(uni("uBeamTan"), 0.2); gl.uniform1f(uni("uBeamReach"), 1000);
+    gl.uniform1f(uni("uIntrinsic"), 0); gl.uniform3fv(uni("cameraPosition"), [0, 10, 0]);
+    gl.viewport(0, 0, S, S);
+    gl.disable(gl.DEPTH_TEST); gl.disable(gl.BLEND); gl.disable(gl.SCISSOR_TEST); gl.disable(gl.CULL_FACE); gl.colorMask(true, true, true, true);
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, pbo);
+    gl.bufferData(gl.PIXEL_PACK_BUFFER, cases.length * 16, gl.STREAM_READ);
+    var uG = new Float32Array(36), half = Math.floor(S / 2);
+    cases.forEach(function (cs, i) {
+      for (var j = 0; j < 36; j++) uG[j] = j < cs.row.length ? cs.row[j] : 0;
+      gl.uniform4fv(uni("uG[0]") || uni("uG"), uG); gl.uniform1f(uni("uLam"), cs.lam);
+      gl.uniform4fv(uni("uMaterial"), cs.m); gl.uniform1f(uni("uFin"), cs.fin); gl.uniform1f(uni("uPacked"), cs.packed);
+      gl.uniform1f(uni("uColourBy"), cs.colourBy);
+      gl.clearBufferfv(gl.COLOR, 0, [-9, -9, -9, -9]);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      gl.readPixels(half, half, 1, 1, gl.RGBA, gl.FLOAT, i * 16);
+    });
+    gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+    var glErr = gl.getError();
+    var sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+    gl.flush();
+    gl.useProgram(null); gl.bindVertexArray(null); gl.bindBuffer(gl.ARRAY_BUFFER, null); gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    if (glErr !== gl.NO_ERROR) { gl.deleteSync(sync); cleanup(); return Promise.resolve({ error: "GL error " + glErr }); }
+    return fenceDone(gl, sync, 10000).then(function (why) {
+      gl.deleteSync(sync);
+      if (why) { cleanup(); return { error: why }; }
+      var px = new Float32Array(cases.length * 4);
+      gl.bindBuffer(gl.COPY_READ_BUFFER, pbo);
+      gl.getBufferSubData(gl.COPY_READ_BUFFER, 0, px);
+      cleanup();
+      var res = { cases: cases.length, tol: FRAG_TOL, fsMutate: opts.fsMutate || "", failures: 0, nonFinite: 0, alphaBad: 0,
+                  maxErr: 0, worst: "", modes: {} };
+      cases.forEach(function (cs, i) {
+        var got = [px[4 * i], px[4 * i + 1], px[4 * i + 2], px[4 * i + 3]];
+        var md = res.modes[cs.mode] || (res.modes[cs.mode] = { cases: 0, maxErr: 0, failures: 0 });
+        md.cases++;
+        if (!got.every(Number.isFinite)) { res.nonFinite++; res.failures++; md.failures++; if (!res.worst) res.worst = cs.mode + " " + cs.palette + " part " + cs.fin + ": non-finite"; return; }
+        var e = Math.max(Math.abs(got[0] - cs.want[0]), Math.abs(got[1] - cs.want[1]), Math.abs(got[2] - cs.want[2]));
+        if (got[3] !== 1) res.alphaBad++;
+        md.maxErr = Math.max(md.maxErr, e);
+        if (e > FRAG_TOL || got[3] !== 1) { res.failures++; md.failures++; }
+        if (e > res.maxErr) {
+          res.maxErr = e;
+          res.worst = cs.mode + " " + cs.palette + " #" + cs.packed.toString(16) + " part " + cs.fin + " v " + vOf(cs.fin, cs.m).toFixed(3) +
+                      ": got " + got.slice(0, 3).map(function (x) { return x.toFixed(4); }).join(" ") +
+                      ", want " + cs.want.map(function (x) { return x.toFixed(4); }).join(" ");
+        }
+      });
+      res.ok = res.failures === 0 && cases.length > 0;
+      return res;
+    });
+  }
+
+  /* The production checks together: the fixed fixture (and the caller's
+   * rows) through the vertex shader in both colour modes, and the fragment
+   * shader. opts.mutate / opts.fsMutate / opts.injectSweep as above. */
+  function appearancePathCheck(gl, EA, rows, lams, opts) {
+    opts = opts || {};
+    if (!EA || !EA.morphBuild) return Promise.resolve({ error: "web/ocean_appearance.js (with its CPU mirror) not loaded" });
+    var fx = pathFixture(EA), R = fx.rows.concat(rows || []), L = fx.lams.concat(lams || []);
+    var a = Object.assign({}, opts, { colourBy: 0 }), b = Object.assign({}, opts, { colourBy: 1 });
+    return Promise.all([appearanceVertexCheck(gl, EA, R, L, a), appearanceVertexCheck(gl, EA, R, L, b), appearanceFragmentCheck(gl, EA, opts)])
+      .then(function (r) {
+        var errs = [];
+        ["appearance", "recolour", "fragment"].forEach(function (k, i) { if (r[i].error) errs.push(k + ": " + r[i].error); });
+        var out = { ok: errs.length === 0 && r.every(function (x) { return x.ok === true; }), fixture: fx.rows.length, fish: R.length,
+                    appearance: r[0], recolour: r[1], fragment: r[2] };
+        if (errs.length) out.error = errs.join("; ");
+        return out;
+      });
   }
   /* the vertex stage's spine and placement (CORE seg / spine / appWorld /
    * minWidth) for instance c, at uWag = 0 */
@@ -741,12 +1034,15 @@
     var d = Math.hypot(U.cam[0] - hx, U.cam[1] - hy, U.cam[2] - hz);
     return 0.7 * Math.max(1, d) / Math.max(1e-3, inst.iBody[4 * c] * U.px);
   }
-  function compareTemplate(EA, jb, data, n, NC, rows, lams, inst, U) {
+  /* one template's feedback against the CPU mirror. only: [c0, c1) the fish
+   * compared (all when absent); names: the captured components' names */
+  function compareTemplate(EA, jb, data, n, NC, rows, lams, inst, U, only, names) {
     var V = jb.tpl.verts, rings = { ringT: Array.prototype.slice.call(jb.ringT, 0, jb.tpl.ringT.length), half: jb.tpl.half };
     var r = { verts: V, maxWorld: 0, maxMat: 0, maxMar: 0, maxDecode: 0, partBad: 0, nan: 0, fins: {}, worst: "" }, worstE = 0;
     var VN = ["vG0", "vG1", "vG2", "vG3", "vG4", "vG5", "vG6", "vG7", "vAux", "vMeta"];
-    for (var c = 0; c < n; c++) {
-      var lam = Math.fround(lams[c]), M = EA.morphDecode(rows[c], lam), P = EA.patternVaryings(rows[c], lam), minW = minWidthCPU(inst, c, U);
+    var c0 = only ? only[0] : 0, c1 = only ? only[1] : n;
+    for (var c = c0; c < c1; c++) {
+      var lam = Math.fround(lams[c]), M = EA.morphDecode(rows[c], lam), P = U.colourBy ? null : EA.patternVaryings(rows[c], lam), minW = minWidthCPU(inst, c, U);
       for (var v = 0; v < V; v++) {
         var o = (c * V + v) * NC;
         var aT = [jb.tpl.pos[4 * v], jb.tpl.pos[4 * v + 1], jb.tpl.pos[4 * v + 2], jb.tpl.pos[4 * v + 3]];
@@ -761,7 +1057,7 @@
           if (!Number.isFinite(data[o + component])) { badComponent = component; break; }
         }
         if (badComponent >= 0) {
-          if (!r.nan++) r.worst = where + ": non-finite feedback component " + badComponent;
+          if (!r.nan++) r.worst = where + ": non-finite feedback component " + badComponent + " (" + (names ? names[badComponent] : "?") + ")";
           continue;
         }
         var b = EA.morphBuild(M, rings, aT, pat, 0, 0, minW), w = appWorldCPU(inst, c, b.geo, U);
@@ -770,7 +1066,7 @@
         var eR = Math.abs(Math.min(data[o + 6], 10) - Math.min(b.mar, 10));
         if (Math.abs(data[o + 7] - pat[0]) > 1e-6 || Math.abs(data[o + 8] - pat[2]) > 1e-6 || data[o + 9] !== inst.iBody[4 * c + 2] || data[o + 10] !== inst.iX[4 * c + 3]) r.partBad++;
         var eD = 0;
-        for (var q = 0; q < VN.length; q++) for (var k = 0; k < 4; k++) {
+        if (P) for (var q = 0; q < VN.length; q++) for (var k = 0; k < 4; k++) {   /* appearance mode: the decoded pattern */
           var g = data[o + 11 + 4 * q + k], ref = P[VN[q]][k], d = Math.abs(g - ref);
           if (q === 0 && k === 0) d = Math.min(d, 1 - d);   /* a hue: circular */
           eD = Math.max(eD, d / Math.max(1, Math.abs(ref)));
@@ -2475,8 +2771,9 @@
                  barbels: !!(appKind && appKind.bmesh && appKind.bmesh.visible) };
       },
       appearanceParity: function (rows, lams, cellW, cellH) { return appearanceParity(rows, lams, cellW, cellH); },
-      /* GPU == CPU through the production vertex path and gene texture
-       * (appearancePathCheck): a Promise of the report */
+      /* GPU == CPU through the production programs (appearancePathCheck: the
+       * fixed fixture, and rows / lams if given, through the vertex shader in
+       * both colour modes and the fragment shader): a Promise of the report */
       appearancePathCheck: function (rows, lams, opts) {
         var p = appearancePathCheck(renderer.getContext(), window.EvoAppearance, rows, lams, opts);
         renderer.resetState();
@@ -2499,7 +2796,9 @@
 
   window.EvoOceanScene = {
     load: load, create: create,
-    /* the production-path check on any WebGL2 context (no three needed) */
-    appearancePathCheck: function (gl, rows, lams, opts) { return appearancePathCheck(gl, window.EvoAppearance, rows, lams, opts); }
+    /* the production-path checks on any WebGL2 context (no three needed) */
+    appearancePathCheck: function (gl, rows, lams, opts) { return appearancePathCheck(gl, window.EvoAppearance, rows, lams, opts); },
+    appearanceVertexCheck: function (gl, rows, lams, opts) { return appearanceVertexCheck(gl, window.EvoAppearance, rows, lams, opts); },
+    appearanceFragmentCheck: function (gl, opts) { return appearanceFragmentCheck(gl, window.EvoAppearance, opts); }
   };
 })();

@@ -610,18 +610,23 @@
       frames: frames, wait: wait, stepToTick: stepToTick, snapshotCopy: snapshotCopy, rafProbe: rafProbe,
       prepare: function (cd) {
         cd = cd || {};
-        var ia = h.initArgs() || {}, world = cd.world || [ia.width, ia.height, ia.depth];
-        var cfg = cd.config || {}, same = ia.seed === (cd.worldSeed >>> 0) && ia.population === cd.population &&
-          ia.width === world[0] && ia.height === world[1] && ia.depth === world[2] && JSON.stringify(ia.cfg || {}) === JSON.stringify(cfg);
+        /* the case's world, or (a case without one) the running world's set-up */
+        var ia = h.initArgs() || {}, has = cd.worldSeed !== undefined, world = cd.world || [ia.width, ia.height, ia.depth];
+        var want = has ? { seed: cd.worldSeed >>> 0, pop: cd.population, cfg: cd.config || {} } : { seed: ia.seed, pop: ia.population, cfg: ia.cfg || {} };
+        var same = ia.seed === want.seed && ia.population === want.pop && ia.width === world[0] && ia.height === world[1] &&
+          ia.depth === world[2] && JSON.stringify(ia.cfg || {}) === JSON.stringify(want.cfg);
+        var target = Math.floor(cd.tick || 0);
         h.setPaused(true);
-        if (!same && cd.worldSeed !== undefined) {
-          var why = h.importWorld(cd.worldSeed >>> 0, cd.population, world[2], cfg, undefined, [], [world[0], world[1]]);
+        /* another world, or this one already past the case's tick: start it again (the page's own import) */
+        if (!same || tick() > target) {
+          var why = h.importWorld(want.seed, want.pop, world[2], want.cfg, undefined, [], [world[0], world[1]]);
           if (why) return Promise.reject(new Error("the case's world was refused: " + why));
         }
         if (cd.colourMode) setSelect("colourMode", cd.colourMode);
         if (cd.quality) scene.setQuality(cd.quality);
         setCheck("governor", cd.governor === true);
-        return stepToTick(cd.tick || 0).then(function () { return frames(3); }).then(function () {
+        return stepToTick(target).then(function () { return frames(3); }).then(function () {
+          if (tick() !== target) throw new Error("prepare: the world is at tick " + tick() + ", the case asks for " + target);
           var cam = camera(cd.camera || "whole");
           return wait(cd.settleMs === undefined ? 1500 : cd.settleMs).then(function () {
             var st = api.state();

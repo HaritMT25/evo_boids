@@ -68,8 +68,10 @@
   var P = new URLSearchParams(location.search);
   var MOCK = P.get("mock") === "1";
   var E1 = P.get("e1") === "1";
-  /* measurement only (web/ocean_perf.js): off, a profiler that records nothing */
-  var BENCH = P.get("renderBench") === "1", PROF = EvoOceanPerf.forPage(BENCH || P.get("perf") === "1"), SP = EvoOceanPerf.SPAN;
+  /* measurement only (web/ocean_perf.js): off, a profiler that records nothing (also without the file) */
+  var PERF = window.EvoOceanPerf, BENCH = !!PERF && P.get("renderBench") === "1";
+  var PROF = PERF ? PERF.forPage(BENCH || P.get("perf") === "1") : { enabled: false, active: false, SPAN: {}, beginFrame: function () {},
+    recordStep: function () {}, beginCpu: function () { return 0; }, lap: function () { return 0; }, endCpu: function () {} }, SP = PROF.SPAN;
   var DT = 0.016;                      /* oc_step's fixed step */
   var SPEEDS = [1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64];
   var STEP_BUDGET_MS = 11;             /* of a 16.7 ms frame: what stepping may take (Hold 60 fps) */
@@ -2210,7 +2212,7 @@
       coarse: coarseMQ.matches,
       reducedMotion: reducedMQ.matches,
       bodyScale: bodyScale, onFollowChange: onFollowChange,
-      profiler: PROF, visualRandom: BENCH ? EvoOceanPerf.visualRandom(2463534242) : null
+      profiler: PROF, visualRandom: BENCH ? PERF.visualRandom(2463534242) : null
     });
     if (!scene) throw new Error("WebGL2 is unavailable, and the 3-D Ocean has only the 3D tank");
     detail0 = scene.quality();
@@ -2273,7 +2275,7 @@
       }
     };
     if (PROF.enabled) EvoOcean.perf = PROF;   /* ?renderBench=1 / ?perf=1 (web/ocean_perf.js) */
-    if (BENCH) EvoOcean.bench = EvoOceanPerf.bench({ module: M, scene: scene, profiler: PROF, page: EvoOcean, setPaused: setPaused,
+    if (BENCH) EvoOcean.bench = PERF.bench({ module: M, scene: scene, profiler: PROF, page: EvoOcean, setPaused: setPaused,
       last: function () { return fresh(lastS); }, epoch: function () { return worldEpoch; }, initArgs: function () { return initArgs; },
       importWorld: importWorld });
     requestAnimationFrame(frame);

@@ -6,20 +6,24 @@
  * the deep tank (web/ocean_scene.js). Around it, the Classic page's controls
  * (web/renderer.js), so the two pages are one product:
  *   - the top bar (live readout -> the stat panel with the depth histogram;
- *     📊 dashboards, web/ocean_dash.js; the settings) and the toasts
- *   - the dock: pause, speed (steps per frame), Turbo, 🎲 Randomize, the
- *     flashlight, fit the view
+ *     📊 dashboards, web/ocean_dash.js; the settings; Help: every key, the
+ *     tour, "What is Turbo?") and the toasts
+ *   - the dock: pause (one step while paused), speed (steps per frame),
+ *     Turbo | the flashlight, View (the light while following, water clarity,
+ *     fish colours, Hold 60 fps: drawing only), fit the tank. Nothing on it
+ *     replaces the run: Randomize is in the settings' Run tab.
  *   - the settings sheet, built from web/ocean_config.js: every key the
  *     Ocean takes, "live" ones (oc_set_param) applying at once, the rest on
  *     Restart ("Restart to apply"); settings that do nothing with the others as
  *     they are are dimmed with the reason (NEEDS); the Run tab: Randomize, New
- *     world / Replay, playback and view switches, save / load a setup
+ *     world / Replay, save / load a setup
  *   - the fish card (click or tap a fish): oc_inspect's numbers and its live
  *     brain (oc_set_capture keeps its senses while a fish is selected)
  *   - Turbo: web/ocean_worker.js steps a copy of the module's memory at full
  *     speed; the copy comes back on Stop, so the run carries on exactly
  *     (web/ocean_handoff.js: the hand-off, shared with the worker)
- *   - the tour and the first-visit Turbo card (web/guide.js, steps below)
+ *   - the tour and the Turbo card (web/guide.js, steps below), from Help; a
+ *     first visit opens on the tank, with one hint and later a Turbo coach mark
  * The flashlight (scene.setFlashlight) is drawing only: no engine call.
  *
  * Every pointer the module returns is valid until the next oc_sync / oc_init
@@ -53,7 +57,10 @@
  * Keys: space pause, + / - (or arrows) steps per frame, F follow (the selected
  *       fish, else a random one; again: another), Esc close / stop following
  *       / let go, R a new world (new seed), shift+R replay this one, C fit the
- *       view, L the flashlight, . one step while paused, ? the keys legend.
+ *       view, L the flashlight (now; never "Light while following"), . one
+ *       step while paused, T Turbo on / off, V the View menu, G the
+ *       dashboards, O the settings, I the live numbers, ? Help (every key).
+ *       Every dock and top-bar control has its key, and Help lists them.
  *       The camera, held (scene.setMove; by key position, never while a field
  *       has the focus): W / S forward / back along the view, A / D left /
  *       right, E / Q or PageUp / PageDown up / down, Shift faster. Following a
@@ -593,11 +600,7 @@
       });
       panelsEl.appendChild(panel);
     });
-    el("panel-run").setAttribute("role", "tabpanel");
-    attachTip(el("f_governor"), "governor");
-    attachTip(el("f_colourBrain"), "colourBrain");
-    attachTip(el("f_followLight"), "followLight");
-    attachTip(el("f_clarity"), "clarity");
+    el("panel-run").setAttribute("role", "tabpanel");   /* (its view switches are in the View menu now) */
     var saved = store("evo_boids.ocean.tab");
     setSheetTab(saved && el("panel-" + saved) ? saved : "run");
   }
@@ -1005,12 +1008,19 @@
     b.querySelector("use").setAttribute("href", paused ? "#i-play" : "#i-pause");
     b.setAttribute("aria-label", paused ? "play" : "pause");
     b.title = (paused ? "Play" : "Pause") + " (Space)";
+    el("stepbtn").hidden = !paused;   /* one step: only while paused */
     dirtyHud = true;
   }
   function changeSpeed(d) {
     speedIdx = Math.max(0, Math.min(SPEEDS.length - 1, speedIdx + d));
     el("speedlabel").textContent = speed() + "×";
     dirtyHud = true;
+  }
+  /* Hold 60 fps may run fewer steps than asked: the label turns and says how many */
+  function showSpeedCap() {
+    var ask = speed(), ran = turboState === "live" && !paused && lastSteps > 0 ? lastSteps : ask, lab = el("speedlabel");
+    lab.classList.toggle("capped", ran < ask);
+    lab.title = ran < ask ? ask + "× asked; running " + ran + " steps per frame to hold 60 fps (View › Hold 60 fps)" : "steps per frame";
   }
   function indexOfId(s, id) {
     if (id === null || !s) return -1;
@@ -1050,57 +1060,123 @@
     if (!on) wantFollow = false;
     if (on) toast(coarseMQ.matches ? "Following. Drag to circle around it."
                                    : "Following. Drag or A / D to circle it, W / S to come closer or back off; Esc stops.");
-    updateKeysLegend(on);
+    /* Light while following: on as the follow starts, back as it was when it ends */
+    if (on) { lightBeforeFollow = lightNow; if (followLight) lightNow = true; }
+    else lightNow = lightBeforeFollow;
     updateLight();
+    updateKeysLegend();
   }
 
   /* ---- the keys legend (a wide screen with a mouse; ocean.html #keys) ----
-   * Shown until hidden with its × or ?, remembered. Its first line is what
-   * W A S D do now: fly the camera, or move it around the followed fish. */
-  var keysShown = store("evo_boids.ocean.keys") !== "0";
-  function setKeysShown(on) {
-    keysShown = !!on;
-    document.body.classList.toggle("keys-on", keysShown);
-    store("evo_boids.ocean.keys", keysShown ? "1" : "0");
+   * One line for what is on screen now: the camera's keys (fly, or around the
+   * followed fish), one step while paused, Stop in Turbo (no follow: the
+   * picture waits for Turbo); ? opens Help, which has every key. */
+  function updateKeysLegend() {
+    var k = function (keys, what) { return "<span class='k'><kbd>" + keys.join("</kbd><kbd>") + "</kbd> " + what + "</span>"; };
+    var live = turboState === "live", parts;
+    if (live && scene && scene.following()) parts = [k(["W", "S"], "closer / farther"), k(["A", "D"], "circle"), k(["Esc"], "let go")];
+    else parts = [k(["W", "A", "S", "D"], "fly"), live ? k(["F"], "follow a fish") : k(["T"], "stop Turbo")];
+    if (live && paused) parts.push(k(["."], "one step"));
+    parts.push(k(["?"], "all keys"));
+    setHtml("keys", parts.join(""));
   }
-  function updateKeysLegend(following) {
-    setHtml("keysmove", following
-      ? "<span class='k'><kbd>W</kbd><kbd>S</kbd> closer / farther</span><span class='k'><kbd>A</kbd><kbd>D</kbd> circle the fish</span>" +
-        "<span class='k'><kbd>Q</kbd><kbd>E</kbd> lower / higher</span>"
-      : "<span class='k'><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> move</span><span class='k'><kbd>Q</kbd><kbd>E</kbd> down / up</span>" +
-        "<span class='k'><kbd>Shift</kbd> faster</span>");
-  }
-  document.body.classList.toggle("keys-on", keysShown);
-  updateKeysLegend(false);
-  el("keysclose").addEventListener("click", function () {
-    setKeysShown(false);
-    toast("Keys hidden: ? shows them again.");
-    this.blur();
-  });
 
   /* ---- the flashlight (drawing only; scene.setFlashlight) ----
-   * While following: on unless "Flashlight while following" is off. Else:
-   * the dock button / L. The button shows the light as it is and toggles
-   * whichever of the two is in charge. */
-  var followLight = store("evo_boids.ocean.followLight") !== "0", lightAnywhere = false;
-  function lightOn() { return scene && scene.following() ? followLight : lightAnywhere; }
+   * One light, on or off now: the dock's button, L and the View menu's
+   * switch turn it on and off, and nothing else changes it but a follow. One
+   * preference, "Light while following" (the View menu's switch, stored):
+   * following a fish turns the light on, letting go puts it back as it was
+   * (onFollowChange). L never writes the preference. */
+  var followLight = store("evo_boids.ocean.followLight") !== "0", lightNow = false, lightBeforeFollow = false;
+  function lightOn() { return lightNow; }
   function updateLight() {
-    var on = !!lightOn();
+    var on = lightNow;
     if (scene) scene.setFlashlight(on);
     var b = el("lightbtn");
     b.setAttribute("aria-pressed", on ? "true" : "false");
-    b.title = (on ? "Flashlight on (L)" : "Flashlight (L)") + ": clear light where you look; on by itself while you follow a fish";
+    b.title = (on ? "Flashlight on (L)" : "Flashlight (L)") + ": clear light where you look, in true colours";
+    el("lightnow").checked = on;
   }
   function toggleLight() {
-    if (scene && scene.following()) {
-      followLight = !followLight;
-      el("followLight").checked = followLight;
-      store("evo_boids.ocean.followLight", followLight ? "1" : "0");
-    } else {
-      lightAnywhere = !lightAnywhere;
-      if (lightAnywhere) toast("Flashlight on: true colours where you look, without the water's tint.");
-    }
+    lightNow = !lightNow;
+    if (lightNow && !(scene && scene.following())) toast("Flashlight on: true colours where you look, without the water's tint.");
     updateLight();
+  }
+
+  /* ---- the View menu and Help: one popover at a time; ×, Esc, its key or a
+   * press outside closes it. [popover, trigger, its first control] ---- */
+  var POPS = { view: ["viewpop", "viewmenubtn", "lightnow"], help: ["helppop", "helpbtn", "tourbtn"] }, openPop = null, popOpener = null;
+  /* A press by the keyboard (its focus ring showing) keeps the focus; a
+   * pointer's lets it go, so Space goes back to pausing. */
+  function pointerBlur(n) { if (!n.matches(":focus-visible")) n.blur(); }
+  /* opener: the trigger, when the keyboard pressed it: the focus goes to the
+   * popover's first control, and back to the trigger when the keyboard closes it */
+  function setPop(name, opener) {
+    openPop = POPS[name] ? name : null;
+    popOpener = openPop && opener || null;
+    Object.keys(POPS).forEach(function (n) {
+      el(POPS[n][0]).hidden = n !== openPop;
+      el(POPS[n][1]).setAttribute("aria-expanded", n === openPop ? "true" : "false");
+    });
+    document.body.classList.toggle("help-open", openPop === "help");
+    if (openPop) {
+      /* never under a layer above it: the charts, a narrow screen's settings sheet */
+      if (dash() && dash().isOpen()) dash().close();
+      if (!wideMQ.matches && drawerEl.classList.contains("open")) setDrawer(false);
+      setStatPanel(false); hideCoach(); placePop();
+      if (popOpener) el(POPS[openPop][2]).focus();
+    }
+  }
+  function closePop(keyboard) {
+    var back = popOpener;
+    setPop(null);
+    if (keyboard && back) back.focus();
+  }
+  function togglePop(name, opener, keyboard) { if (openPop === name) closePop(keyboard); else setPop(name, opener); }
+  /* the View menu over its button, left of a wide screen's settings panel (a
+   * phone: the screen's width, from the CSS) */
+  function placePop() {
+    var pop = el("viewpop");
+    if (openPop !== "view" || innerWidth < 600) { pop.style.left = ""; return; }
+    var r = el("viewmenubtn").getBoundingClientRect(), w = pop.offsetWidth;
+    var right = wideMQ.matches && drawerEl.classList.contains("open") ? drawerEl.getBoundingClientRect().left : innerWidth;
+    pop.style.left = Math.round(Math.max(10, Math.min(right - w - 10, r.left + r.width / 2 - w / 2))) + "px";
+  }
+  document.addEventListener("pointerdown", function (e) {
+    if (openPop && !e.target.closest("#" + POPS[openPop][0] + ", #" + POPS[openPop][1])) setPop(null);
+  });
+
+  /* ---- a first visit: the tank, then one hint (load + 9 s, a fish), then
+   * this small Turbo coach mark, after a minute or once generation 1 is
+   * born (25 s at the least), on a screen with nothing else open (no fish
+   * card, popover, live numbers, settings, charts or tour) in a tab in view.
+   * Once per visitor; not after Turbo has been used or its card seen (Help's
+   * "What is Turbo?" too); ?guide=0 none (the tests). ---- */
+  var COACH_KEY = "evo_boids.ocean.turboHintSeen.v1", coachTimer = 0, coachHideT = 0;
+  function coachDone() { return store(COACH_KEY) === "1" || store(window.EvoGuideConfig.introKey) === "1"; }
+  function startCoach() {
+    if (P.get("guide") === "0" || P.has("renderBench") || coachDone()) return;
+    var t0 = performance.now();
+    coachTimer = setInterval(function () {
+      var t = (performance.now() - t0) / 1000, gen = summary ? summary[13] : 0;
+      if (coachDone()) { clearInterval(coachTimer); return; }   /* Turbo used, or its card seen, meanwhile */
+      if (!(t >= 60 || (gen >= 1 && t >= 25)) || turboState !== "live" || openPop || statOpen || selectedId !== null || document.hidden ||
+          document.getElementById("guide") || drawerEl.classList.contains("open") || (dash() && dash().isOpen())) return;
+      clearInterval(coachTimer);
+      store(COACH_KEY, "1");
+      el("coach").hidden = false;
+      placeCoach();
+      coachHideT = setTimeout(hideCoach, 25000);
+    }, 1000);
+  }
+  function hideCoach() { el("coach").hidden = true; clearTimeout(coachHideT); }
+  function placeCoach() {   /* above the Turbo button, its arrow on it */
+    var c = el("coach");
+    if (c.hidden) return;
+    var r = el("turbobtn").getBoundingClientRect(), w = c.offsetWidth, mid = r.left + r.width / 2;
+    var left = Math.round(Math.max(10, Math.min(innerWidth - w - 10, mid - w / 2)));
+    c.style.left = left + "px";
+    c.style.setProperty("--arrow-x", Math.round(mid - left) + "px");
   }
 
   /* ---------------- the readout and the stat panel ---------------- */
@@ -1173,6 +1249,7 @@
     setTxt("ro-depth", g("depthMean").toFixed(0));
     setTxt("ro-fps", String(fps));
     el("ro-fps").className = "num" + (fps && fps < 45 ? " warn" : "");
+    updateKeysLegend(); showSpeedCap();
     if (!statOpen) return;
     var rb = rates.perSec("b"), rd = rates.perSec("d");
     var rows = [
@@ -1506,7 +1583,7 @@
     tb.setAttribute("aria-pressed", on ? "true" : "false");
     tb.disabled = turboState === "entering" || turboState === "exiting";
     var locked = turboState !== "live";
-    ["restart", "savecp", "loadcp", "pausebtn", "slower", "faster", "randombtn", "randombig", "newworld", "replay"].forEach(function (id) {
+    ["restart", "savecp", "loadcp", "pausebtn", "slower", "faster", "stepbtn", "randombig", "newworld", "replay"].forEach(function (id) {
       el(id).classList.toggle("locked", locked);
     });
     el("turbo").hidden = turboState === "live";
@@ -1750,6 +1827,8 @@
     document.addEventListener("focusin", function (e) { if (typingIn(e.target)) releaseMoveKeys(); });
     window.addEventListener("keydown", function (e) {
       if (e.key === "Escape") {
+        /* the tour or the charts take this Esc themselves; else back to the popover's opener */
+        if (openPop) { if (!escHandledElsewhere) closePop(true); return; }
         if (drawerEl.classList.contains("open")) setDrawer(false);
         else if (statOpen) setStatPanel(false);
         else if (!escHandledElsewhere) { if (scene.following()) unfollow(); else select(null); }
@@ -1769,7 +1848,14 @@
         e.preventDefault();
         return;
       }
-      if (k === "?") { setKeysShown(!keysShown); return; }
+      /* the dock's and the top bar's own keys (Turbo's too: T stops it; letters press no button) */
+      if (e.repeat && /^[?vtgoil]$/.test(lk)) return;   /* a held toggle acts once (the camera and speed keys repeat) */
+      if (k === "?") { togglePop("help", null, true); return; }
+      if (lk === "v") { togglePop("view", null, true); return; }
+      if (lk === "t") { el("turbobtn").click(); return; }
+      if (lk === "g") { setPop(null); el("dashbtn").click(); return; }
+      if (lk === "o") { setPop(null); setDrawer(!drawerEl.classList.contains("open")); return; }
+      if (lk === "i") { setPop(null); setStatPanel(!statOpen); return; }
       if (t && t.tagName === "BUTTON") return;   /* Space / Enter belong to the button */
       /* the view: always */
       if (lk === "c") { wantFollow = false; scene.resetView(true); return; }
@@ -1810,7 +1896,7 @@
     window.addEventListener("resize", function () {
       scene.resize(); updateInsets();
       clearTimeout(fitTimer);
-      fitTimer = setTimeout(function () { updateFitButton(); updateInsets(); }, 250);
+      fitTimer = setTimeout(function () { updateFitButton(); updateInsets(); placePop(); placeCoach(); }, 250);
     });
     if (reducedMQ.addEventListener) reducedMQ.addEventListener("change", function () { scene.setReducedMotion(reducedMQ.matches); });
   }
@@ -1841,7 +1927,7 @@
     document.body.classList.toggle("sheet-open", open);
     menuBtn.setAttribute("aria-expanded", open ? "true" : "false");
     if (!open) hideTip();
-    if (open) setStatPanel(false);
+    if (open) { setStatPanel(false); setPop(null); hideCoach(); }
     if (scene) { updateInsets(); setTimeout(updateInsets, 320); }
   }
   menuBtn.addEventListener("click", function () { setDrawer(!drawerEl.classList.contains("open")); this.blur(); });
@@ -1933,11 +2019,30 @@
   btn("faster", function () { if (guardTurbo()) return; changeSpeed(1); });
   btn("turbobtn", function () { if (turboState === "live") enterTurbo(); else if (turboState === "turbo") exitTurbo(); });
   btn("turboexit", exitTurbo);
-  btn("randombtn", randomize);
+  el("turbobtn").addEventListener("click", function () { store(COACH_KEY, "1"); hideCoach(); });   /* found it: no coach mark */
+  btn("coachgo", function () { hideCoach(); el("turbobtn").click(); });
+  btn("coachx", hideCoach);
+  btn("stepbtn", function () { if (guardTurbo()) return; if (paused) stepOnce = true; });
   btn("randombig", randomize);
   btn("newworld", newWorld);
   btn("replay", replay);
   btn("lightbtn", toggleLight);
+  ["view", "help"].forEach(function (n) {   /* the triggers; × closes (pointerBlur, setPop: the focus) */
+    el(POPS[n][1]).addEventListener("click", function () {
+      var kb = this.matches(":focus-visible");
+      togglePop(n, kb ? this : null, kb);
+      if (!kb) this.blur();
+    });
+    el(n + "close").addEventListener("click", function () { closePop(this.matches(":focus-visible")); });
+  });
+  btn("tourbtn", function () { setPop(null); if (window.EvoGuide) EvoGuide.start(); });
+  btn("whatturbo", function () { setPop(null); if (window.EvoGuide && EvoGuide.turbo) EvoGuide.turbo(); });
+  el("to2dmenu").href = el("to2d").href;   /* the deploy build renames Classic's page in #to2d */
+  el("lightnow").addEventListener("change", function () {
+    lightNow = this.checked;
+    updateLight();
+    pointerBlur(this);
+  });
   btn("viewbtn", function () { if (scene) { wantFollow = false; scene.resetView(true); } });
   btn("fitbtn", fitToScreen);
   btn("followbtn", function () {
@@ -1958,7 +2063,6 @@
     setPending(true); updateNeeds(); updateTabDots();
     showNote("Every setting is back to its default. Restart to apply.");
   });
-  btn("guidebtn", function () { if (window.EvoGuide) EvoGuide.start(); });
   btn("savecp", function () { if (guardTurbo()) return; saveSetup(); });
   btn("loadcp", function () { if (guardTurbo()) return; el("cpfile").click(); });
   el("cpfile").addEventListener("change", function () {
@@ -1970,13 +2074,14 @@
   el("governor").addEventListener("change", function () {
     governorOn = this.checked;
     if (!governorOn) restoreDetail();
-    this.blur();
+    pointerBlur(this);
   });
-  el("followLight").addEventListener("change", function () {
+  el("followLight").addEventListener("change", function () {   /* the preference; following now, it applies now */
     followLight = this.checked;
     store("evo_boids.ocean.followLight", followLight ? "1" : "0");
+    if (scene && scene.following()) lightNow = followLight || lightBeforeFollow;
     updateLight();
-    this.blur();
+    pointerBlur(this);
   });
   el("followLight").checked = followLight;
   /* Fish colour: the fish's own appearance genome (its skin pattern; the
@@ -1992,15 +2097,29 @@
       want = saved === "brain" || saved === "family" ? saved : "appearance";
     colourMode = want;
     colourBrain = want === "brain";
-    el("colourMode").value = colourMode;
+    showColourMode();
   })();
-  el("colourMode").addEventListener("change", function () {
-    colourMode = this.value === "brain" || this.value === "appearance" ? this.value : "family";
+  /* the View menu's three buttons; the line under them says what the mode
+   * shows, or why Appearance can't (updateModeline), with the way to fix it */
+  function showColourMode() {
+    el("colourMode").querySelectorAll("button").forEach(function (b) { b.setAttribute("aria-pressed", b.dataset.c === colourMode ? "true" : "false"); });
+  }
+  el("colourMode").addEventListener("click", function (e) {
+    var b = e.target.closest("button[data-c]");
+    if (!b) return;
+    colourMode = b.dataset.c === "brain" || b.dataset.c === "appearance" ? b.dataset.c : "family";
     colourBrain = colourMode === "brain";
     if (!BENCH) store("evo_boids.colourBy", colourMode);   /* a benchmark's cases are not the visitor's choice */
+    showColourMode();
     if (M) applyDisplaySwitches();
     updateModeline();
-    this.blur();
+    pointerBlur(b);
+  });
+  el("colourwhy").addEventListener("click", function (e) {   /* "Settings › Life › Appearance genes" */
+    if (!e.target.closest("#colourfix")) return;
+    setPop(null); setDrawer(true); setSheetTab("life");
+    var row = el("f_appearance");
+    if (row) row.scrollIntoView({ block: "center" });
   });
   /* Water clarity: how murky the water is drawn (scene.setClarity; drawing
    * only, live), 0 realistic (the Ocean's first look, kept for reference)
@@ -2049,6 +2168,15 @@
       (WALLS ? ", glass walls" : ", the sides wrap around") +
       ". Drawing: the 3D tank" + (scene ? ", detail " + scene.quality() + " of 3" : "") +
       what + ".";
+    var noApp = !!M && colourMode === "appearance" && !flags;   /* the View menu: what the colours show, or why not */
+    el("colourwhy").classList.toggle("why", noApp);
+    setHtml("colourwhy", noApp
+      ? (HAS_APP ? "Appearance genes are off in this world, so the fish show family colours. To turn them on: " +
+                   "<button type='button' class='linkbtn' id='colourfix'>Settings › Life › Appearance genes</button>, then Restart."
+                 : "This engine build has no appearance genes, so the fish show family colours.")
+      : colourMode === "appearance" ? "Each fish wears the skin pattern and body shape it inherited."
+      : colourMode === "brain" ? "Fish with similar brains get similar colours."
+      : "Each family line has its own colour, the same one it has in the charts.");
   }
   setPaused(BENCH);
   changeSpeed(0);
@@ -2057,6 +2185,7 @@
   var guideFish = null;
   window.EvoGuideConfig = {
     key: "evo_boids.ocean.guideSeen.v1", introKey: "evo_boids.ocean.turboIntroSeen.v1",
+    quiet: true,   /* a first visit opens on the tank: the tour and the Turbo card wait in Help */
     steps: function (h) {
       var tap = function () { return h.touch() ? "Tap" : "Click"; };
       return [
@@ -2071,11 +2200,10 @@
           target: function () { return h.rectOf("#tank"); },
           body: function () {
             var looks = colourMode === "appearance" && HAS_APP
-              ? "each fish wears the skin pattern and body shape it inherited from its parents (the settings can " +
-                "colour them by family or by brain instead)"
+              ? "each fish wears the skin pattern and body shape it inherited from its parents"
               : colourBrain ? "a fish's colour follows its brain's wiring" : "each family has its own colour";
             return "Glowing specks are food, " + looks + ", and the dark fish with glowing eyes are " +
-                   "predators. Light fades and turns blue with depth. " +
+                   "predators. <b>View</b>, in the dock, colours them by family or brain and makes the water realistic. " +
                    (h.touch() ? "Drag to move, pinch to zoom, twist with two fingers to turn (below the horizon too)."
                               : "Drag to move, scroll to zoom, right-drag to turn (below the horizon too). Or fly: " +
                                 "<kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> move where you look, <kbd>Q</kbd> " +
@@ -2098,30 +2226,31 @@
         { drawer: false, title: "Live numbers",
           target: function () { return h.rectOf("#readout"); },
           body: function () {
-            return "Fish, generations, their average depth and the frame rate. " + tap() + " it for the rest: food, " +
-                   "births and deaths, family lines, and where in the depth the fish are.";
+            return "Fish, generations, their average depth and the frame rate. " + tap() + " it (or press I) for the " +
+                   "rest: food, births and deaths, family lines, and where in the depth the fish are.";
           } },
-        { drawer: false, title: "Two worlds",
-          target: function () { return h.rectOf("#worlds"); },
+        { drawer: false, title: "Two worlds",   /* a phone: the switch is in the live numbers' panel (ocean.html #worlds-alt) */
+          target: function () { return h.rectOf(innerWidth < 600 ? "#readout" : "#worlds"); },
           body: function () {
-            return "You are in the <b>3-D Ocean</b>. <b>2-D</b> opens Classic, the original flat world that the " +
-                   "native app runs, which you can watch as a tank or flat. Each world runs on its own, so " +
-                   "switching starts the other one fresh.";
+            return "You are in the <b>3-D Ocean</b>. <b>2-D Classic</b>" +
+                   (innerWidth < 600 ? " (tap the live numbers here; it is at the bottom)" : "") + " opens the original " +
+                   "flat world on its own page; the native app runs it too. Each world runs on its own, so switching " +
+                   "starts the other one fresh.";
           } },
         { desktopOnly: true, drawer: false, title: "Keyboard",
           body: function () {
-            return "<kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> fly · <kbd>Q</kbd> <kbd>E</kbd> down and up · " +
-                   "<kbd>Space</kbd> pause · <kbd>↑</kbd> <kbd>↓</kbd> speed · <kbd>F</kbd> follow · <kbd>L</kbd> " +
-                   "flashlight · <kbd>C</kbd> fit the view · <kbd>R</kbd> a new world (<kbd>Shift</kbd> <kbd>R</kbd> " +
-                   "replays this one) · <kbd>?</kbd> the keys beside the dock. Try one now; the tour waits. " +
+            return "<kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> fly · <kbd>Space</kbd> pause · <kbd>T</kbd> " +
+                   "Turbo · <kbd>F</kbd> follow · <kbd>L</kbd> flashlight · <kbd>V</kbd> view · <kbd>G</kbd> charts · " +
+                   "<kbd>O</kbd> settings · <kbd>?</kbd> help, with every key. Try one now; the tour waits. " +
                    "(<kbd>Esc</kbd> closes things, and this tour.)";
           } },
         { drawer: false, title: "Playback",
           target: function () { return h.rectOf("#dock"); },
           body: function () {
-            return "Pause and change speed. <b>Turbo</b> runs the world headless in a background thread, many times " +
-                   "faster, and hands it back exactly. The dice draws a new world; the lamp is the flashlight; the " +
-                   "corners fit the whole tank back on screen.";
+            return "Pause and change speed; while paused, the step button moves one step at a time. <b>Turbo</b> " +
+                   "runs this same world many times faster without drawing it, and hands it back exactly. Then the " +
+                   "flashlight, <b>View</b> (how the tank looks: the light, the water, the fish colours) and the " +
+                   "tank button, which fits the whole tank back on screen. Nothing here replaces your world.";
           } },
         { drawer: false, title: "Dashboards",
           target: function () { return h.rectOf("#dashbtn"); },
@@ -2131,7 +2260,7 @@
           } },
         { drawer: false, title: "Settings",
           target: function () { return h.rectOf("#menubtn"); },
-          body: function () { return "Everything else lives behind this button."; } },
+          body: function () { return "New worlds, every rule of this one, and saving and loading setups (O)."; } },
         { drawer: true, tab: "run", scroll: ".run-hero", place: h.drawerSides, title: "Randomize",
           target: function () { return h.rectOf(".run-hero"); },
           body: function () {
@@ -2147,7 +2276,7 @@
                    "<b>Restart</b>; settings marked <i>live</i> apply at once.";
           } },
         { last: true, drawer: false, title: "You're set",
-          body: function () { return "Replay this tour any time with <b>Tour</b> in the settings. Enjoy!"; } }
+          body: function () { return "Take this tour again any time from <b>Help</b> (?), with every key. Enjoy!"; } }
       ];
     },
     intro: function (h) {
@@ -2354,8 +2483,9 @@
     window.dispatchEvent(new Event("evo:ready"));
     setTimeout(function () {
       if (!everSelected && selectedId === null && turboState === "live" && !document.getElementById("guide"))
-        toast((coarseMQ.matches ? "Tap" : "Click") + " any fish to see its brain; F follows one with a flashlight.");
+        toast(coarseMQ.matches ? "Tap any fish to see its brain." : "Click any fish to see its brain; F follows one with a flashlight.");
     }, 9000);
+    startCoach();   /* later: the Turbo coach mark, once */
   }).catch(function (e) {
     var why = String(e && e.message || e);
     splashSay("The 3-D Ocean could not start.\n" + why, true);

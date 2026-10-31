@@ -337,7 +337,9 @@ function makeDom(page) {
     class El {
         constructor(tag) {
             this.tagName = this.nodeName = String(tag).toUpperCase();
-            this.children = []; this.parentNode = null; this.style = {}; this.dataset = {}; this.attrs = {};
+            this.children = []; this.parentNode = null; this.dataset = {}; this.attrs = {};
+            this.style = Object.defineProperties({}, {   /* custom properties (the Turbo coach's --arrow-x) */
+                setProperty: { value(k, v) { this[k] = String(v); } }, removeProperty: { value(k) { delete this[k]; } } });
             this._cls = new Set(); this._ls = {}; this._id = ''; this._text = ''; this._html = ''; this._auto = false;
             this.hidden = false; this.disabled = false; this.checked = false; this.value = ''; this.type = '';
             this.width = 0; this.height = 0; this.tabIndex = 0; this.scrollTop = 0;
@@ -545,7 +547,7 @@ async function bootPage(query) {
 }
 /* the Turbo controls, as they read: off ("live") or on */
 function turboControls(p) {
-    const locked = ['restart', 'savecp', 'loadcp', 'pausebtn', 'slower', 'faster', 'randombtn', 'randombig', 'newworld', 'replay']
+    const locked = ['restart', 'savecp', 'loadcp', 'pausebtn', 'slower', 'faster', 'stepbtn', 'randombig', 'newworld', 'replay']
         .filter(id => p.el(id).classList.contains('locked'));
     return { card: !p.el('turbo').hidden, button: !p.el('turbobtn').disabled, locked };
 }

@@ -1934,7 +1934,7 @@
   el("colourMode").addEventListener("change", function () {
     colourMode = this.value === "brain" || this.value === "appearance" ? this.value : "family";
     colourBrain = colourMode === "brain";
-    store("evo_boids.colourBy", colourMode);
+    if (!BENCH) store("evo_boids.colourBy", colourMode);   /* a benchmark's cases are not the visitor's choice */
     if (M) applyDisplaySwitches();
     updateModeline();
     this.blur();

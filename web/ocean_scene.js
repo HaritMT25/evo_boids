@@ -45,7 +45,10 @@
  *     production programs (a fixed fixture through the vertex shader in both
  *     colour modes: the gene texture's slot lookup, every body part's
  *     position and material site, the decoded pattern genes, the packed
- *     colour; and the fragment shader)
+ *     colour; and the fragment shader); appearanceTextureParity() that of
+ *     the live gene texture as three uploaded it (raw genes, pattern charts)
+ *   - measurement (opts.profiler, web/ocean_perf.js): spans, counters and
+ *     optional GPU timing; the default profiler records nothing
  *   - glass walls (setWorld(w, h, d, {walls})): the four side panes drawn as
  *     faint glass (brighter at grazing angles, GLASS_FS; not depth-written),
  *     every fish vertex held inside them (a fish against a pane flattens on
@@ -361,7 +364,7 @@
   /* ---- the appearance genome's fish (web/ocean_appearance.js: EvoAppearance) ----
    * The same spine, tail beat, pitch, lighting, depth, fog, selection and
    * flashlight as FISH_VS / FISH_FS; every gene comes from uGenes (a fish's
-   * 63 floats in 16 RGBA32F texels, fetched by gl_InstanceID): the body is
+   * 63 floats in 16 RGBA32F texels, fetched by appearanceSlot()): the body is
    * the M1 template deformed by the 30 shape genes and its skin is pattern
    * law 3 from the 33 pattern floats, at the vertex's canonical material
    * site, evaluated before the bend and the swim, so the pattern never
@@ -374,6 +377,15 @@
    * back, pale belly, paler fins) at the legacy template's height, (1 − 2v)
    * times the canonical profile, which equals FISH_FS's vOy on a neutral
    * body. The lighting, eyes, selection, fog and flashlight are shared. */
+  /* An instance's gene slot: the 16-texel row of the gene texture its genes
+   * are in (EvoAppearance GENES fetchGenes). One string for every program
+   * that reads genes (the fish and its shadow, the transform-feedback check,
+   * the live-texture probes), so that a change of ownership changes them all
+   * at once. Today the slot is the draw index. */
+  var GENE_SLOT_GLSL = "int appearanceSlot() { return gl_InstanceID; }";
+  /* the pattern genes of the fetched slot -> the flat pattern varyings (the
+   * fish's vertex shader and the texture-backed chart probe) */
+  var DECODE_CALL = "patternDecode(GT[0], GT[1], GT[2], GT[3], GT[4], GT[5], GT[6], GT[7].xyz, vec2(GT[7].w, GT[8].x), iX.z);";
   function appearanceShaders(EA) {
     var G = EA.GLSL;
     var CORE = [
@@ -386,6 +398,7 @@
       "uniform float uColourBy;",   /* 0: the skin from the genes (pattern law 3); 1: the family / brain colour */
       G.COMMON,
       G.GENES,
+      GENE_SLOT_GLSL,
       G.MORPH,
       "vec2 seg(int i) {",
       "  if (i <= 0) return iA.xy; if (i == 1) return iA.zw; if (i == 2) return iB.xy;",
@@ -429,8 +442,8 @@
       CORE, G.VARY, G.DECODE,
       "varying vec3 vWorld; varying vec4 vMatV; flat varying vec4 vPart;",
       "void main() {",
-      "  fetchGenes(gl_InstanceID);",
-      "  if (uColourBy < 0.5) patternDecode(GT[0], GT[1], GT[2], GT[3], GT[4], GT[5], GT[6], GT[7].xyz, vec2(GT[7].w, GT[8].x), iX.z);",
+      "  fetchGenes(appearanceSlot());",
+      "  if (uColourBy < 0.5) " + DECODE_CALL,
       "  Morph M = mDecode(iX.z);",
       "  vec3 geo, mat; float mar;",
       "  mBuild(M, aT, aPattern, uTime, uWag, minWidth(), geo, mat, mar);",
@@ -505,7 +518,7 @@
       "uniform vec3 uLight; uniform float uFloorY; uniform float uDepth;",
       "varying vec3 vWorld; varying float vLift;",
       "void main() {",
-      "  fetchGenes(gl_InstanceID);",
+      "  fetchGenes(appearanceSlot());",
       "  Morph M = mDecode(iX.z);",
       "  vec3 geo, mat; float mar;",
       "  mBuild(M, aT, aPattern, uTime, uWag, minWidth(), geo, mat, mar);",
@@ -537,10 +550,43 @@
       "varying vec2 vUV;",
       "void main() { float u = vUV.x, v = vUV.y; gl_FragColor = vec4(patternSkinM(u, v, pProfileH(u) * (1.0 - 2.0 * v), 0, 1000.0), 1.0); }"
     ].join("\n");
-    return { vs: vs, fs: fs, shadowVs: shadowVs, chartVs: chartVs, chartFs: chartFs };
+    /* the live gene texture's probes (appearanceTextureParity), with the
+     * fish's own GENES, GENE_SLOT_GLSL and DECODE_CALL. probeRawVs: an
+     * instance's 16 texels as fetched, onto 16 pixels of a float target
+     * (placed by draw index, read through appearanceSlot()); probeChartVs: the
+     * chart above, fed from the gene texture and the production iX, in the
+     * cell iCell gives it (off the target for an instance not charted) */
+    var probeRawVs = [
+      G.GENES, GENE_SLOT_GLSL,
+      "attribute float aTexel;",   /* 0..15, the same over a pixel's quad */
+      "uniform vec2 uProbeSize;",
+      "flat varying vec4 vRaw;",
+      "void main() {",
+      "  fetchGenes(appearanceSlot());",
+      "  int k = int(aTexel + 0.5);",
+      "  vRaw = GT[k];",
+      "  int o = 16 * gl_InstanceID + k;",
+      "  vec2 px = vec2(float(o % 512), float(o / 512)) + position.xy;",
+      "  gl_Position = vec4(2.0 * px / uProbeSize - 1.0, 0.0, 1.0);",
+      "}"
+    ].join("\n");
+    var probeRawFs = "flat varying vec4 vRaw;\nvoid main() { gl_FragColor = vRaw; }";
+    var probeChartVs = [
+      "attribute vec4 iX;", "attribute vec4 iCell;",
+      G.COMMON, G.VARY, G.DECODE, G.GENES, GENE_SLOT_GLSL,
+      "varying vec2 vUV;",
+      "void main() {",
+      "  fetchGenes(appearanceSlot());",
+      "  " + DECODE_CALL,
+      "  vUV = position.xy;",
+      "  gl_Position = vec4(iCell.xy + position.xy * iCell.zw, 0.0, 1.0);",
+      "}"
+    ].join("\n");
+    return { vs: vs, fs: fs, shadowVs: shadowVs, chartVs: chartVs, chartFs: chartFs,
+             probeRawVs: probeRawVs, probeRawFs: probeRawFs, probeChartVs: probeChartVs };
   }
 
-  /* The appearance checks: two layers, each against the CPU mirror
+  /* The appearance checks: three layers, each against the CPU mirror
    * (web/ocean_appearance.js), each a Promise of a report whose read-back
    * waits on a fence, polled (at most 10 s), so it never stalls the pipeline.
    * A report with .error did not run (a missing extension, a compile error,
@@ -556,8 +602,11 @@
    *     colours must reach vPart.w), and its fragment shader on known inputs
    *     (appearanceFragmentCheck: the recolour path, Family's and Brain's
    *     palettes, and the skin).
-   * They share the genes' layout (GENES, packGenes), the WebGL2 prefixes
-   * (VS3, FS3) and the fence polling (fenceDone). */
+   *   appearanceTextureParity (in create): the live gene texture itself, as
+   *     three uploaded it, read through the same slot selector right after a
+   *     production draw: its raw genes bit for bit, and the pattern charts.
+   * They share what the fish reads (GENE_SLOT_GLSL, DECODE_CALL, GENES), the
+   * WebGL2 prefixes (VS3, FS3) and the fence polling (fenceDone). */
   var VS3 = "#version 300 es\n#define attribute in\n#define varying out\nprecision highp float;\nprecision highp int;\n" +
             "uniform mat4 projectionMatrix;\nuniform mat4 viewMatrix;\nuniform vec3 cameraPosition;\n";
   var FS3 = "#version 300 es\n#define varying in\nprecision highp float;\nprecision highp int;\nuniform vec3 cameraPosition;\n" +
@@ -1461,6 +1510,13 @@
 
   function hash01(n) { var s = Math.sin(n * 12.9898 + 78.233) * 43758.5453; return s - Math.floor(s); }
 
+  /* without web/ocean_perf.js: a profiler that records nothing */
+  var NO_PROFILER = (function () {
+    function no() {} function zero() { return 0; }
+    return { active: false, SPAN: {}, K: {}, beginCpu: zero, lap: zero, endCpu: no, count: no, add: no, markDiagnostic: no,
+             attachGL: no, watch: no, beginSubmission: no, endSubmission: no, suspend: function (f) { return f(); } };
+  })();
+
   /* ---------------- the scene ---------------- */
   function create(canvas, opts) {
     if (!THREE) return null;
@@ -1474,6 +1530,20 @@
       return null;
     }
     renderer.toneMapping = THREE.NoToneMapping;
+    /* measurement (web/ocean_perf.js): opts.profiler, else one that records
+     * nothing; and the snow's and the current streaks' generator
+     * (opts.visualRandom: the benchmark's seeded one; else Math.random) */
+    var profiler = opts.profiler || (window.EvoOceanPerf && window.EvoOceanPerf.disabled) || NO_PROFILER;
+    var SP = profiler.SPAN || {}, PK = profiler.K || {};
+    profiler.attachGL(renderer.getContext());
+    var vrand = opts.visualRandom || Math.random;
+    /* the gene texture's uploads as three performed them (DataTexture.onUpdate),
+     * kept with or without a profiler: the live-texture probe asserts it
+     * caused none */
+    var geneIO = { uploads: 0, bytes: 0, allocs: 0 };
+    /* test-only: holdGeneUploads leaves the gene texture's upload out, so a
+     * stale texture can be shown to fail appearanceTextureParity */
+    var testFaults = { holdGeneUploads: false };
     /* the shaders write sRGB as-is, but three colour-manages the clear colour:
      * hand it over as sRGB ("srgb" = THREE.SRGBColorSpace) so the water above
      * the horizon (seen from a low camera) is the fog colour, not a pale teal */
@@ -1548,6 +1618,7 @@
     floor.position.y = FLOOR_Y;
     floor.renderOrder = 0;
     scene.add(floor);
+    profiler.watch(floor, "floor");
 
     /* the surface, lit from above when seen from below (SURF_FS); it shares
      * the floor's caustic texture uniform, so it shimmers once that is built */
@@ -1563,6 +1634,7 @@
     surface.renderOrder = 7;
     surface.frustumCulled = false;
     scene.add(surface);
+    profiler.watch(surface, "surface");
 
     /* fish + predators: instanced templates sharing one shader */
     var fishUniforms = beamUniforms({
@@ -1586,7 +1658,7 @@
      * has to grow. */
     function Kind(pred) {
       var tpl = fishTemplate(pred);
-      var self = { cap: 0, n: 0, geo: null, mesh: null, shadow: null, attrs: null };
+      var self = { cap: 0, n: 0, geo: null, mesh: null, shadow: null, attrs: null, verts: tpl.pos.length / 3, tris: tpl.idx.length / 3 };
       function build(cap) {
         var g = new THREE.InstancedBufferGeometry();
         g.setAttribute("position", new THREE.BufferAttribute(tpl.pos, 3));
@@ -1612,6 +1684,8 @@
           self.mesh.renderOrder = 2;
           scene.add(self.shadow);
           scene.add(self.mesh);
+          profiler.watch(self.mesh, pred ? "predBody" : "fishBody");
+          profiler.watch(self.shadow, pred ? "predShadow" : "fishShadow");
         }
         self.geo = g; self.attrs = at; self.cap = cap;
       }
@@ -1668,8 +1742,16 @@
       var shMat = new THREE.ShaderMaterial({ vertexShader: sh.shadowVs, fragmentShader: SHADOW_FS, uniforms: shadowU,
                                              transparent: true, depthWrite: true, depthFunc: THREE.LessDepth, side: THREE.DoubleSide });
       var self = { cap: 0, n: 0, lod: "", attrs: null, geo: null, bgeo: null, mesh: null, bmesh: null, shadow: null,
-                   tex: null, texData: null, mat: mat, shaders: sh, barbels: false, tpls: tpls, barbTpl: barbTpl };
+                   tex: null, texData: null, mat: mat, shaders: sh, barbels: false, tpls: tpls, barbTpl: barbTpl, plan: null };
       var INST = ["iA", "iB", "iC", "iBody", "iX"];
+      self.inst = INST;   /* the instance attributes the probes share */
+      /* three uploaded the gene texture (DataTexture.onUpdate): the pending plan's bytes */
+      function onGeneUpload() {
+        var bytes = self.plan ? self.plan.bytes : self.texData.byteLength;
+        self.plan = null;
+        geneIO.uploads++; geneIO.bytes += bytes;
+        profiler.add(PK.geneUploads, 1); profiler.add(PK.geneUploadBytes, bytes);
+      }
       function geometry(tpl, at) {
         var g = new THREE.InstancedBufferGeometry();
         var p3 = new Float32Array(tpl.verts * 3);
@@ -1702,6 +1784,10 @@
         tex.magFilter = tex.minFilter = 1003;
         tex.generateMipmaps = false;
         tex.needsUpdate = true;
+        tex.onUpdate = onGeneUpload;
+        self.plan = { full: true, bytes: data.byteLength };   /* its allocation's upload */
+        geneIO.allocs++;
+        profiler.add(PK.texAllocs, 1); profiler.add(PK.instAllocBytes, INST.length * cap * 16);
         if (self.geo) {
           self.geo.dispose(); if (self.bgeo) self.bgeo.dispose(); self.tex.dispose();
           self.mesh.geometry = g; self.shadow.geometry = g;
@@ -1712,10 +1798,12 @@
           self.mesh.frustumCulled = self.shadow.frustumCulled = false;
           self.shadow.renderOrder = 1; self.mesh.renderOrder = 2;
           scene.add(self.shadow); scene.add(self.mesh);
+          profiler.watch(self.mesh, "fishBody"); profiler.watch(self.shadow, "fishShadow");
           if (bg) {
             self.bmesh = new THREE.Mesh(bg, mat);
             self.bmesh.frustumCulled = false; self.bmesh.renderOrder = 2;
             scene.add(self.bmesh);
+            profiler.watch(self.bmesh, "barbels");
           }
         }
         U.uGenes.value = tex;
@@ -1738,7 +1826,18 @@
           a.addUpdateRange(0, n * 4);
           a.needsUpdate = true;
         });
-        self.tex.needsUpdate = true;
+        /* the gene texture's upload: the whole texture every frame (one full
+         * upload, no ranges); the plan is what onGeneUpload counts */
+        var tg = profiler.beginCpu();
+        if (!testFaults.holdGeneUploads) {
+          self.plan = { full: true, bytes: self.texData.byteLength };
+          self.tex.needsUpdate = true;
+        }
+        profiler.endCpu(SP.geneRanges, tg);
+        if (profiler.active) {
+          profiler.count(PK.instBytes, INST.length * n * 16); profiler.count(PK.geneDirtySlots, n);
+          profiler.count(PK.geneRanges, 0); profiler.count(PK.texCapacity, self.cap);
+        }
         self.mesh.visible = n > 0;
         self.shadow.visible = n > 0 && quality >= 2;
         if (self.bmesh) self.bmesh.visible = n > 0 && !!barbels && self.lod === "medium";
@@ -1760,6 +1859,7 @@
     food.frustumCulled = false;
     food.renderOrder = 3;
     scene.add(food);
+    profiler.watch(food, "food");
     function ensureFood(n) {
       if (n <= foodCap) return;
       var cap = Math.max(1024, foodCap);
@@ -1790,13 +1890,14 @@
     glow.frustumCulled = false;
     glow.renderOrder = 1;
     scene.add(glow);
+    profiler.watch(glow, "other");
 
     /* marine snow: a fixed buffer, animated entirely in the shader (more of
      * it than in the shallow tank: it falls through the whole depth) */
     var snowGeo = new THREE.BufferGeometry(), SNOW = 900;
     (function () {
       var p = new Float32Array(SNOW * 3), sd = new Float32Array(SNOW);
-      for (var i = 0; i < SNOW; i++) { p[3 * i] = Math.random() - 0.5; p[3 * i + 2] = Math.random() - 0.5; sd[i] = Math.random(); }
+      for (var i = 0; i < SNOW; i++) { p[3 * i] = vrand() - 0.5; p[3 * i + 2] = vrand() - 0.5; sd[i] = vrand(); }
       snowGeo.setAttribute("position", new THREE.BufferAttribute(p, 3));
       snowGeo.setAttribute("seed", new THREE.BufferAttribute(sd, 1));
     })();
@@ -1811,6 +1912,7 @@
     snow.frustumCulled = false;
     snow.renderOrder = 6;
     scene.add(snow);
+    profiler.watch(snow, "snow");
     function placeSnow() {
       /* a fixed budget of flakes over the tank (more area: sparser, never
        * more); with glass walls inside the panes, clear of their 14-unit sway */
@@ -1836,6 +1938,7 @@
       obj.frustumCulled = false;
       obj.renderOrder = order;
       scene.add(obj);
+      profiler.watch(obj, "other");
       return { obj: obj, p: p.array, a: a.array, geo: g,
                commit: function (verts) {
                  g.setDrawRange(0, verts);
@@ -1859,6 +1962,7 @@
     glass.renderOrder = 8;   /* after the fish, the food and the snow */
     glass.visible = false;
     scene.add(glass);
+    profiler.watch(glass, "other");
     function buildGlass() {
       var P = glassGeo.attributes.position.array, N = glassGeo.attributes.normal.array, k = 0;
       var top = -0.5, bot = FLOOR_Y + 0.6;
@@ -1890,6 +1994,7 @@
       mesh.renderOrder = 5;
       mesh.visible = false;
       scene.add(mesh);
+      profiler.watch(mesh, "other");
       return mesh;
     }
     var selRing = Ring(1), hoverRing = Ring(0.45);
@@ -2162,7 +2267,7 @@
       if (!heights || heights.length < n) heights = new Float32Array(Math.max(n, 2048));
       var xs = SX, ys = SY, barbels = false;
       for (var c = 0; c < n; c++) {
-        var b = 12 * c, px = segs[b], py = segs[b + 1], o = 4 * c, r = ST * c;
+        var b = 12 * c, px = segs[b], py = segs[b + 1], o = 4 * c;
         xs[0] = px; ys[0] = py;
         for (var k = 1; k < 6; k++) {
           var x = segs[b + 2 * k], y = segs[b + 2 * k + 1];
@@ -2187,16 +2292,30 @@
         X[o] = t === t ? t : 0; X[o + 1] = hash01(id);
         X[o + 2] = 20 * size * elong / BODY[o];   /* lambda: body length / radius */
         X[o + 3] = cols ? cols[3 * c] * 65536 + cols[3 * c + 1] * 256 + cols[3 * c + 2] : 0;   /* the family / brain colour */
-        packGenes(T, R, r, c, ST);   /* 16 texels: the 63 genes, one zero */
-        if (R[r + MO + 26] > 0.2) barbels = true;
       }
+      /* the genes, by draw index: 16 texels a fish, the 63 genes and one zero */
+      var tg = profiler.beginCpu();
+      for (c = 0; c < n; c++) {
+        packGenes(T, R, ST * c, c, ST);
+        if (R[ST * c + MO + 26] > 0.2) barbels = true;
+      }
+      profiler.endCpu(SP.appearanceRows, tg);
       var tanHalf = Math.tan(camera.fov * Math.PI / 360);
       appKind.mat.uniforms.uPxPerUnit.value = ch / (2 * tanHalf);
       appKind.mat.uniforms.uColourBy.value = appSkin ? 0 : 1;
       appKind.commit(n, barbels);
+      if (profiler.active) {
+        var tp = appKind.tpls[appKind.lod];
+        profiler.count(PK.lod, appKind.lod === "medium" ? 2 : 1); profiler.count(PK.bodyInst, n);
+        profiler.count(PK.shadowInst, appKind.shadow.visible ? n : 0); profiler.count(PK.barbelInst, appKind.bmesh && appKind.bmesh.visible ? n : 0);
+        profiler.count(PK.tplVerts, tp.verts); profiler.count(PK.tplTris, tp.idx.length / 3);
+        profiler.count(PK.geneSrcBytes, n * ST * 4); profiler.count(PK.genePadBytes, n * 4);
+      }
     }
+    var appDrawn = false;   /* this frame drew the appearance fish (the probes need it) */
     function fillFish(s, selIdx, hovIdx) {
-      if (appearanceDrawn(s)) {
+      appDrawn = appearanceDrawn(s);
+      if (appDrawn) {
         fillApp(s, selIdx, hovIdx);
         fish.commit(0);
         return;
@@ -2239,6 +2358,12 @@
         X[o] = t === t ? t : 0; X[o + 1] = 0; X[o + 2] = 0; X[o + 3] = 0;
       }
       fish.commit(n);
+      if (profiler.active) {
+        profiler.count(PK.lod, 0); profiler.count(PK.bodyInst, n); profiler.count(PK.barbelInst, 0);
+        profiler.count(PK.shadowInst, fish.shadow.visible ? n : 0);
+        profiler.count(PK.tplVerts, fish.verts); profiler.count(PK.tplTris, fish.tris);
+        profiler.count(PK.instBytes, 6 * n * 16);
+      }
     }
 
     /* Predators carry only a position: a short history of where each one has
@@ -2348,8 +2473,8 @@
       for (var i = 0; i < STREAKS; i++) {
         var o = 4 * i;
         if (streak[o + 2] >= streak[o + 3]) {
-          streak[o] = Math.random() * W; streak[o + 1] = Math.random() * H;
-          streak[o + 2] = 0; streak[o + 3] = 1.5 + Math.random() * 3;
+          streak[o] = vrand() * W; streak[o + 1] = vrand() * H;
+          streak[o + 2] = 0; streak[o + 3] = 1.5 + vrand() * 3;
         }
         sampleCurrent(s, streak[o], streak[o + 1], vel);
         if (dtSim > 0) {
@@ -2444,7 +2569,8 @@
     canvas.addEventListener("pointerleave", function () { hoverPt = null; });
 
     function render(s, info) {
-      if (lost) return;
+      if (lost) { profiler.count(PK.lost, 1); if (probes.length) failProbes("the WebGL context is lost"); return; }
+      var pt = profiler.beginCpu();
       var now = performance.now();
       var dt = lastT ? Math.min(0.1, (now - lastT) / 1000) : 0.016;
       lastT = now;
@@ -2483,7 +2609,9 @@
       hoverIdx = hoverPt ? pickAt(s, hoverPt[0], hoverPt[1], 16) : -1;
       if (hoverIdx === sel) hoverIdx = -1;
       canvas.style.cursor = hoverIdx >= 0 ? "pointer" : "";
+      pt = profiler.lap(SP.cameraPick, pt);
       fillFish(s, sel, hoverIdx);
+      pt = profiler.lap(SP.fishPack, pt);
       fillPreds(s);
       fillFood(s);
       fillCurrents(s, info.dtSim);
@@ -2499,7 +2627,22 @@
         floorMat.uniforms.uCausticAmt.value = causticAmt();   /* strong enough to read on the sand */
       }
       aimBeam(s, sel, dt);
-      renderer.render(scene, camera);
+      profiler.lap(SP.otherPack, pt);
+      var submitT = profiler.beginCpu(), ok = false;
+      profiler.beginSubmission();
+      try {
+        renderer.render(scene, camera);
+        ok = true;
+      } finally {
+        profiler.endSubmission(ok);   /* a query left open by a throw is closed and invalidated */
+        profiler.endCpu(SP.submit, submitT);
+      }
+      if (profiler.active) {
+        var ri = renderer.info.render;
+        profiler.count(PK.calls, ri.calls); profiler.count(PK.triangles, ri.triangles);
+        profiler.count(PK.points, ri.points); profiler.count(PK.lines, ri.lines);
+      }
+      if (probes.length) runProbes(s);
     }
     var followDive = false;
 
@@ -2616,6 +2759,250 @@
       errs.sort(function (a, b) { return a - b; });
       return { fish: n, samples: errs.length, maxErr: maxErr, meanErr: sum / errs.length, p99: errs[Math.floor(errs.length * 0.99)],
                p999: errs[Math.floor(errs.length * 0.999)], over002: over / errs.length, worst: worst };
+    }
+
+    /* ---- the live gene texture, checked (appearanceTextureParity) ----
+     * Right after a production draw of the appearance fish, two diagnostic
+     * draws read appKind.tex itself, bound through the fish material's own
+     * uGenes uniform (so three's uploader is what is tested), with the
+     * production instance attributes (iX) and the same slot selector
+     * (GENE_SLOT_GLSL), into RGBA32F targets (nearest, no mipmaps, no MSAA,
+     * no depth) read back through pixel-pack buffers and a fence (polled,
+     * 10 s; three's state is restored before anything waits):
+     *   raw: every fish's 16 texels, bit for bit, against owned copies of
+     *     the snapshot's 63 genes and the zero after them (never re-packed)
+     *   intrinsic: pattern charts, 96 x 48 a fish, at most 64 a batch, the
+     *     whole instance sequence drawn with the uncharted fish off the
+     *     target, of fish on both sides of the 32-fish rows and of slot 2048,
+     *     against EvoAppearance.decode / flankAt of the original rows (p99.9
+     *     <= .002, nothing non-finite)
+     * The probe must upload nothing: one that did would have repaired a
+     * missed production upload, and that fails. expected: owned copies
+     * {worldEpoch, n, ids, app, body} (EvoOcean.bench.snapshotCopy), which
+     * must be the snapshot drawn; absent, that snapshot's own copies.
+     * o.mutate "slot": the probes read a wrong slot; o.pendingUpload: a
+     * production upload left pending (the probe would perform it); both must
+     * fail. o.charts: how many fish to chart (24). A diagnostic: the frame is
+     * marked, never part of a timed capture. */
+    var probes = [];
+    var PROBE_SENTINEL = new Float32Array([-9, -9, -9, -9]);
+    var RAW_QUADS = (function () {   /* 16 pixel quads, one a gene texel */
+      var pos = new Float32Array(16 * 6 * 3), tx = new Float32Array(16 * 6), Q = [[0, 0], [1, 0], [0, 1], [0, 1], [1, 0], [1, 1]];
+      for (var k = 0; k < 16; k++) for (var v = 0; v < 6; v++) { var i = 6 * k + v; pos[3 * i] = Q[v][0]; pos[3 * i + 1] = Q[v][1]; tx[i] = k; }
+      return { pos: pos, texel: tx };
+    })();
+    function appearanceTextureParity(expected, o) {
+      return new Promise(function (resolve) {
+        var rq = { expected: expected || null, o: o || {}, resolve: resolve };
+        rq.timer = setTimeout(function () {
+          var i = probes.indexOf(rq);
+          if (i >= 0) { probes.splice(i, 1); resolve({ ok: false, error: "no production draw of the appearance fish within 10 s" }); }
+        }, 10000);
+        probes.push(rq);
+      });
+    }
+    function failProbes(why) {
+      var list = probes; probes = [];
+      list.forEach(function (rq) { clearTimeout(rq.timer); rq.resolve({ ok: false, error: why }); });
+    }
+    function runProbes(s) {
+      if (!appDrawn || !appKind || !appKind.mesh.visible) { failProbes("the appearance fish were not drawn this frame (" + appStatus + ")"); return; }
+      var list = probes; probes = [];
+      list.forEach(function (rq) {
+        clearTimeout(rq.timer);
+        var p;
+        try { p = profiler.suspend(function () { return textureProbe(rq, s); }); }
+        catch (e) { p = Promise.resolve({ ok: false, error: "probe: " + (e && e.message || e) }); }
+        p.then(rq.resolve, function (e) { rq.resolve({ ok: false, error: "probe: " + (e && e.message || e) }); });
+      });
+    }
+    /* the draw indices charted: both sides of the 32-fish rows and of 2048, the last, then spread */
+    function chartPicks(n, want) {
+      var pick = [], seen = {};
+      function add(i) { if (i >= 0 && i < n && !seen[i]) { seen[i] = true; pick.push(i); } }
+      [0, 1, 31, 32, 33, 63, 64, 2047, 2048, 2049, n - 1].forEach(add);
+      for (var k = 1; pick.length < Math.min(want, n) && k < 64 * want; k++) add(Math.floor((k * 0.6180339887 % 1) * n));
+      return pick.sort(function (a, b) { return a - b; });
+    }
+    function floatTarget(w, h) {
+      return new THREE.WebGLRenderTarget(w, h, { type: 1015, format: 1023, minFilter: 1003, magFilter: 1003, generateMipmaps: false,
+                                                 depthBuffer: false, stencilBuffer: false, samples: 0 });
+    }
+    function textureProbe(rq, s) {
+      var o = rq.o, gl = renderer.getContext(), n = appKind.n, ST = EA.STRIDE, inst = appKind.inst;
+      var res = { ok: false, worldEpoch: s.worldEpoch, tick: s.stats ? s.stats[1] : null, fish: n,
+                  mutate: o.mutate || "", pendingUpload: !!o.pendingUpload, failures: [] };
+      if (!THREE.WebGLRenderTarget) { res.error = "the three bundle has no WebGLRenderTarget (tools/three_bundle)"; return Promise.resolve(res); }
+      /* what was drawn: owned copies, before any probe work */
+      var drawnIds = Float64Array.from(s.ids.subarray(0, n));
+      var exp = rq.expected || { worldEpoch: s.worldEpoch, tick: res.tick, n: n, ids: drawnIds,
+                                 app: Float32Array.from(s.app.subarray(0, n * ST)), body: Float32Array.from(s.body.subarray(0, 2 * n)) };
+      var why = null;
+      if (exp.n !== n) why = "it has " + exp.n + " fish, " + n + " were drawn";
+      else if (exp.worldEpoch !== undefined && s.worldEpoch !== undefined && exp.worldEpoch !== s.worldEpoch) why = "world epoch " + exp.worldEpoch + ", drawn " + s.worldEpoch;
+      else for (var i = 0; i < n; i++) if (exp.ids[i] !== drawnIds[i]) { why = "draw " + i + " is fish " + exp.ids[i] + ", drawn " + drawnIds[i]; break; }
+      if (!why && (!exp.app || exp.app.length < n * ST || !exp.body || exp.body.length < 2 * n)) why = "it has no appearance rows or bodies";
+      if (why) { res.error = "the expected snapshot is not the one drawn: " + why; return Promise.resolve(res); }
+      var app = exp.app instanceof Float32Array ? exp.app : Float32Array.from(exp.app), body = exp.body;
+      var tex = appKind.tex;
+      res.texture = { width: tex.image.width, height: tex.image.height, type: tex.type, format: tex.format,
+                      internalFormat: tex.internalFormat || "RGBA32F (three: RGBAFormat + FloatType)", capacity: appKind.cap,
+                      minFilter: tex.minFilter, magFilter: tex.magFilter, mipmaps: tex.generateMipmaps };
+      var sh = appKind.shaders, rawVs = sh.probeRawVs, chartVs = sh.probeChartVs;
+      if (o.mutate === "slot") {
+        var wrong = "int appearanceSlot() { return gl_InstanceID ^ 1; }";
+        rawVs = rawVs.split(GENE_SLOT_GLSL).join(wrong); chartVs = chartVs.split(GENE_SLOT_GLSL).join(wrong);
+      } else if (o.mutate) { res.error = "unknown mutation " + o.mutate; return Promise.resolve(res); }
+      var picks = chartPicks(n, o.charts || 24), CW = 96, CH = 48, PER = 64, COLS = 8;
+      var geos = [], mats = [], rts = [], reads = [], batches = [], err = null, shaderErr = null;
+      var keepRT = renderer.getRenderTarget(), keepClear = renderer.autoClear, keepOnErr = renderer.debug.onShaderError;
+      var cam = new THREE.PerspectiveCamera(), up0 = geneIO.uploads;
+      function geometry() {   /* shares the fish's instance attributes (and their GL buffers) */
+        var g = new THREE.InstancedBufferGeometry();
+        inst.forEach(function (nm) { g.setAttribute(nm, appKind.attrs[nm]); });
+        g.instanceCount = n;
+        geos.push(g);
+        return g;
+      }
+      function material(vs, fs, extra) {
+        var u = { uGenes: appKind.mat.uniforms.uGenes };   /* the fish material's own uniform: appKind.tex */
+        Object.keys(extra).forEach(function (k) { u[k] = extra[k]; });
+        var m = new THREE.ShaderMaterial({ vertexShader: vs, fragmentShader: fs, uniforms: u, depthTest: false, depthWrite: false, side: THREE.DoubleSide });
+        mats.push(m);
+        return m;
+      }
+      function draw(rt, g, m) {
+        var mesh = new THREE.Mesh(g, m), sc = new THREE.Scene();
+        mesh.frustumCulled = false; sc.add(mesh);
+        renderer.setRenderTarget(rt);
+        var st = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+        if (st !== gl.FRAMEBUFFER_COMPLETE) throw new Error("the probe's float target is incomplete (" + st + ")");
+        renderer.state.buffers.color.setMask(true);
+        renderer.state.setScissorTest(false);
+        gl.clearBufferfv(gl.COLOR, 0, PROBE_SENTINEL);
+        renderer.render(sc, cam);
+        renderer.setRenderTarget(rt);
+        var b = gl.createBuffer();   /* the target -> a pixel-pack buffer; nothing waits here */
+        gl.bindBuffer(gl.PIXEL_PACK_BUFFER, b);
+        gl.bufferData(gl.PIXEL_PACK_BUFFER, rt.width * rt.height * 16, gl.STREAM_READ);
+        gl.readPixels(0, 0, rt.width, rt.height, gl.RGBA, gl.FLOAT, 0);
+        gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+        reads.push(b);
+        return { buf: b, w: rt.width, h: rt.height };
+      }
+      var raw = null;
+      if (o.pendingUpload) tex.needsUpdate = true;   /* a production upload left undone */
+      try {
+        renderer.autoClear = false;
+        renderer.debug.onShaderError = function (g, prog, vs, fs) {
+          shaderErr = ((g.getShaderInfoLog(vs) || "") + " " + (g.getShaderInfoLog(fs) || "") + " " + (g.getProgramInfoLog(prog) || "")).trim() || "the probe's program did not link";
+        };
+        /* raw genes: 16 pixels a fish, 512 a row */
+        var rawH = Math.ceil(16 * n / GENES_W), rawRT = floatTarget(GENES_W, rawH), rg = geometry();
+        rts.push(rawRT);
+        rg.setAttribute("position", new THREE.BufferAttribute(RAW_QUADS.pos, 3));
+        rg.setAttribute("aTexel", new THREE.BufferAttribute(RAW_QUADS.texel, 1));
+        raw = draw(rawRT, rg, material(rawVs, sh.probeRawFs, { uProbeSize: { value: new THREE.Vector2(GENES_W, rawH) } }));
+        /* the charts, a batch of at most 64 at a time */
+        var cg = geometry(), cell = new THREE.InstancedBufferAttribute(new Float32Array(n * 4), 4);
+        cg.setAttribute("position", new THREE.BufferAttribute(new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 1, 0]), 3));
+        cg.setIndex([0, 1, 2, 2, 1, 3]);
+        cg.setAttribute("iCell", cell);
+        var cm = material(chartVs, sh.chartFs, { uIntrinsic: { value: 1 } });
+        for (var b0 = 0; b0 < picks.length; b0 += PER) {
+          var part = picks.slice(b0, b0 + PER), rowsN = Math.ceil(part.length / COLS), A = cell.array;
+          for (var q = 0; q < n; q++) { A[4 * q] = 4; A[4 * q + 1] = 4; A[4 * q + 2] = 0; A[4 * q + 3] = 0; }   /* off the target */
+          part.forEach(function (c, k) {
+            var cx = k % COLS, cy = Math.floor(k / COLS);
+            A[4 * c] = -1 + 2 * cx / COLS; A[4 * c + 1] = -1 + 2 * cy / rowsN; A[4 * c + 2] = 2 / COLS; A[4 * c + 3] = 2 / rowsN;
+          });
+          cell.needsUpdate = true;
+          var rt = floatTarget(COLS * CW, rowsN * CH);
+          rts.push(rt);
+          batches.push({ fish: part, read: draw(rt, cg, cm) });
+        }
+      } catch (e) { err = e; }
+      finally {
+        renderer.setRenderTarget(keepRT);
+        renderer.autoClear = keepClear;
+        renderer.debug.onShaderError = keepOnErr;
+      }
+      res.extraUploads = geneIO.uploads - up0;
+      var sync = err || shaderErr ? null : gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+      if (sync) gl.flush();
+      function cleanup() {
+        gl.bindBuffer(gl.COPY_READ_BUFFER, null);
+        reads.forEach(function (b) { gl.deleteBuffer(b); });
+        if (sync) gl.deleteSync(sync);
+        geos.forEach(function (g) { inst.forEach(function (nm) { g.deleteAttribute(nm); }); g.dispose(); });   /* the fish keep theirs */
+        mats.forEach(function (m) { m.dispose(); }); rts.forEach(function (t) { t.dispose(); });
+      }
+      if (err || shaderErr) { cleanup(); res.error = shaderErr ? "probe shader: " + shaderErr : "probe: " + (err.message || err); return Promise.resolve(res); }
+      return fenceDone(gl, sync, 10000).then(function (why) {
+        if (why) { cleanup(); res.error = why; return res; }
+        function fetch(rd) {
+          var px = new Float32Array(rd.w * rd.h * 4);
+          gl.bindBuffer(gl.COPY_READ_BUFFER, rd.buf);
+          gl.getBufferSubData(gl.COPY_READ_BUFFER, 0, px);
+          return px;
+        }
+        /* raw: the genes' bit patterns, then the zero */
+        var rp = fetch(raw), gotU = new Uint32Array(rp.buffer), appU = new Uint32Array(app.buffer, app.byteOffset, n * ST);
+        var R = { compared: n * 64, mismatches: 0, paddingMismatches: 0, nonFinite: 0, examples: [] };
+        for (var c = 0; c < n; c++) for (var j = 0; j < 64; j++) {
+          var gi = 64 * c + j;
+          if (!Number.isFinite(rp[gi])) R.nonFinite++;
+          if (j < 63) {
+            if (gotU[gi] !== appU[ST * c + j]) {
+              R.mismatches++;
+              if (R.examples.length < 6) R.examples.push({ draw: c, id: exp.ids[c], gene: j, want: app[ST * c + j], got: rp[gi] });
+            }
+          } else if (gotU[gi] !== 0) R.paddingMismatches++;
+        }
+        res.rawGenes = R;
+        /* the charts against the CPU mirror of the original rows */
+        var errs = [], nonFinite = 0, over = 0, maxErr = 0, worst = "", out = [0, 0, 0];
+        batches.forEach(function (bt) {
+          var px = fetch(bt.read), TW = bt.read.w;
+          bt.fish.forEach(function (c, k) {
+            var size = body[2 * c], elong = body[2 * c + 1];
+            var lam = Math.fround(20 * size * elong / Math.fround(4.6 * bodyScale(size)));   /* fillApp's iX.z */
+            var D = EA.decode(app.subarray(ST * c, ST * c + ST), lam), x0 = (k % COLS) * CW, y0 = Math.floor(k / COLS) * CH;
+            for (var jj = 0; jj < CH; jj++) for (var ii = 0; ii < CW; ii++) {
+              EA.flankAt(D, (ii + 0.5) / CW, (jj + 0.5) / CH, out);
+              var p = ((y0 + jj) * TW + x0 + ii) * 4;
+              if (!Number.isFinite(px[p]) || !Number.isFinite(px[p + 1]) || !Number.isFinite(px[p + 2])) { nonFinite++; continue; }
+              var e = Math.max(Math.abs(px[p] - out[0]), Math.abs(px[p + 1] - out[1]), Math.abs(px[p + 2] - out[2]));
+              errs.push(e); if (e > 0.002) over++;
+              if (e > maxErr) { maxErr = e; worst = "draw " + c + " (fish " + exp.ids[c] + ") u " + ((ii + 0.5) / CW).toFixed(3) + " v " + ((jj + 0.5) / CH).toFixed(3); }
+            }
+          });
+        });
+        cleanup();
+        var E = Float64Array.from(errs).sort();
+        res.intrinsic = { fish: picks.length, draws: picks, ids: picks.map(function (c) { return exp.ids[c]; }), samples: E.length,
+                          p99: E.length ? E[Math.floor(E.length * 0.99)] : null, p999: E.length ? E[Math.floor(E.length * 0.999)] : null,
+                          maxErr: maxErr, over002: E.length ? over / E.length : null, nonFinite: nonFinite, worst: worst };
+        if (res.extraUploads) res.failures.push("the probe uploaded the gene texture " + res.extraUploads + "x (a production upload was pending)");
+        if (R.mismatches) res.failures.push(R.mismatches + " raw gene mismatches");
+        if (R.paddingMismatches) res.failures.push(R.paddingMismatches + " padding mismatches");
+        if (R.nonFinite) res.failures.push(R.nonFinite + " non-finite raw components");
+        if (nonFinite) res.failures.push(nonFinite + " non-finite chart pixels");
+        if (!E.length || !(res.intrinsic.p999 <= 0.002)) res.failures.push("chart p99.9 " + res.intrinsic.p999 + " > .002");
+        if (tex.type !== 1015 || tex.format !== 1023) res.failures.push("the gene texture is not RGBA float");
+        res.ok = res.failures.length === 0;
+        return res;
+      });
+    }
+    function contextInfo() {
+      var gl = renderer.getContext(), d = gl.getExtension("WEBGL_debug_renderer_info");
+      return { version: gl.getParameter(gl.VERSION), glsl: gl.getParameter(gl.SHADING_LANGUAGE_VERSION),
+               vendor: d ? gl.getParameter(d.UNMASKED_VENDOR_WEBGL) : gl.getParameter(gl.VENDOR),
+               renderer: d ? gl.getParameter(d.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER),
+               attributes: gl.getContextAttributes(), extensions: gl.getSupportedExtensions(),
+               drawingBuffer: [gl.drawingBufferWidth, gl.drawingBufferHeight], pixelRatio: renderer.getPixelRatio(),
+               maxTextureSize: gl.getParameter(gl.MAX_TEXTURE_SIZE), lost: gl.isContextLost(),
+               timerQuery: !!gl.getExtension("EXT_disjoint_timer_query_webgl2") };
     }
 
     function setQuality(q) {
@@ -2779,6 +3166,16 @@
         renderer.resetState();
         return p;
       },
+      /* the live gene texture after the next production draw (see there): a Promise of the report */
+      appearanceTextureParity: appearanceTextureParity,
+      /* the gene texture and its upload counts (tests: upload interception) */
+      geneTexture: function () {
+        return appKind ? { texture: appKind.tex, data: appKind.texData, capacity: appKind.cap, n: appKind.n,
+                           uploads: geneIO.uploads, bytes: geneIO.bytes, allocs: geneIO.allocs } : null;
+      },
+      testFaults: testFaults,
+      /* the drawing context: renderer strings, extensions, attributes, drawing buffer */
+      contextInfo: contextInfo,
       /* the water's clarity, 0 realistic .. 1 clear (drawing only; CLARITY) */
       setClarity: setClarity,
       clarity: function () { return clarity; },
@@ -2799,6 +3196,8 @@
     /* the production-path checks on any WebGL2 context (no three needed) */
     appearancePathCheck: function (gl, rows, lams, opts) { return appearancePathCheck(gl, window.EvoAppearance, rows, lams, opts); },
     appearanceVertexCheck: function (gl, rows, lams, opts) { return appearanceVertexCheck(gl, window.EvoAppearance, rows, lams, opts); },
-    appearanceFragmentCheck: function (gl, opts) { return appearanceFragmentCheck(gl, window.EvoAppearance, opts); }
+    appearanceFragmentCheck: function (gl, opts) { return appearanceFragmentCheck(gl, window.EvoAppearance, opts); },
+    /* the shared slot selector (the probes and PR2's ownership change read it) */
+    GENE_SLOT_GLSL: GENE_SLOT_GLSL
   };
 })();

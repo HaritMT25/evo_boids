@@ -6,10 +6,12 @@
  * the deep tank (web/ocean_scene.js). Around it, the Classic page's controls
  * (web/renderer.js), so the two pages are one product:
  *   - the top bar (live readout -> the stat panel with the depth histogram;
- *     📊 dashboards, web/ocean_dash.js; the settings) and the toasts
- *   - the dock: pause, speed (steps per frame), Turbo, 🎲 Randomize | the
- *     flashlight, View (the light while following, water clarity, fish
- *     colours, Hold 60 fps: drawing only), fit the tank
+ *     📊 dashboards, web/ocean_dash.js; the settings; Help: every key, the
+ *     tour, "What is Turbo?") and the toasts
+ *   - the dock: pause (one step while paused), speed (steps per frame),
+ *     Turbo | the flashlight, View (the light while following, water clarity,
+ *     fish colours, Hold 60 fps: drawing only), fit the tank. Nothing on it
+ *     replaces the run: Randomize is in the settings' Run tab.
  *   - the settings sheet, built from web/ocean_config.js: every key the
  *     Ocean takes, "live" ones (oc_set_param) applying at once, the rest on
  *     Restart ("Restart to apply"); settings that do nothing with the others as
@@ -20,7 +22,8 @@
  *   - Turbo: web/ocean_worker.js steps a copy of the module's memory at full
  *     speed; the copy comes back on Stop, so the run carries on exactly
  *     (web/ocean_handoff.js: the hand-off, shared with the worker)
- *   - the tour and the first-visit Turbo card (web/guide.js, steps below)
+ *   - the tour and the Turbo card (web/guide.js, steps below), from Help; a
+ *     first visit opens on the tank, with one hint and later a Turbo coach mark
  * The flashlight (scene.setFlashlight) is drawing only: no engine call.
  *
  * Every pointer the module returns is valid until the next oc_sync / oc_init
@@ -53,7 +56,9 @@
  *       fish, else a random one; again: another), Esc close / stop following
  *       / let go, R a new world (new seed), shift+R replay this one, C fit the
  *       view, L the flashlight (now; never "Light while following"), . one
- *       step while paused, V the View menu, ? the keys legend.
+ *       step while paused, T Turbo on / off, V the View menu, G the
+ *       dashboards, O the settings, I the live numbers, ? Help (every key).
+ *       Every dock and top-bar control has its key, and Help lists them.
  *       The camera, held (scene.setMove; by key position, never while a field
  *       has the focus): W / S forward / back along the view, A / D left /
  *       right, E / Q or PageUp / PageDown up / down, Shift faster. Following a
@@ -982,12 +987,19 @@
     b.querySelector("use").setAttribute("href", paused ? "#i-play" : "#i-pause");
     b.setAttribute("aria-label", paused ? "play" : "pause");
     b.title = (paused ? "Play" : "Pause") + " (Space)";
+    el("stepbtn").hidden = !paused;   /* one step: only while paused */
     dirtyHud = true;
   }
   function changeSpeed(d) {
     speedIdx = Math.max(0, Math.min(SPEEDS.length - 1, speedIdx + d));
     el("speedlabel").textContent = speed() + "×";
     dirtyHud = true;
+  }
+  /* Hold 60 fps may run fewer steps than asked: the label turns and says how many */
+  function showSpeedCap() {
+    var ask = speed(), ran = turboState === "live" && !paused && lastSteps > 0 ? lastSteps : ask, lab = el("speedlabel");
+    lab.classList.toggle("capped", ran < ask);
+    lab.title = ran < ask ? ask + "× asked; running " + ran + " steps per frame to hold 60 fps (View › Hold 60 fps)" : "steps per frame";
   }
   function indexOfId(s, id) {
     if (id === null || !s) return -1;
@@ -1030,33 +1042,23 @@
     /* Light while following: on as the follow starts, back as it was when it ends */
     if (on) { lightBeforeFollow = lightNow; if (followLight) lightNow = true; }
     else lightNow = lightBeforeFollow;
-    updateKeysLegend(on);
     updateLight();
+    updateKeysLegend();
   }
 
   /* ---- the keys legend (a wide screen with a mouse; ocean.html #keys) ----
-   * Shown until hidden with its × or ?, remembered. Its first line is what
-   * W A S D do now: fly the camera, or move it around the followed fish. */
-  var keysShown = store("evo_boids.ocean.keys") !== "0";
-  function setKeysShown(on) {
-    keysShown = !!on;
-    document.body.classList.toggle("keys-on", keysShown);
-    store("evo_boids.ocean.keys", keysShown ? "1" : "0");
+   * One line for what is on screen now: the camera's keys (fly, or around the
+   * followed fish), one step while paused, Stop in Turbo (no follow: the
+   * picture waits for Turbo); ? opens Help, which has every key. */
+  function updateKeysLegend() {
+    var k = function (keys, what) { return "<span class='k'><kbd>" + keys.join("</kbd><kbd>") + "</kbd> " + what + "</span>"; };
+    var live = turboState === "live", parts;
+    if (live && scene && scene.following()) parts = [k(["W", "S"], "closer / farther"), k(["A", "D"], "circle"), k(["Esc"], "let go")];
+    else parts = [k(["W", "A", "S", "D"], "fly"), live ? k(["F"], "follow a fish") : k(["T"], "stop Turbo")];
+    if (live && paused) parts.push(k(["."], "one step"));
+    parts.push(k(["?"], "all keys"));
+    setHtml("keys", parts.join(""));
   }
-  function updateKeysLegend(following) {
-    setHtml("keysmove", following
-      ? "<span class='k'><kbd>W</kbd><kbd>S</kbd> closer / farther</span><span class='k'><kbd>A</kbd><kbd>D</kbd> circle the fish</span>" +
-        "<span class='k'><kbd>Q</kbd><kbd>E</kbd> lower / higher</span>"
-      : "<span class='k'><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> move</span><span class='k'><kbd>Q</kbd><kbd>E</kbd> down / up</span>" +
-        "<span class='k'><kbd>Shift</kbd> faster</span>");
-  }
-  document.body.classList.toggle("keys-on", keysShown);
-  updateKeysLegend(false);
-  el("keysclose").addEventListener("click", function () {
-    setKeysShown(false);
-    toast("Keys hidden: ? shows them again.");
-    this.blur();
-  });
 
   /* ---- the flashlight (drawing only; scene.setFlashlight) ----
    * One light, on or off now: the dock's button, L and the View menu's
@@ -1080,15 +1082,17 @@
     updateLight();
   }
 
-  /* ---- the View menu (a popover): ×, Esc, V or a press outside closes it ---- */
-  var POPS = { view: ["viewpop", "viewmenubtn"] }, openPop = null;
+  /* ---- the View menu and Help: one popover at a time; ×, Esc, its key or a
+   * press outside closes it ---- */
+  var POPS = { view: ["viewpop", "viewmenubtn"], help: ["helppop", "helpbtn"] }, openPop = null;
   function setPop(name) {
     openPop = POPS[name] ? name : null;
     Object.keys(POPS).forEach(function (n) {
       el(POPS[n][0]).hidden = n !== openPop;
       el(POPS[n][1]).setAttribute("aria-expanded", n === openPop ? "true" : "false");
     });
-    if (openPop) { setStatPanel(false); placePop(); }
+    document.body.classList.toggle("help-open", openPop === "help");
+    if (openPop) { setStatPanel(false); hideCoach(); placePop(); }
   }
   function togglePop(name) { setPop(openPop === name ? null : name); }
   /* the View menu over its button (a phone: the screen's width, from the CSS) */
@@ -1101,6 +1105,38 @@
   document.addEventListener("pointerdown", function (e) {
     if (openPop && !e.target.closest("#" + POPS[openPop][0] + ", #" + POPS[openPop][1])) setPop(null);
   });
+
+  /* ---- a first visit: the tank, then one hint (load + 9 s, a fish), then
+   * this small Turbo coach mark, after a minute or once generation 1 is
+   * born (25 s at the least), on a screen with nothing else open (no fish
+   * card, popover, settings, charts or tour). Once per visitor; not after
+   * Turbo has been used or its card seen; ?guide=0 none (the tests). The
+   * tour and "What is Turbo?" are in Help. ---- */
+  var COACH_KEY = "evo_boids.ocean.turboHintSeen.v1", coachTimer = 0, coachHideT = 0;
+  function startCoach() {
+    if (P.get("guide") === "0" || P.has("renderBench") || store(COACH_KEY) === "1" || store(window.EvoGuideConfig.introKey) === "1") return;
+    var t0 = performance.now();
+    coachTimer = setInterval(function () {
+      var t = (performance.now() - t0) / 1000, gen = summary ? summary[13] : 0;
+      if (store(COACH_KEY) === "1") { clearInterval(coachTimer); return; }   /* Turbo was used meanwhile */
+      if (!(t >= 60 || (gen >= 1 && t >= 25)) || turboState !== "live" || openPop || selectedId !== null || document.getElementById("guide") ||
+          drawerEl.classList.contains("open") || (dash() && dash().isOpen())) return;
+      clearInterval(coachTimer);
+      store(COACH_KEY, "1");
+      el("coach").hidden = false;
+      placeCoach();
+      coachHideT = setTimeout(hideCoach, 25000);
+    }, 1000);
+  }
+  function hideCoach() { el("coach").hidden = true; clearTimeout(coachHideT); }
+  function placeCoach() {   /* above the Turbo button, its arrow on it */
+    var c = el("coach");
+    if (c.hidden) return;
+    var r = el("turbobtn").getBoundingClientRect(), w = c.offsetWidth, mid = r.left + r.width / 2;
+    var left = Math.round(Math.max(10, Math.min(innerWidth - w - 10, mid - w / 2)));
+    c.style.left = left + "px";
+    c.style.setProperty("--arrow-x", Math.round(mid - left) + "px");
+  }
 
   /* ---------------- the readout and the stat panel ---------------- */
   var dirtyHud = true, hudT = 0, histRows = [];
@@ -1168,6 +1204,7 @@
     setTxt("ro-depth", g("depthMean").toFixed(0));
     setTxt("ro-fps", String(fps));
     el("ro-fps").className = "num" + (fps && fps < 45 ? " warn" : "");
+    updateKeysLegend(); showSpeedCap();
     if (!statOpen) return;
     var rb = rates.perSec("b"), rd = rates.perSec("d");
     var rows = [
@@ -1475,7 +1512,7 @@
     tb.setAttribute("aria-pressed", on ? "true" : "false");
     tb.disabled = turboState === "entering" || turboState === "exiting";
     var locked = turboState !== "live";
-    ["restart", "savecp", "loadcp", "pausebtn", "slower", "faster", "randombtn", "randombig", "newworld", "replay"].forEach(function (id) {
+    ["restart", "savecp", "loadcp", "pausebtn", "slower", "faster", "stepbtn", "randombig", "newworld", "replay"].forEach(function (id) {
       el(id).classList.toggle("locked", locked);
     });
     el("turbo").hidden = turboState === "live";
@@ -1706,8 +1743,13 @@
         e.preventDefault();
         return;
       }
-      if (k === "?") { setKeysShown(!keysShown); return; }
+      /* the dock's and the top bar's own keys (Turbo's too: T stops it; letters press no button) */
+      if (k === "?") { togglePop("help"); return; }
       if (lk === "v") { togglePop("view"); return; }
+      if (lk === "t") { el("turbobtn").click(); return; }
+      if (lk === "g") { setPop(null); el("dashbtn").click(); return; }
+      if (lk === "o") { setPop(null); setDrawer(!drawerEl.classList.contains("open")); return; }
+      if (lk === "i") { setPop(null); setStatPanel(!statOpen); return; }
       if (t && t.tagName === "BUTTON") return;   /* Space / Enter belong to the button */
       /* the view: always */
       if (lk === "c") { wantFollow = false; scene.resetView(true); return; }
@@ -1748,7 +1790,7 @@
     window.addEventListener("resize", function () {
       scene.resize(); updateInsets();
       clearTimeout(fitTimer);
-      fitTimer = setTimeout(function () { updateFitButton(); updateInsets(); placePop(); }, 250);
+      fitTimer = setTimeout(function () { updateFitButton(); updateInsets(); placePop(); placeCoach(); }, 250);
     });
     if (reducedMQ.addEventListener) reducedMQ.addEventListener("change", function () { scene.setReducedMotion(reducedMQ.matches); });
   }
@@ -1779,7 +1821,7 @@
     document.body.classList.toggle("sheet-open", open);
     menuBtn.setAttribute("aria-expanded", open ? "true" : "false");
     if (!open) hideTip();
-    if (open) { setStatPanel(false); setPop(null); }
+    if (open) { setStatPanel(false); setPop(null); hideCoach(); }
     if (scene) { updateInsets(); setTimeout(updateInsets, 320); }
   }
   menuBtn.addEventListener("click", function () { setDrawer(!drawerEl.classList.contains("open")); this.blur(); });
@@ -1871,13 +1913,21 @@
   btn("faster", function () { if (guardTurbo()) return; changeSpeed(1); });
   btn("turbobtn", function () { if (turboState === "live") enterTurbo(); else if (turboState === "turbo") exitTurbo(); });
   btn("turboexit", exitTurbo);
-  btn("randombtn", randomize);
+  el("turbobtn").addEventListener("click", function () { store(COACH_KEY, "1"); hideCoach(); });   /* found it: no coach mark */
+  btn("coachgo", function () { hideCoach(); el("turbobtn").click(); });
+  btn("coachx", hideCoach);
+  btn("stepbtn", function () { if (guardTurbo()) return; if (paused) stepOnce = true; });
   btn("randombig", randomize);
   btn("newworld", newWorld);
   btn("replay", replay);
   btn("lightbtn", toggleLight);
   btn("viewmenubtn", function () { togglePop("view"); });
   btn("viewclose", function () { setPop(null); });
+  btn("helpbtn", function () { togglePop("help"); });
+  btn("helpclose", function () { setPop(null); });
+  btn("tourbtn", function () { setPop(null); if (window.EvoGuide) EvoGuide.start(); });
+  btn("whatturbo", function () { setPop(null); if (window.EvoGuide && EvoGuide.turbo) EvoGuide.turbo(); });
+  el("to2dmenu").href = el("to2d").href;   /* the deploy build renames Classic's page in #to2d */
   el("lightnow").addEventListener("change", function () {
     lightNow = this.checked;
     updateLight();
@@ -1903,7 +1953,6 @@
     setPending(true); updateNeeds(); updateTabDots();
     showNote("Every setting is back to its default. Restart to apply.");
   });
-  btn("guidebtn", function () { if (window.EvoGuide) EvoGuide.start(); });
   btn("savecp", function () { if (guardTurbo()) return; saveSetup(); });
   btn("loadcp", function () { if (guardTurbo()) return; el("cpfile").click(); });
   el("cpfile").addEventListener("change", function () {
@@ -2026,6 +2075,7 @@
   var guideFish = null;
   window.EvoGuideConfig = {
     key: "evo_boids.ocean.guideSeen.v1", introKey: "evo_boids.ocean.turboIntroSeen.v1",
+    quiet: true,   /* a first visit opens on the tank: the tour and the Turbo card wait in Help */
     steps: function (h) {
       var tap = function () { return h.touch() ? "Tap" : "Click"; };
       return [
@@ -2066,31 +2116,31 @@
         { drawer: false, title: "Live numbers",
           target: function () { return h.rectOf("#readout"); },
           body: function () {
-            return "Fish, generations, their average depth and the frame rate. " + tap() + " it for the rest: food, " +
-                   "births and deaths, family lines, and where in the depth the fish are.";
+            return "Fish, generations, their average depth and the frame rate. " + tap() + " it (or press I) for the " +
+                   "rest: food, births and deaths, family lines, and where in the depth the fish are.";
           } },
         { drawer: false, title: "Two worlds",
           target: function () { return h.rectOf("#worlds"); },
           body: function () {
-            return "You are in the <b>3-D Ocean</b>. <b>2-D</b> opens Classic, the original flat world that the " +
-                   "native app runs, which you can watch as a tank or flat. Each world runs on its own, so " +
-                   "switching starts the other one fresh.";
+            return "You are in the <b>3-D Ocean</b>. <b>2-D Classic</b>" +
+                   (innerWidth < 600 ? ", at the bottom of the live numbers," : "") + " opens the original flat " +
+                   "world on its own page; the native app runs it too. Each world runs on its own, so switching " +
+                   "starts the other one fresh.";
           } },
         { desktopOnly: true, drawer: false, title: "Keyboard",
           body: function () {
-            return "<kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> fly · <kbd>Q</kbd> <kbd>E</kbd> down and up · " +
-                   "<kbd>Space</kbd> pause · <kbd>↑</kbd> <kbd>↓</kbd> speed · <kbd>F</kbd> follow · <kbd>L</kbd> " +
-                   "flashlight · <kbd>C</kbd> fit the view · <kbd>R</kbd> a new world (<kbd>Shift</kbd> <kbd>R</kbd> " +
-                   "replays this one) · <kbd>?</kbd> the keys beside the dock. Try one now; the tour waits. " +
+            return "<kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> fly · <kbd>Space</kbd> pause · <kbd>T</kbd> " +
+                   "Turbo · <kbd>F</kbd> follow · <kbd>L</kbd> flashlight · <kbd>V</kbd> view · <kbd>G</kbd> charts · " +
+                   "<kbd>O</kbd> settings · <kbd>?</kbd> help, with every key. Try one now; the tour waits. " +
                    "(<kbd>Esc</kbd> closes things, and this tour.)";
           } },
         { drawer: false, title: "Playback",
           target: function () { return h.rectOf("#dock"); },
           body: function () {
-            return "Pause and change speed. <b>Turbo</b> runs the world headless in a background thread, many times " +
-                   "faster, and hands it back exactly. The dice draws a new world; the lamp is the flashlight, and " +
-                   "<b>View</b> beside it sets the light, the water and the fish colours; the tank button fits the " +
-                   "whole tank back on screen.";
+            return "Pause and change speed; while paused, the step button moves one step at a time. <b>Turbo</b> " +
+                   "runs this same world many times faster without drawing it, and hands it back exactly. Then the " +
+                   "flashlight, <b>View</b> (how the tank looks: the light, the water, the fish colours) and the " +
+                   "tank button, which fits the whole tank back on screen. Nothing here replaces your world.";
           } },
         { drawer: false, title: "Dashboards",
           target: function () { return h.rectOf("#dashbtn"); },
@@ -2100,7 +2150,7 @@
           } },
         { drawer: false, title: "Settings",
           target: function () { return h.rectOf("#menubtn"); },
-          body: function () { return "Everything else lives behind this button."; } },
+          body: function () { return "New worlds, every rule of this one, and saving and loading setups (O)."; } },
         { drawer: true, tab: "run", scroll: ".run-hero", place: h.drawerSides, title: "Randomize",
           target: function () { return h.rectOf(".run-hero"); },
           body: function () {
@@ -2116,7 +2166,7 @@
                    "<b>Restart</b>; settings marked <i>live</i> apply at once.";
           } },
         { last: true, drawer: false, title: "You're set",
-          body: function () { return "Replay this tour any time with <b>Tour</b> in the settings. Enjoy!"; } }
+          body: function () { return "Take this tour again any time from <b>Help</b> (?), with every key. Enjoy!"; } }
       ];
     },
     intro: function (h) {
@@ -2310,8 +2360,9 @@
     window.dispatchEvent(new Event("evo:ready"));
     setTimeout(function () {
       if (!everSelected && selectedId === null && turboState === "live" && !document.getElementById("guide"))
-        toast((coarseMQ.matches ? "Tap" : "Click") + " any fish to see its brain; F follows one with a flashlight.");
+        toast(coarseMQ.matches ? "Tap any fish to see its brain." : "Click any fish to see its brain; F follows one with a flashlight.");
     }, 9000);
+    startCoach();   /* later: the Turbo coach mark, once */
   }).catch(function (e) {
     var why = String(e && e.message || e);
     splashSay("The 3-D Ocean could not start.\n" + why, true);

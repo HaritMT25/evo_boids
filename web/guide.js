@@ -12,9 +12,14 @@
  * Page hooks it uses: window.EvoApp (renderer.js). */
 (function () {
   /* Another page can bring its own tour: window.EvoGuideConfig = {key,
-   * introKey, steps(h), intro(h)} set before this file runs (web/ocean.js,
-   * the 3-D Ocean), where h holds the helpers below. Classic sets none. */
+   * introKey, steps(h), intro(h), quiet} set before this file runs
+   * (web/ocean.js, the 3-D Ocean), where h holds the helpers below. Classic
+   * sets none. quiet: a first visit starts neither the Turbo card nor the
+   * tour (the page opens them from its Help: EvoGuide.start(),
+   * EvoGuide.turbo()), and the Turbo card's Cancel doesn't offer the tour;
+   * ?guide=1 and ?intro=1 still start them. */
   var CFG = window.EvoGuideConfig || null;
+  var QUIET = !!(CFG && CFG.quiet);
   var KEY = (CFG && CFG.key) || "evo_boids.guideSeen.v2";
   function app() { return window.EvoApp || {}; }
   function q(sel) { return document.querySelector(sel); }
@@ -303,7 +308,7 @@
     if (root && root.parentNode) root.parentNode.removeChild(root);
     idx = -1;
     if (tryIt) { if (app().startTurbo) app().startTurbo(); }
-    else if (!quiet && !seen()) start(false);
+    else if (!quiet && !QUIET && !seen()) start(false);
   }
   window.addEventListener("keydown", function (e) {
     if (idx < 0) return;
@@ -315,13 +320,14 @@
     else if (e.key === "ArrowLeft" && idx > 1) show(idx - 1);
   });
 
-  window.EvoGuide = { start: function () { start(true); } };
+  window.EvoGuide = { start: function () { start(true); }, turbo: function () { startIntro(); } };
   /* renderer.js never fires evo:ready under ?bench, so no tour there */
   function auto() {
     var p = new URLSearchParams(location.search), g = p.get("guide");
     if (p.get("intro") === "1") { startIntro(); return; }
     if (g === "0") return;
     if (g === "1") { start(false); return; }
+    if (QUIET) return;
     if (!introSeen()) startIntro();
     else if (!seen()) start(false);
   }

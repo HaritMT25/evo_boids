@@ -1,7 +1,7 @@
 // tests/ocean_render_browser.mjs: the Ocean's render checks and benchmark on the real page, in headless Brave.
 //
 //   node tests/ocean_render_browser.mjs --base http://localhost:8152 [--out DIR]
-//        [--parts correctness,faults,timer,iframe,perf] [--counts 500,1500,2500]
+//        [--parts correctness,faults,timer,beam,iframe,perf] [--counts 500,1500,2500]
 //        [--dur 15000] [--warm 10000] [--rounds 2] [--headed]
 //   env: PLAYWRIGHT  the playwright module (default C:/Users/harit/gemini_bridge/node_modules/playwright)
 //        BRAVE_EXE   the browser (default C:/Program Files/BraveSoftware/Brave-Browser/Application/brave.exe)
@@ -25,6 +25,9 @@
 //   timer        GPU timing on the real context: frame and draw scopes, a lost
 //                and restored context (WEBGL_lose_context), and the extension
 //                hidden (absent timer); none may raise an error or a 0 ms sample
+//   beam         the flashlight's full-strength floor (caustics included) is
+//                the same in Realistic and Clear water (deployed-audit PR #30-31,
+//                finding 5)
 //   iframe       the page at 890 x 453 in a non-isolated parent: colours,
 //                select / follow, a restart, Turbo there and back, the live
 //                texture check
@@ -50,7 +53,7 @@ const PW = process.env.PLAYWRIGHT || "C:/Users/harit/gemini_bridge/node_modules/
 const BRAVE = process.env.BRAVE_EXE || "C:/Program Files/BraveSoftware/Brave-Browser/Application/brave.exe";
 const BASE = String(arg("base", "http://localhost:8152")).replace(/\/$/, "");
 const OUT = path.resolve(String(arg("out", path.join(os.tmpdir(), "ocean_render_" + Date.now()))));
-const PARTS = String(arg("parts", "correctness,faults,timer,iframe,perf")).split(",");
+const PARTS = String(arg("parts", "correctness,faults,timer,beam,iframe,perf")).split(",");
 const COUNTS = String(arg("counts", "500,1500,2500")).split(",").map(Number);
 const DUR = Number(arg("dur", 15000)), WARM = Number(arg("warm", 10000)), ROUNDS = Number(arg("rounds", 2));
 const HEADED = !!arg("headed", false);
@@ -322,6 +325,51 @@ async function partTimer() {
   await L.ctx.close();
 }
 
+/* ---------------- the flashlight's floor in any water ---------------- */
+/* deployed-audit PR #30-31 finding 5: inside the beam's full-strength core the
+ * floor (its caustics too) is the same in Realistic and Clear water. A static
+ * frame (paused, no fish: their shadows are the water's; reduced motion: no
+ * snow, an instant light), canvas pixels read right after the app's render */
+const AFTER_FRAME = () => {
+  const raf = window.requestAnimationFrame.bind(window);
+  window.__after = [];
+  window.requestAnimationFrame = (cb) => raf((t) => { cb(t); if (cb.name === "frame" && window.__after.length) { const q = window.__after; window.__after = []; q.forEach((f) => f()); } });
+};
+async function partBeam() {
+  console.log("== the flashlight's floor: the same in any water at full beam");
+  const c = caseFor(0, { config: Object.assign({}, CASES.benchmark.config, { minPopulation: 0 }) });
+  const L = await launch("beam", { init: AFTER_FRAME });
+  await L.page.goto(benchUrl(c));
+  await ready(L.page, true);
+  const r = await L.page.evaluate(async () => {
+    const B = EvoOcean.bench, S = EvoOcean.scene;
+    S.setReducedMotion(true);
+    await B.prepare({ camera: "whole", settleMs: 2500 });   /* the caustics fade in over ~1.4 s */
+    const gl = document.getElementById("tank").getContext("webgl2"), W = gl.drawingBufferWidth, H = gl.drawingBufferHeight;
+    const grab = () => new Promise((res) => window.__after.push(() => { const px = new Uint8Array(W * H * 4); gl.readPixels(0, 0, W, H, gl.RGBA, gl.UNSIGNED_BYTE, px); res(px); }));
+    const shot = {};
+    for (const light of [false, true]) for (const u of [0, 1]) { S.setClarity(u); S.setFlashlight(light); await B.frames(4); shot[(light ? "on" : "off") + u] = await grab(); }
+    S.setClarity(1); S.setFlashlight(false);
+    /* the core's lower half: the floor there is nearer than the beam's reach, so its strength is 1 */
+    function diff(a, b) {
+      let n = 0, d = 0, max = 0;
+      for (let y = 0; y <= H / 2; y++) for (let x = 0; x < W; x++) {
+        if (Math.hypot(x - W / 2, y - H / 2) >= 90) continue;
+        const p = 4 * (y * W + x), m = Math.max(Math.abs(a[p] - b[p]), Math.abs(a[p + 1] - b[p + 1]), Math.abs(a[p + 2] - b[p + 2]));
+        n++; if (m) { d++; max = Math.max(max, m); }
+      }
+      return { pixels: n, differing: d, maxDiff: max };
+    }
+    return { n: EvoOcean.state().n, pc: EvoOcean.state().pc, on: diff(shot.on0, shot.on1), off: diff(shot.off0, shot.off1) };
+  });
+  report.parts.beam = r;
+  check("no fish or predators in the frame (no water-shaded shadows)", r.n === 0 && r.pc === 0, { n: r.n, pc: r.pc });
+  check("the water changes the floor without the light (the probe sees clarity)", r.off.differing > r.off.pixels * 0.9, r.off);
+  check("at full beam the floor, caustics included, is the same in Realistic and Clear", r.on.pixels > 10000 && r.on.differing === 0, r.on);
+  check("no console / page / network errors", L.errors.length === 0, L.errors.slice(0, 5));
+  await L.ctx.close();
+}
+
 /* ---------------- the embed: 890 x 453 in a non-isolated parent ---------------- */
 async function partIframe() {
   console.log("== iframe 890 x 453 under a non-isolated parent");
@@ -422,7 +470,7 @@ async function partPerf() {
   }
 }
 
-const RUN = { correctness: partCorrectness, faults: partFaults, timer: partTimer, iframe: partIframe, perf: partPerf };
+const RUN = { correctness: partCorrectness, faults: partFaults, timer: partTimer, beam: partBeam, iframe: partIframe, perf: partPerf };
 (async () => {
   for (const p of PARTS) {
     if (!RUN[p]) { console.log("unknown part " + p); fails++; continue; }

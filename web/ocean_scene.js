@@ -1162,6 +1162,7 @@
     FOG_FN,
     BEAM_FN,
     "uniform vec2 uHalf; uniform float uTime; uniform float uCausticAmt;",
+    "uniform float uCausticTrue;",   /* the flashlight's: the caustics' realistic strength, in any water */
     "uniform sampler2D uCaustic; uniform vec3 uSand; uniform vec3 uSandDark; uniform vec3 uWater;",
     "uniform vec3 uCausticCol; uniform vec3 uEdge; uniform vec3 uLight;",
     "varying vec3 vWorld;",
@@ -1255,7 +1256,12 @@
     "  col += edge;",
     "  col = mix(col, uFog, max(fogOf(vWorld), smoothstep(0.0, 1100.0, dOut)));",
     "  float bk = beamOf(vWorld);",
-    "  if (bk > 0.0) col = mix(col, dry * mix(0.36, 1.0, inside) + caus + edge, bk);",
+    /* in the flashlight's clear light: the sand's true colour, and its caustics
+     * at their realistic strength (uCausticTrue), the same in any water */
+    "  if (bk > 0.0) {",
+    "    vec3 causTrue = uCausticCol * min(cA, cB) * uCausticTrue * (0.25 + 0.75 * inside) * (0.55 + 0.45 * lit);",
+    "    col = mix(col, dry * mix(0.36, 1.0, inside) + causTrue + edge, bk);",
+    "  }",
     "  gl_FragColor = vec4(col, 1.0);",
     "}"
   ].join("\n");
@@ -1608,7 +1614,7 @@
       uniforms: beamUniforms({
         uHalf: common.uHalf, uTime: common.uTime, uFog: common.uFog, uFogDensity: common.uFogDensity,
         uCaustic: { value: (function () { var t = new THREE.DataTexture(new Uint8Array([0, 0, 0, 255]), 1, 1); t.needsUpdate = true; return t; })() },
-        uCausticAmt: { value: 0 },
+        uCausticAmt: { value: 0 }, uCausticTrue: { value: 0 },
         uSand: { value: v3(C.sand) }, uSandDark: { value: v3(C.sandDark) }, uWater: { value: v3(C.water) },
         uCausticCol: { value: v3(C.caustic) }, uEdge: { value: v3(C.edge) }, uLight: common.uLight
       })
@@ -2625,6 +2631,7 @@
       if (causticFade < 1 && causticReady) {
         causticFade = Math.min(1, causticFade + dt / 1.4);
         floorMat.uniforms.uCausticAmt.value = causticAmt();   /* strong enough to read on the sand */
+        floorMat.uniforms.uCausticTrue.value = causticTrue();
       }
       aimBeam(s, sel, dt);
       profiler.lap(SP.otherPack, pt);
@@ -2675,6 +2682,7 @@
      * it is built after the first frames, in idle time, and the light fades in. */
     var causticReady = false, causticFade = 0;
     function causticAmt() { return 0.5 * causticK * (1 - Math.pow(1 - causticFade, 3)); }   /* causticK: the water's clarity */
+    function causticTrue() { return 0.5 * (1 - Math.pow(1 - causticFade, 3)); }   /* in the flashlight: realistic, in any water; the same fade */
     (window.requestIdleCallback || function (f) { return setTimeout(f, 300); })(function () {
       floorMat.uniforms.uCaustic.value.dispose();
       floorMat.uniforms.uCaustic.value = causticTexture(256);

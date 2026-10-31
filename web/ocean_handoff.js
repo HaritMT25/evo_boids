@@ -121,17 +121,19 @@
    * Turbo took it), the acknowledged ones first, so that edits which depend
    * on each other (minSpeed 200 only after maxSpeed 300) apply in the order
    * the worker applied them. A newer edit of a key always lands after an
-   * older one, never under it. Entries: {key, num, seq, from: "acked" |
-   * "sent" | "held"}. */
+   * older one, never under it. Every held edit is kept, not only the newest
+   * of its key: a later setting can depend on an earlier value (minSpeed 0,
+   * maxSpeed 10, minSpeed 5 from 30-150 holds only as that sequence; without
+   * the first, maxSpeed 10 is refused against 30). Entries: {key, num, seq,
+   * from: "acked" | "sent" | "held"}. */
   function ledger() {
-    var seq = 0, held = {}, inflight = [], acked = [];
+    var seq = 0, held = [], inflight = [], acked = [];
     function byseq(a, b) { return a.seq - b.seq; }
-    function heldList() { return Object.keys(held).map(function (k) { return held[k]; }).sort(byseq); }
     return {
       /* a new Turbo session: nothing in flight, nothing acknowledged yet */
       start: function () { inflight = []; acked = []; },
-      /* an edit made while neither side owns the world (the newest per key) */
-      hold: function (key, num) { held[key] = { key: key, num: num, seq: ++seq, from: "held" }; },
+      /* an edit made while neither side owns the world (every one, in order) */
+      hold: function (key, num) { held.push({ key: key, num: num, seq: ++seq, from: "held" }); },
       /* an edit sent to the worker; seq: a held edit's own, when it is flushed */
       sent: function (key, num, s) { inflight.push({ key: key, num: num, seq: s === undefined ? ++seq : s, from: "sent" }); },
       /* the worker's answer to the oldest in-flight edit of key (it answers in order) */
@@ -143,17 +145,23 @@
         }
         return null;
       },
-      /* a newer edit of key is still on its way */
-      pending: function (key) { return inflight.some(function (e) { return e.key === key; }); },
+      /* an edit of key newer than sequence number afterSeq (any, without it)
+       * still waits: in flight, or held for the hand-off. The answer to an
+       * older edit must not undo it (the page's field shows it) */
+      pending: function (key, afterSeq) {
+        var s = afterSeq === undefined ? 0 : afterSeq;
+        return inflight.concat(held).some(function (e) { return e.key === key && e.seq > s; });
+      },
       /* the held edits, oldest first, now that one side owns the world */
-      takeHeld: function () { var l = heldList(); held = {}; return l; },
+      takeHeld: function () { var l = held; held = []; return l; },
       /* the page owns the world again: what it applies, oldest first */
       back: function (lost) {
-        var l = (lost ? acked : []).concat(inflight, heldList()).sort(byseq);
-        held = {}; inflight = []; acked = [];
+        var l = (lost ? acked : []).concat(inflight, held).sort(byseq);
+        held = []; inflight = []; acked = [];
         return l;
       },
-      held: function () { var o = {}; Object.keys(held).forEach(function (k) { o[k] = held[k].num; }); return o; },
+      /* the held edits as {key: its newest value} (EvoOcean.state); never what is applied */
+      held: function () { var o = {}; held.forEach(function (e) { o[e.key] = e.num; }); return o; },
       inflight: function () { return inflight.map(function (e) { return [e.key, e.num]; }); }
     };
   }
@@ -216,12 +224,30 @@
     return { value: val([]), repeats: repeats };
   }
   /* a cfg object as oc_init's JSON ("" for nothing), the later occurrences of
-   * its repeated keys ([{key, value}], parseFirst's at its level) after it */
+   * its repeated keys ([{key, value}], parseFirst's at its level) after it.
+   * A number too big for a double (1e400) parses to ±Infinity, which
+   * JSON.stringify writes as null: {"maxPopulation":300,"maxPopulation":1e400}
+   * reached oc_init as ...:null, which its whole-number check passes over.
+   * So an infinity goes on as a number that is one in oc_init too (±1e400):
+   * the engine checks every occurrence, of every key, as it does its own
+   * JSON. Everything else is written as JSON.stringify writes it. (The
+   * values are JSON's: from JSON.parse / parseFirst, or the sheet's.) */
+  function literal(v) {
+    if (v === Infinity) return "1e400";
+    if (v === -Infinity) return "-1e400";
+    if (typeof v === "number" && v !== v) throw new Error("NaN is not a JSON value");
+    var none = function (x) { return x === undefined || typeof x === "function"; };   /* as JSON.stringify skips them */
+    if (Array.isArray(v)) return "[" + v.map(function (x) { return none(x) ? "null" : literal(x); }).join(",") + "]";
+    if (v && typeof v === "object")
+      return "{" + Object.keys(v).filter(function (k) { return !none(v[k]); })
+                     .map(function (k) { return JSON.stringify(k) + ":" + literal(v[k]); }).join(",") + "}";
+    return JSON.stringify(v);
+  }
   function cfgJson(cfg, repeats) {
     var keys = Object.keys(cfg || {}), more = repeats || [];
     if (!keys.length && !more.length) return "";
-    var s = JSON.stringify(cfg || {});
-    more.forEach(function (r) { s = s.slice(0, -1) + (s.length > 2 ? "," : "") + JSON.stringify(r.key) + ":" + JSON.stringify(r.value) + "}"; });
+    var s = literal(cfg || {});
+    more.forEach(function (r) { s = s.slice(0, -1) + (s.length > 2 ? "," : "") + JSON.stringify(r.key) + ":" + literal(r.value) + "}"; });
     return s;
   }
 

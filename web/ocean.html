@@ -34,6 +34,7 @@
   (function () {
     var CLASSIC_PAGE = "index.html";
     var CLASSIC_ONLY = ["view", "fish", "gl", "bench", "threads", "nthreads"];
+    /* (web/ocean.js OCEAN_KEYS is this list: an Ocean link without walls= is from before walls) */
     var OCEAN_ONLY = ["seed", "pop", "depth", "w", "h", "cfg", "speed", "e1", "mock", "walls"];
     var q = new URLSearchParams(location.search), has = function (k) { return q.has(k); };
     if (CLASSIC_ONLY.some(has) && !OCEAN_ONLY.some(has)) {
@@ -1019,6 +1020,7 @@
   </script>
   <script src="ocean_handoff.js"></script>
   <script src="ocean_appearance.js"></script>
+  <script src="ocean_perf.js"></script>
   <script src="ocean_scene.js"></script>
   <script src="ocean_config.js"></script>
   <script src="charts.js"></script>

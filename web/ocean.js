@@ -46,6 +46,8 @@
  *      the visitor's last choice, clear the first time; never stored)
  *      ?mock=1 loads ocean_mock.js from beside the page instead of the engine
  *      (a JS stand-in for page development, not part of web/).
+ *      ?renderBench=1 the render benchmark (web/ocean_perf.js: EvoOcean.bench,
+ *      paused from the first frame, Hold 60 fps off); ?perf=1 its profiler only.
  *      The link's setup goes to oc_init as it is; one it refuses stops the
  *      page with the engine's reason (and a link without it).
  *      A Restart writes seed / pop / depth / w / h / cfg back, so a reload, or
@@ -73,6 +75,10 @@
   var P = new URLSearchParams(location.search);
   var MOCK = P.get("mock") === "1";
   var E1 = P.get("e1") === "1";
+  /* measurement only (web/ocean_perf.js): off, a profiler that records nothing (also without the file) */
+  var PERF = window.EvoOceanPerf, BENCH = !!PERF && P.get("renderBench") === "1";
+  var PROF = PERF ? PERF.forPage(BENCH || P.get("perf") === "1") : { enabled: false, active: false, SPAN: {}, beginFrame: function () {},
+    recordStep: function () {}, beginCpu: function () { return 0; }, lap: function () { return 0; }, endCpu: function () {} }, SP = PROF.SPAN;
   var DT = 0.016;                      /* oc_step's fixed step */
   var SPEEDS = [1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64];
   var STEP_BUDGET_MS = 11;             /* of a 16.7 ms frame: what stepping may take (Hold 60 fps) */
@@ -229,7 +235,7 @@
   }
   function fitToScreen() {
     if (!M || guardTurbo()) return;
-    var w0 = getVal("width"), h0 = getVal("height"), f = screenWorld();
+    var w0 = el("o_width").value, h0 = el("o_height").value, f = screenWorld();   /* as typed, to put back */
     setVal("width", f[0]); setVal("height", f[1]);
     if (!restart()) { setVal("width", w0); setVal("height", h0); }
   }
@@ -237,20 +243,26 @@
    * whether this module knows them at all */
   function hasWalls() { return has("oc_walls_enabled"); }
   function wallsOn() { return hasWalls() && !!M._oc_walls_enabled(); }
-  var worldReady = false;
+  var worldReady = false, worldEpoch = 0;   /* epoch: a new world's (fish ids start over); Turbo keeps it */
   /* repeats: the later occurrences of cfg's repeated keys (HO.parseFirst), so
    * oc_init checks each and takes the first, as it does for its own JSON.
    * size: [width, height] (the sheet's, the link's, a setup's). */
   function initWorld(seed, population, depth, cfg, rawCfg, repeats, size) {
-    if (cfg && cfg.walls === true && !hasWalls()) {   /* a stale module: it would ignore the key */
+    if (cfg && (cfg.walls === true || cfg.walls === 1) && !hasWalls()) {   /* a stale module: it would ignore the key */
       pageError = "glass walls need a newer engine module (this one has no oc_walls_enabled: rebuild web/evo_ocean)";
       return false;
     }
     var json = rawCfg !== undefined ? rawCfg : HO.cfgJson(cfg, repeats);
     var ok = withCString(json, function (ptr) { return M._oc_init(seed >>> 0, size[0], size[1], depth, population, ptr); });
     if (!ok) return false;
-    initArgs = { seed: seed >>> 0, population: population, depth: depth, width: size[0], height: size[1], cfg: cfg };
-    runCfg = Object.assign({}, cfg);
+    /* the bookkeeping, once the engine has taken it: an on / off key as
+     * true / false (the Ocean's own also come as 0 / 1: oc_init takes those) */
+    var accepted = Object.assign({}, cfg);
+    Object.keys(accepted).forEach(function (k) {
+      if (KEYS[k] && typeof KEYS[k][0] === "boolean") accepted[k] = accepted[k] === true || accepted[k] === 1;
+    });
+    initArgs = { seed: seed >>> 0, population: population, depth: depth, width: size[0], height: size[1], cfg: accepted };
+    runCfg = Object.assign({}, accepted);
     clearFieldNotes();
     afterNewWorld();
     return true;
@@ -261,30 +273,19 @@
    * drop what they can't hold (0.5 for a count, 2 for an on / off key or a
    * choice). On a refusal nothing changes: the running world, the sheet.
    * raw: the cfg as text instead (a ?cfg= that is not JSON). Returns "", or
-   * why not. A switch must be true or false: the engine reads Classic's
-   * switches (toroidal, bodyModel, ...) only as JSON booleans and passes over
-   * anything else, so {"toroidal":1} would run without it under a sheet
-   * showing it on. repeats: the later occurrences of a repeated key
-   * (HO.parseFirst; cfg holds the first): each is checked here too, and
-   * goes on to oc_init, which checks it and runs the first, as the sheet
-   * then shows. */
+   * why not. The on / off keys are the engine's to check, as every value is
+   * (one rule, in one place): a SimConfig switch (toroidal, bodyModel, ...)
+   * must be a JSON true / false, the Ocean's own (lightEnabled, walls, ...)
+   * may also be the number 0 / 1, and oc_init checks every occurrence before
+   * it replaces the world (wasm/ocean_wasm.cpp). The sheet shows what it
+   * runs (setVal: true or 1 is on); initWorld keeps true / false.
+   * repeats: the later occurrences of a repeated key (HO.parseFirst; cfg
+   * holds the first): they go on to oc_init, which checks each and runs the
+   * first, as the sheet then shows. */
   function importWorld(seed, population, depth, cfg, raw, repeats, size) {
-    var clean = {}, more = [], bad = [];
-    function aSwitch(k, v) {
-      if (KEYS[k] && typeof KEYS[k][0] === "boolean" && typeof v !== "boolean")
-        bad.push(k + " must be true or false (got " + JSON.stringify(v) + ")");
-    }
-    Object.keys(cfg || {}).forEach(function (k) {
-      if (ARGS[k]) return;
-      clean[k] = cfg[k];
-      aSwitch(k, cfg[k]);
-    });
-    (repeats || []).forEach(function (r) {
-      if (ARGS[r.key]) return;
-      more.push(r);
-      aSwitch(r.key, r.value);
-    });
-    if (bad.length) return bad.join("; ");
+    var clean = {}, more = [];
+    Object.keys(cfg || {}).forEach(function (k) { if (!ARGS[k]) clean[k] = cfg[k]; });
+    (repeats || []).forEach(function (r) { if (!ARGS[r.key]) more.push(r); });
     if (!initWorld(seed, population, depth, clean, raw, more, size)) return lastError();
     resetForm();
     setVal("seed", seed >>> 0); setVal("population", population); setVal("depth", depth);
@@ -301,6 +302,7 @@
   }
   /* a new world (oc_init or oc_reset), or one handed back by Turbo */
   function afterNewWorld(fromTurbo) {
+    if (!fromTurbo) worldEpoch++;
     var w0 = W, h0 = H, d0 = D, g0 = WALLS;
     readWorld();
     WALLS = wallsOn();
@@ -450,16 +452,26 @@
       if (typeof def === "boolean" ? v !== def : v !== def) cfg[k] = v;
     });
     Object.keys(extraCfg).forEach(function (k) { if (!(k in cfg)) cfg[k] = extraCfg[k]; });
-    return { seed: getVal("seed") >>> 0, population: getVal("population"), depth: getVal("depth"),
-             width: getVal("width"), height: getVal("height"), cfg: cfg };
+    return { seed: argVal("seed"), population: argVal("population"), depth: argVal("depth"),
+             width: argVal("width"), height: argVal("height"), cfg: cfg };
   }
-  /* the sheet's size fields against oc_init's limits: "" or why not */
+  /* oc_init's own arguments as the sheet holds them: no rounding, no default
+   * for an empty field (getVal's convenience for the other fields), so
+   * sizeProblem checks the very number shown, as a link's or a setup's is
+   * checked, and 99.6 is refused rather than run as 100 under a field
+   * showing 99.6. (The steppers' clamping is theirs, before this.) */
+  function argVal(key) {
+    var s = String(el("o_" + key).value).trim();
+    return s === "" ? NaN : Number(s);
+  }
+  /* the sheet's oc_init arguments against oc_init's limits: "" or why not */
   function sizeProblem(f) {
-    var bad = [];
-    if (!wholeIn(f.width, LIM.side)) bad.push("the tank width must be a whole number from " + LIM.side[0] + " to " + LIM.side[1] + " (got " + f.width + ")");
-    if (!wholeIn(f.height, LIM.side)) bad.push("the tank length must be a whole number from " + LIM.side[0] + " to " + LIM.side[1] + " (got " + f.height + ")");
-    if (!depthOk(f.depth)) bad.push("the sea depth must be from " + LIM.depth[0] + " to " + LIM.depth[1] + " (got " + f.depth + ")");
-    if (!wholeIn(f.population, LIM.population)) bad.push("the starting fish must be a whole number from 0 to " + LIM.population[1] + " (got " + f.population + ")");
+    var bad = [], got = function (v) { return " (got " + (v === v ? v : "no number") + ")"; };
+    if (!wholeIn(f.seed, [0, 4294967295])) bad.push("the seed must be a whole number from 0 to 4294967295" + got(f.seed));
+    if (!wholeIn(f.width, LIM.side)) bad.push("the tank width must be a whole number from " + LIM.side[0] + " to " + LIM.side[1] + got(f.width));
+    if (!wholeIn(f.height, LIM.side)) bad.push("the tank length must be a whole number from " + LIM.side[0] + " to " + LIM.side[1] + got(f.height));
+    if (!depthOk(f.depth)) bad.push("the sea depth must be from " + LIM.depth[0] + " to " + LIM.depth[1] + got(f.depth));
+    if (!wholeIn(f.population, LIM.population)) bad.push("the starting fish must be a whole number from 0 to " + LIM.population[1] + got(f.population));
     return bad.join("; ");
   }
   /* ---- live settings ----
@@ -815,6 +827,7 @@
       delete cfgOut.walls;
       if (Object.keys(cfgOut).length) u.searchParams.set("cfg", JSON.stringify(cfgOut)); else u.searchParams.delete("cfg");
       u.searchParams.delete("e1");   /* its keys are in cfg now */
+      u.searchParams.delete("renderBench"); u.searchParams.delete("perf");   /* measurement, never a setup's */
       history.replaceState(null, "", u);
     } catch (e) { /* file:// or a sandboxed frame */ }
   }
@@ -843,6 +856,9 @@
    * (importWorld: a value the engine refuses is reported, and nothing
    * changes). A setup without a size takes this screen's. */
   function loadSetup(text) {
+    /* the read is asynchronous: who owns the world is asked again now (the
+     * file input's check, before the read, stays: it starts no read for nothing) */
+    if (!M || guardTurbo()) return;
     var s, pf;
     try { pf = HO.parseFirst(text); s = pf.value; } catch (e) { showError("That file is not JSON: " + e.message); return; }
     /* a repeated key, as for ?cfg=: the first occurrence counts, every one is
@@ -871,13 +887,16 @@
     var depth = arg("depth", KEYS.depth[0], depthOk);
     var fw = fittedWorld();
     var w = arg("width", fw[0], whole(LIM.side[0], LIM.side[1])), h = arg("height", fw[1], whole(LIM.side[0], LIM.side[1]));
-    /* the sides: version 2 says (a bool); version 1 is from before walls, so
-     * it wraps unless its config itself asks for them */
-    var walls = version === 1 ? s.config.walls === true : arg("walls", null, function (v) { return typeof v === "boolean"; });
+    /* the sides: version 2 says (its own field, a bool, written as the
+     * config's first "walls", never deleted: a later one in its config still
+     * goes to oc_init to be checked, and would run if the first were gone);
+     * version 1 is from before walls, so it wraps unless its config itself
+     * asks for them, which oc_init checks as any Ocean switch (true / 1 on) */
+    var walls = version === 1 ? null : arg("walls", null, function (v) { return typeof v === "boolean"; });
     if (version !== 1 && walls === null) bad.push("walls (missing: a version-2 setup says true or false)");
     if (bad.length) { showError("That setup can't start: " + bad.join(", ") + " (whole numbers in range; walls true or false)."); return; }
     var config = Object.assign({}, s.config);
-    if (walls) config.walls = true; else delete config.walls;
+    if (version !== 1) config.walls = walls;
     clearError();
     var why = importWorld(seed, pop, depth, config, undefined, cfgRepeats, [w, h]);
     if (why) {
@@ -895,7 +914,7 @@
     var buf = heap();
     var n = M._oc_creature_count(), fc = M._oc_food_count(), pc = M._oc_predator_count();
     return {
-      buf: buf, n: n, fc: fc, pc: pc, selIdx: -1,
+      buf: buf, worldEpoch: worldEpoch, n: n, fc: fc, pc: pc, selIdx: -1,
       segs: new Float32Array(buf, M._oc_creature_segments(), n * 12),
       depth: new Float32Array(buf, M._oc_creature_depth(), n),
       ids: new Float64Array(buf, M._oc_creature_ids(), n),
@@ -917,7 +936,9 @@
    * rewrite them, and both cut a new snapshot), on the live memory */
   function fresh(s) {
     if (!s || s.buf === heap()) return s;   /* (the appearance rows: a view of this sync's too) */
+    var pt = PROF.beginCpu();
     var t = snapshot();
+    PROF.endCpu(SP.snapshot, pt);
     t.selIdx = s.selIdx;
     if (!HAS_VZ) t.vz = s.vz;   /* the estimate lives in JS */
     if (lastS === s) lastS = t;
@@ -967,13 +988,13 @@
 
   /* ---------------- state ---------------- */
   var scene = null, lastS = null;
-  var paused = false, stepOnce = false;
+  var paused = BENCH, stepOnce = false;
   var speedIdx = Math.max(0, SPEEDS.indexOf(Math.round(Math.max(1, Math.min(64, parseFloat(P.get("speed")) || 1)))));
   var stepMs = 0, lastSteps = 0;
   var selectedId = null, wantFollow = false, everSelected = false;
   var animT = 0, lastNow = 0;
   var fpsFrames = 0, fpsT = 0, fps = 0;
-  var governorOn = true, colourBrain = false, colourMode = "family";
+  var governorOn = !BENCH, colourBrain = false, colourMode = "family";
   var summary = null, summaryT = 0;   /* oc_summary, refreshed twice a second for the readout */
   function speed() { return SPEEDS[speedIdx]; }
   function stepsThisFrame() {
@@ -1211,16 +1232,20 @@
   function updateHud(s, now) {
     if (!dirtyHud && now - hudT < 500) return;
     dirtyHud = false; hudT = now;
-    if (has("oc_summary") && (!summary || now - summaryT > 450)) {
+    /* while Turbo owns the world, its numbers: the worker's latest stats and
+     * summary (turboView); this page's copy is the world as Turbo took it */
+    var tv = turboState !== "live" ? turboView : null;
+    if (!tv && has("oc_summary") && (!summary || now - summaryT > 450)) {
       summary = HO.f64(M, M._oc_summary(), M._oc_summary_len());   /* it allocates: the views after it */
       summaryT = now;
       s = fresh(s);
     }
-    var st = s.stats, g = function (k) { return STATS[k] < st.length ? st[STATS[k]] : NaN; };
+    var st = tv ? tv.st : s.stats, su = tv ? tv.su : summary, g = function (k) { return STATS[k] < st.length ? st[STATS[k]] : NaN; };
+    var nFish = tv ? g("pop") : s.n, nFood = tv ? su[0] : s.fc, nPred = tv ? su[1] : s.pc;
     var frame = g("frame");
     rates.push(frame, g("births"), g("deaths"));
-    setTxt("ro-fish", fmtInt(s.n));
-    setTxt("ro-gen", summary ? String(Math.round(summary[13])) : "–");
+    setTxt("ro-fish", fmtInt(nFish));
+    setTxt("ro-gen", su ? String(Math.round(su[13])) : "–");
     setTxt("ro-depth", g("depthMean").toFixed(0));
     setTxt("ro-fps", String(fps));
     el("ro-fps").className = "num" + (fps && fps < 45 ? " warn" : "");
@@ -1228,24 +1253,25 @@
     if (!statOpen) return;
     var rb = rates.perSec("b"), rd = rates.perSec("d");
     var rows = [
-      ["fish", fmtInt(s.n)],
-      ["food", fmtInt(s.fc)],
-      ["predators", String(s.pc)],
+      ["fish", fmtInt(nFish)],
+      ["food", fmtInt(nFood)],
+      ["predators", String(nPred)],
       ["time", fmtTime(frame * DT) + " <small>· frame " + fmtInt(frame) + "</small>"],
       ["seed", initArgs ? String(initArgs.seed) : "–"],
       ["births", fmtInt(g("births")) + (rb !== null ? " <small>· " + rb.toFixed(1) + "/s</small>" : "")],
       ["deaths", fmtInt(g("deaths")) + (rd !== null ? " <small>· " + rd.toFixed(1) + "/s</small>" : "")],
       ["founders added", fmtInt(g("reseeds"))]
     ];
-    if (summary) {
-      rows.push(["died", "<small>starved </small>" + fmtInt(summary[3]) + "<small> · old </small>" + fmtInt(summary[4]) + "<small> · caught </small>" + fmtInt(summary[2])]);
-      rows.push(["generation", summary[12].toFixed(1) + " <small>avg · " + Math.round(summary[13]) + " max</small>"]);
-      rows.push(["family lines", fmtInt(summary[19])]);
-      rows.push(["neutral depth", (summary[14] * D).toFixed(0) + " <small>± " + (summary[15] * D).toFixed(0) + "</small>"]);
+    if (su) {
+      rows.push(["died", "<small>starved </small>" + fmtInt(su[3]) + "<small> · old </small>" + fmtInt(su[4]) + "<small> · caught </small>" + fmtInt(su[2])]);
+      rows.push(["generation", su[12].toFixed(1) + " <small>avg · " + Math.round(su[13]) + " max</small>"]);
+      rows.push(["family lines", fmtInt(su[19])]);
+      rows.push(["neutral depth", (su[14] * D).toFixed(0) + " <small>± " + (su[15] * D).toFixed(0) + "</small>"]);
     }
     rows.push(["depth", g("depthMean").toFixed(0) + " ± " + g("depthSd").toFixed(0) + " <small>of " + D.toFixed(0) + "</small>"]);
     var ask = speed(), ran = paused ? ask : lastSteps;
-    rows.push(["steps / frame", ran + (ran !== ask ? "<small>/" + ask + "</small>" : "") + " <small>· " + fps + " fps</small>"]);
+    if (tv && turboStats) rows.push(["steps / s", fmtInt(turboStats.stepsPerSec) + " <small>· Turbo</small>"]);
+    else rows.push(["steps / frame", ran + (ran !== ask ? "<small>/" + ask + "</small>" : "") + " <small>· " + fps + " fps</small>"]);
     setHtml("statlist", rows.map(function (r) { return "<dt>" + r[0] + "</dt><dd>" + r[1] + "</dd>"; }).join(""));
     for (var i = 0; i < 8; i++) {
       var k = STATS.hist0 + i, v = k < st.length ? st[k] : 0;
@@ -1255,7 +1281,7 @@
     }
     var notes = [];
     if (paused) notes.push("Paused. Space or ▶ runs it; . steps once.");
-    if (turboState !== "live") notes.push("Turbo is running: this picture waits for it.");
+    if (turboState !== "live") notes.push(tv ? "Turbo is running: these are its numbers; the picture waits for it." : "Turbo is running: this picture waits for it.");
     if (scene && scene.following()) notes.push("Following a fish" + (lightOn() ? ", with the flashlight on." : "."));
     setTxt("statnotes", notes.join(" "));
   }
@@ -1512,8 +1538,11 @@
     sampleBucket = b;
     dash().push(HO.row(M, dash().famK, statsLen));
   }
+  /* the Brains dashboard's wiring: this world's, or, while Turbo owns the
+   * world, the worker's (turboWiring) */
   function wiringNow() {
-    if (!M || turboState !== "live" || !has("oc_wiring")) return null;
+    if (!M || !has("oc_wiring")) return null;
+    if (turboState !== "live") return turboWiring();
     var sh = brainShape(), n = M._oc_wiring();   /* both allocate: the view after them */
     var data = new Float32Array(heap(), M._oc_wiring_data(), 2 * sh.nS * sh.nA);
     return { at: performance.now(), n: n, senses: sh.nS, actions: sh.nA,
@@ -1524,9 +1553,31 @@
   /* ---------------- TURBO (web/ocean_worker.js) ----------------
    * live -> entering -> turbo -> exiting -> live. The worker gets a copy of
    * this module's memory and hands its own back on Stop; meanwhile this page
-   * keeps drawing the frozen world under the Turbo card, and live settings
-   * go to the worker. */
+   * keeps drawing the frozen world under the Turbo card, live settings go
+   * to the worker, and the readout and dashboards show the worker's world
+   * (its stats messages, its samples, the wiring it is asked for). */
   var turboState = "live", turboWorker = null, turboStats = null;
+  /* What the dashboards read while Turbo owns the world, from the worker:
+   * turboView {st, su}, its latest oc_stats / oc_summary (each stats message
+   * brings them: the readout and the stat panel); turboWire, the Brains
+   * panel's wiring, which the worker computes when asked (the panel asks
+   * when its copy is 2 s old, and only while it shows), stamped when it
+   * arrives here; wireAsked: a question is out (one at a time: an answer
+   * held up behind a long chunk is not asked for again, so the questions
+   * never pile up; the worker answers every one, {none} without a world).
+   * Cleared at each start and hand-back: the page's own world is the source
+   * again. */
+  var turboView = null, turboWire = null, wireAsked = false;
+  function turboWiring() {
+    var w = turboWire;
+    turboWire = null;
+    if (w) return w;   /* the panel keeps it until it wants a fresh one */
+    if (turboState === "turbo" && turboWorker && !wireAsked) {
+      wireAsked = true;
+      turboWorker.postMessage({ cmd: "wiring" });
+    }
+    return null;   /* nothing new yet: the panel keeps what it shows */
+  }
   function updateLocks() {
     var tb = el("turbobtn"), on = turboState === "turbo" || turboState === "exiting";
     tb.setAttribute("aria-pressed", on ? "true" : "false");
@@ -1553,14 +1604,24 @@
     var msg = e.data || {};
     if (msg.type === "stats") {
       turboStats = msg;
+      if (msg.st && msg.su) turboView = { st: msg.st, su: msg.su };
       if (turboState === "entering") { turboState = "turbo"; updateLocks(); flushHeld(); }
       paintTurbo();
+    } else if (msg.type === "wiring") {
+      wireAsked = false;   /* answered: the next one may be asked */
+      if (msg.none || turboState === "live") return;   /* no world there; or it is back here, the page's own the source */
+      brainShape();   /* the names: this page's module is the same build */
+      turboWire = { at: performance.now(), n: msg.n, senses: msg.senses, actions: msg.actions, path: msg.path, direct: msg.direct,
+                    senseNames: sensorNames, actionNames: actionNames, frame: msg.frame, turbo: true };
     } else if (msg.type === "rec") {
       if (dash()) dash().ingest(msg.rows);
     } else if (msg.type === "set") {
-      live.answered(msg.key, !!msg.ok);
+      /* a refusal leaves the field alone when a newer edit of the key, in
+       * flight or held for the hand-off, follows the one answered */
+      var answered = live.answered(msg.key, !!msg.ok);
+      if (!answered) return;
       if (msg.ok) liveApplied(msg.key, valOf(msg.key, msg.value));
-      else refuse(msg.key, msg.error, live.pending(msg.key));
+      else refuse(msg.key, msg.error, live.pending(msg.key, answered.seq));
     } else if (msg.type === "memory") {
       if (turboState !== "exiting") return;
       try { takeMemory(msg.mem); }
@@ -1585,6 +1646,8 @@
    * the acknowledged ones before them (ledger back). Returns replayEdits'. */
   function turboBack(quiet, lost) {
     turboState = "live";
+    turboView = null; turboWire = null; wireAsked = false;
+    summary = null;   /* the readout's summary: this world's again, at the next refresh */
     var plan = live.back(!!lost);
     afterNewWorld(true);
     sampleBucket = Math.floor(M._oc_stats ? frameNow() / (dash() ? dash().every() : 60) : -1);
@@ -1629,26 +1692,35 @@
     turboWorker = null;
   }
   function frameNow() { M._oc_sync(); return HO.f64(M, M._oc_stats(), statsLen)[1]; }
+  /* A start that throws here (the Worker, the copy of the memory, the first
+   * message) goes back to live through turboFailed, as a worker that fails
+   * while starting does: the worker dropped, the held edits applied. The
+   * worker always gets a copy: this page's memory stays the fallback. */
   function enterTurbo() {
     if (turboState !== "live" || !M || MOCK) { if (MOCK) showNote("Turbo needs the real engine."); return; }
-    turboState = "entering";
-    turboStats = null;
-    turboEntryCfg = Object.assign({}, runCfg);
-    live.start();
-    select(null);
-    unfollow();
-    updateLocks();
-    if (!turboWorker) {
-      turboWorker = new Worker(A.worker);
-      turboWorker.onmessage = onTurboMessage;
-      turboWorker.onerror = function (ev) {
-        if (ev && ev.preventDefault) ev.preventDefault();
-        turboFailed("The Turbo worker failed: " + (ev && ev.message || "could not load ocean_worker.js"), null);
-      };
+    try {
+      turboState = "entering";
+      turboStats = null;
+      turboView = null; turboWire = null; wireAsked = false;
+      turboEntryCfg = Object.assign({}, runCfg);
+      live.start();
+      select(null);
+      unfollow();
+      updateLocks();
+      if (!turboWorker) {
+        turboWorker = new Worker(A.worker);
+        turboWorker.onmessage = onTurboMessage;
+        turboWorker.onerror = function (ev) {
+          if (ev && ev.preventDefault) ev.preventDefault();
+          turboFailed("The Turbo worker failed: " + (ev && ev.message || "could not load ocean_worker.js"), null);
+        };
+      }
+      var mem = heap().slice(0);
+      turboWorker.postMessage({ cmd: "start", js: moduleUrls.js, wasm: moduleUrls.wasm, handoff: moduleUrls.handoff, mem: mem,
+                                recEvery: dash() ? dash().every() : 60, famK: dash() ? dash().famK : 8 }, [mem]);
+    } catch (err) {
+      turboFailed("Turbo could not start: " + (err && err.message || err), null);
     }
-    var mem = heap().slice(0);
-    turboWorker.postMessage({ cmd: "start", js: moduleUrls.js, wasm: moduleUrls.wasm, handoff: moduleUrls.handoff, mem: mem,
-                              recEvery: dash() ? dash().every() : 60, famK: dash() ? dash().famK : 8 }, [mem]);
   }
   function exitTurbo() {
     if (turboState !== "turbo") return;
@@ -1677,6 +1749,7 @@
   var splashDone = false;
   function frame(now) {
     requestAnimationFrame(frame);
+    PROF.beginFrame(now, worldEpoch, turboState, paused);   /* the raw rAF interval, before the clamp below */
     var dt = lastNow ? Math.min(0.1, (now - lastNow) / 1000) : 0;
     lastNow = now;
     var steps = 0;
@@ -1685,14 +1758,20 @@
       stepOnce = false;
       var t0 = performance.now();
       M._oc_step(steps);
-      var per = (performance.now() - t0) / steps;
+      var stepElapsed = performance.now() - t0;
+      PROF.recordStep(stepElapsed, steps);
+      var per = stepElapsed / steps;
       stepMs = stepMs ? stepMs * 0.9 + per * 0.1 : per;
       if (!paused) animT += dt * Math.min(steps, 2);
     }
     lastSteps = steps;
+    var pt = PROF.beginCpu();
     M._oc_sync();
+    pt = PROF.lap(SP.sync, pt);
     var s = snapshot();
+    pt = PROF.lap(SP.snapshot, pt);
     if (turboState === "live") { takeSample(s.stats); s = fresh(s); }
+    pt = PROF.lap(SP.dashboard, pt);
     if (!HAS_VZ) s.vz = vzEstimate(s, steps > 0);
     var ax = { f: 0, r: 0, u: 0 };
     for (var key in heldMoveKeys) ax[heldMoveKeys[key][0]] += heldMoveKeys[key][1];
@@ -1705,12 +1784,17 @@
     }
     s.selIdx = idx;
     lastS = s;
+    PROF.lap(SP.controller, pt);
     if (!(dash() && dash().isOpen())) scene.render(s, { animT: animT, dtSim: steps * DT, selIdx: idx });
+    pt = PROF.beginCpu();
     s = updateCard(s);
+    pt = PROF.lap(SP.card, pt);
     fpsFrames++;
     if (now - fpsT >= 1000) { fps = Math.round(fpsFrames * 1000 / (now - fpsT)); fpsFrames = 0; fpsT = now; dirtyHud = true; govern(now); }
     updateHud(s, now);
+    PROF.lap(SP.hud, pt);
     if (!splashDone) { splashDone = true; el("splash").classList.add("done"); }
+    if (PROF.active) PROF.endFrame(s.n, s.stats[1], !!(dash() && dash().isOpen()));
   }
 
   /* ---------------- input ---------------- */
@@ -2025,7 +2109,7 @@
     if (!b) return;
     colourMode = b.dataset.c === "brain" || b.dataset.c === "appearance" ? b.dataset.c : "family";
     colourBrain = colourMode === "brain";
-    store("evo_boids.colourBy", colourMode);
+    if (!BENCH) store("evo_boids.colourBy", colourMode);   /* a benchmark's cases are not the visitor's choice */
     showColourMode();
     if (M) applyDisplaySwitches();
     updateModeline();
@@ -2094,7 +2178,7 @@
       : colourMode === "brain" ? "Fish with similar brains get similar colours."
       : "Each family line has its own colour, the same one it has in the charts.");
   }
-  setPaused(false);
+  setPaused(BENCH);
   changeSpeed(0);
 
   /* ---------------- the tour (web/guide.js reads this) ---------------- */
@@ -2296,12 +2380,20 @@
     /* the sides: ?walls=1 / 0 (written by every Restart); a link without it
      * from before walls existed wraps as it always did (and so does a ?cfg=
      * without "walls"); a bare address — a new visit — starts with glass
-     * walls (CFG.FRESH), when this module has them */
-    var freshVisit = ["seed", "pop", "depth", "w", "h", "cfg", "e1", "walls"].every(function (k) { return !P.has(k); });
+     * walls (CFG.FRESH), when this module has them. walls= is written into
+     * the cfg's own (first) "walls" either way, never deleted: a later
+     * "walls" in ?cfg= (cfgRepeats) still goes to oc_init to be checked, and
+     * would be the one it runs if the first were gone. An Ocean link is one
+     * with any of the keys only the Ocean reads (ocean.html's OCEAN_ONLY, the
+     * same list: tests/ocean_turbo_handoff.js holds them equal), ?speed= among
+     * them; the keys both pages read (colour, guide, intro) and those newer
+     * than walls (clarity) make no link old. */
+    var OCEAN_KEYS = ["seed", "pop", "depth", "w", "h", "cfg", "speed", "e1", "mock", "walls"];
+    var freshVisit = OCEAN_KEYS.every(function (k) { return !P.has(k); });
     if (P.has("walls")) {
       var wv = P.get("walls");
       if (wv === "1") cfg0.walls = true;
-      else if (wv === "0") delete cfg0.walls;
+      else if (wv === "0") cfg0.walls = false;
       else linkBad.push("walls=" + wv + " (1 or 0)");
     } else if (freshVisit && hasWalls()) {
       Object.keys(CFG.FRESH).forEach(function (k) { if (!(k in cfg0)) cfg0[k] = CFG.FRESH[k]; });
@@ -2319,7 +2411,8 @@
       tankDepth: D,
       coarse: coarseMQ.matches,
       reducedMotion: reducedMQ.matches,
-      bodyScale: bodyScale, onFollowChange: onFollowChange
+      bodyScale: bodyScale, onFollowChange: onFollowChange,
+      profiler: PERF ? PROF : null, visualRandom: BENCH ? PERF.visualRandom(2463534242) : null
     });
     if (!scene) throw new Error("WebGL2 is unavailable, and the 3-D Ocean has only the 3D tank");
     detail0 = scene.quality();
@@ -2378,9 +2471,13 @@
                  turbo: turboState, colourBrain: colourBrain, frame: s.stats[1],
                  held: live.held(), inflight: live.inflight(), fixedSize: [URL_W, URL_H], walls: WALLS, hasWalls: hasWalls(),
                  stats: Array.prototype.slice.call(s.stats), depthMin: s.n ? lo : 0, depthMax: s.n ? hi : 0,
-                 dashRows: dash() ? dash()._rows().length : 0 };
+                 dashRows: dash() ? dash()._rows().length : 0, worldEpoch: worldEpoch };
       }
     };
+    if (PROF.enabled) EvoOcean.perf = PROF;   /* ?renderBench=1 / ?perf=1 (web/ocean_perf.js) */
+    if (BENCH) EvoOcean.bench = PERF.bench({ module: M, scene: scene, profiler: PROF, page: EvoOcean, setPaused: setPaused,
+      last: function () { return fresh(lastS); }, epoch: function () { return worldEpoch; }, initArgs: function () { return initArgs; },
+      importWorld: importWorld });
     requestAnimationFrame(frame);
     window.EvoApp.ready = true;
     window.dispatchEvent(new Event("evo:ready"));

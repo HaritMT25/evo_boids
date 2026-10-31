@@ -12,6 +12,9 @@
  * multiple (web/ocean_worker.js); both arrive through push() / ingest().
  * History is bounded: when full, every other row goes and the interval
  * doubles (setRecEvery tells the page, which tells a running worker).
+ * The Brains tab reads host.wiring() when its copy is 2 s old, only while it
+ * shows: the page's own world's, or during Turbo the worker's (the page asks
+ * the worker; null until it answers, and the panel keeps what it has).
  *
  * Page hooks: attach(host), push(row), ingest(rows), reset(), every(),
  * open() / close() / isOpen(). Charts redraw at most twice a second, only
@@ -47,11 +50,13 @@
     if (host && host.setRecEvery) host.setRecEvery(every);
   }
   /* the run went back to an earlier frame (a Turbo run that was lost): the
-   * samples after it are of a future that did not happen */
+   * samples after it, and the wiring the worker had, are of a future that
+   * did not happen */
   function rewind(frame) {
     var n = rows.length;
     rows = rows.filter(function (r) { return frameOf(r) <= frame; });
     if (rows.length !== n) version++;
+    wireCache = null; lastKey = "";
   }
 
   /* ---- columns ---- */
@@ -252,7 +257,11 @@
                    } };
         },
         legendScale: true,
-        note: function (d) { return d ? "From " + (wireCache ? wireCache.n : 0) + " fish; refreshes every 2 s while the world runs here (not during Turbo)." : "Waiting for the world…"; } }
+        note: function (d) {
+          if (!d) return "Waiting for the world…";
+          return "From " + (wireCache ? wireCache.n : 0) + " fish" + (wireCache && wireCache.turbo ? " in the Turbo run" : "") +
+                 "; refreshes every 2 s.";
+        } }
     ] }
   ];
   function z(v) { return Number.isFinite(v) ? v : 0; }

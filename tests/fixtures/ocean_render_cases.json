@@ -1,0 +1,40 @@
+{
+  "format": "evo_ocean_render_cases",
+  "version": 1,
+  "about": "The Ocean render benchmark (tests/ocean_render_browser.mjs, EvoOcean.bench at ?renderBench=1). A case is the benchmark world below at one population, one camera and one colour mode, paused at tick 0 (the counts are exact and no ecology changes), drawn through the normal page frame: oc_sync, packing, the render. The live cases unpause it at one step a frame and record the population every frame. walls: true is the site's fresh-visit default (CFG.FRESH).",
+  "benchmark": {
+    "worldSeed": 42,
+    "visualSeed": 2463534242,
+    "tick": 0,
+    "world": [1920, 1080, 240],
+    "population": 2500,
+    "config": { "appearance": 3, "walls": true },
+    "quality": 3,
+    "speed": 1,
+    "governor": false,
+    "drawingBuffer": [1920, 1080],
+    "colourMode": "appearance"
+  },
+  "populations": [500, 1500, 2500],
+  "colourModes": ["appearance", "family", "brain"],
+  "cameras": {
+    "whole": "lookFrom([0, 920, 1620], [0, -120, 0]); flashlight off",
+    "dense": "heads binned into 256-unit x / y cells; the fullest (row-major tie break); its mean head position and depth as the target; camera at target + [180, 80, 240]; flashlight off",
+    "follow": "the smallest id, preferring a fish with barbels; camera at its head + [85, 32, 100]; then follow (the flashlight comes on with it); transitions settle"
+  },
+  "capture": {
+    "warmMs": 20000,
+    "durationMs": 120000,
+    "drainMs": 5000,
+    "sampleEvery": 6,
+    "maxOutstandingQueries": 64,
+    "drawScopeMs": 30000
+  },
+  "matrix": "3 counts x 3 cameras x 3 colour modes = 27 cells; paired baseline / candidate order B, C, C, B; draw-scope timing separate from whole-frame timing, never combined",
+  "profilerModes": {
+    "off": "the profiler off; rAF timestamps only (the baseline)",
+    "frame": "cpu: frame (the whole frame callback: two clock reads)",
+    "spans": "cpu: every span",
+    "spansGpu": "cpu: every span, gpu: frame (one elapsed query around the submission, every 6th)"
+  }
+}

@@ -866,14 +866,16 @@
     var depth = arg("depth", KEYS.depth[0], depthOk);
     var fw = fittedWorld();
     var w = arg("width", fw[0], whole(LIM.side[0], LIM.side[1])), h = arg("height", fw[1], whole(LIM.side[0], LIM.side[1]));
-    /* the sides: version 2 says (its own field, a bool, over its config's);
+    /* the sides: version 2 says (its own field, a bool, written as the
+     * config's first "walls", never deleted: a later one in its config still
+     * goes to oc_init to be checked, and would run if the first were gone);
      * version 1 is from before walls, so it wraps unless its config itself
      * asks for them, which oc_init checks as any Ocean switch (true / 1 on) */
     var walls = version === 1 ? null : arg("walls", null, function (v) { return typeof v === "boolean"; });
     if (version !== 1 && walls === null) bad.push("walls (missing: a version-2 setup says true or false)");
     if (bad.length) { showError("That setup can't start: " + bad.join(", ") + " (whole numbers in range; walls true or false)."); return; }
     var config = Object.assign({}, s.config);
-    if (version !== 1) { if (walls) config.walls = true; else delete config.walls; }
+    if (version !== 1) config.walls = walls;
     clearError();
     var why = importWorld(seed, pop, depth, config, undefined, cfgRepeats, [w, h]);
     if (why) {
@@ -2215,12 +2217,15 @@
     /* the sides: ?walls=1 / 0 (written by every Restart); a link without it
      * from before walls existed wraps as it always did (and so does a ?cfg=
      * without "walls"); a bare address — a new visit — starts with glass
-     * walls (CFG.FRESH), when this module has them */
+     * walls (CFG.FRESH), when this module has them. walls= is written into
+     * the cfg's own (first) "walls" either way, never deleted: a later
+     * "walls" in ?cfg= (cfgRepeats) still goes to oc_init to be checked, and
+     * would be the one it runs if the first were gone. */
     var freshVisit = ["seed", "pop", "depth", "w", "h", "cfg", "e1", "walls"].every(function (k) { return !P.has(k); });
     if (P.has("walls")) {
       var wv = P.get("walls");
       if (wv === "1") cfg0.walls = true;
-      else if (wv === "0") delete cfg0.walls;
+      else if (wv === "0") cfg0.walls = false;
       else linkBad.push("walls=" + wv + " (1 or 0)");
     } else if (freshVisit && hasWalls()) {
       Object.keys(CFG.FRESH).forEach(function (k) { if (!(k in cfg0)) cfg0[k] = CFG.FRESH[k]; });

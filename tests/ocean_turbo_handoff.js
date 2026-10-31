@@ -441,7 +441,7 @@ const unref = (t) => { if (t && t.unref) t.unref(); return t; };
 
 /* A page at ocean.html?query, started (or refused: page.failed). */
 async function bootPage(query) {
-    const page = { hooks: {}, workers: [], uncaught: [], logs: [], inits: [], sets: [], raf: null };
+    const page = { hooks: {}, workers: [], uncaught: [], logs: [], inits: [], sets: [], blobs: [], raf: null };
     const { doc, Ev, fireOn } = makeDom(page);
     const loc = {};
     const setLoc = (u) => { const x = new URL(u); Object.assign(loc, { href: x.href, search: x.search, origin: x.origin, protocol: x.protocol, pathname: x.pathname }); };
@@ -458,7 +458,8 @@ async function bootPage(query) {
         innerWidth: 1920, innerHeight: 1080, devicePixelRatio: 1, _ls: winLs,
         addEventListener: (t, f) => { (winLs[t] = winLs[t] || []).push(f); }, removeEventListener() {},
         dispatchEvent: (ev) => { fireOn(ctx, ev); return true; },
-        Event: Ev, URL, URLSearchParams, Blob, ImageData: class {}, performance, WebAssembly, TextEncoder, TextDecoder,
+        Event: Ev, URL, URLSearchParams, ImageData: class {}, performance, WebAssembly, TextEncoder, TextDecoder,
+        Blob: function (parts, o) { page.blobs.push(parts.map(String).join('')); return new Blob(parts, o); },   /* Save setup's file */
         console: { log: say('log'), info: say('info'), warn: say('warn'), error: say('error'), debug: say('debug') },
         setTimeout: (f, ms) => unref(setTimeout(f, ms)), clearTimeout, setInterval: (f, ms) => unref(setInterval(f, ms)), clearInterval,
         EVO_ASSETS: { ocean: 'evo_ocean.js', oceanWasm: 'evo_ocean.wasm', worker: 'ocean_worker.js', handoff: 'ocean_handoff.js', mock: 'ocean_mock.js' },
@@ -1492,6 +1493,60 @@ async function pageDashboards() {
     }
 }
 
+/* Deployed-audit PR #30-31, finding 2: ?walls=0 (or a version-2 setup's
+ * "walls": false) deleted the cfg's own "walls", so a later "walls" in the
+ * same cfg became the first occurrence and the one oc_init ran:
+ * ?walls=0&cfg={"walls":false,"walls":true} ran glass walls under an
+ * unchecked switch, with runCfg missing walls. walls= now writes the first
+ * occurrence; the later ones still go to oc_init to be checked. Through the
+ * link and a setup file, then Replay, Save setup and loading that file. */
+async function pageWallsOverride() {
+    section('The page: walls=0 and a setup\'s "walls": false win over a later "walls" in the cfg (deployed audit #30-31, finding 2)');
+    const DUP = '{"walls":false,"walls":true}';
+    const sides = (p) => ({ engine: p.M._oc_walls_enabled(), page: p.T.WALLS, box: p.el('o_walls').checked, run: p.T.runCfg.walls,
+                            init: p.T.initArgs.cfg.walls });
+    const off = (s) => s.engine === 0 && s.page === false && s.box === false && s.run === false && s.init === false;
+    const show = (s) => JSON.stringify(s);
+    const v2 = (walls, config) => '{"format":"evo_ocean_setup","version":2,"seed":7,"population":12,"depth":240,"width":1920,' +
+                                  '"height":1080,"walls":' + walls + ',"config":' + config + '}';
+    const load = async (p, text) => {
+        p.el('err').textContent = '';
+        p.loadFile({ name: 'setup.json', text: () => Promise.resolve(text) });
+        await until(() => p.msg() !== '', 'the setup\'s answer');
+        return p.msg();
+    };
+    for (const how of ['link', 'setup']) {
+        const p = await bootPage(how === 'link' ? '?seed=7&pop=12&w=1920&h=1080&walls=0&cfg=' + encodeURIComponent(DUP) : PAGE_Q7);
+        const said = how === 'link' ? p.failed : await load(p, v2('false', DUP));
+        const s1 = sides(p), sent = p.inits[p.inits.length - 1];
+        ok(!/refused|can't/.test(said) && off(s1) && /^\{"walls":false,.*"walls":true\}$/.test(sent),
+           how + ': ' + (how === 'link' ? '?walls=0&cfg=' + DUP : 'a version-2 setup, walls false, config ' + DUP) +
+           ' runs without walls, the switch off, runCfg / initArgs walls false (' + show(s1) + '; oc_init got ' + sent + ')');
+        p.click('replay');
+        const s2 = sides(p);
+        ok(off(s2), how + ': Replay keeps it without walls (' + show(s2) + ')');
+        p.click('savecp');
+        const saved = JSON.parse(p.blobs[p.blobs.length - 1] || '{}');
+        ok(saved.walls === false && !('walls' in (saved.config || {})), how + ': Save setup writes walls false (' + JSON.stringify({ walls: saved.walls, config: saved.config }) + ')');
+        await load(p, p.blobs[p.blobs.length - 1]);
+        const s3 = sides(p);
+        ok(off(s3) && /^Setup loaded/.test(p.msg()), how + ': and that file loads without walls (' + show(s3) + ')');
+    }
+    {   /* the other way, and a later occurrence that is not a switch: still checked, still refused */
+        const p = await bootPage(PAGE_Q7);
+        await load(p, v2('true', '{"walls":true,"walls":false}'));
+        const on = sides(p);
+        ok(on.engine === 1 && on.box === true && on.run === true, 'a version-2 setup, walls true, config {"walls":true,"walls":false}: glass walls (' + show(on) + ')');
+        const why = await load(p, v2('false', '{"walls":false,"walls":2}'));
+        ok(/refused/.test(why) && /walls/.test(why) && sides(p).engine === 1, 'walls false over a later "walls": 2 is refused by oc_init, the world kept ("' + why + '")');
+        let refused = '';
+        try { p.T.urlImport(new URLSearchParams('seed=7&pop=12&w=1920&h=1080&walls=0&cfg=' + encodeURIComponent('{"walls":false,"walls":"x"}'))); }
+        catch (e) { refused = String(e.message); }
+        ok(/walls/.test(refused), 'and so is ?walls=0&cfg={"walls":false,"walls":"x"} ("' + refused + '")');
+        ok(p.uncaught.length === 0, 'no exception escaped the page\'s handlers');
+    }
+}
+
 /* Every section, in order; `node tests/ocean_turbo_handoff.js NAME...` runs only those. */
 const SECTIONS = {
     repeatedKeys, liveLedger, growthPage, randomize, imports,
@@ -1504,7 +1559,8 @@ const SECTIONS = {
                                                 foodPatches: 5, foodDepthMode: 1, bodyModel: true }));
     },
     failures: failures_,
-    pageHeld, pageRefusal, pageAsyncSetup, pageStartFailures, pageOverflow, pageBools, pageDashboards
+    pageHeld, pageRefusal, pageAsyncSetup, pageStartFailures, pageOverflow, pageBools, pageDashboards,
+    pageWallsOverride
 };
 const unhandled = [];
 process.on('unhandledRejection', (e) => { unhandled.push(e); });

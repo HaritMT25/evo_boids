@@ -48,6 +48,12 @@
 //                 tests/ocean_sense_tests.hpp, which lists what they pin)
 //   food_grid     OceanFoodGrid == SpatialGrid: the same lists and visits, and
 //                 each entry's payload is its item's
+//   sense_dce     every fish reading one sensor, each sensor, each topology /
+//                 eye mode: capture off == capture on, bit for bit
+//   capture_toggle  capture on -> off -> on: the same run; captured arrays
+//                 untouched while off
+//   food_scan     the food scans' item lists == their scalar definition, bit
+//                 for bit (the three in tests/ocean_speed_tests.hpp)
 //   food_life     foodLife: an item goes on the step its age reaches foodLife;
 //                 off, none do; the first stock's ages spread; draws unchanged;
 //                 the spawn cap counts live items (what expires frees its place
@@ -4791,6 +4797,7 @@ void testFlowLanes() {
 
 #include "ocean_appearance_tests.hpp"
 #include "ocean_sense_tests.hpp"
+#include "ocean_speed_tests.hpp"   // the exact Turbo speed-ups' own checks
 
 namespace ot {
 #include "ocean_walls_tests.hpp"   // the glass walls (uses this file's helpers)
@@ -4818,6 +4825,9 @@ int main(int argc, char** argv) {
     ot::testSenseEdges();   // tests/ocean_sense_tests.hpp: the scans' edges, pinned
     ot::testSenseRef();
     ot::testFoodGrid();
+    ot::testSenseDce();    // tests/ocean_speed_tests.hpp: what the speed-ups must keep
+    ot::testCaptureToggle();
+    ot::testFoodScan();
     ot::testFoodLife();
     ot::testRemovedNonFinite();
     ot::testReproducible();

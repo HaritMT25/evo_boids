@@ -4794,6 +4794,7 @@ void testFlowLanes() {
 
 namespace ot {
 #include "ocean_walls_tests.hpp"   // the glass walls (uses this file's helpers)
+#include "ocean_exp_tests.hpp"     // the ALIFE 2027 instruments (eye build; uses this file's helpers)
 }  // namespace ot
 
 int main(int argc, char** argv) {
@@ -4869,6 +4870,9 @@ int main(int argc, char** argv) {
 #ifdef EVO_OCEAN_EYE
     ot::testEyeExpProbe();   // the eye experiment's own probes (tools/ocean_eye_exp.cpp)
     ot::testEyeExpWiring();
+    ot::testExpArmsShareInit();   // the ALIFE 2027 instruments: tests/ocean_exp_tests.hpp
+    ot::testExpObserversNeutral();
+    ot::testExpBranches();
 #endif
     // the appearance genome (cosmetic): tests/ocean_appearance_tests.hpp
     ot::testAppearanceGallery();

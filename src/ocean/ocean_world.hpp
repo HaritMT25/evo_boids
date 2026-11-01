@@ -2334,7 +2334,21 @@ private:
     // wrapDelta's rule (d > W/2: d − W; d < −W/2: d + W; else d) — the two round
     // differently, so both stay (sense_edges, "wrapped filter"). The rule is
     // taken as a select between the three values wrapDelta returns, each
-    // computed as it computes it: no branch, the same bits. Scalar.
+    // computed as it computes it: no branch, the same bits.
+    //
+    // Four candidates at a time, as foodWithin's (GCC / Clang vector
+    // extensions: SSE2 on x86-64, SIMD128 under -msimd128): lane j runs
+    // candidate k + j's very operations — the image offset gx = x − cx0 and its
+    // q2 = gx·gx + gy·gy, the scan offset ux = x − px, the same IEEE single
+    // −, × and + in the same tree, no FMA (-ffp-contract=off), no relaxed SIMD;
+    // wrapDelta's select is a BITWISE select of the lane's three candidate
+    // values (ux − W if ux > W/2, else ux + W if ux < −W/2, else ux — the
+    // scalar's precedence), so a ±0 or NaN keeps its exact bits (an arithmetic
+    // blend such as ux + 0 would turn −0 into +0); the two tests are the
+    // literal masks q2 <= R² and !(d2 > R²) (a NaN d² passes the second, as it
+    // always has; a NaN q2 fails the first). The lanes are written and kept one
+    // by one in lane order, as the scalar loop would; the rest of a run (< 4)
+    // is the scalar loop (food_scan holds both to the scalar definition).
     int foodWithinWrapped(const Fish& c, float R) {
         FoodSeen* out = foodSeenList();
         const float* fx = foodGrid_.xs();
@@ -2344,9 +2358,38 @@ private:
         const float px = c.pos.x, py = c.pos.y, pz = c.depth;
         const float W = (float)width, H = (float)height;
         const float hw = 0.5f * W, hh = 0.5f * H;   // wrapDelta's half = 0.5f · span
+        typedef float v4f __attribute__((vector_size(16)));
+        typedef int v4i __attribute__((vector_size(16)));
+        const v4f PX = {px, px, px, px}, PY = {py, py, py, py}, PZ = {pz, pz, pz, pz};
+        const v4f RR = {R2, R2, R2, R2};
+        const v4f VW = {W, W, W, W}, VH = {H, H, H, H};
+        const v4f HW = {hw, hw, hw, hw}, HH = {hh, hh, hh, hh};
+        const v4f NHW = -HW, NHH = -HH;   // −hw, −hh: negation is exact, the scalar's −hw
+        // m ? a : b, lane by lane, by bits (a vector cast between equal sizes is a bitcast)
+        auto pick = [](v4i m, v4f a, v4f b) { return (v4f)(((v4i)a & m) | ((v4i)b & ~m)); };
         int n = 0;
         foodGrid_.forEachRunWrapped(c.pos, R, [&](int b, int e, float cx0, float cy0) {
-            for (int k = b; k < e; ++k) {
+            const v4f CX = {cx0, cx0, cx0, cx0}, CY = {cy0, cy0, cy0, cy0};
+            int k = b;
+            for (; k + 4 <= e; k += 4) {
+                v4f X, Y, Z;
+                std::memcpy(&X, fx + k, sizeof X);
+                std::memcpy(&Y, fy + k, sizeof Y);
+                std::memcpy(&Z, fz + k, sizeof Z);
+                const v4f gx = X - CX, gy = Y - CY;            // the grid's 2-D test
+                const v4f q2 = gx * gx + gy * gy;
+                const v4f ux = X - PX, uy = Y - PY;            // the scan's offset, wrapped
+                const v4f dx = pick(ux > HW, ux - VW, pick(ux < NHW, ux + VW, ux));
+                const v4f dy = pick(uy > HH, uy - VH, pick(uy < NHH, uy + VH, uy));
+                const v4f dz = Z - PZ;
+                const v4f d2 = dx * dx + dy * dy + dz * dz;
+                const v4i keep = (q2 <= RR) & ~(d2 > RR);    // −1 = kept
+                for (int j = 0; j < 4; ++j) {
+                    out[n] = {dx[j], dy[j], dz[j], d2[j], k + j};
+                    n -= keep[j];
+                }
+            }
+            for (; k < e; ++k) {
                 const float gx = fx[k] - cx0, gy = fy[k] - cy0;   // the grid's 2-D test
                 const float q2 = gx * gx + gy * gy;
                 const float ux = fx[k] - px, uy = fy[k] - py;     // the scan's offset, wrapped

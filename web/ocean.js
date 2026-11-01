@@ -1020,11 +1020,14 @@
     el("speedlabel").textContent = speed() + "×";
     dirtyHud = true;
   }
-  /* Hold 60 fps may run fewer steps than asked: the label turns and says how many */
+  /* Hold 60 fps may run fewer steps than asked: the label turns, and the
+   * caption under it (#speedcap) says how many, on a touch screen too */
   function showSpeedCap() {
     var ask = speed(), ran = turboState === "live" && !paused && lastSteps > 0 ? lastSteps : ask, lab = el("speedlabel");
     lab.classList.toggle("capped", ran < ask);
     lab.title = ran < ask ? ask + "× asked; running " + ran + " steps per frame to hold 60 fps (View › Hold 60 fps)" : "steps per frame";
+    el("speedcap").hidden = !(ran < ask);
+    if (ran < ask) setTxt("speedcap", "runs " + ran);
   }
   function indexOfId(s, id) {
     if (id === null || !s) return -1;

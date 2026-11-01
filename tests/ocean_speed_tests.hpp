@@ -14,20 +14,26 @@
 //   sense_dce       capture off vs on, one sensor at a time (what a skip of
 //                   the sensors a net does not read must keep): every fish
 //                   rewired to read only sensor s (into hidden neuron 0 and
-//                   STEER_X), in a world where every sensor reads non-zero
-//                   somewhere (predators, a current or flow, pheromone, food,
-//                   neighbours); stepped with capture off and on: the same
-//                   neuron outputs bit for bit and the same dynamics, two
-//                   steps, for every s, in each topology (glass walls; bounded
-//                   + E1 flow; toroidal + topological neighbours) and (eye
-//                   build) eye nearest / summed / eye-only; and the own-state
-//                   inputs equal kernel::writeOwnStateSensors bit for bit (the
-//                   nearest's three are held to kernel::writeNearestSensors by
-//                   sense_edges / sense_ref)
+//                   STEER_X; hidden 0 also votes to fight, the undriven hidden
+//                   1 to pair, so contacts fight or pair by what s read), in a
+//                   world where every sensor reads non-zero somewhere
+//                   (predators, a current or flow, pheromone, food,
+//                   neighbours); stepped with capture off and on: each step
+//                   the same neuron outputs bit for bit, the same dynamics and
+//                   the same rng stream (each world's OWN stream: fingerprinted
+//                   with it installed, and the saved streams compared), for
+//                   every s, in each topology (glass walls — 40 steps from
+//                   founders old enough to pair, contacts and births required;
+//                   bounded + E1 flow; toroidal + topological neighbours — 2
+//                   steps) and (eye build) eye nearest / summed / eye-only;
+//                   and the own-state inputs equal kernel::writeOwnStateSensors
+//                   bit for bit (the nearest's three are held to
+//                   kernel::writeNearestSensors by sense_edges / sense_ref)
 //   capture_toggle  captureActivations on -> off -> on -> off: the run is the
-//                   always-on and the always-off run every step; while off,
-//                   no fish's lastSensors / lastActions change; back on, they
-//                   are the always-on run's
+//                   always-on and the always-off run every step (dynamics and
+//                   each world's own rng stream), eye-only mode included; while
+//                   off, no fish's lastSensors / lastActions change; back on,
+//                   they are the always-on run's
 //   food_scan       OceanWorld::foodWithin / foodWithinWrapped (the scans'
 //                   item lists) against the scalar loops that define them,
 //                   record by record, bit for bit: random worlds (narrow tori
@@ -76,14 +82,22 @@ inline bool mayBeAllZero(int s, const RichCfg& rc) {
 }
 
 // Fish f reads sensor s only: s -> hidden neuron 0 and s -> STEER_X, weight 1
-// (its genome kept: genetic similarity still varies).
+// (its genome kept: genetic similarity still varies). Two social wires make
+// the contact vote depend on what s read: hidden 0 (tanh of s, carried into
+// the vote as recurrent state) -> INTERACT_FIGHT, and the undriven hidden 1
+// (a constant 0.5) -> INTERACT_REPRODUCE, so pairs whose s read high fight and
+// the rest pair (kernel::interactionVote). Neither adds a sensor source.
 inline void readOnly(Fish& f, int s) {
-    Gene toHidden, toSteer;
+    Gene toHidden, toSteer, fight, pair;
     toHidden.sourceType = SOURCE_SENSOR; toHidden.sourceNum = (uint16_t)s;
     toHidden.sinkType = SINK_NEURON;     toHidden.sinkNum = 0;     toHidden.weight = 8192;
     toSteer = toHidden;
     toSteer.sinkType = SINK_ACTION;      toSteer.sinkNum = STEER_X;
-    buildNeuralNet(Genome{toHidden, toSteer}, f.nnet);
+    fight.sourceType = SOURCE_NEURON;    fight.sourceNum = 0;
+    fight.sinkType = SINK_ACTION;        fight.sinkNum = INTERACT_FIGHT;    fight.weight = 8192;
+    pair = fight;
+    pair.sourceNum = 1;                  pair.sinkNum = INTERACT_REPRODUCE;
+    buildNeuralNet(Genome{toHidden, toSteer, fight, pair}, f.nnet);
 }
 
 inline bool sameArrays(const Fish& a, const Fish& b) {
@@ -142,22 +156,40 @@ void testSenseMask() {
 }
 
 // One world with its own rng stream (the engine's rng is global): step() swaps
-// the stream in, steps, and keeps where it got to.
+// the stream in, steps, and keeps where it got to. fp() is the world's
+// fingerprint with ITS stream in the global engine (the fingerprint's rng
+// section hashes the global rng, so a world fingerprinted after another one
+// stepped would otherwise show that world's stream); the global rng is put
+// back after. Comparisons also hold the saved streams to each other directly
+// (sameEngine: three draws and the whole serialised state).
 struct OwnRng {
     OceanWorld w;
     RandomGen r;
     void step() { rng = r; w.update(0.016f); r = rng; }
+    ofp::Fingerprint fp() const {
+        const RandomGen keep = rng;
+        rng = r;
+        const ofp::Fingerprint f = ofp::fingerprint(w, false);
+        rng = keep;
+        return f;
+    }
 };
 
 void testSenseDce() {
     Test t("sense_dce");
     using sense::sameBits;
     long compared = 0, ownChecked = 0;
+    long long longContacts = 0, longBirths = 0;   // the 40-step worlds' social coverage
     for (const speed::RichCfg& rc : speed::kRich) {
+        // The first config runs each single-sensor world 40 steps (contacts, fights,
+        // pairings and births happen, decided by what s read), from founders aged
+        // 6.4 s (pairing needs age > 5); the others 2 steps after a 3.2 s warm-up.
+        const bool longRun = (&rc == &speed::kRich[0]);
+        const int steps = longRun ? 40 : 2;
         OceanWorld base;
         std::string err;
         if (!t.expect(ofp::initWorld(base, 77, 1920, 1080, 240.0f, 300, rc.json, err), "%s: %s", rc.name, err.c_str())) continue;
-        for (int k = 0; k < 200; ++k) base.update(0.016f);   // pheromone laid, fish spread, predators about
+        for (int k = 0; k < (longRun ? 400 : 200); ++k) base.update(0.016f);   // pheromone laid, fish spread, predators about
         const RandomGen r0 = rng;
 
         // The own-state inputs computeSensors writes itself == kernel::writeOwnStateSensors
@@ -187,16 +219,21 @@ void testSenseDce() {
             OwnRng on = off;
             off.w.cfg.captureActivations = false;   // the skip: only sensor s is computed
             on.w.cfg.captureActivations = true;     // every sensor
-            for (int step = 0; step < 2; ++step) {
+            const long long births0 = on.w.totalBirths;
+            for (int step = 0; step < steps; ++step) {
                 off.step();
                 on.step();
-                const ofp::Fingerprint a = ofp::fingerprint(off.w, false), b = ofp::fingerprint(on.w, false);
-                bool same = sameDynamics(a, b) && off.w.creatures.size() == on.w.creatures.size();
+                const ofp::Fingerprint a = off.fp(), b = on.fp();   // each with its own stream
+                bool same = sameEngine(off.r, on.r) && sameDynamics(a, b) && off.w.creatures.size() == on.w.creatures.size();
                 for (std::size_t i = 0; same && i < off.w.creatures.size(); ++i)
                     same = sameBits(off.w.creatures[i].nnet.neurons[0].output, on.w.creatures[i].nnet.neurons[0].output);
-                t.expect(same, "%s: reading only %s, step %d: capture off (the skip) and on differ (fish %016llx vs %016llx)",
-                         rc.name, ocean::kSensorNames[s], step + 1, (unsigned long long)a.fish, (unsigned long long)b.fish);
+                t.expect(same, "%s: reading only %s, step %d: capture off (the skip) and on differ (fish %016llx vs %016llx, "
+                               "rng %016llx vs %016llx)",
+                         rc.name, ocean::kSensorNames[s], step + 1, (unsigned long long)a.fish, (unsigned long long)b.fish,
+                         (unsigned long long)a.rng, (unsigned long long)b.rng);
                 ++compared;
+                if (longRun)   // contacts this step: an interaction (any outcome) restarts both timers at the cooldown
+                    for (const Fish& f : on.w.creatures) longContacts += (f.interactTimer == on.w.cfg.interactCooldown);
                 if (step == 0) {   // teeth: the sensor read non-zero for some fish
                     long nonZero = 0;
                     for (const Fish& f : on.w.creatures) nonZero += !sameBits(f.lastSensors[s], 0.0f);
@@ -206,18 +243,21 @@ void testSenseDce() {
                                  ocean::kSensorNames[s]);
                 }
             }
+            if (longRun) longBirths += on.w.totalBirths - births0;
         }
         if (!zero.empty()) t.note("%s: all-zero (expected):%s", rc.name, zero.c_str());
     }
-    t.note("%ld single-sensor worlds x steps: capture off == capture on; %ld fish's own-state inputs == the kernel's",
-           compared, ownChecked);
+    t.expect(longContacts > 0 && longBirths > 0, "the 40-step single-sensor worlds had %lld contacts and %lld births: the "
+             "social paths were not exercised", longContacts, longBirths);
+    t.note("%ld single-sensor worlds x steps: capture off == capture on (each world's own rng stream); %ld fish's own-state "
+           "inputs == the kernel's; the 40-step worlds: %lld fish-contacts, %lld births", compared, ownChecked, longContacts,
+           longBirths);
 }
 
 void testCaptureToggle() {
     Test t("capture_toggle");
     long offChecked = 0;
-    for (const speed::RichCfg& rc : speed::kRich) {
-        if (rc.eyeOnly) continue;
+    for (const speed::RichCfg& rc : speed::kRich) {   // eye-only included
         OceanWorld w0;
         std::string err;
         if (!t.expect(ofp::initWorld(w0, 91, 1920, 1080, 240.0f, 300, rc.json, err), "%s: %s", rc.name, err.c_str())) continue;
@@ -234,10 +274,10 @@ void testCaptureToggle() {
             on.step();
             toggled.step();
             off.step();
-            const ofp::Fingerprint a = ofp::fingerprint(on.w, false), b = ofp::fingerprint(toggled.w, false),
-                                   c = ofp::fingerprint(off.w, false);
-            if (!t.expect(sameDynamics(a, b) && sameDynamics(a, c), "%s step %d: always-on / toggled / always-off differ",
-                          rc.name, step + 1))
+            const ofp::Fingerprint a = on.fp(), b = toggled.fp(), c = off.fp();   // each with its own stream
+            if (!t.expect(sameEngine(on.r, toggled.r) && sameEngine(on.r, off.r) && sameDynamics(a, b) && sameDynamics(a, c),
+                          "%s step %d: always-on / toggled / always-off differ (rng %016llx / %016llx / %016llx)", rc.name,
+                          step + 1, (unsigned long long)a.rng, (unsigned long long)b.rng, (unsigned long long)c.rng))
                 break;
             if (!cap) {   // off: no fish's captured arrays change (survivors, by id; newborns keep theirs)
                 std::size_t j = 0;

@@ -2434,6 +2434,9 @@
    * link without any is a fresh visit (glass walls); a refused link's
    * "default settings" drops them all. */
   var OCEAN_KEYS = ["seed", "pop", "depth", "w", "h", "cfg", "speed", "e1", "mock", "walls"];
+  /* and the keys only Classic reads (ocean.html's CLASSIC_ONLY, the same
+   * list): left in a link without Ocean keys, the head sends it to Classic */
+  var CLASSIC_KEYS = ["view", "fish", "gl", "bench", "threads", "nthreads"];
   var linkRefused = false;   /* oc_init refused the link's ?cfg= / ?e1=1 */
   splashSay(MOCK ? "Starting the ocean (mock engine)…" : "Starting the ocean…");
   var sceneReady = window.EvoOceanScene ? EvoOceanScene.load() : Promise.reject(new Error("ocean_scene.js missing"));
@@ -2612,7 +2615,8 @@
     acts.className = "splash-acts";
     if (linkRefused) {   /* this page with the default settings: a fresh visit's, every world key gone (glass walls) */
       var u = new URL(location.href), a = document.createElement("a");
-      OCEAN_KEYS.forEach(function (k) { u.searchParams.delete(k); });
+      /* Classic's too, or the head would take what is left to Classic; the display ones (colour, clarity, ...) stay */
+      OCEAN_KEYS.concat(CLASSIC_KEYS).forEach(function (k) { u.searchParams.delete(k); });
       a.href = u.href; a.id = "splashplain"; a.className = "btn";
       a.textContent = "Open it with the default settings";
       acts.appendChild(a);

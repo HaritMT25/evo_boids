@@ -2161,6 +2161,28 @@ async function pageCardNumbers() {
     ok(p.uncaught.length === 0, 'no exception escaped the page\'s handlers' + (p.uncaught.length ? ' (' + p.uncaught[0] + ')' : ''));
 }
 
+/* Review finding 3: "Open it with the default settings" kept Classic's
+ * routing keys, so a refused link with ?threads= (or view, bench, ...) and
+ * Ocean keys went, once they were dropped, to Classic (ocean.html's head). */
+async function pageMixedRecovery() {
+    section('The page: the default-settings recovery of a link with Classic\'s keys stays on the Ocean (review of PR #37, finding 3)');
+    const html = fs.readFileSync(path.join(WEB, 'ocean.html'), 'utf8'), js = fs.readFileSync(path.join(WEB, 'ocean.js'), 'utf8');
+    const list = (src, name) => { const m = new RegExp('var ' + name + ' = (\\[[^\\]]*\\])').exec(src); return m ? JSON.parse(m[1]) : null; };
+    const CLASSIC_ONLY = list(html, 'CLASSIC_ONLY'), OCEAN_ONLY = list(html, 'OCEAN_ONLY'), CLASSIC_KEYS = list(js, 'CLASSIC_KEYS');
+    ok(CLASSIC_ONLY && JSON.stringify(CLASSIC_KEYS) === JSON.stringify(CLASSIC_ONLY), 'web/ocean.js\'s CLASSIC_KEYS are ocean.html\'s CLASSIC_ONLY (' + JSON.stringify(CLASSIC_KEYS) + ')');
+    /* ocean.html's head: a query with a Classic-only key and no Ocean-only one goes to Classic */
+    const toClassic = (q) => CLASSIC_ONLY.some(k => q.has(k)) && !OCEAN_ONLY.some(k => q.has(k));
+    for (const extra of ['threads=0', 'view=flat', 'bench=1', 'threads=0&view=flat&fish=500&gl=0&nthreads=2&bench=1']) {
+        const p = await bootPage('?speed=2&' + extra + '&colour=family&clarity=realistic&cfg=' + encodeURIComponent('{"maxPopulation":0.5}'));
+        const a = p.el('splashplain'), u = a ? new URL(a.href) : null;
+        const left = u ? [...u.searchParams.keys()] : null;
+        ok(/refused/.test(p.failed) && u && !toClassic(u.searchParams) && left.join() === 'colour,clarity',
+           '?speed=2&' + extra + ' refused: the recovery keeps only colour and clarity (' + (u ? u.search : 'no link') + ') and stays on the Ocean');
+    }
+    const q = await bootPage('?colour=family&clarity=realistic');
+    ok(!q.failed && q.M._oc_walls_enabled() === 1, '  it starts as a fresh visit: glass walls');
+}
+
 /* Every section, in order; `node tests/ocean_turbo_handoff.js NAME...` runs only those. */
 const SECTIONS = {
     repeatedKeys, liveLedger, growthPage, randomize, imports,
@@ -2176,7 +2198,7 @@ const SECTIONS = {
     pageHeld, pageRefusal, pageAsyncSetup, pageStartFailures, pageOverflow, pageBools, pageDashboards,
     pageWallsOverride, pageFreshVisit, pageSizeFields, pageRoundTrip,
     pageColourBench, pageLayers, pageResize, pageKeys, pageStartupFailures, pageTourEscape, pageWholeFields,
-    pageTurboFraction, pageCardNumbers
+    pageTurboFraction, pageCardNumbers, pageMixedRecovery
 };
 const unhandled = [];
 process.on('unhandledRejection', (e) => { unhandled.push(e); });

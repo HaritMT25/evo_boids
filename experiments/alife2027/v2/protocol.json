@@ -86,7 +86,9 @@
       {"id": "H1", "contrast": ["C1", "D1"], "endpoint": "L", "test": "paired_t_one_sided", "null_difference": 0},
       {"id": "H2", "contrast": ["C1", "D1"], "endpoint": "A", "test": "paired_t_one_sided", "null_difference": 0},
       {"id": "H3", "contrast": ["C1", "A1"], "endpoint": "Y", "test": "exact_unconditional_paired_ni",
-       "margin_fraction": [3, 20], "ordering": "B_minus_C_inclusive_upper_tail",
+       "margin_fraction": [3, 20], "ordering": "score",
+       "ordering_note": "tables ranked by Tango's score statistic under delta0 = -margin (inclusive, ties within 1e-9); the p-value is the exact certified supremum over the nuisance, not the score's normal approximation; the v1 brief's difference ordering is reported as a sensitivity (it rejects at n = 128 only when b - c >= 4)",
+       "least_favourable_null": "boundary delta = -margin, valid because every region used is checked closed under (u, v) -> (u + 1, v - 1)",
        "nuisance_maximization": "exact_rational_bernstein_subdivision", "probability_bound_gap": 1e-10}
     ],
     "gating": "fixed sequence: a later test is formal only if every earlier one rejects; estimates and intervals are always published",

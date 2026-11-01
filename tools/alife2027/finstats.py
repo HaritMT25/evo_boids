@@ -67,6 +67,8 @@ def var(x: Sequence[float]) -> float:
     n = len(x)
     if n < 2:
         return math.nan
+    if max(x) == min(x):   # exactly constant: the mean's rounding must not make it positive
+        return 0.0
     m = mean(x)
     return math.fsum((v - m) ** 2 for v in x) / (n - 1)
 

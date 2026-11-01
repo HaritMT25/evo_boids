@@ -6,17 +6,20 @@
  * the deep tank (web/ocean_scene.js). Around it, the Classic page's controls
  * (web/renderer.js), so the two pages are one product:
  *   - the top bar (live readout -> the stat panel with the depth histogram;
- *     📊 dashboards, web/ocean_dash.js; the settings; Help: every key, the
+ *     📊 dashboards, web/ocean_dash.js; Setup; Help: every key, the
  *     tour, "What is Turbo?") and the toasts
  *   - the dock: pause (one step while paused), speed (steps per frame),
  *     Turbo | the flashlight, View (the light while following, water clarity,
  *     fish colours, Hold 60 fps: drawing only), fit the tank. Nothing on it
- *     replaces the run: Randomize is in the settings' Run tab.
- *   - the settings sheet, built from web/ocean_config.js: every key the
- *     Ocean takes, "live" ones (oc_set_param) applying at once, the rest on
- *     Restart ("Restart to apply"); settings that do nothing with the others as
- *     they are are dimmed with the reason (NEEDS); the Run tab: Randomize, New
- *     world / Replay, save / load a setup
+ *     replaces the run.
+ *   - Setup, the sheet built from web/ocean_config.js: the next world (the
+ *     draft): every key the Ocean takes, "live" ones (oc_set_param) applying
+ *     at once to the running world too, the rest waiting for Start;
+ *     settings that do nothing with the others as they are are dimmed with
+ *     the reason (NEEDS); the Run tab: Start from (scenario cards, Surprise
+ *     me, a setup file), This run (Replay, Save setup); the start bar
+ *     (what runs or what waits, Discard, Start: the same fish or new ones).
+ *     One door: every world start is a plan for startWorld.
  *   - the fish card (click or tap a fish): oc_inspect's numbers and its live
  *     brain (oc_set_capture keeps its senses while a fish is selected)
  *   - Turbo: web/ocean_worker.js steps a copy of the module's memory at full
@@ -244,13 +247,15 @@
     var f = screenWorld();
     el("fitbtn").hidden = !M || !(W === f[1] && H === f[0]);
   }
+  /* the size only, for the next world (staged in the sheet, which opens on
+   * it): Start starts it; the rest of the setup stays as it is */
   function fitToScreen() {
     if (!M) return;
-    var w0 = el("o_width").value, h0 = el("o_height").value, f = screenWorld();   /* as typed, to put back */
+    var f = screenWorld();
     setVal("width", f[0]); setVal("height", f[1]);
-    var r = restart();
-    if (r === "refused") { setVal("width", w0); setVal("height", h0); }
-    else if (r !== "started") setPending(true);
+    updateNeeds(); updateTabDots(); renderStartBar();
+    setDrawer(true);
+    showNote("The tank's size for this screen, " + f[0] + " × " + f[1] + ", waits for the next start: Start applies it.");
   }
   /* the tank's sides: glass walls in the running world (oc_walls_enabled), and
    * whether this module knows them at all */
@@ -701,7 +706,6 @@
       panel.dataset.tab = tab.id;
       panel.setAttribute("role", "tabpanel");
       if (tab.id === "ocean") panel.appendChild(presetBox());
-      if (tab.id === "world") panel.appendChild(bigTankBox());
       tab.groups.forEach(function (g) {
         var h = document.createElement("h3");
         h.textContent = g[0];
@@ -714,48 +718,67 @@
     var saved = store("evo_boids.ocean.tab");
     setSheetTab(saved && el("panel-" + saved) ? saved : "run");
   }
-  /* the Water (E1) tab's "Tuned E1 preset": its keys into the sheet */
+  /* the Water (E1) tab: the tuned E1 water added to what the tabs hold (the
+   * next world; the rest kept). The whole Living water world is a scenario
+   * in Run › Start from. */
   function presetBox() {
     var box = document.createElement("div");
     box.className = "preset";
-    box.innerHTML = "<button type='button' class='btn' id='e1btn'><svg class='i'><use href='#i-restart'/></svg>Use the tuned E1 preset</button>" +
-      "<p>The E1 physics as tuned: surface waves, a gentle deep current with food drifting in it, light that fades with depth, and depth costs scaled to each fish's metabolism. Puts its settings in the tabs; Restart applies them.</p>";
-    box.querySelector("#e1btn").addEventListener("click", function () {
+    box.innerHTML = "<button type='button' class='btn' id='e1add'><svg class='i'><use href='#i-plus'/></svg>Add the tuned E1 water</button>" +
+      "<p>Surface waves, a gentle deep current with food drifting in it, light that fades with depth, and depth costs scaled to each fish's " +
+      "metabolism, put into these tabs on top of the rest (predators, food, ... stay). They wait for the next start. The whole " +
+      "<b>Living water</b> world is in Run › Start from.</p>";
+    box.querySelector("#e1add").addEventListener("click", function () {
       var p = e1Preset();
       if (!p) { showError("this module has no E1 preset (oc_e1_preset)"); return; }
       cfgToForm(p);
-      updateNeeds(); updateTabDots(); setPending(true);
-      showNote("The E1 preset is in the settings. Restart to apply.");
+      updateNeeds(); updateTabDots(); renderStartBar();
+      showNote("The E1 water is in the tabs: it waits for the next start.");
       this.blur();
     });
     return box;
   }
-  /* the World tab's "Big tank": a whole recipe for a tank four times the
-   * standard volume (EvoOceanConfig.BIG_TANK: 3840 x 2160 x 240, 2000 fish,
-   * glass walls, four times the food, a 2000-fish cap), started at once.
-   * Editing the size by hand changes only the size; this (and Randomize)
-   * are the actions that rebalance the whole world. */
-  function bigTankBox() {
-    var b = CFG.BIG_TANK, box = document.createElement("div");
-    box.className = "preset";
-    box.innerHTML = "<button type='button' class='btn' id='bigbtn'><svg class='i'><use href='#i-restart'/></svg>Start the Big tank</button>" +
-      "<p>A glass tank four times the standard volume (" + b.width + " × " + b.height + " × " + b.depth + "), with " + b.population +
-      " fish, four times the food and the tuned water (waves, a gentle deep current, light, depth costs). Births stop at " +
-      b.cfg.maxPopulation + " fish. It starts a new world at once (this seed).</p>";
-    box.querySelector("#bigbtn").addEventListener("click", function () { startBigTank(); this.blur(); });
-    return box;
+
+  /* ---- Start from: scenarios (EvoOceanConfig.SCENARIOS) and a file ----
+   * A card stages its whole recipe as the next world (stageDraft): the tabs
+   * show it, and it starts only when its Start (or the start bar's) is
+   * pressed: two presses in one place. Surprise me draws again with Reroll.
+   * Picking one over edits that wait asks first (Replace / Keep editing). */
+  var CARD_IDS = { standard: "advreset", bigtank: "bigbtn", e1: "e1btn", hunters: "huntersbtn", currents: "currentsbtn", surprise: "randombig", file: "loadcp" };
+  function newSeed() { return (Math.random() * 0x100000000) >>> 0; }
+  /* the seed the sheet shows (a scenario keeps it; Surprise me draws its own) */
+  function shownSeed() { var s = formNum("seed"); return wholeIn(s, [0, 4294967295]) ? s : initArgs ? initArgs.seed : KEYS.seed[0]; }
+  function scenarioOf(id) {
+    var t = { width: formNum("width"), height: formNum("height"), depth: formNum("depth"), walls: !!getVal("walls"),
+              sideWallBand: getVal("sideWallBand"), sideWallTurnRate: getVal("sideWallTurnRate") };
+    if (!(t.width > 0) || !(t.height > 0) || !(t.depth > 0)) { t.width = W; t.height = H; t.depth = D; }
+    return CFG.scenario(id, { seed: id === "surprise" ? newSeed() : shownSeed(), screen: screenWorld(), walls: hasWalls(), e1: e1Preset(),
+                              rand: Math.random, tank: t });
   }
-  function startBigTank() {
+  /* what a new draft would replace: edits waiting, or a staged recipe's own edits */
+  function atRisk() { return pendingDiff().length; }
+  function pickScenario(id) {
     if (!M) return;
-    if (!hasWalls()) { showError("The Big tank needs glass walls: this engine module has none (rebuild web/evo_ocean)."); return; }
-    var b = CFG.BIG_TANK, seed = getVal("seed");
-    resetForm();
-    setVal("seed", seed);
-    setVal("width", b.width); setVal("height", b.height); setVal("depth", b.depth); setVal("population", b.population);
-    cfgToForm(b.cfg);
-    updateNeeds(); updateTabDots(); setPending(true);
-    restart(function () { toast("The Big tank: " + b.width + " × " + b.height + " × " + b.depth + ", " + b.population + " fish, glass walls."); });
+    if (id === "bigtank" && !hasWalls()) { showError("The Big tank needs glass walls: this engine module has none (rebuild web/evo_ocean)."); return; }
+    if (id === "e1" && !e1Preset()) { showError("this module has no E1 preset (oc_e1_preset)"); return; }
+    var n = atRisk(), title = (CFG.SCENARIOS.filter(function (s) { return s.id === id; })[0] || {}).title;
+    if (draft && draft.id === id && id !== "surprise") { showNote(title + " is ready: its Start (or the start bar's) starts it."); return; }
+    if (n) { askReplace(title, n, function () { stageScenario(id); }); return; }
+    stageScenario(id);
   }
+  function stageScenario(id) {
+    var r = scenarioOf(id);
+    if (!r) { showError("That scenario is not available here."); return; }
+    stageDraft({ kind: "scenario", id: id, title: r.title, summary: r.summary, seed: r.seed }, function () {
+      setVal("seed", r.seed); setVal("population", r.population); setVal("depth", r.depth); setVal("width", r.width); setVal("height", r.height);
+      cfgToForm(r.cfg);
+    });
+    el("randnote").textContent = id === "surprise" ? "Picked: " + r.summary + ". Reroll draws again; every setting is in the tabs." : "";
+    clearError();
+    showNote(r.title + " is ready: Start starts it" + (turboState !== "live" ? " (and stops Turbo)." : "."));
+  }
+  /* a staged card's Start: the start bar's own dispatcher */
+  function startStaged() { restart(); }
   function setSheetTab(id) {
     currentTab = id;
     CFG.TABS.forEach(function (tab) {
@@ -946,6 +969,22 @@
     wc.hidden = !count;
     setHtml("waitingcount", count + "<span class='wc-word'> waiting</span>");
     wc.title = draft ? draft.title + " is ready for the next start (Setup)" : count + " edit" + (count > 1 ? "s" : "") + " waiting for the next start (Setup)";
+    setTxt("startsame-sub", "seed " + shownSeed() + (draft ? ", " + draft.title : n ? ", with what waits" : ""));
+    markCards();
+  }
+  /* the picked card wears its Start (and Surprise me its Reroll): the same start as the bar's */
+  function markCards() {
+    var pickedId = draft ? (draft.kind === "file" ? "file" : draft.id) : null, acts = el("scenario-acts");
+    Object.keys(CARD_IDS).forEach(function (id) {
+      var b = el(CARD_IDS[id]), on = id === pickedId;
+      b.setAttribute("aria-pressed", on ? "true" : "false");
+      if (b.parentNode && b.parentNode.classList) b.parentNode.classList.toggle("picked", on);
+      if (on && b.parentNode && acts.parentNode !== b.parentNode) b.parentNode.appendChild(acts);
+    });
+    acts.hidden = !pickedId;
+    el("rerollbtn").hidden = pickedId !== "surprise";
+    var lab = el("scenario-start").querySelector("span");
+    if (lab) lab.textContent = turboState !== "live" ? "Stop Turbo & start" : "Start";
   }
   /* the sheet back to the running world: its seed and size, its settings
    * with the live tweaks it accepted; an edit still on its way keeps its
@@ -1079,16 +1118,25 @@
     if (age >= 300) lose.push(fmtTime(age) + " of evolution");
     if (usedTurbo || turbo) lose.push("what Turbo ran");
     var one = tw.length === 1, tweaks = tw.map(function (k) { return (LABELS[k] || k) + " " + shown(cfgVal(k)); }).join(", ");
-    el("startaskmsg").textContent =
-      (replaying ? "Replay starts this world again from its seed" : turbo ? "This stops Turbo and replaces your run" : "This replaces your run") +
+    showAsk((replaying ? "Replay starts this world again from its seed" : turbo ? "This stops Turbo and replaces your run" : "This replaces your run") +
       (lose.length ? ", and " + lose.join(" and ") + " with it" : "") + "." +
       (tw.length ? " Your live tweak" + (one ? "" : "s") + " (" + tweaks + ") " + (replaying ? (one ? "is" : "are") + " dropped." :
                    (one ? "carries" : "carry") + " over to the new world.") : "") +
-      (replaying && waitingNow() ? " What waits for the next start stays waiting." : "");
-    el("startconfirm").textContent = replaying ? "Replay" : turbo ? "Stop Turbo & start" : "Replace it";
-    el("startcancel").textContent = "Keep it";
+      (replaying && waitingNow() ? " What waits for the next start stays waiting." : ""),
+      replaying ? "Replay" : turbo ? "Stop Turbo & start" : "Replace it", "Keep it");
+  }
+  /* a scenario or a file over edits that wait: asked in the same place */
+  function askReplace(title, n, fn) {
+    asking = { replace: fn };
+    showAsk(title + " replaces " + (n === 1 ? "the change" : "the " + n + " changes") + " waiting for the next start.", "Replace", "Keep editing");
+  }
+  function showAsk(msg, yes, no) {
+    el("startaskmsg").textContent = msg;
+    el("startconfirm").textContent = yes;
+    el("startcancel").textContent = no;
     el("startask").hidden = false;
     el("applybar").classList.add("asking");
+    setStartMenu(false);
     if (!drawerEl.classList.contains("open")) setDrawer(true);
   }
   function hideAsk() {
@@ -1100,9 +1148,23 @@
     var a = asking;
     hideAsk();
     if (!a) return;
+    if (a.replace) { a.replace(); return; }
     if (planKey(a.plan) !== a.key) { showNote("The setup changed: start again to review it."); return; }
     requestStart(a.plan, true);
   }
+  function cancelAsk() {
+    var a = asking;
+    hideAsk();
+    showNote(a && a.replace ? "Kept your changes." : "Kept your run.");
+  }
+  /* the start bar's menu: Start again (same fish), Start fresh (new fish) */
+  function setStartMenu(open) {
+    var m = el("startmenu");
+    if (!m) return;
+    m.hidden = !open;
+    el("startmenubtn").setAttribute("aria-expanded", open ? "true" : "false");
+  }
+  function startMenuOpen() { var m = el("startmenu"); return !!m && !m.hidden; }
   /* a plan from the sheet: its seed (or a new one, drawn once per request),
    * size and settings as typed, checked before anything stops */
   function formPlan(source, seed) {
@@ -1126,26 +1188,6 @@
   function replay() {
     if (!initArgs) return;
     requestStart({ source: "replay", op: "replay", done: function () { clearError(); toast("Replaying seed " + initArgs.seed + " from its start."); } });
-  }
-  /* Randomize keeps the tank as it is set (its size, depth and sides) and
-   * draws a recipe for it: drawn for the standard tank, scaled once to this
-   * volume (EvoOceanConfig.draw); with glass walls it never wraps */
-  function randomize() {
-    if (!M) return;
-    var keep = { width: getVal("width"), height: getVal("height"), depth: getVal("depth"), walls: getVal("walls"),
-                 sideWallBand: getVal("sideWallBand"), sideWallTurnRate: getVal("sideWallTurnRate") };
-    var pick = CFG.draw(Math.random, KEYS.population[0], e1Preset(), [keep.width, keep.height, keep.depth, keep.walls]);
-    resetForm();
-    Object.keys(keep).forEach(function (k) { setVal(k, keep[k]); });
-    Object.keys(pick.set).forEach(function (k) { setVal(k, pick.set[k]); });
-    setVal("population", pick.population);
-    setVal("seed", (Math.random() * 0x100000000) >>> 0);
-    updateNeeds(); updateTabDots(); setPending(true);
-    var what = pick.population + " fish" + (pick.labels.length ? " · " + pick.labels.join(" · ") : " · the default world");
-    restart(function () {
-      el("randnote").textContent = "Picked: " + what + ". Every setting is in the tabs above.";
-      toast("New world: " + what);
-    });
   }
   /* a Restart writes the setup into the address, so a reload or a shared
    * link is this world: its size too, on a screen of any shape */
@@ -1241,14 +1283,19 @@
      * the sheet has no field for), unless the sheet is edited first */
     var plan = importPlan("file", seed, pop, depth, config, undefined, cfgRepeats, [w, h], true);
     var title = "the setup file" + (name ? " " + name : "");
-    stageDraft({ kind: "file", id: "file", title: "the setup file", plan: plan, seed: seed >>> 0,
-                 summary: (name ? name + ": " : "") + "seed " + (seed >>> 0) + " · " + w + " × " + h + " × " + depth + " · " + pop + " fish" +
-                          (config.walls === true || config.walls === 1 ? " · glass walls" : config.walls === false || config.walls === 0 ? " · wrapping sides" : "") },
-      function () {
-        setVal("seed", seed >>> 0); setVal("population", pop); setVal("depth", depth); setVal("width", w); setVal("height", h);
-        cfgToForm(plan.imported);
-      });
-    showNote("Ready: " + title + ". Start replaces this run with it, from its start.");
+    function stage() {
+      stageDraft({ kind: "file", id: "file", title: "the setup file", plan: plan, seed: seed >>> 0,
+                   summary: (name ? name + ": " : "") + "seed " + (seed >>> 0) + " · " + w + " × " + h + " × " + depth + " · " + pop + " fish" +
+                            (config.walls === true || config.walls === 1 ? " · glass walls" : config.walls === false || config.walls === 0 ? " · wrapping sides" : "") },
+        function () {
+          setVal("seed", seed >>> 0); setVal("population", pop); setVal("depth", depth); setVal("width", w); setVal("height", h);
+          cfgToForm(plan.imported);
+        });
+      el("randnote").textContent = "";
+      showNote("Ready: " + title + ". Start replaces this run with it, from its start.");
+    }
+    var n = pendingDiff().length;
+    if (n) askReplace("The setup file", n, stage); else stage();
   }
   /* What Start starts: a staged file as it is (with a new seed for Start
    * fresh) while its fields are untouched, else the sheet (seed: Start
@@ -2409,6 +2456,7 @@
          * and nothing behind them closes with it; else the popover (back to its
          * opener), the settings, the live numbers, or the fish */
         if (openPop) { if (!escHandledElsewhere) closePop(true); return; }
+        if (!escHandledElsewhere && startMenuOpen()) { setStartMenu(false); el("startmenubtn").focus(); return; }   /* the start menu first, then the sheet */
         if (!escHandledElsewhere) {
           if (drawerEl.classList.contains("open")) setDrawer(false);
           else if (statOpen) setStatPanel(false);
@@ -2523,7 +2571,7 @@
     drawerEl.classList.toggle("open", open);
     document.body.classList.toggle("sheet-open", open);
     menuBtn.setAttribute("aria-expanded", open ? "true" : "false");
-    if (!open) { hideTip(); if (asking) hideAsk(); }   /* a question no one can see is no question: closing the sheet keeps the run */
+    if (!open) { hideTip(); setStartMenu(false); if (asking) hideAsk(); }   /* a question no one can see is no question: closing the sheet keeps the run */
     if (open) { setStatPanel(false); setPop(null); hideCoach(); }
     if (scene) { updateInsets(); setTimeout(updateInsets, 320); }
   }
@@ -2637,8 +2685,17 @@
   btn("coachgo", function () { hideCoach(); toggleTurbo(); });
   btn("coachx", hideCoach);
   btn("stepbtn", function () { if (guardTurbo()) return; if (paused) stepOnce = true; });
-  btn("randombig", randomize);
-  btn("newworld", newWorld);
+  /* Start from: each card stages (pickScenario); the picked one's Start starts it */
+  Object.keys(CARD_IDS).forEach(function (id) { if (id !== "file") btn(CARD_IDS[id], function () { pickScenario(id); }); });
+  btn("scenario-start", startStaged);
+  btn("rerollbtn", function () { pickScenario("surprise"); });
+  /* the start bar: Start (the same fish: this seed), and its menu */
+  btn("startmenubtn", function () { setStartMenu(!startMenuOpen()); });
+  btn("startsame", function () { setStartMenu(false); restart(); });
+  btn("newworld", function () { setStartMenu(false); newWorld(); });
+  document.addEventListener("pointerdown", function (e) {
+    if (startMenuOpen() && !(e.target.closest && e.target.closest("#startmenu, #startmenubtn"))) setStartMenu(false);
+  });
   btn("replay", replay);
   btn("lightbtn", toggleLight);
   ["view", "help"].forEach(function (n) {   /* the triggers; × closes (pointerBlur, setPop: the focus) */
@@ -2672,14 +2729,9 @@
     el("iexpand").title = cardExpanded ? "Hide its brain" : "Show its brain";
     cardCache.sense = null;
   });
-  btn("advreset", function () {
-    resetForm();
-    setPending(true); updateNeeds(); updateTabDots();
-    showNote("Every setting is back to its default. Restart to apply.");
-  });
   btn("savecp", saveSetup);   /* in Turbo too: the accepted setup */
   btn("startconfirm", confirmAsk);
-  btn("startcancel", function () { hideAsk(); showNote("Kept your run."); });
+  btn("startcancel", cancelAsk);
   btn("loadcp", function () { el("cpfile").click(); });
   /* the read is asynchronous: its answer stages the file only if nothing
    * newer came meanwhile (another file, a scenario, Discard, a start), and
@@ -2749,7 +2801,7 @@
     setColourMode(b.dataset.c);
     pointerBlur(b);
   });
-  el("colourwhy").addEventListener("click", function (e) {   /* "Settings › Life › Appearance genes" */
+  el("colourwhy").addEventListener("click", function (e) {   /* "Setup › Life › Appearance genes" */
     if (!e.target.closest("#colourfix")) return;
     setPop(null); setDrawer(true); setSheetTab("life");
     var row = el("f_appearance");
@@ -2806,7 +2858,7 @@
     el("colourwhy").classList.toggle("why", noApp);
     setHtml("colourwhy", noApp
       ? (HAS_APP ? "Appearance genes are off in this world, so the fish show family colours. To turn them on: " +
-                   "<button type='button' class='linkbtn' id='colourfix'>Settings › Life › Appearance genes</button>, then Restart."
+                   "<button type='button' class='linkbtn' id='colourfix'>Setup › Life › Appearance genes</button>, then Start."
                  : "This engine build has no appearance genes, so the fish show family colours.")
       : colourMode === "appearance" ? "Each fish wears the skin pattern and body shape it inherited."
       : colourMode === "brain" ? "Fish with similar brains get similar colours."
@@ -2876,7 +2928,7 @@
           body: function () {
             return "<kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> fly · <kbd>Space</kbd> pause · <kbd>T</kbd> " +
                    "Turbo · <kbd>F</kbd> follow · <kbd>L</kbd> flashlight · <kbd>V</kbd> view · <kbd>G</kbd> charts · " +
-                   "<kbd>O</kbd> settings · <kbd>?</kbd> help, with every key. Try one now; the tour waits. " +
+                   "<kbd>O</kbd> setup · <kbd>?</kbd> help, with every key. Try one now; the tour waits. " +
                    "(<kbd>Esc</kbd> closes things, and this tour.)";
           } },
         { drawer: false, title: "Playback",
@@ -2893,22 +2945,21 @@
             return "Charts of this run as it happens: population, where in the depth the fish live and the depth they " +
                    "float at, family lines, bodies, and which senses their brains use. Recorded on your device only.";
           } },
-        { drawer: false, title: "Settings",
+        { drawer: false, title: "Setup",
           target: function () { return h.rectOf("#menubtn"); },
-          body: function () { return "New worlds, every rule of this one, and saving and loading setups (O)."; } },
-        { drawer: true, tab: "run", scroll: ".run-hero", place: h.drawerSides, title: "Randomize",
-          target: function () { return h.rectOf(".run-hero"); },
+          body: function () { return "New worlds, every rule of this one, and saving setups (O). Nothing in it replaces your run until you press <b>Start</b>."; } },
+        { drawer: true, tab: "run", scroll: "#scenarios", place: h.drawerSides, title: "Start from",
+          target: function () { return h.rectOf("#scenarios"); },
           body: function () {
-            return "The quickest way to explore. It draws a setup from ranges that worked in experiments (predators, " +
-                   "currents, the E1 physics), restarts, and lists what it picked.";
+            return "Pick a world: Big tank, Living water, Hunters, Currents & patches, or <b>Surprise me</b>, which draws a " +
+                   "setup from ranges that worked in experiments. The card fills the tabs with it; its <b>Start</b> starts it.";
           } },
         { drawer: true, tab: "depth", scroll: "#f_kBuoy", place: h.drawerSides, title: "Your own settings",
           target: function () { return h.rectOf("#f_kBuoy"); },
           body: function () {
-            return "Change anything by hand: the depth physics here, waves, light, currents and the tuned E1 preset " +
-                   "under Water (E1). " +
-                   (h.touch() ? "Tap" : "Hover over") + " a setting's name to see what it does. Changes apply on " +
-                   "<b>Restart</b>; settings marked <i>live</i> apply at once.";
+            return "Change anything by hand: the depth physics here, waves, light and currents under Water (E1). " +
+                   (h.touch() ? "Tap" : "Hover over") + " a setting's name to see what it does. Changes wait for " +
+                   "<b>Start</b>, at the bottom; settings marked <i>live</i> apply at once.";
           } },
         { last: true, drawer: false, title: "You're set",
           body: function () { return "Take this tour again any time from <b>Help</b> (?), with every key. Enjoy!"; } }

@@ -662,7 +662,8 @@ async function bootPage(query, opts) {
         page.el('err').textContent = '';
         const g = page.T.draftGen;
         page.loadFile({ name: 'setup.json', text: () => Promise.resolve(text) });
-        await until(() => page.T.draftGen !== g || page.msg() !== '', 'the setup\'s answer');
+        await until(() => page.T.draftGen !== g || page.msg() !== '' || page.T.asking, 'the setup\'s answer');
+        if (page.T.asking && page.T.asking.replace) page.click('startconfirm');   /* it replaces edits that waited: Replace */
         if (page.T.draft && page.T.draft.kind === 'file' && page.T.draftGen !== g) { page.el('err').textContent = ''; page.start(); }
         return page.msg();
     };
@@ -2415,15 +2416,21 @@ async function pageStartDoor() {
     const c = startCounter(p);
     const v1 = '{"format":"evo_ocean_setup","version":1,"seed":11,"population":20,"depth":200,"width":1920,"height":1080,"config":{"foodEnergy":6}}';
     const ways = [
-        ['Restart', () => p.click('restart'), 'init'],
+        ['Start (the bar)', () => p.click('restart'), 'init'],
+        ['Start again (same fish), the menu', () => { p.click('startmenubtn'); p.click('startsame'); }, 'init'],
+        ['Start fresh (new fish), the menu', () => { p.click('startmenubtn'); p.click('newworld'); }, 'init'],
         ['R (a new seed)', () => p.key('r'), 'init'],
         ['Shift+R (Replay)', () => p.key('R', { shift: true }), 'reset'],
-        ['Randomize', () => p.click('randombig'), 'init'],
-        ['the E1 preset, then Restart', () => { p.click('e1btn'); p.click('restart'); }, 'init'],
-        ['Fit the world to this screen', () => { p.ctx.innerWidth = 800; p.ctx.innerHeight = 1200; p.click('fitbtn'); p.ctx.innerWidth = 1920; p.ctx.innerHeight = 1080; }, 'init'],
+        ['Replay from start (the button)', () => p.click('replay'), 'reset'],
+        ['Surprise me, then its Start', () => { p.click('randombig'); p.click('scenario-start'); }, 'init'],
+        ['Living water, then its Start', () => { p.click('e1btn'); p.click('scenario-start'); }, 'init'],
+        ['Hunters, then the bar\'s Start', () => { p.click('huntersbtn'); p.click('restart'); }, 'init'],
+        ['Currents & patches, then its Start', () => { p.click('currentsbtn'); p.click('scenario-start'); }, 'init'],
+        ['Standard, then its Start', () => { p.click('advreset'); p.click('scenario-start'); }, 'init'],
+        ['Fit the world to this screen, then Start', () => { p.ctx.innerWidth = 800; p.ctx.innerHeight = 1200; p.click('fitbtn'); p.ctx.innerWidth = 1920; p.ctx.innerHeight = 1080; p.click('restart'); }, 'init'],
         ['Load setup, then Start', () => p.loadSetup(v1), 'init'],
         ['the link\'s import (start-up, benchmark)', () => p.T.importWorld(7, 12, 240, { walls: true }, undefined, [], [1920, 1080]), 'init'],
-        ['Big tank', () => p.click('bigbtn'), 'init']
+        ['Big tank, then its Start', () => { p.click('bigbtn'); p.click('scenario-start'); }, 'init']
     ];
     const bad = [];
     for (const [what, act, kind] of ways) {
@@ -2800,6 +2807,117 @@ async function pageDraft() {
     }
 }
 
+/* UI-3: Start from. Every scenario (and Surprise me's draws) starts in
+ * oc_init on ordinary, portrait, small and large tanks; Surprise me's
+ * labels are written after its one volume scaling; picking a card only
+ * stages (no oc_init, in Turbo no Stop either), its Start and the bar's are
+ * one start; Reroll draws again; a card over edits that wait asks first;
+ * the Fit button and the Water tab's E1 water stage only; the Start menu's
+ * same fish / new fish. */
+async function pageScenarios() {
+    section('UI-3: scenarios: recipes oc_init takes, labels after scaling, a card stages and its Start starts, Reroll, Replace / Keep editing');
+    {   /* the recipes themselves, through oc_init */
+        const M = await mk(1), e1 = JSON.parse(HO.cString(M, M._oc_e1_preset()));
+        let s = 777;
+        const rand = () => { s = (s + 0x6D2B79F5) | 0; let t = Math.imul(s ^ (s >>> 15), 1 | s); t ^= t + Math.imul(t ^ (t >>> 7), 61 | t); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+        const init = (r) => HO.withCString(M, HO.cfgJson(r.cfg), p => M._oc_init(r.seed, r.width, r.height, r.depth, r.population, p));
+        const bad = [];
+        for (const screen of [[1920, 1080], [1080, 1920]])
+            for (const id of ['standard', 'bigtank', 'e1', 'hunters', 'currents']) {
+                const r = CFG.scenario(id, { seed: 9, screen, walls: true, e1, rand, tank: null });
+                if (!r || !init(r)) bad.push(id + ' ' + screen.join('x') + ': ' + (r ? HO.cString(M, M._oc_last_error()) : 'none'));
+            }
+        const big = CFG.scenario('bigtank', { seed: 9, screen: [1920, 1080], walls: true, e1, rand });
+        let draws = 0, scaled = [];
+        for (const [w, h, d, walls] of [[1920, 1080, 240, true], [1080, 1920, 240, true], [300, 300, 60, true], [300, 300, 240, false],
+                                         [5000, 3000, 400, true], [3840, 2160, 240, false]]) {
+            for (let i = 0; i < 40; i++) {
+                const r = CFG.scenario('surprise', { seed: 1 + i, screen: [1920, 1080], walls: true, e1, rand,
+                                                     tank: { width: w, height: h, depth: d, walls, sideWallBand: 40, sideWallTurnRate: 3 } });
+                draws++;
+                if (!init(r)) bad.push('surprise ' + [w, h, d, walls].join('/') + ': ' + HO.cString(M, M._oc_last_error()));
+                const cap = /at most (\d+) fish/.exec(r.summary), hunters = /(\d+) (?:hunting )?predators/.exec(r.summary);
+                if (cap && +cap[1] !== r.cfg.maxPopulation) bad.push('surprise label "' + cap[0] + '" but the cap is ' + r.cfg.maxPopulation);
+                if (hunters && +hunters[1] !== r.cfg.predatorCount) bad.push('surprise label "' + hunters[0] + '" but ' + r.cfg.predatorCount + ' predators');
+                if (!r.summary.startsWith(r.width + ' × ' + r.height + ' × ' + r.depth + ' · ' + r.population + ' fish')) bad.push('surprise summary ' + r.summary);
+                if (r.cfg.maxPopulation > 0 && r.population > r.cfg.maxPopulation) bad.push('surprise: ' + r.population + ' fish over its cap ' + r.cfg.maxPopulation);
+                if (w * h * d === 5000 * 3000 * 400) {   /* x12 the standard volume: 210-420 fish, scaled once (twice would be ~145 x) */
+                    const vol = w * h * d / (1920 * 1080 * 240);
+                    scaled.push(/x[\d.]+\)/.test(r.summary) && r.population <= Math.ceil(420 * vol) ? 'once' : 'not once (' + r.population + ')');
+                }
+            }
+        }
+        ok(!bad.length && JSON.stringify(big.cfg) === JSON.stringify(CFG.BIG_TANK.cfg) && big.population === CFG.BIG_TANK.population && scaled.every(x => x === 'once'),
+           'Standard, Big tank (its recipe verbatim), Living water, Hunters, Currents & patches on landscape and portrait screens, and ' + draws +
+           ' Surprise me draws on ordinary, portrait, small, large and wrapping tanks: oc_init takes every one; the labels (caps, predators, fish) ' +
+           'are the final recipe\'s, scaled once' + (bad.length ? ' — ' + bad.slice(0, 4).join('; ') : ''));
+    }
+    {   /* on the page: a card stages, its Start and the bar's start the same world; Reroll; Replace / Keep editing */
+        const p = await bootPage(PAGE_Q);
+        const c = startCounter(p), a = c();
+        p.click('huntersbtn');
+        const staged = p.T.draft && p.T.draft.id === 'hunters' && delta(a, c()).inits === 0 && p.shown('scenario-acts') &&
+                       p.el('huntersbtn').getAttribute('aria-pressed') === 'true' && p.T.getVal('predatorCount') === 4;
+        p.click('scenario-start');
+        const viaCard = JSON.stringify(p.T.initArgs);
+        p.click('huntersbtn'); p.click('restart');
+        const viaBar = JSON.stringify(p.T.initArgs);
+        ok(staged && viaCard === viaBar && p.T.initArgs.cfg.predatorCount === 4 && delta(a, c()).inits === 2 && !p.T.draft,
+           'Hunters: the card stages (4 predators in the tabs, no oc_init), its Start starts it; the card again and the bar\'s Start start the very same world');
+        p.click('randombig');
+        const s1 = p.T.draft.seed, f1 = p.form();
+        p.click('rerollbtn');
+        const s2 = p.T.draft.seed, n1 = delta(a, c()).inits;
+        ok(p.T.draft.id === 'surprise' && s1 !== s2 && f1 !== p.form() && n1 === 2 && /Picked:/.test(p.el('randnote').textContent),
+           'Surprise me stages a draw (seed ' + s1 + '), Reroll another (seed ' + s2 + '); neither starts anything');
+        p.click('startdiscard');
+        p.edit('population', 77);
+        p.click('bigbtn');
+        const ask = asked(p) && /Big tank replaces the change/.test(p.el('startaskmsg').textContent);
+        p.click('startcancel');
+        const kept = !p.T.draft && p.T.getVal('population') === 77;
+        p.click('bigbtn'); p.click('startconfirm');
+        ok(ask && kept && p.T.draft && p.T.draft.id === 'bigtank' && p.T.getVal('population') === 2000 && delta(a, c()).inits === 2,
+           'a card over an edit that waits asks ("' + p.el('startaskmsg').textContent + '"); Keep editing keeps 77 fish; Replace stages the Big tank');
+        p.click('startdiscard');
+        p.edit('predatorCount', 2);
+        p.click('e1add');
+        ok(!p.T.draft && p.T.getVal('predatorCount') === 2 && p.T.getVal('lightEnabled') === true && delta(a, c()).inits === 2,
+           'the Water tab\'s "Add the tuned E1 water": the E1 keys join the waiting edits (the 2 predators stay), nothing starts');
+        p.click('startdiscard');
+        p.ctx.innerWidth = 800; p.ctx.innerHeight = 1200;
+        p.click('fitbtn');
+        p.ctx.innerWidth = 1920; p.ctx.innerHeight = 1080;
+        ok(sheetOpen(p) && p.T.getVal('width') === 1080 && p.T.getVal('height') === 1920 && p.T.W === 1920 && delta(a, c()).inits === 2,
+           'Fit the world to this screen: 1080 x 1920 waits in the opened setup sheet; the world is still 1920 x 1080');
+        p.click('startdiscard');
+        const seed0 = p.T.initArgs.seed;
+        p.click('startmenubtn');
+        const menu = p.shown('startmenu') && p.el('startmenubtn').getAttribute('aria-expanded') === 'true';
+        p.key('Escape');
+        const menuEsc = !p.shown('startmenu') && sheetOpen(p);
+        p.click('startmenubtn'); p.click('startsame');
+        const same = p.T.initArgs.seed === seed0;
+        p.click('startmenubtn'); p.click('newworld');
+        ok(menu && menuEsc && same && p.T.initArgs.seed !== seed0 && !p.shown('startmenu'),
+           'the start menu: Esc closes it (not the sheet); Start again (same fish) keeps seed ' + seed0 + ', Start fresh draws ' + p.T.initArgs.seed);
+    }
+    {   /* in Turbo: a card stages (no Stop); its Start is Stop Turbo & start */
+        const { p, sh } = await pageInTurbo();
+        const c = startCounter(p), a = c();
+        p.click('currentsbtn');
+        const staged = p.T.draft && p.T.draft.id === 'currents' && !sh.toWorker.some(m => m.cmd === 'stop') && p.T.turboState === 'turbo';
+        const label = p.el('scenario-start').querySelector('span').textContent;
+        p.click('scenario-start');
+        const ask = asked(p);
+        p.click('startconfirm');
+        await until(() => p.T.turboState === 'live' && !p.T.pendingStart, 'the start');
+        ok(staged && label === 'Stop Turbo & start' && ask && delta(a, c()).inits === 1 && p.T.initArgs.cfg.currentStrength === 80,
+           'in Turbo: Currents & patches stages without stopping Turbo; its Start reads "Stop Turbo & start", asks, then starts it once');
+        ok(p.uncaught.length === 0, 'no exception escaped the page\'s handlers' + (p.uncaught.length ? ' (' + p.uncaught[0] + ')' : ''));
+    }
+}
+
 /* Every section, in order; `node tests/ocean_turbo_handoff.js NAME...` runs only those. */
 const SECTIONS = {
     repeatedKeys, liveLedger, growthPage, randomize, imports,
@@ -2816,7 +2934,7 @@ const SECTIONS = {
     pageWallsOverride, pageFreshVisit, pageSizeFields, pageRoundTrip,
     pageColourBench, pageLayers, pageResize, pageKeys, pageStartupFailures, pageTourEscape, pageWholeFields,
     pageTurboFraction, pageCardNumbers, pageMixedRecovery, pageEscOwner, pageTabKeys, pageIntegralFloats,
-    pageTurboMode, pageStartDoor, pageFollowBack, pageDraft
+    pageTurboMode, pageStartDoor, pageFollowBack, pageDraft, pageScenarios
 };
 const unhandled = [];
 process.on('unhandledRejection', (e) => { unhandled.push(e); });

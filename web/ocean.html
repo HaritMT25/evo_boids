@@ -541,10 +541,41 @@
   input.range { width: 9.5em; height: 28px; accent-color: var(--plankton); cursor: pointer; }
   .rangeval { font-size: 12px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
 
-  .run-hero { margin-top: 14px; padding: 16px; border-radius: var(--r-md); background: var(--surface-2); border: 1px solid var(--line-soft); }
-  .run-hero .btn { width: 100%; min-height: 50px; font-size: 15px; }
-  .run-hero p { margin-top: 10px; font-size: 13px; color: var(--ink-3); }
+  /* Start from: scenario cards (a phone: a strip that scrolls sideways); the picked card gets the Start (and Reroll) */
+  #scenarios { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
+  .scard { display: flex; flex-direction: column; gap: 8px; min-width: 0; padding: 0; border-radius: var(--r-md);
+           background: var(--surface-2); border: 1px solid var(--line-soft); transition: border-color 150ms var(--ease), background-color 150ms var(--ease); }
+  .scard.picked { border-color: var(--plankton); background: oklch(0.86 0.19 125 / 0.08); }
+  .spick { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; width: 100%; min-height: 64px; padding: 10px 12px;
+           border: 0; border-radius: var(--r-md); background: none; text-align: left; }
+  .spick:hover { background: var(--surface-3); }
+  .spick b { font-size: 14px; font-weight: 650; color: var(--ink); }
+  .spick span { font-size: 12px; line-height: 1.35; color: var(--ink-3); }
+  #scenario-acts { display: flex; gap: 8px; padding: 0 10px 10px; }
+  #scenario-acts[hidden] { display: none; }
+  #scenario-acts .btn { flex: 1 1 auto; min-height: 44px; padding: 0 12px; }
+  #rerollbtn[hidden] { display: none; }
+  @media (max-width: 599px) {
+    #scenarios { display: flex; overflow-x: auto; scroll-snap-type: x proximity; scrollbar-width: none; margin: 8px -18px 0; padding: 0 18px 4px; }
+    #scenarios::-webkit-scrollbar { display: none; }
+    .scard { flex: 0 0 min(64vw, 220px); scroll-snap-align: start; }
+  }
   #randnote { margin-top: 10px; font-size: 13px; color: var(--plankton); line-height: 1.5; }
+  /* the start bar's split button and its menu (same fish / new fish) */
+  .startsplit { display: inline-flex; flex: none; position: relative; }
+  .startsplit #restart { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+  #startmenubtn { min-width: 44px; padding: 0 10px; border-left-width: 0; border-top-left-radius: 0; border-bottom-left-radius: 0; }
+  #startmenubtn svg.i { width: 18px; height: 18px; transition: transform 200ms var(--ease); }
+  #startmenubtn[aria-expanded="true"] svg.i { transform: rotate(180deg); }
+  #restart.pending + #startmenubtn { background: var(--plankton); color: var(--plankton-ink); border-color: transparent; box-shadow: inset 1px 0 0 oklch(0.22 0.06 130 / 0.35); }
+  #startmenu { flex: 1 1 100%; display: flex; flex-direction: column; gap: 4px; padding: 6px; border-radius: var(--r-md);
+               background: var(--surface-2); border: 1px solid var(--line-soft); }
+  #startmenu[hidden] { display: none; }
+  #startmenu button { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; min-height: 48px; padding: 6px 12px;
+                      border: 0; border-radius: var(--r-sm); background: none; text-align: left; }
+  #startmenu button:hover { background: var(--surface-3); }
+  #startmenu b { font-size: 14px; font-weight: 600; color: var(--ink); }
+  #startmenu small { font-size: 12px; color: var(--ink-3); }
   #randnote:empty { display: none; }
   .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; }
   .panel .hint { margin-top: 8px; font-size: 12px; color: var(--ink-3); line-height: 1.45; }
@@ -875,7 +906,7 @@
     </nav>
     <div id="tools" class="chip-surface">
       <button id="dashbtn" class="icon-btn" aria-label="dashboards: charts of this run" aria-expanded="false" title="Dashboards: charts of this run (G)"><svg class="i"><use href="#i-chart"/></svg></button>
-      <button id="menubtn" class="icon-btn" aria-label="settings" aria-expanded="false" aria-controls="drawer" title="Settings (O)"><svg class="i"><use href="#i-sliders"/></svg></button>
+      <button id="menubtn" class="icon-btn" aria-label="setup" aria-expanded="false" aria-controls="drawer" title="Setup (O): start a new world, change the rules"><svg class="i"><use href="#i-sliders"/></svg></button>
       <button id="helpbtn" class="icon-btn" aria-label="help and keys" aria-expanded="false" aria-controls="helppop" title="Help and keys (?)"><svg class="i"><use href="#i-help"/></svg></button>
     </div>
   </header>
@@ -887,7 +918,7 @@
     <div class="notes" id="statnotes"></div>
     <div id="worlds-alt"><a id="to2dmenu" class="btn" href="#to2d">2-D Classic<svg class="i out" aria-hidden="true"><use href="#i-out"/></svg></a><span>The original flat world, on its own page. This run stops.</span></div>
   </div>
-  <button id="fitbtn" class="btn chip-surface" hidden title="Starts this world again, sized for this screen: the same settings and seed"><svg class="i"><use href="#i-restart"/></svg>Fit the world to this screen</button>
+  <button id="fitbtn" class="btn chip-surface" hidden title="Sizes the next world for this screen (Setup: then Start)"><svg class="i"><use href="#i-restart"/></svg>Fit the world to this screen…</button>
   <div id="toasts" aria-live="polite"></div>
   <div id="keys" class="chip-surface" role="note" aria-label="keyboard shortcuts"></div>
   <div id="coach" class="chip-surface" role="status" hidden>
@@ -979,43 +1010,44 @@
     <h3>Time</h3>
     <span class="k"><kbd>Space</kbd> pause / play (in Turbo: stop it)</span><span class="k"><kbd>.</kbd> one step (paused)</span><span class="k"><kbd>+</kbd><kbd>−</kbd> speed</span><span class="k"><kbd>T</kbd> Turbo on / off</span>
     <h3>World</h3>
-    <span class="k"><kbd>R</kbd> start fresh: same rules, new fish</span><span class="k"><kbd>Shift</kbd><kbd>R</kbd> replay this world from its start</span><span class="k"><kbd>O</kbd> settings</span>
+    <span class="k"><kbd>R</kbd> start fresh: same rules, new fish</span><span class="k"><kbd>Shift</kbd><kbd>R</kbd> replay this world from its start (what waits stays)</span><span class="k"><kbd>O</kbd> setup</span>
     <h3>Look</h3>
     <span class="k"><kbd>I</kbd> live numbers</span><span class="k"><kbd>G</kbd> charts</span><span class="k"><kbd>?</kbd> this help</span>
     <div class="pop-acts"><button id="tourbtn" class="btn">Take the tour</button><button id="whatturbo" class="btn ghost">What is Turbo?</button></div>
   </div>
 
-  <aside id="drawer" role="dialog" aria-label="settings" aria-modal="false">
+  <aside id="drawer" role="dialog" aria-label="setup" aria-modal="false">
     <div class="sheet-grip" id="grip" aria-hidden="true"></div>
     <div class="sheet-head">
-      <h2>Settings</h2>
-      <button id="drawerclose" class="icon-btn" aria-label="close settings"><svg class="i"><use href="#i-close"/></svg></button>
+      <h2>Setup</h2>
+      <button id="drawerclose" class="icon-btn" aria-label="close setup"><svg class="i"><use href="#i-close"/></svg></button>
     </div>
     <div id="setup-turbo" class="turbo-bar" role="status" hidden><svg class="i"><use href="#i-bolt"/></svg><span>Turbo is running: <b id="st-rate">–</b> steps/s</span><button id="setup-turbo-stop" class="btn">Stop Turbo</button></div>
-    <nav id="tabs" role="tablist" aria-label="settings sections"></nav>
+    <nav id="tabs" role="tablist" aria-label="setup sections"></nav>
     <div id="panels">
       <section class="panel" data-tab="run" id="panel-run">
-        <div class="run-hero">
-          <button id="randombig" class="btn primary"><svg class="i"><use href="#i-dice"/></svg>Randomize the world</button>
-          <p>Draws a whole setup from ranges that worked in experiments (predators, currents, the E1 physics, schooling rules) and restarts.</p>
-          <p id="randnote"></p>
+        <h3>Start from</h3>
+        <!-- a card stages its whole recipe in these tabs (the next world); its Start (or the start bar's) starts it -->
+        <div id="scenarios" role="group" aria-label="start from">
+          <div class="scard" data-s="standard"><button id="advreset" class="spick" type="button" aria-pressed="false"><b>Standard</b><span>A new visitor's ocean: the default rules, glass walls, sized for this screen</span></button></div>
+          <div class="scard" data-s="bigtank"><button id="bigbtn" class="spick" type="button" aria-pressed="false"><b>Big tank</b><span>Four times the volume and the fish, four times the food, the tuned water</span></button></div>
+          <div class="scard" data-s="e1"><button id="e1btn" class="spick" type="button" aria-pressed="false"><b>Living water</b><span>Waves, a deep current, light that fades with depth, depth costs (E1)</span></button></div>
+          <div class="scard" data-s="hunters"><button id="huntersbtn" class="spick" type="button" aria-pressed="false"><b>Hunters</b><span>Four predators hunt; plenty of food, a cap on the fish, swimming costs energy</span></button></div>
+          <div class="scard" data-s="currents"><button id="currentsbtn" class="spick" type="button" aria-pressed="false"><b>Currents &amp; patches</b><span>Eddies carry six food patches, each at its own depth</span></button></div>
+          <div class="scard" data-s="surprise"><button id="randombig" class="spick" type="button" aria-pressed="false"><b>Surprise me</b><span>A whole setup drawn from ranges that worked, for the tank as set</span></button></div>
+          <div class="scard" data-s="file"><button id="loadcp" class="spick" type="button" aria-pressed="false"><b>From a file…</b><span>A setup you saved: that world from its start</span></button></div>
         </div>
-        <h3>This world</h3>
-        <div class="row2">
-          <button id="newworld" class="btn" title="the same settings, a new seed (R)"><svg class="i"><use href="#i-restart"/></svg>New world</button>
-          <button id="replay" class="btn" title="this world again from its start (Shift+R)"><svg class="i"><use href="#i-replay"/></svg>Replay</button>
-        </div>
-        <p id="modeline"></p>
-        <p class="hint">The flashlight, water clarity, fish colours and Hold 60 fps are in <b>View</b>, beside the flashlight in the dock (key V).</p>
-        <h3>Save &amp; load</h3>
-        <div class="row2">
-          <button id="savecp" class="btn" title="the settings and seed, as a file"><svg class="i"><use href="#i-save"/></svg>Save setup</button>
-          <button id="loadcp" class="btn" title="a saved setup: restarts with it"><svg class="i"><use href="#i-load"/></svg>Load setup</button>
-        </div>
-        <p class="hint">A setup is the settings and the seed, so loading one replays that world from its start. The Ocean cannot save the fish themselves yet (Classic's Save world can). After a restart the page's address carries the setup too: bookmark or share it.</p>
+        <div id="scenario-acts" hidden><button id="scenario-start" class="btn primary" type="button"><svg class="i"><use href="#i-play"/></svg><span>Start</span></button><button id="rerollbtn" class="btn" type="button" hidden><svg class="i"><use href="#i-dice"/></svg>Reroll</button></div>
+        <p id="randnote"></p>
         <input id="cpfile" type="file" accept=".json" hidden>
-        <h3>Defaults</h3>
-        <button id="advreset" class="btn ghost" style="margin-top:8px">Reset every setting</button>
+        <h3>This run</h3>
+        <p id="modeline"></p>
+        <div class="row2">
+          <button id="replay" class="btn" title="this world again from its seed (Shift+R): what waits stays waiting, live tweaks are dropped"><svg class="i"><use href="#i-replay"/></svg>Replay from start</button>
+          <button id="savecp" class="btn" title="this world's seed and settings, as a file (during Turbo too)"><svg class="i"><use href="#i-save"/></svg>Save setup</button>
+        </div>
+        <p class="hint">A start begins a world from its seed: the Ocean can't save the fish themselves yet (Classic's Save world can). The page's address carries the setup of the world that runs: bookmark or share it.</p>
+        <p class="hint">The flashlight, water clarity, fish colours and Hold 60 fps are in <b>View</b>, beside the flashlight in the dock (key V).</p>
         <p id="credit">evo_boids © 2026 Harit Tarwani ·
           <a href="https://creativecommons.org/licenses/by-nc/4.0/" target="_blank" rel="noopener noreferrer">CC BY-NC 4.0</a></p>
       </section>
@@ -1031,8 +1063,15 @@
       <!-- the start bar: what runs, or what the next start will be (the draft) -->
       <p id="startsummary"></p>
       <div id="startrow">
-        <button id="startdiscard" class="btn ghost" hidden title="Forget the waiting changes (live tweaks stay: they already apply)">Discard</button>
-        <button id="restart" class="btn"><svg class="i"><use href="#i-restart"/></svg><span>Start again</span></button>
+        <button id="startdiscard" class="btn ghost" hidden title="Forget what waits for the next start (live tweaks stay: they already apply)">Discard</button>
+        <span class="startsplit">
+          <button id="restart" class="btn"><svg class="i"><use href="#i-restart"/></svg><span>Start again</span></button>
+          <button id="startmenubtn" class="btn" aria-haspopup="menu" aria-expanded="false" aria-controls="startmenu" aria-label="more ways to start" title="Same fish or new fish"><svg class="i"><use href="#i-chevron"/></svg></button>
+        </span>
+      </div>
+      <div id="startmenu" role="menu" aria-label="ways to start" hidden>
+        <button id="startsame" role="menuitem" type="button"><b>Start again (same fish)</b><small id="startsame-sub">the same seed</small></button>
+        <button id="newworld" role="menuitem" type="button" title="R"><b>Start fresh (new fish)</b><small>a new seed (R)</small></button>
       </div>
       <span id="err" role="status"></span>
     </div>

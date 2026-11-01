@@ -1815,10 +1815,24 @@
   var heldMoveKeys = {}, shiftHeld = false;
   function releaseMoveKeys() { heldMoveKeys = {}; shiftHeld = false; }
   /* a focused field takes the keys: the text inputs, selects, text areas and
-   * editable text (the settings' number fields among them) */
+   * editable text (the settings' number fields among them). A switch or a
+   * slider is not one: letters are shortcuts there too (ownKey keeps theirs). */
   function typingIn(t) {
     if (!t || !t.tagName) return false;
-    return t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || !!t.isContentEditable;
+    if (t.tagName === "INPUT") return !/^(checkbox|radio|range|button|submit|reset|color|file|image)$/i.test(t.type || "text");
+    return t.tagName === "TEXTAREA" || t.tagName === "SELECT" || !!t.isContentEditable;
+  }
+  /* the keys a focused control acts on itself: Space and Enter press a button
+   * or turn a switch (Enter follows a link), a slider takes the arrows, Home,
+   * End and Page Up / Down, a tab the arrows. Every other key stays a shortcut. */
+  function ownKey(t, k) {
+    if (!t || !t.tagName) return false;
+    var press = k === " " || k === "Spacebar" || k === "Enter";
+    if (t.tagName === "BUTTON") return press || (/^Arrow/.test(k) && t.getAttribute("role") === "tab");
+    if (t.tagName === "A") return k === "Enter";
+    if (t.tagName !== "INPUT") return false;
+    if (t.type === "range") return /^(Arrow|Page)/.test(k) || k === "Home" || k === "End";
+    return press && (t.type === "checkbox" || t.type === "radio");
   }
   var escHandledElsewhere = false;
   window.addEventListener("keydown", function (e) {
@@ -1852,6 +1866,7 @@
       if (e.key === "Shift") { shiftHeld = true; return; }
       if (e.ctrlKey || e.metaKey || e.altKey) return;
       var k = e.key, lk = String(k).toLowerCase();
+      if (ownKey(t, k)) return;   /* Space / Enter press the focused button or switch; a slider's arrows move it */
       /* the camera's movement: also with a button focused (letters don't press it) */
       var mv = MOVE_CODES[e.code], mk = mv ? "c:" + e.code : null;
       if (!mv && MOVE_KEYS[lk]) { mv = MOVE_KEYS[lk]; mk = "k:" + lk; }
@@ -1862,13 +1877,14 @@
       }
       /* the dock's and the top bar's own keys (Turbo's too: T stops it; letters press no button) */
       if (e.repeat && /^[?vtgoil]$/.test(lk)) return;   /* a held toggle acts once (the camera and speed keys repeat) */
-      if (k === "?") { togglePop("help", null, true); return; }
-      if (lk === "v") { togglePop("view", null, true); return; }
+      /* ? and V open as their buttons do from the keyboard: the focus into the
+       * popover, and back to the button when it closes */
+      if (k === "?") { togglePop("help", el(POPS.help[1]), true); return; }
+      if (lk === "v") { togglePop("view", el(POPS.view[1]), true); return; }
       if (lk === "t") { el("turbobtn").click(); return; }
       if (lk === "g") { setPop(null); el("dashbtn").click(); return; }
       if (lk === "o") { setPop(null); setDrawer(!drawerEl.classList.contains("open")); return; }
       if (lk === "i") { setPop(null); setStatPanel(!statOpen); return; }
-      if (t && t.tagName === "BUTTON") return;   /* Space / Enter belong to the button */
       /* the view: always */
       if (lk === "c") { wantFollow = false; scene.resetView(true); return; }
       if (lk === "l") { toggleLight(); return; }

@@ -1910,6 +1910,53 @@ async function pageResize() {
     }
 }
 
+/* Finding 4: with a button focused (as Esc leaves the View button) every
+ * letter shortcut was ignored; V and ? opened without the focus. */
+async function pageKeys() {
+    section('The page: shortcuts with a control focused, and V / ? opening with the focus (audit 43fedc0, finding 4)');
+    const p = await bootPage(PAGE_Q);
+    p.tabTo('viewmenubtn');
+    p.key('Enter');
+    const opened = p.T.openPop === 'view' && focused(p) === 'lightnow';
+    p.key('Escape');
+    ok(opened && p.T.openPop === null && focused(p) === 'viewmenubtn',
+       'Tab to View, Enter: it opens with the focus on its first switch; Esc: closed, the focus back on View (' + focused(p) + ')');
+    const light0 = p.el('lightbtn').getAttribute('aria-pressed');
+    p.key('l');
+    const light1 = p.el('lightbtn').getAttribute('aria-pressed');
+    p.key('f');
+    const sel = p.ctx.EvoOcean.state().selectedId;
+    p.key('+');
+    const spd = p.el('speedlabel').textContent;
+    p.key('c');
+    ok(light0 === 'false' && light1 === 'true' && sel !== null && spd === '2×' && p.uncaught.length === 0,
+       'then, View still focused: L turns the light on (' + light0 + ' -> ' + light1 + '), F follows a fish (' + sel + '), + speeds up (' + spd + '), C fits the view');
+    p.key('Escape');
+    p.key('v');
+    const v1 = p.T.openPop === 'view' && focused(p) === 'lightnow';
+    p.key('v');
+    ok(v1 && p.T.openPop === null && focused(p) === 'viewmenubtn', 'V opens View with the focus inside; V again closes it, the focus back on View (' + focused(p) + ')');
+    p.key('?', { shift: true });
+    const h1 = p.T.openPop === 'help' && focused(p) === 'tourbtn';
+    p.key('Escape');
+    ok(h1 && p.T.openPop === null && focused(p) === 'helpbtn', '? opens Help with the focus on its first button; Esc closes it, the focus back on Help (' + focused(p) + ')');
+    p.key('v');
+    const paused0 = p.T.paused, sw0 = p.el('lightnow').checked;
+    p.key(' ');
+    ok(p.T.paused === paused0 && p.el('lightnow').checked !== sw0 && p.el('lightbtn').getAttribute('aria-pressed') === String(!sw0),
+       'Space on the focused flashlight switch turns it, and does not pause (switch ' + sw0 + ' -> ' + p.el('lightnow').checked + ')');
+    p.key('l');
+    ok(p.el('lightnow').checked === sw0, '  L there turns the light back (a switch is not a text field)');
+    p.key('Escape');
+    p.key(' ');
+    ok(p.T.paused === paused0 && p.T.openPop === 'view', 'Space on the focused View button presses it (View opens), and does not pause');
+    p.key('Escape');
+    p.tabTo('o_kBuoy');
+    p.key('l');
+    ok(p.el('lightnow').checked === sw0, 'a number field keeps its keys: L typed there is no shortcut');
+    ok(p.uncaught.length === 0, 'no exception escaped the page\'s handlers' + (p.uncaught.length ? ' (' + p.uncaught[0] + ')' : ''));
+}
+
 /* Finding 9: in the tour's "Your own settings", Esc in a number field
  * closed the settings (the page's) but not the tour (guide.js's typing
  * guard came first), which then pointed at nothing. */
@@ -1948,7 +1995,7 @@ const SECTIONS = {
     failures: failures_,
     pageHeld, pageRefusal, pageAsyncSetup, pageStartFailures, pageOverflow, pageBools, pageDashboards,
     pageWallsOverride, pageFreshVisit, pageSizeFields, pageRoundTrip,
-    pageColourBench, pageLayers, pageResize, pageTourEscape
+    pageColourBench, pageLayers, pageResize, pageKeys, pageTourEscape
 };
 const unhandled = [];
 process.on('unhandledRejection', (e) => { unhandled.push(e); });

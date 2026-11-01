@@ -295,16 +295,27 @@ const PAGE_SRC = (() => {
         '    get paused() { return paused; }, get openPop() { return openPop; }, get statOpen() { return statOpen; },\n' +
         '    get worldEpoch() { return worldEpoch; }, get pendingStart() { return pendingStart; }, get asking() { return asking; },\n' +
         '    get usedTurbo() { return usedTurbo; }, get turboStats() { return turboStats; }, startWorld: startWorld,\n' +
+        '    get turboReturn() { return turboReturn; }, set turboReturn(v) { turboReturn = v; },\n' +
+        '    get lastS() { return fresh(lastS); }, inspect: inspect,\n' +
         '    getVal: getVal, importWorld: importWorld, wiringNow: wiringNow, frame: frame,\n' +
         '    urlImport: function (P) {\n' + src.slice(a, b) + '    }\n  };';
     return src.slice(0, end) + access + src.slice(end);
 })();
-/* the scene: fixed answers, but the skin it was last told to draw (setAppearance -> appearance().skin) */
-const SCENE_STUB = `window.EvoOceanScene = { load: function () { return Promise.resolve(); }, create: function () {
+/* the scene: fixed answers, but the skin it was last told to draw (setAppearance -> appearance().skin), and a
+ * follow and a flashlight with state: setFollow tells the page (onFollowChange) as ocean_scene.js does, at once */
+const SCENE_STUB = `window.EvoOceanScene = { load: function () { return Promise.resolve(); }, create: function (canvas, opts) {
   var fixed = { following: false, flashlight: false, quality: 3, flashlightLevel: 0, pick: -1, project: null, view: null, degrade: false,
                 appearance: { want: false, skin: false, shapes: true, drawing: false } };
   return new Proxy({}, { get: function (t, k) {
     if (k === "setAppearance") return function (on) { fixed.appearance = { want: !!on, skin: !!on, shapes: true, drawing: !!on }; };
+    if (k === "setFollow") return function (on) {
+      on = !!on;
+      if (on === fixed.following) return;
+      fixed.following = on;
+      if (opts && opts.onFollowChange) opts.onFollowChange(on);
+    };
+    if (k === "resetView") return function () { if (fixed.following) { fixed.following = false; if (opts && opts.onFollowChange) opts.onFollowChange(false); } };
+    if (k === "setFlashlight") return function (on) { fixed.flashlight = !!on; };
     return function () { return fixed[k]; };
   } });
 } };`;
@@ -2585,6 +2596,110 @@ async function pageStartDoor() {
     ok(p.uncaught.length === 0, 'no exception escaped the page\'s handlers' + (p.uncaught.length ? ' (' + p.uncaught[0] + ')' : ''));
 }
 
+/* UI-4: the picked or followed fish after Turbo. The same fish when it
+ * lives (followed again, the lamp by the follow's own rule, the stored
+ * preference never written); else its family line's nearest (world
+ * distance, the lower id on a tie); else none, said so; a selection
+ * without a follow stays one; C during Turbo drops the follow, Esc the
+ * fish; a lost world's recovery picks it up from the page's own copy;
+ * never across a new world (Stop Turbo & start). The round trip with the
+ * fish picked up again stays bit-identical (the capture switch as the page
+ * sets it: off during Turbo, on again after). */
+async function pageFollowBack() {
+    section('UI-4: the picked or followed fish comes back after Turbo (alive, its family\'s nearest, none), the lamp as it was, never across a new world');
+    const st = (p) => p.ctx.EvoOcean.state();
+    const pick = (p, follow) => { p.ctx.EvoOcean.select(0); if (follow) p.click('followbtn'); return st(p).selectedId; };
+    async function trip(p, during, stop) {
+        p.click('turbobtn');
+        await until(() => p.T.turboState === 'turbo', 'Turbo');
+        const sh = p.worker();
+        await until(() => sh.delivered.some(isType('stats')), 'its stats');
+        const mid = st(p);
+        if (during) await during(sh);
+        if (stop !== false) { p.click('turboexit'); await until(() => p.T.turboState === 'live', 'the hand-back'); }
+        return { sh, mid };
+    }
+    {   /* followed, alive: followed again; bit-identical with the capture as the page sets it */
+        const p = await bootPage(PAGE_Q);
+        const id = pick(p, true), lit = st(p).flashlight;
+        const img = HO.buffer(p.M).slice(0);
+        const { sh, mid } = await trip(p);
+        const s = p.T.lastS, alive = Array.prototype.includes.call(s.ids.subarray(0, s.n), id), after = st(p);
+        ok(lit && mid.selectedId === null && !mid.following && !mid.flashlight && alive && after.selectedId === id && after.following && after.flashlight &&
+           p.ctx.localStorage.getItem('evo_boids.ocean.followLight') === null,
+           'followed fish #' + id + ': let go while Turbo runs (the lamp back off), then followed again after Stop with the lamp on; the preference never written');
+        const ref = await mk(1, {}, 300, 300, 0);
+        HO.take(ref, img.slice(0), 'the control');
+        ref._oc_set_capture(0); ref._oc_step(frame(p.M) - frame(ref)); ref._oc_set_capture(1);
+        const d = sameFor(p.M, ref, 150);
+        ok(workerEdits(sh).length === 0 && d === '', '  and the run is bit-identical to one without Turbo (150 steps, the capture off during Turbo, on after)' + (d ? ': ' + d : ''));
+    }
+    {   /* a selection without a follow; C during Turbo; Esc during Turbo */
+        const p = await bootPage(PAGE_Q);
+        const id = pick(p, false);
+        await trip(p);
+        const a = st(p);
+        pick(p, true);
+        await trip(p, () => p.key('c'));
+        const b = st(p);
+        pick(p, true);
+        await trip(p, () => p.key('Escape'));
+        const c = st(p);
+        ok(a.selectedId === id && !a.following && b.selectedId !== null && !b.following && c.selectedId === null && !c.following,
+           'picked, not followed: picked again, not followed; C during Turbo: picked again, the follow dropped; Esc during Turbo: let go (' +
+           [a.selectedId, a.following, b.selectedId, b.following, c.selectedId].join(' ') + ')');
+    }
+    {   /* dead: the nearest of its family line; extinct: none, said so */
+        const p = await bootPage(PAGE_Q);
+        const s0 = p.T.lastS, k = 3, fam = Math.round(p.T.inspect(k).info[7]);
+        const at = { x: p.T.lastS.segs[12 * k] + 37, y: p.T.lastS.segs[12 * k + 1] - 21, d: p.T.lastS.depth[k] };
+        void s0;
+        await trip(p, () => { p.T.turboReturn = { id: 1e9, follow: true, epoch: p.T.worldEpoch, family: fam, x: at.x, y: at.y, d: at.d }; });
+        const s = p.T.lastS, n = s.n, ids = Array.from(s.ids.subarray(0, n)), xs = [], ys = [], ds = [];
+        for (let i = 0; i < n; i++) { xs.push(s.segs[12 * i]); ys.push(s.segs[12 * i + 1]); ds.push(s.depth[i]); }
+        let want = null, bd = Infinity;
+        for (let i = 0; i < n; i++) {
+            if (Math.round(p.T.inspect(i).info[7]) !== fam) continue;
+            const d2 = (xs[i] - at.x) ** 2 + (ys[i] - at.y) ** 2 + (ds[i] - at.d) ** 2;   /* walls=1: no wrap */
+            if (d2 < bd || (d2 === bd && ids[i] < want)) { bd = d2; want = ids[i]; }
+        }
+        const a = st(p), t1 = toastText(p);
+        await trip(p, () => { p.T.turboReturn = { id: 1e9, follow: true, epoch: p.T.worldEpoch, family: -77, x: 0, y: 0, d: 0 }; });
+        const b = st(p), t2 = toastText(p);
+        ok(want !== null && a.selectedId === want && a.following && /died during Turbo/.test(t1) && b.selectedId === null && !b.following &&
+           /nor did any of its family line/.test(t2),
+           'a fish that died during Turbo: its family line\'s nearest (#' + want + ') is followed instead, said so; a family line gone: none, said so');
+    }
+    {   /* the preference off: the follow leaves the lamp alone, before and after */
+        const p = await bootPage(PAGE_Q);
+        const sw = p.el('followLight');
+        sw.checked = false; sw.dispatchEvent(new p.Ev('change', { bubbles: true }));
+        pick(p, true);
+        const lit = st(p).flashlight;
+        await trip(p);
+        const a = st(p);
+        ok(!lit && a.following && !a.flashlight && p.ctx.localStorage.getItem('evo_boids.ocean.followLight') === '0',
+           'Light while following off: followed again after Turbo with the lamp still off, the preference still off');
+    }
+    {   /* a lost world: picked up from the page's own copy */
+        const p = await bootPage(PAGE_Q);
+        const id = pick(p, true);
+        await trip(p, async (sh) => { sh.pause(); trapNext(sh); await until(() => sh.queued(isType('error')), 'the trap'); sh.resume(); }, false);
+        await until(() => p.T.turboState === 'live', 'the recovery');
+        const a = st(p);
+        ok(a.selectedId === id && a.following, 'Turbo\'s world lost: the page goes on from its own copy, and fish #' + id + ' is followed again');
+    }
+    {   /* never across a new world */
+        const p = await bootPage(PAGE_Q);
+        pick(p, true);
+        await trip(p, () => { p.click('restart'); p.click('startconfirm'); }, false);
+        await until(() => p.T.turboState === 'live' && !p.T.pendingStart, 'the new world');
+        const a = st(p);
+        ok(a.selectedId === null && !a.following && p.T.turboReturn === null, 'Stop Turbo & start: the new world starts with no fish picked or followed');
+        ok(p.uncaught.length === 0, 'no exception escaped the page\'s handlers' + (p.uncaught.length ? ' (' + p.uncaught[0] + ')' : ''));
+    }
+}
+
 /* Every section, in order; `node tests/ocean_turbo_handoff.js NAME...` runs only those. */
 const SECTIONS = {
     repeatedKeys, liveLedger, growthPage, randomize, imports,
@@ -2601,7 +2716,7 @@ const SECTIONS = {
     pageWallsOverride, pageFreshVisit, pageSizeFields, pageRoundTrip,
     pageColourBench, pageLayers, pageResize, pageKeys, pageStartupFailures, pageTourEscape, pageWholeFields,
     pageTurboFraction, pageCardNumbers, pageMixedRecovery, pageEscOwner, pageTabKeys, pageIntegralFloats,
-    pageTurboMode, pageStartDoor
+    pageTurboMode, pageStartDoor, pageFollowBack
 };
 const unhandled = [];
 process.on('unhandledRejection', (e) => { unhandled.push(e); });

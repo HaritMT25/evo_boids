@@ -1912,7 +1912,7 @@
   }
   function turboWait() { showNote(turboState === "entering" ? "Turbo is starting: a moment." : "Turbo is handing the world back: a moment."); }
   /* a tap on the waiting picture, or F, while Turbo runs: never silently ignored */
-  var turboHintT = 0;
+  var turboHintT = -Infinity;
   function turboPictureHint() {
     var now = performance.now();
     if (now - turboHintT < 2500) return;
@@ -1969,6 +1969,7 @@
       }
       var ps = pendingStart;
       pendingStart = null;
+      if (ps) turboReturn = null;   /* a new world follows: no fish to pick up */
       turboBack();
       if (ps) finishPendingStart(ps);   /* in this message, before any frame steps the world handed back */
       else showNote("Turbo ran " + (msg.totalSteps || 0).toLocaleString() + " steps.");
@@ -1992,7 +1993,9 @@
     sampleBucket = Math.floor(M._oc_stats ? frameNow() / (dash() ? dash().every() : 60) : -1);
     setPaused(startFailed ? turboEntryPaused : false);
     updateLocks();
-    return replayEdits(plan, quiet);
+    var res = replayEdits(plan, quiet);
+    restoreAfterTurbo();
+    return res;
   }
   /* The worker stopped on an error, or died. With its memory (the world was
    * whole), the run goes on from where Turbo got it, as after a Stop.
@@ -2024,6 +2027,60 @@
               (again.length ? ", with " + again.join(", ") + " applied again." : ".")) +
               (refused.length ? " Refused: " + refused.join("; ") + "." : ""));
   }
+  /* The fish the visitor had picked (and followed) when Turbo took the world:
+   * its id, family line, place and whether it was followed, in this world
+   * (epoch). The picture can't show it during Turbo; the hand-back (or a
+   * recovery) picks it up again: the same fish if it lives, else the nearest
+   * of its family line (world distance, across the wrap without walls; the
+   * lower id on a tie), else none, said so. Following resumes only if it was
+   * on and not let go meanwhile (C, the fit button: no follow; Esc: nothing).
+   * Never across a new world. The flashlight preference is never written:
+   * the follow's own rule turns the lamp on and puts it back. */
+  function returnPoint() {
+    if (selectedId === null) return null;
+    var s = fresh(lastS), idx = indexOfId(s, selectedId);
+    var r = { id: selectedId, follow: !!(scene && scene.following()), epoch: worldEpoch, family: null, x: 0, y: 0, d: 0 };
+    if (idx >= 0) {
+      r.x = s.segs[12 * idx]; r.y = s.segs[12 * idx + 1]; r.d = s.depth[idx];   /* read before oc_inspect, which may grow the memory */
+      var f = inspect(idx);
+      if (f) r.family = Math.round(f.info[7]);
+    }
+    return r;
+  }
+  function restoreAfterTurbo() {
+    var r = turboReturn;
+    turboReturn = null;
+    if (!r || r.epoch !== worldEpoch || !M || turboState !== "live") return;
+    var s = fresh(lastS), idx = indexOfId(s, r.id), id = r.id;
+    if (idx < 0) { id = nearestOfFamily(s, r); }
+    if (id === null) {
+      toast("Fish #" + r.id + " did not survive Turbo, nor did any of its family line" + (r.follow ? ": nothing to follow." : "."));
+      return;
+    }
+    select(id, true);
+    if (r.follow && scene) { wantFollow = true; scene.setFollow(true); }
+    if (id !== r.id) toast("Fish #" + r.id + " died during Turbo: " + (r.follow ? "following" : "showing") + " #" + id + ", the nearest of its family line.");
+  }
+  /* the nearest living member of r's family line, by id (one oc_inspect per fish: the ids and places copied first) */
+  function nearestOfFamily(s, r) {
+    if (r.family === null || !s || !s.n || !has("oc_inspect")) return null;
+    var n = s.n, ids = Array.prototype.slice.call(s.ids, 0, n), xs = [], ys = [], ds = [], i;
+    for (i = 0; i < n; i++) { xs.push(s.segs[12 * i]); ys.push(s.segs[12 * i + 1]); ds.push(s.depth[i]); }
+    var best = null, bd = Infinity;
+    for (i = 0; i < n; i++) {
+      if (!M._oc_inspect(i)) continue;
+      var info = HO.f64(M, M._oc_inspect_info(), M._oc_inspect_len());   /* a fresh view: oc_inspect allocates */
+      if (Math.round(info[7]) !== r.family) continue;
+      var dx = xs[i] - r.x, dy = ys[i] - r.y, dz = ds[i] - r.d;
+      if (!WALLS) {
+        if (dx > W / 2) dx -= W; else if (dx < -W / 2) dx += W;
+        if (dy > H / 2) dy -= H; else if (dy < -H / 2) dy += H;
+      }
+      var d2 = dx * dx + dy * dy + dz * dz;
+      if (d2 < bd || (d2 === bd && ids[i] < best)) { bd = d2; best = ids[i]; }
+    }
+    return best;
+  }
   function dropWorker() {
     if (!turboWorker) return;
     turboWorker.onmessage = null;
@@ -2046,6 +2103,7 @@
       turboEntryCfg = Object.assign({}, runCfg);
       turboEntryPaused = paused;
       live.start();
+      turboReturn = returnPoint();   /* the fish to pick up again after Turbo, before the picture lets it go */
       select(null);
       unfollow();
       updateLocks();
@@ -2194,7 +2252,8 @@
         if (!escHandledElsewhere) {
           if (drawerEl.classList.contains("open")) setDrawer(false);
           else if (statOpen) setStatPanel(false);
-          else if (scene.following()) unfollow(); else select(null);
+          else if (scene.following()) unfollow();
+          else { select(null); if (turboReturn) { turboReturn = null; showNote("Let go: no fish to pick up after Turbo."); } }
         }
         if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
         return;
@@ -2224,7 +2283,7 @@
       if (lk === "o") { setPop(null); setDrawer(!drawerEl.classList.contains("open")); return; }
       if (lk === "i") { setPop(null); setStatPanel(!statOpen); return; }
       /* the view: always */
-      if (lk === "c") { wantFollow = false; scene.resetView(true); return; }
+      if (lk === "c") { wantFollow = false; scene.resetView(true); if (turboReturn) turboReturn.follow = false; return; }
       if (lk === "l") { toggleLight(); return; }
       if (lk === "f") { follow(); return; }
       /* Turbo: Space stops it (as T does); the speed and the step are Turbo's
@@ -2438,7 +2497,7 @@
     updateLight();
     pointerBlur(this);
   });
-  btn("viewbtn", function () { if (scene) { wantFollow = false; scene.resetView(true); } });
+  btn("viewbtn", function () { if (scene) { wantFollow = false; scene.resetView(true); if (turboReturn) turboReturn.follow = false; } });
   btn("fitbtn", fitToScreen);
   btn("followbtn", function () {
     if (!scene) return;

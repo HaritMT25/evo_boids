@@ -1,10 +1,12 @@
-# evo_boids
+# Finfolk
 
 An artificial-life simulation in C++20 where fish with small neural networks evolve by inheritance and mutation. It runs natively and in the browser through WebAssembly.
 
-**Live demo:** https://evo-boids.vercel.app/ opens the 3-D Ocean; the switch at the top opens 2-D Classic (https://evo-boids.vercel.app/classic.html).
+Finfolk is the sea-folk of Orkney folklore, and the name reads as fin + folk: a society of fish. Until November 2026 the project was called evo_boids, and the code keeps that name: the file names, the `evo_boids` binary and its CLI, the wasm modules, the `evo_boids.*` browser storage keys and the checkpoint format.
 
-![evo_boids running in the browser](docs/demo.gif) <!-- placeholder: GIF to be recorded -->
+**Live demo:** https://finfolk-sim.vercel.app/ opens the 3-D Ocean; the switch at the top opens 2-D Classic (https://finfolk-sim.vercel.app/classic.html). The old address, https://evo-boids.vercel.app/, serves the same site.
+
+![Finfolk running in the browser](docs/demo.gif) <!-- placeholder: GIF to be recorded -->
 
 ## What it simulates
 
@@ -140,7 +142,7 @@ A **3-D | 2-D** switch beside the live readout, on both pages, moves between the
 
 **Links from before.** Until 2026-10-28 the root was Classic. A query on `/` (or `/ocean.html`) with one of the keys only Classic reads (`view`, `fish`, `gl`, `bench`, `threads`, `nthreads`) and none of the keys only the Ocean reads (`seed`, `pop`, `depth`, `w`, `h`, `cfg`, `speed`, `e1`, `mock`, `walls`) goes to `/classic.html` with its query and hash, before the Ocean starts (a script at the top of `web/ocean.html`). So `/?view=flat`, `/?threads=0` and `/?bench` open Classic as they did, and the Ocean's own links, which carry `?seed=` from the first restart on, stay. Keys both pages read the same way (`colour`, `guide`, `intro`) decide nothing: `/?guide=0` is the Ocean. Classic reads no `seed` and no `cfg`, so no key means one thing on one page and another on the other. A query with keys of both, which neither page writes, stays on the Ocean.
 
-**Embedded.** Both pages run inside an iframe on a page without COOP/COEP (the portfolio's EvoBoids.exe window frames `/` at about 890×453): Classic then runs single-threaded, the Ocean as always. Windows 560 px tall or less, such as that one, get each page's compact layout; there the Ocean's fish card drops its bars and sizes the brain to fit between the top bar and the dock.
+**Embedded.** Both pages run inside an iframe on a page without COOP/COEP (the portfolio site's demo window frames `/` at about 890×453): Classic then runs single-threaded, the Ocean as always. Windows 560 px tall or less, such as that one, get each page's compact layout; there the Ocean's fish card drops its bars and sizes the brain to fit between the top bar and the dock.
 
 The Ocean's page options (`web/ocean.js` lists them):
 
@@ -271,7 +273,7 @@ The chart button beside the settings button opens charts of the running world. E
 
 ### Deploy (Vercel, static)
 
-Live at https://evo-boids.vercel.app/.
+Live at https://finfolk-sim.vercel.app/ (also https://evo-boids.vercel.app/: both are domains of the Vercel project `evo-boids`, so every production deploy updates both).
 
 ```bash
 wasm/build_site.sh                                  # -> dist/: index.html (the Ocean), ocean.html (the same),
@@ -282,7 +284,7 @@ vercel build --prod --cwd dist                      # -> dist/.vercel/output, he
 vercel deploy --prebuilt --prod --cwd dist          # production (drop both --prod for a preview)
 ```
 
-Deploy the prebuilt output. A plain `vercel deploy --cwd dist`, which builds on Vercel's side, went live on 2026-10-18 without any of the `vercel.json` headers: no COOP/COEP, so the page ran single-threaded. The same files built locally with `vercel build` keep them. After a deploy, check that `curl -sI https://evo-boids.vercel.app/classic.html` shows `cross-origin-opener-policy: same-origin`.
+Deploy the prebuilt output. A plain `vercel deploy --cwd dist`, which builds on Vercel's side, went live on 2026-10-18 without any of the `vercel.json` headers: no COOP/COEP, so the page ran single-threaded. The same files built locally with `vercel build` keep them. After a deploy, check that `curl -sI https://finfolk-sim.vercel.app/classic.html` (and the same path on evo-boids.vercel.app) shows `cross-origin-opener-policy: same-origin`.
 
 `dist/vercel.json` sets:
 - COOP/COEP on every path: Classic's threaded module needs them, and its Turbo worker and pthread workers too. The Ocean, single-threaded, needs none and runs the same under them, at the top level and in an iframe on a page without them

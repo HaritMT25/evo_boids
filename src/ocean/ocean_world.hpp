@@ -17,6 +17,8 @@
 //   * depth costs (OceanConfig cHold / cPress) after kernel::stepMetabolism
 //   * optional food lifetime (OceanConfig::foodLife): uneaten food is removed
 //     foodLife seconds after it appeared
+//   * optional own-frame labels (OceanConfig::labelFrame 1): the labeled food /
+//     neighbour direction senses report right / ahead instead of world x / y
 //   * eating, interaction, sensing and the predators' capture use 3-D
 //     distance: the SpatialGrid is still on (x, y), its candidates are
 //     filtered by 3-D distance (a shallow sea: candidates per query stay
@@ -2516,11 +2518,22 @@ private:
             avgHx /= neighborCount; avgHy /= neighborCount;
         }
         sensors[NEIGHBOR_COUNT] = tanhCountOver10(inRadiusCount);
+        const bool ownLabels = ocfg.labelFrame == 1;   // OceanConfig::labelFrame (A1): x = right, y = ahead
+        if (ownLabels) {   // projected before the tanh; the heading likewise
+            sensors[AVG_NEIGHBOR_DX] = evomath::tanhf((avgDx * rht.x + avgDy * rht.y) / R);
+            sensors[AVG_NEIGHBOR_DY] = evomath::tanhf((avgDx * fwd.x + avgDy * fwd.y) / R);
+        } else {
         sensors[AVG_NEIGHBOR_DX] = evomath::tanhf(avgDx / R);
         sensors[AVG_NEIGHBOR_DY] = evomath::tanhf(avgDy / R);
+        }
         sensors[AVG_NEIGHBOR_DZ] = evomath::tanhf(avgDz / R);
+        if (ownLabels) {
+            sensors[AVG_NEIGHBOR_HEADING_X] = avgHx * rht.x + avgHy * rht.y;
+            sensors[AVG_NEIGHBOR_HEADING_Y] = avgHx * fwd.x + avgHy * fwd.y;
+        } else {
         sensors[AVG_NEIGHBOR_HEADING_X] = avgHx;
         sensors[AVG_NEIGHBOR_HEADING_Y] = avgHy;
+        }
         sensors[NEAREST_NEIGHBOR_DIST] = nearestDist / R;
         sensors[POPULATION_DENSITY] = tanhCountOver15(inRadiusCount);
         sensors[POPULATION_FWD] = tanhCountOver5(popFwd);
@@ -2589,8 +2602,13 @@ private:
             const FoodSeen* s = foodSeen_.data();
             for (int j = 0; j < n; ++j) smell(s[j].k, s[j].dx, s[j].dy, s[j].dz, s[j].d2);
         }
+        if (ownLabels) {   // the unit vector's horizontal part, right / ahead (DZ as is)
+            sensors[NEAREST_FOOD_DX] = foodDx * rht.x + foodDy * rht.y;
+            sensors[NEAREST_FOOD_DY] = foodDx * fwd.x + foodDy * fwd.y;
+        } else {
         sensors[NEAREST_FOOD_DX] = foodDx;
         sensors[NEAREST_FOOD_DY] = foodDy;
+        }
         sensors[NEAREST_FOOD_DZ] = foodDz;
         sensors[NEAREST_FOOD_DIST] = foodDist / R;
         sensors[FOOD_DENSITY] = tanhCountOver10(foodCount);

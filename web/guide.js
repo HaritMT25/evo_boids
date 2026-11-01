@@ -313,10 +313,12 @@
   window.addEventListener("keydown", function (e) {
     if (idx < 0) return;
     if (steps[idx] && steps[idx].intro) { if (e.key === "Escape") endIntro(false, true); return; }
+    /* Esc ends the tour from anywhere, a settings field too (the pages leave
+     * this Esc to the tour); a field keeps its own arrow keys */
+    if (e.key === "Escape") { finish(); return; }
     var t = e.target && e.target.tagName;
     if (t === "INPUT" || t === "SELECT" || t === "TEXTAREA") return;
-    if (e.key === "Escape") finish();
-    else if (e.key === "ArrowRight" && !steps[idx].welcome && !steps[idx].last) show(idx + 1);
+    if (e.key === "ArrowRight" && !steps[idx].welcome && !steps[idx].last) show(idx + 1);
     else if (e.key === "ArrowLeft" && idx > 1) show(idx - 1);
   });
 

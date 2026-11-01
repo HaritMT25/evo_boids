@@ -1880,6 +1880,30 @@ async function pageLayers() {
     ok(p.uncaught.length === 0, 'no exception escaped the page\'s handlers' + (p.uncaught.length ? ' (' + p.uncaught[0] + ')' : ''));
 }
 
+/* Finding 9: in the tour's "Your own settings", Esc in a number field
+ * closed the settings (the page's) but not the tour (guide.js's typing
+ * guard came first), which then pointed at nothing. */
+async function pageTourEscape() {
+    section('The page: Esc in a field during the tour ends the tour, once (audit 43fedc0, finding 9)');
+    const p = await bootPage(PAGE_Q, { guide: true });
+    const title = () => { const g = p.el('guide'), h = g && g.querySelector('h2'); return h ? h.textContent : ''; };
+    p.ctx.EvoGuide.start();
+    for (let i = 0; i < 20 && title() !== 'Your own settings'; i++) p.key('ArrowRight');
+    ok(title() === 'Your own settings' && sheetOpen(p), 'the tour is at "Your own settings", its settings open');
+    p.tabTo('o_kBuoy');
+    p.key('ArrowRight');
+    ok(title() === 'Your own settings', '  an arrow key in its number field stays the field\'s (the tour waits)');
+    p.key('Escape');
+    ok(!p.el('guide') && !sheetOpen(p) && focused(p) === null,
+       'Esc in that field ends the tour, which closes its settings: no tour left pointing at a closed sheet (tour ' + !!p.el('guide') + ', sheet ' + sheetOpen(p) + ')');
+    p.ctx.EvoGuide.start();
+    p.key('i');
+    const both = !!p.el('guide') && p.shown('statpanel');
+    p.key('Escape');
+    ok(both && !p.el('guide') && p.shown('statpanel'), 'the live numbers opened during the tour: Esc ends the tour and leaves them (' + p.shown('statpanel') + ')');
+    ok(p.uncaught.length === 0, 'no exception escaped the page\'s handlers' + (p.uncaught.length ? ' (' + p.uncaught[0] + ')' : ''));
+}
+
 /* Every section, in order; `node tests/ocean_turbo_handoff.js NAME...` runs only those. */
 const SECTIONS = {
     repeatedKeys, liveLedger, growthPage, randomize, imports,
@@ -1894,7 +1918,7 @@ const SECTIONS = {
     failures: failures_,
     pageHeld, pageRefusal, pageAsyncSetup, pageStartFailures, pageOverflow, pageBools, pageDashboards,
     pageWallsOverride, pageFreshVisit, pageSizeFields, pageRoundTrip,
-    pageColourBench, pageLayers
+    pageColourBench, pageLayers, pageTourEscape
 };
 const unhandled = [];
 process.on('unhandledRejection', (e) => { unhandled.push(e); });

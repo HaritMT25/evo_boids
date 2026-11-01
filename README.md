@@ -1,10 +1,12 @@
-# evo_boids
+# Finfolk
 
 An artificial-life simulation in C++20 where fish with small neural networks evolve by inheritance and mutation. It runs natively and in the browser through WebAssembly.
 
+Finfolk is the sea-folk of Orkney folklore, and the name reads as fin + folk: a society of fish. Until November 2026 the project was called evo_boids, and the code keeps that name: the file names, the `evo_boids` binary and its CLI, the wasm modules, the `evo_boids.*` browser storage keys and the checkpoint format.
+
 **Live demo:** https://evo-boids.vercel.app/ opens the 3-D Ocean; the switch at the top opens 2-D Classic (https://evo-boids.vercel.app/classic.html).
 
-![evo_boids running in the browser](docs/demo.gif) <!-- placeholder: GIF to be recorded -->
+![Finfolk running in the browser](docs/demo.gif) <!-- placeholder: GIF to be recorded -->
 
 ## What it simulates
 

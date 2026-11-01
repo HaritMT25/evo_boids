@@ -2189,7 +2189,7 @@
     steps: function (h) {
       var tap = function () { return h.touch() ? "Tap" : "Click"; };
       return [
-        { welcome: true, drawer: false, title: "Welcome to evo_boids",
+        { welcome: true, drawer: false, title: "Welcome to Finfolk",
           body: function () {
             return "Each fish has a tiny neural network wired by its genes. Fish that eat enough have children with " +
                    "slightly mutated genes. This is the 3-D Ocean, a sea with real depth: they sense up and down and " +

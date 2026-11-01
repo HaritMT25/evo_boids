@@ -2255,6 +2255,25 @@ async function pageTabKeys() {
     ok(p.uncaught.length === 0, 'no exception escaped the page\'s handlers' + (p.uncaught.length ? ' (' + p.uncaught[0] + ')' : ''));
 }
 
+/* The review's coverage: a whole number written 300.0 (a float that is
+ * whole) is accepted as 300 by the field, a setup file and the link. */
+async function pageIntegralFloats() {
+    section('The page: 300.0 is a whole number: the field, a setup file and the link take it (review of PR #37, coverage)');
+    const p = await bootPage(PAGE_Q7);
+    const sets0 = p.sets.length;
+    p.edit('maxPopulation', '300.0');
+    ok(p.T.runCfg.maxPopulation === 300 && p.sets.length === sets0 + 1 && p.sets[sets0][2] === 300, 'live: 300.0 applies as 300');
+    p.edit('predatorCount', '2.0'); p.click('restart');
+    ok(p.T.initArgs.cfg.predatorCount === 2, 'Restart: predatorCount 2.0 runs as 2 ("' + p.msg() + '")');
+    p.el('err').textContent = '';
+    p.loadFile({ name: 'setup.json', text: () => Promise.resolve('{"format":"evo_ocean_setup","version":1,"seed":7,"population":12.0,"width":1920,' +
+                                                                '"height":1080,"depth":240,"config":{"maxPopulation":300.0}}') });
+    await until(() => p.msg() !== '', 'the setup\'s answer');
+    ok(/^Setup loaded/.test(p.msg()) && p.T.runCfg.maxPopulation === 300 && p.T.initArgs.population === 12, 'a setup file: maxPopulation 300.0, 12.0 fish load ("' + p.msg() + '")');
+    const q = await bootPage('?seed=7&pop=12&w=1920&h=1080&walls=0&cfg=' + encodeURIComponent('{"maxPopulation":300.0}'));
+    ok(!q.failed && q.T.initArgs.cfg.maxPopulation === 300 && q.el('o_maxPopulation').value === '300', 'the link: cfg maxPopulation 300.0 starts (' + (q.failed || 'field ' + q.el('o_maxPopulation').value) + ')');
+}
+
 /* Every section, in order; `node tests/ocean_turbo_handoff.js NAME...` runs only those. */
 const SECTIONS = {
     repeatedKeys, liveLedger, growthPage, randomize, imports,
@@ -2270,7 +2289,7 @@ const SECTIONS = {
     pageHeld, pageRefusal, pageAsyncSetup, pageStartFailures, pageOverflow, pageBools, pageDashboards,
     pageWallsOverride, pageFreshVisit, pageSizeFields, pageRoundTrip,
     pageColourBench, pageLayers, pageResize, pageKeys, pageStartupFailures, pageTourEscape, pageWholeFields,
-    pageTurboFraction, pageCardNumbers, pageMixedRecovery, pageEscOwner, pageTabKeys
+    pageTurboFraction, pageCardNumbers, pageMixedRecovery, pageEscOwner, pageTabKeys, pageIntegralFloats
 };
 const unhandled = [];
 process.on('unhandledRejection', (e) => { unhandled.push(e); });

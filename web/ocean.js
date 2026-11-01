@@ -1612,6 +1612,7 @@
     el("ts-food").textContent = t ? Math.round(t.food).toLocaleString() : "–";
   }
   var turboEntryCfg = null;   /* runCfg when Turbo took the world */
+  var turboEntryPaused = false;   /* and whether it was paused then: a start that fails leaves it so */
   function onTurboMessage(e) {
     var msg = e.data || {};
     if (msg.type === "stats") {
@@ -1655,15 +1656,18 @@
   /* The page owns the world again: its memory is the worker's, or (lost) its
    * own, from where Turbo took it. It applies, in the order they were made,
    * the edits never answered (never applied) and the held ones, and, lost,
-   * the acknowledged ones before them (ledger back). Returns replayEdits'. */
-  function turboBack(quiet, lost) {
+   * the acknowledged ones before them (ledger back). Returns replayEdits'.
+   * After a session the world runs on (Stop Turbo and watch); a start that
+   * failed (startFailed: the worker never answered) leaves the playback as
+   * it was, a paused world paused. */
+  function turboBack(quiet, lost, startFailed) {
     turboState = "live";
     turboView = null; turboWire = null; wireAsked = false;
     summary = null;   /* the readout's summary: this world's again, at the next refresh */
     var plan = live.back(!!lost);
     afterNewWorld(true);
     sampleBucket = Math.floor(M._oc_stats ? frameNow() / (dash() ? dash().every() : 60) : -1);
-    setPaused(false);
+    setPaused(startFailed ? turboEntryPaused : false);
     updateLocks();
     return replayEdits(plan, quiet);
   }
@@ -1683,7 +1687,7 @@
     }
     var lost = !back && was !== "entering";
     if (lost && turboEntryCfg) runCfg = Object.assign({}, turboEntryCfg);
-    var res = turboBack(true, lost);
+    var res = turboBack(true, lost, was === "entering");
     if (lost && dash() && dash().rewind) dash().rewind(frameNow());
     /* what this world took again (the acknowledged edits), and what it refused, truthfully */
     var again = [], seen = {};
@@ -1715,6 +1719,7 @@
       turboStats = null;
       turboView = null; turboWire = null; wireAsked = false;
       turboEntryCfg = Object.assign({}, runCfg);
+      turboEntryPaused = paused;
       live.start();
       select(null);
       unfollow();

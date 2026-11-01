@@ -1348,26 +1348,43 @@ async function pageAsyncSetup() {
  * for good: controls locked, no Stop. Each injected failure first makes the
  * held three-edit sequence (as an edit landing in that moment would be
  * held), so the recovery must apply it too; then a second start must work. */
+/* Post-merge audit 43fedc0, finding 6: a start that fails also left a
+ * paused world running (turboBack's setPaused(false)); each failure now
+ * runs from a paused page too, which must stay paused, and the worker's
+ * asynchronous load failure (its onerror, while starting) joins them. */
 async function pageStartFailures() {
-    section('The page: a Turbo start that throws recovers (the Worker, its first message, the memory copy)');
+    section('The page: a Turbo start that throws or fails to load recovers, paused or running as it was (the Worker, its first message, the memory copy, its load)');
     const injections = [
         ['the Worker constructor throws', (p) => { p.hooks.ctor = () => { edit3(p); throw new Error('injected: no worker'); }; }],
         ['the first postMessage throws', (p) => { p.hooks.post = () => { edit3(p); throw new Error('injected: could not post'); }; }],
         ['the memory copy throws', (p) => {
             const b = HO.buffer(p.M);
             Object.defineProperty(b, 'slice', { configurable: true, value: () => { delete b.slice; edit3(p); throw new RangeError('injected: out of memory'); } });
+        }],
+        ['the worker fails to load', (p) => {   /* its script: the Worker is made, then its error event, before any answer */
+            p.hooks.onWorker = (sh) => {
+                p.hooks.onWorker = null;
+                sh.pause();
+                edit3(p);
+                setImmediate(() => { if (sh.onerror) sh.onerror({ message: 'injected: could not load ocean_worker.js', preventDefault() {} }); });
+            };
         }]
     ];
-    for (const [what, arm] of injections) {
-        const p = await bootPage(PAGE_Q);
+    for (const paused of [false, true]) for (const [what0, arm] of injections) {
+        const p = await bootPage(PAGE_Q), what = (paused ? 'paused, ' : '') + what0;
+        if (paused) p.click('pausebtn');
         const img = HO.buffer(p.M).slice(0), f0 = frame(p.M), sets0 = p.sets.length, nW = p.workers.length;
         arm(p);
         p.click('turbobtn');
         for (let i = 0; i < 4; i++) await tick();
         const sh = p.workers.length > nW ? p.worker() : null, c = turboControls(p);
-        ok(p.T.turboState === 'live' && p.T.turboWorker === null && !c.card && c.button && !c.locked.length && /Turbo could not start/.test(p.msg()),
+        ok(p.T.turboState === 'live' && p.T.turboWorker === null && !c.card && c.button && !c.locked.length &&
+           /Turbo could not start|The Turbo worker failed/.test(p.msg()),
            what + ': the page is live again, no worker, the Turbo card hidden, its button on, nothing locked ("' + p.msg() + '"; state ' +
            p.T.turboState + (c.locked.length ? ', locked ' + c.locked.join(' ') : '') + ')');
+        const playing = p.el('pausebtn').getAttribute('aria-label') === 'pause';
+        ok(p.T.paused === paused && playing === !paused && p.el('stepbtn').hidden === !paused,
+           what + ': ' + (paused ? 'still paused (▶ and the step button showing)' : 'still running') + ' (paused ' + p.T.paused + ')');
         if (sh) ok(sh.terminated === 1 && sh.onmessage === null && sh.onerror === null,
                    what + ': the worker it had made is terminated once, its handlers detached (' + sh.terminated + ')');
         ok(at5to10(p), what + ': the edits held in that moment apply, in order (' + speeds(p) + ')');
@@ -1380,7 +1397,8 @@ async function pageStartFailures() {
             await until(() => p.worker().fromWorker.some(m => m.type === 'stats' && m.frame >= f1 + 60), 'the second run');
             p.click('turboexit');
             await until(() => p.T.turboState === 'live', 'the second hand-back');
-            ok(frame(p.M) > f1 && at5to10(p), what + ': a second Turbo starts and hands back (frame ' + f1 + ' -> ' + frame(p.M) + ')');
+            ok(frame(p.M) > f1 && at5to10(p) && !p.T.paused,
+               what + ': a second Turbo starts and hands back, and the world runs on, as after any Stop (frame ' + f1 + ' -> ' + frame(p.M) + ')');
         } else ok(false, what + ': a second Turbo start (the page is stuck "' + p.T.turboState + '")');
         ok(p.uncaught.length === 0, what + ': no exception escaped the page\'s handlers' + (p.uncaught.length ? ' (' + p.uncaught[0] + ')' : ''));
     }

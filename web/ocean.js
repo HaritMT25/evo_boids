@@ -22,6 +22,8 @@
  *   - Turbo: web/ocean_worker.js steps a copy of the module's memory at full
  *     speed; the copy comes back on Stop, so the run carries on exactly
  *     (web/ocean_handoff.js: the hand-off, shared with the worker)
+ *   - Turbo is a mode of the dock (updateLocks): its strip takes the time
+ *     group's place, with Stop (also Space and T), and the tank dims
  *   - the tour and the Turbo card (web/guide.js, steps below), from Help; a
  *     first visit opens on the tank, with one hint and later a Turbo coach mark
  * The flashlight (scene.setFlashlight) is drawing only: no engine call.
@@ -190,6 +192,11 @@
   function readLight() {
     var on = has("oc_light_enabled") && !!M._oc_light_enabled();
     LIGHT = { on: on, L0: on ? M._oc_light_l0() : 1, k: on ? M._oc_light_kwater() : 0 };
+    if (scene) scene.setLight(LIGHT);
+  }
+  function lightFromCfg() {
+    var on = !!cfgVal("lightEnabled");
+    LIGHT = { on: on, L0: on ? cfgVal("L0") : 1, k: on ? cfgVal("kWater") : 0 };
     if (scene) scene.setLight(LIGHT);
   }
   function readWorld() {
@@ -560,7 +567,10 @@
    * have set it back), unless the visitor is in it. */
   function liveApplied(key, v, quiet, seq) {
     if (v === KEYS[key][0]) delete runCfg[key]; else runCfg[key] = v;
-    if (key === "lightEnabled" || key === "L0" || key === "kWater") readLight();
+    /* the light the picture is drawn in: this module's, or while Turbo owns
+     * the world, what the worker acknowledged (this page's copy is the world
+     * as Turbo took it; the hand-back reads the module again) */
+    if (key === "lightEnabled" || key === "L0" || key === "kWater") { if (turboState === "live") readLight(); else lightFromCfg(); }
     var input = el("o_" + key);
     if (input && document.activeElement !== input && !(live && live.pending(key, seq)) && getVal(key) !== v) {
       setVal(key, v); updateNeeds(); updateTabDots();
@@ -1037,6 +1047,7 @@
     b.setAttribute("aria-label", paused ? "play" : "pause");
     b.title = (paused ? "Play" : "Pause") + " (Space)";
     el("stepbtn").hidden = !paused;   /* one step: only while paused */
+    paintRunState();
     dirtyHud = true;
   }
   function changeSpeed(d) {
@@ -1076,8 +1087,9 @@
   }
   /* F: follow the selected fish; again (or with none): a random one */
   function follow() {
+    if (turboState !== "live") { turboPictureHint(); return; }
     var s = fresh(lastS);
-    if (!s || !s.n || turboState !== "live") return;
+    if (!s || !s.n) return;
     var idx = !scene.following() ? indexOfId(s, selectedId) : -1;
     if (idx < 0) idx = randomFish(s, selectedId);
     select(s.ids[idx]);
@@ -1109,7 +1121,7 @@
     var k = function (keys, what) { return "<span class='k'><kbd>" + keys.join("</kbd><kbd>") + "</kbd> " + what + "</span>"; };
     var live = turboState === "live", parts;
     if (live && scene && scene.following()) parts = [k(["W", "S"], "closer / farther"), k(["A", "D"], "circle"), k(["Esc"], "let go")];
-    else parts = [k(["W", "A", "S", "D"], "fly"), live ? k(["F"], "follow a fish") : k(["T"], "stop Turbo")];
+    else parts = [k(["W", "A", "S", "D"], "fly"), live ? k(["F"], "follow a fish") : k(["Space"], "stop Turbo")];
     if (live && paused) parts.push(k(["."], "one step"));
     parts.push(k(["?"], "all keys"));
     setHtml("keys", parts.join(""));
@@ -1611,7 +1623,7 @@
   /* ---------------- TURBO (web/ocean_worker.js) ----------------
    * live -> entering -> turbo -> exiting -> live. The worker gets a copy of
    * this module's memory and hands its own back on Stop; meanwhile this page
-   * keeps drawing the frozen world under the Turbo card, live settings go
+   * keeps drawing the frozen world, dimmed (updateLocks), live settings go
    * to the worker, and the readout and dashboards show the worker's world
    * (its stats messages, its samples, the wiring it is asked for). */
   var turboState = "live", turboWorker = null, turboStats = null;
@@ -1636,26 +1648,104 @@
     }
     return null;   /* nothing new yet: the panel keeps what it shows */
   }
+  /* The page's mode, drawn from who owns the world (UI-4): Live or Paused
+   * (the page), or Turbo, starting, running or stopping (the worker). Turbo
+   * is a mode of the dock's time group: pause, step, speed and the Turbo
+   * button give way to its strip (Stop, a sparkline of the fish, its
+   * numbers); the watch group, the View menu, the camera and the charts keep
+   * working on the waiting picture, which is dimmed (body.turbo-on, the tank
+   * only). Where the dock is covered (a narrow screen's setup sheet, the
+   * charts) a bar there has the same Stop. The run's state shows in the
+   * readout (#runstate). (The name is the old one: it locked the controls.) */
+  var RUNSTATE = { live: ["Live", "The world is running"], paused: ["Paused", "Paused: Space or ▶ runs it"],
+                   entering: ["Starting Turbo", "Turbo is taking the world"], turbo: ["Turbo", "Turbo is running the world without drawing it"],
+                   exiting: ["Stopping Turbo", "Turbo is handing the world back"] };
+  function runState() { return turboState === "live" ? (paused ? "paused" : "live") : turboState; }
+  function paintRunState() {
+    var s = runState(), r = el("runstate");
+    if (!r || r.dataset.s === s) return;
+    r.dataset.s = s;
+    r.title = RUNSTATE[s][1];
+    var w = r.querySelector(".rs-word");
+    if (w) w.textContent = RUNSTATE[s][0];
+  }
+  var LOCK_IDS = ["restart", "savecp", "loadcp", "randombig", "newworld", "replay"];
   function updateLocks() {
-    var tb = el("turbobtn"), on = turboState === "turbo" || turboState === "exiting";
+    var s = turboState, on = s !== "live";
+    document.body.classList.toggle("turbo-on", on);
+    var tb = el("turbobtn");
     tb.setAttribute("aria-pressed", on ? "true" : "false");
-    tb.disabled = turboState === "entering" || turboState === "exiting";
-    var locked = turboState !== "live";
-    ["restart", "savecp", "loadcp", "pausebtn", "slower", "faster", "stepbtn", "randombig", "newworld", "replay"].forEach(function (id) {
-      el(id).classList.toggle("locked", locked);
+    tb.disabled = s === "entering" || s === "exiting";
+    LOCK_IDS.forEach(function (id) { var b = el(id); if (b) b.classList.toggle("locked", on); });
+    el("turbo-strip").hidden = !on;
+    el("setup-turbo").hidden = !on;
+    el("dash-turbo").hidden = !on;
+    var word = s === "entering" ? "Starting…" : s === "exiting" ? "Stopping…" : "Stop";
+    var stop = el("turboexit");
+    stop.disabled = s !== "turbo";
+    stop.setAttribute("aria-label", s === "turbo" ? "stop Turbo" : word.toLowerCase());
+    var sw = stop.querySelector(".ts-word");
+    if (sw) sw.textContent = word;
+    ["setup-turbo-stop", "dash-turbo-stop"].forEach(function (id) {
+      var b = el(id);
+      b.disabled = s !== "turbo";
+      b.textContent = s === "turbo" ? "Stop Turbo" : s === "entering" ? "Starting…" : "Stopping…";
     });
-    el("turbo").hidden = turboState === "live";
-    el("turboexit").disabled = turboState !== "turbo";
-    el("turboexit").textContent = turboState === "exiting" ? "Syncing back…" : turboState === "entering" ? "Starting…" : "Stop Turbo and watch";
-    if (turboState !== "live") paintTurbo();
+    paintRunState();
+    if (on) paintTurbo();
+    updateKeysLegend();
     dirtyHud = true;
   }
+  /* the strip's numbers (and the bars'), from the worker's latest stats */
+  var SPARK_N = 90, spark = [];
   function paintTurbo() {
-    var t = turboStats;
-    el("ts-rate").textContent = t ? Math.round(t.stepsPerSec).toLocaleString() : "–";
-    el("ts-steps").textContent = t ? t.totalSteps.toLocaleString() : "–";
-    el("ts-pop").textContent = t ? Math.round(t.pop).toLocaleString() : "–";
-    el("ts-food").textContent = t ? Math.round(t.food).toLocaleString() : "–";
+    var t = turboStats, rate = t ? Math.round(t.stepsPerSec).toLocaleString("en-US") : "–";
+    setTxt("ts-rate", rate); setTxt("st-rate", rate); setTxt("dt-rate", rate);
+    setTxt("ts-steps", t ? t.totalSteps.toLocaleString("en-US") : "–");
+    setTxt("ts-pop", t ? Math.round(t.pop).toLocaleString("en-US") : "–");
+    setTxt("ts-gen", t && t.su ? String(Math.round(t.su[13])) : "–");
+    drawSpark();
+  }
+  /* a bounded sparkline of the fish, from the stats Turbo sends anyway (no
+   * extra steps, no extra messages) */
+  function drawSpark() {
+    var c = el("turbo-sparkline"), g = c && c.getContext ? c.getContext("2d") : null;
+    if (!g) return;
+    var dpr = window.devicePixelRatio || 1, w = 64, h = 24;
+    if (c.width !== w * dpr) { c.width = w * dpr; c.height = h * dpr; }
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.clearRect(0, 0, w, h);
+    if (spark.length < 2) return;
+    var lo = Infinity, hi = -Infinity;
+    spark.forEach(function (v) { lo = Math.min(lo, v); hi = Math.max(hi, v); });
+    if (hi - lo < 2) { hi += 1; lo -= 1; }
+    g.beginPath();
+    spark.forEach(function (v, i) {
+      var x = 1 + (w - 2) * i / (SPARK_N - 1), y = h - 2 - (v - lo) / (hi - lo) * (h - 4);
+      if (i) g.lineTo(x, y); else g.moveTo(x, y);
+    });
+    g.strokeStyle = "#ef8a5a"; g.lineWidth = 1.5; g.lineJoin = "round";
+    g.stroke();
+  }
+  /* T, the Turbo button, the coach mark's Try Turbo: on, or off */
+  function toggleTurbo() {
+    if (turboState === "live") enterTurbo();
+    else if (turboState === "turbo") stopTurbo();
+    else turboWait();
+  }
+  /* Stop Turbo (the strip's ■, the bars', Space, T): the ordinary hand-back */
+  function stopTurbo() {
+    if (turboState === "turbo") exitTurbo();
+    else if (turboState !== "live") turboWait();
+  }
+  function turboWait() { showNote(turboState === "entering" ? "Turbo is starting: a moment." : "Turbo is handing the world back: a moment."); }
+  /* a tap on the waiting picture, or F, while Turbo runs: never silently ignored */
+  var turboHintT = 0;
+  function turboPictureHint() {
+    var now = performance.now();
+    if (now - turboHintT < 2500) return;
+    turboHintT = now;
+    toast("The picture waits while Turbo runs. Stop Turbo (Space) to pick or follow a fish.");
   }
   var turboEntryCfg = null;   /* runCfg when Turbo took the world */
   var turboEntryPaused = false;   /* and whether it was paused then: a start that fails leaves it so */
@@ -1664,6 +1754,8 @@
     if (msg.type === "stats") {
       turboStats = msg;
       if (msg.st && msg.su) turboView = { st: msg.st, su: msg.su };
+      spark.push(msg.pop);
+      if (spark.length > SPARK_N) spark.shift();
       if (turboState === "entering") { turboState = "turbo"; updateLocks(); flushHeld(); }
       paintTurbo();
     } else if (msg.type === "wiring") {
@@ -1760,9 +1852,10 @@
    * worker always gets a copy: this page's memory stays the fallback. */
   function enterTurbo() {
     if (turboState !== "live" || !M || MOCK) { if (MOCK) showNote("Turbo needs the real engine."); return; }
+    store(COACH_KEY, "1"); hideCoach();   /* found it: no coach mark */
     try {
       turboState = "entering";
-      turboStats = null;
+      turboStats = null; spark = [];
       turboView = null; turboWire = null; wireAsked = false;
       turboEntryCfg = Object.assign({}, runCfg);
       turboEntryPaused = paused;
@@ -1940,7 +2033,7 @@
        * popover, and back to the button when it closes */
       if (k === "?") { togglePop("help", el(POPS.help[1]), true); return; }
       if (lk === "v") { togglePop("view", el(POPS.view[1]), true); return; }
-      if (lk === "t") { el("turbobtn").click(); return; }
+      if (lk === "t") { toggleTurbo(); return; }
       if (lk === "g") { setPop(null); el("dashbtn").click(); return; }
       if (lk === "o") { setPop(null); setDrawer(!drawerEl.classList.contains("open")); return; }
       if (lk === "i") { setPop(null); setStatPanel(!statOpen); return; }
@@ -1948,11 +2041,13 @@
       if (lk === "c") { wantFollow = false; scene.resetView(true); return; }
       if (lk === "l") { toggleLight(); return; }
       if (lk === "f") { follow(); return; }
-      /* the world: not while Turbo owns it */
+      /* Turbo: Space stops it (as T does); the speed and the step are Turbo's
+       * own while it runs, and say so */
       if (turboState !== "live") {
-        if (k === " " || k === "ArrowUp" || k === "ArrowDown" || k === "+" || k === "=" || k === "-" || lk === "r" || k === ".") {
-          showNote("Stop Turbo first."); e.preventDefault();
-        }
+        if (k === " " || k === "Spacebar") { if (!e.repeat) stopTurbo(); e.preventDefault(); }
+        else if (k === "ArrowUp" || k === "ArrowDown" || k === "+" || k === "=" || k === "-" || k === "_" || k === ".") {
+          showNote("Turbo runs as fast as it can: stop it (Space) to set the speed or step."); e.preventDefault();
+        } else if (lk === "r") showNote("Stop Turbo first.");
         return;
       }
       if (k === " " || k === "Spacebar") { setPaused(!paused); e.preventDefault(); }
@@ -1973,7 +2068,8 @@
       var moved = Math.hypot(e.clientX - tap.x, e.clientY - tap.y), held = performance.now() - tap.t;
       tap = null;
       var s = fresh(lastS);
-      if (moved > 8 || held > 600 || !s || turboState !== "live") return;
+      if (moved > 8 || held > 600 || !s) return;
+      if (turboState !== "live") { turboPictureHint(); return; }
       var best = scene.pick(s, e.clientX, e.clientY, e.pointerType === "mouse" ? 18 : 30);
       if (best < 0 && scene.following()) return;   /* a stray tap doesn't drop a follow */
       if (best >= 0 && scene.following() && s.ids[best] !== selectedId) unfollow();
@@ -2121,10 +2217,10 @@
   btn("pausebtn", function () { if (guardTurbo()) return; setPaused(!paused); });
   btn("slower", function () { if (guardTurbo()) return; changeSpeed(-1); });
   btn("faster", function () { if (guardTurbo()) return; changeSpeed(1); });
-  btn("turbobtn", function () { if (turboState === "live") enterTurbo(); else if (turboState === "turbo") exitTurbo(); });
-  btn("turboexit", exitTurbo);
-  el("turbobtn").addEventListener("click", function () { store(COACH_KEY, "1"); hideCoach(); });   /* found it: no coach mark */
-  btn("coachgo", function () { hideCoach(); el("turbobtn").click(); });
+  btn("turbobtn", toggleTurbo);
+  /* Stop: the dock's strip, and the bars where the dock is covered (a narrow setup sheet, the charts) */
+  ["turboexit", "setup-turbo-stop", "dash-turbo-stop"].forEach(function (id) { btn(id, stopTurbo); });
+  btn("coachgo", function () { hideCoach(); toggleTurbo(); });
   btn("coachx", hideCoach);
   btn("stepbtn", function () { if (guardTurbo()) return; if (paused) stepOnce = true; });
   btn("randombig", randomize);
@@ -2293,6 +2389,7 @@
   }
   setPaused(BENCH);
   changeSpeed(0);
+  updateLocks();   /* the mode the page starts in: Live (or Paused), no Turbo strip */
 
   /* ---------------- the tour (web/guide.js reads this) ---------------- */
   var guideFish = null;
@@ -2411,6 +2508,8 @@
     colourByBrain: function () { return colourBrain; },
     colourMode: function () { return colourMode; },
     startTurbo: function () { if (M && turboState === "live") enterTurbo(); },
+    /* the Turbo card's tour step (web/guide.js) asks this; Classic's page has its #turbo card instead */
+    turboActive: function () { return turboState !== "live"; },
     setDrawer: setDrawer,
     setSheetTab: setSheetTab,
     inspectSomeFish: function () {

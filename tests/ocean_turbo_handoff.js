@@ -646,12 +646,17 @@ async function bootPage(query, opts) {
     page.loc = loc;
     return page;
 }
-/* the Turbo controls, as they read: off ("live") or on */
+/* the Turbo controls, as they read: off ("live") or on (card: the dock's Turbo strip, which replaced the card) */
 function turboControls(p) {
     const locked = ['restart', 'savecp', 'loadcp', 'pausebtn', 'slower', 'faster', 'stepbtn', 'randombig', 'newworld', 'replay']
         .filter(id => p.el(id).classList.contains('locked'));
-    return { card: !p.el('turbo').hidden, button: !p.el('turbobtn').disabled, locked };
+    return { card: !p.el('turbo-strip').hidden || p.doc.body.classList.contains('turbo-on'), button: !p.el('turbobtn').disabled, locked };
 }
+/* the page's mode as it reads (UI-4): the state, the readout's badge, the dimmed tank, the strip and the two bars, Stop */
+const modeOf = (p) => ({ state: p.T.turboState, rs: p.el('runstate').dataset.s, on: p.doc.body.classList.contains('turbo-on'),
+                         strip: !p.el('turbo-strip').hidden, setup: !p.el('setup-turbo').hidden, dash: !p.el('dash-turbo').hidden,
+                         stop: !p.el('turboexit').disabled });
+const toastText = (p) => p.el('toasts').children.map(c => c.textContent).join(' | ');
 /* a world like the page's from an image of its memory (the control's start),
  * edits [frame, key, value] applied at their frames, stepped to toFrame */
 async function controlRun(img, edits, toFrame) {
@@ -2274,6 +2279,81 @@ async function pageIntegralFloats() {
     ok(!q.failed && q.T.initArgs.cfg.maxPopulation === 300 && q.el('o_maxPopulation').value === '300', 'the link: cfg maxPopulation 300.0 starts (' + (q.failed || 'field ' + q.el('o_maxPopulation').value) + ')');
 }
 
+/* ---------------------------------------------------------------------
+ * UI-4 (Turbo as a mode) and UI-3 (one door to a new world): the page's
+ * modes and transitions, edits during Turbo, every world start through
+ * one commit (startWorld), the draft for the next world and the Start bar.
+ * Layout, stacking, touch sizes and real focus are the browser script's
+ * (ui_redesign/shots_ui34/ui34_matrix.cjs).
+ * --------------------------------------------------------------------- */
+
+/* Live -> Paused -> one step -> Turbo -> Stop, by Space, T and each Stop
+ * button alike; a focused field or button keeps Space; speed keys and F in
+ * Turbo say why not; the picture's light follows a light edit the worker
+ * acknowledged (the page's own module is the world as Turbo took it). */
+async function pageTurboMode() {
+    section('UI-4: Turbo is a mode of the dock: Live, Paused, a step, Turbo, Stop (Space, T, the strip\'s and the bars\' Stop)');
+    const p = await bootPage(PAGE_Q);
+    const m0 = modeOf(p);
+    p.key(' ');
+    const m1 = modeOf(p), f1 = frame(p.M);
+    p.key('.'); p.raf(performance.now());
+    const f2 = frame(p.M);
+    p.raf(performance.now());
+    const f3 = frame(p.M);
+    ok(m0.rs === 'live' && !m0.on && !m0.strip && m1.rs === 'paused' && p.T.paused && f2 === f1 + 1 && f3 === f2,
+       'Live, then Space: Paused (the readout says so); . steps exactly once (frame ' + f1 + ' -> ' + f2 + ' -> ' + f3 + ')');
+    p.key('t');
+    const m2 = modeOf(p);
+    await until(() => p.T.turboState === 'turbo', 'Turbo');
+    const sh = p.worker();
+    await until(() => sh.delivered.filter(isType('stats')).length >= 3, 'its stats');
+    const m3 = modeOf(p);
+    ok(m2.state === 'entering' && m2.rs === 'entering' && m2.on && m2.strip && !m2.stop && m3.rs === 'turbo' && m3.on && m3.strip &&
+       m3.setup && m3.dash && m3.stop && p.el('ts-gen').textContent !== '–' && p.el('ts-rate').textContent !== '–' && p.ctx.EvoApp.turboActive(),
+       'T, paused: Starting Turbo (its Stop waits), then Turbo: the dock\'s strip, the setup sheet\'s and the charts\' bars with Stop, the tank dimmed, ' +
+       'generation ' + p.el('ts-gen').textContent + ' and ' + p.el('ts-rate').textContent + ' steps/s (' + JSON.stringify(m3) + ')');
+    const spd0 = p.el('speedlabel').textContent;
+    p.key('+');
+    const note = p.msg();
+    p.key('f');
+    ok(p.el('speedlabel').textContent === spd0 && /as fast as it can/.test(note) && /picture waits while Turbo runs/.test(toastText(p)),
+       'in Turbo, + says Turbo runs at its own speed (the speed stays ' + spd0 + '), F that the picture waits ("' + note + '")');
+    p.tabTo('o_kBuoy'); p.key(' ');
+    const typed = p.T.turboState;
+    p.tabTo('viewmenubtn'); p.key(' ');
+    const pressed = p.T.openPop === 'view' && p.T.turboState === 'turbo';
+    p.key('Escape'); p.el('viewmenubtn').blur(); p.pointer();
+    ok(typed === 'turbo' && pressed, 'Space in a number field types, Space on a focused button presses it: neither stops Turbo');
+    {   /* a light edit the worker acknowledges: the picture's light is the acknowledged one */
+        const on0 = p.ctx.EvoOcean.state().light.on;
+        p.edit('lightEnabled', true);
+        await until(() => sh.delivered.some(m => m.type === 'set' && m.key === 'lightEnabled'), 'the answer');
+        ok(on0 === false && p.ctx.EvoOcean.state().light.on === true && p.T.runCfg.lightEnabled === true,
+           'in Turbo, the light field turned on and acknowledged: the picture is drawn in it (light ' + on0 + ' -> ' + p.ctx.EvoOcean.state().light.on + ')');
+    }
+    p.key(' ');
+    const m4 = modeOf(p);
+    await until(() => p.T.turboState === 'live', 'the hand-back');
+    const m5 = modeOf(p);
+    ok(m4.rs === 'exiting' && m4.strip && !m4.stop && m5.rs === 'live' && !m5.on && !m5.strip && !m5.setup && !m5.dash && !p.T.paused &&
+       p.ctx.EvoOcean.state().light.on === true && !p.ctx.EvoApp.turboActive(),
+       'Space in Turbo: Stopping Turbo, then Live (running, as after every Stop), strip and bars gone, the light as acknowledged (' + JSON.stringify(m5) + ')');
+    const ways = [['T', () => p.key('t')], ['the strip\'s Stop', () => p.click('turboexit')], ['the setup sheet\'s Stop', () => p.click('setup-turbo-stop')],
+                  ['the charts\' Stop', () => p.click('dash-turbo-stop')]];
+    const stopped = [];
+    for (const [what, act] of ways) {
+        p.click('turbobtn');
+        await until(() => p.T.turboState === 'turbo', 'Turbo');
+        act();
+        const st = p.T.turboState;
+        await until(() => p.T.turboState === 'live', 'the hand-back');
+        if (st === 'exiting') stopped.push(what);
+    }
+    ok(stopped.length === ways.length, 'each Stop stops it the same way: ' + stopped.join(', '));
+    ok(p.uncaught.length === 0, 'no exception escaped the page\'s handlers' + (p.uncaught.length ? ' (' + p.uncaught[0] + ')' : ''));
+}
+
 /* Every section, in order; `node tests/ocean_turbo_handoff.js NAME...` runs only those. */
 const SECTIONS = {
     repeatedKeys, liveLedger, growthPage, randomize, imports,
@@ -2289,7 +2369,8 @@ const SECTIONS = {
     pageHeld, pageRefusal, pageAsyncSetup, pageStartFailures, pageOverflow, pageBools, pageDashboards,
     pageWallsOverride, pageFreshVisit, pageSizeFields, pageRoundTrip,
     pageColourBench, pageLayers, pageResize, pageKeys, pageStartupFailures, pageTourEscape, pageWholeFields,
-    pageTurboFraction, pageCardNumbers, pageMixedRecovery, pageEscOwner, pageTabKeys, pageIntegralFloats
+    pageTurboFraction, pageCardNumbers, pageMixedRecovery, pageEscOwner, pageTabKeys, pageIntegralFloats,
+    pageTurboMode
 };
 const unhandled = [];
 process.on('unhandledRejection', (e) => { unhandled.push(e); });

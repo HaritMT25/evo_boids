@@ -1957,6 +1957,32 @@ async function pageKeys() {
     ok(p.uncaught.length === 0, 'no exception escaped the page\'s handlers' + (p.uncaught.length ? ' (' + p.uncaught[0] + ')' : ''));
 }
 
+/* Finding 5: no WebGL2, and the landing page's error splash had no way on;
+ * finding 11: "Open it with the default settings" kept ?speed=, so it
+ * started a wrapping world where a fresh visit has glass walls. */
+async function pageStartupFailures() {
+    section('The page: a start that fails offers 2-D Classic, and "default settings" is a fresh visit (audit 43fedc0, findings 5 and 11)');
+    {
+        const p = await bootPage(PAGE_Q, { nogl: true });
+        const c = p.el('splashclassic');
+        ok(/WebGL2/.test(p.failed) && c && c.isConnected && c.href === p.el('to2d').href && /\/index\.html$/.test(c.href),
+           'no WebGL2: the splash says why and offers "Open 2-D Classic", at #to2d\'s address (' + (c ? c.href : 'none') + '; "' + p.failed.split('\n').pop() + '")');
+    }
+    {
+        const p = await bootPage(PAGE_Q, { nosimd: true });
+        ok(/SIMD/.test(p.failed) && !p.el('splashclassic'), 'no WebAssembly SIMD: no Classic offered (its modules need SIMD too)');
+    }
+    {
+        const p = await bootPage('?speed=2&colour=family&cfg=' + encodeURIComponent('{"maxPopulation":0.5}'));
+        const a = p.el('splashplain'), c = p.el('splashclassic'), u = a ? new URL(a.href) : null;
+        const left = u ? ['seed', 'pop', 'depth', 'w', 'h', 'cfg', 'speed', 'e1', 'mock', 'walls'].filter(k => u.searchParams.has(k)) : null;
+        ok(/refused/.test(p.failed) && u && left.length === 0 && u.searchParams.get('colour') === 'family' && c,
+           'a refused link with ?speed=: "Open it with the default settings" drops every world key (' + (u ? u.search : 'no link') + '), and Classic is offered too');
+        const q = await bootPage(u ? u.search : '?speed=2');
+        ok(!q.failed && q.M._oc_walls_enabled() === 1 && q.el('o_walls').checked, 'that link starts as a bare address does: glass walls (' + (q.failed || 'walls ' + q.M._oc_walls_enabled()) + ')');
+    }
+}
+
 /* Finding 9: in the tour's "Your own settings", Esc in a number field
  * closed the settings (the page's) but not the tour (guide.js's typing
  * guard came first), which then pointed at nothing. */
@@ -1995,7 +2021,7 @@ const SECTIONS = {
     failures: failures_,
     pageHeld, pageRefusal, pageAsyncSetup, pageStartFailures, pageOverflow, pageBools, pageDashboards,
     pageWallsOverride, pageFreshVisit, pageSizeFields, pageRoundTrip,
-    pageColourBench, pageLayers, pageResize, pageKeys, pageTourEscape
+    pageColourBench, pageLayers, pageResize, pageKeys, pageStartupFailures, pageTourEscape
 };
 const unhandled = [];
 process.on('unhandledRejection', (e) => { unhandled.push(e); });

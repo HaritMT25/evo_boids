@@ -589,6 +589,9 @@
   #splash .swim { display: block; width: 120px; height: 2px; margin: 18px auto 0; border-radius: 1px; background: var(--surface-3); overflow: hidden; position: relative; }
   #splash .swim::after { content: ""; position: absolute; inset: 0 auto 0 0; width: 40%; background: var(--deep); animation: swim 1.1s var(--ease) infinite; }
   #splash.failed .swim { display: none; }
+  /* a failed start's ways on (ocean.js): the link with the default settings, 2-D Classic */
+  #splash .splash-acts { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; margin-top: 18px; }
+  #splash .splash-acts .btn { text-decoration: none; }
   @keyframes swim { from { transform: translateX(-100%); } to { transform: translateX(260%); } }
 
   /* ---------- tooltip ---------- */

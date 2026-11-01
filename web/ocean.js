@@ -145,11 +145,15 @@
   }
   function abs(u) { return new URL(u, location.href).href; }
   var moduleUrls = null;   /* {js, wasm}: the Turbo worker loads the same module */
+  var noSimd = false;      /* Classic's modules need SIMD too: a start that fails for it offers no Classic */
   function loadModule() {
     if (!MOCK) {
       var simd = false;
       try { simd = typeof WebAssembly === "object" && WebAssembly.validate(SIMD_PROBE); } catch (e) { /* none */ }
-      if (!simd) return Promise.reject(new Error("this browser has no WebAssembly SIMD, which the simulation needs (Chrome 91+, Firefox 89+ or Safari 16.4+)"));
+      if (!simd) {
+        noSimd = true;
+        return Promise.reject(new Error("this browser has no WebAssembly SIMD, which the simulation needs (Chrome 91+, Firefox 89+ or Safari 16.4+)"));
+      }
     }
     var js = abs(MOCK ? A.mock : A.ocean), wasm = abs(A.oceanWasm);
     moduleUrls = { js: js, wasm: wasm, handoff: abs(A.handoff || "ocean_handoff.js") };
@@ -2372,6 +2376,13 @@
 
   /* ---------------- start ---------------- */
   buildHist();
+  /* An Ocean link is one with any of the keys only the Ocean reads
+   * (ocean.html's OCEAN_ONLY, the same list: tests/ocean_turbo_handoff.js
+   * holds them equal), ?speed= among them; the keys both pages read (colour,
+   * guide, intro) and those newer than walls (clarity) make no link old. A
+   * link without any is a fresh visit (glass walls); a refused link's
+   * "default settings" drops them all. */
+  var OCEAN_KEYS = ["seed", "pop", "depth", "w", "h", "cfg", "speed", "e1", "mock", "walls"];
   var linkRefused = false;   /* oc_init refused the link's ?cfg= / ?e1=1 */
   splashSay(MOCK ? "Starting the ocean (mock engine)…" : "Starting the ocean…");
   var sceneReady = window.EvoOceanScene ? EvoOceanScene.load() : Promise.reject(new Error("ocean_scene.js missing"));
@@ -2438,11 +2449,7 @@
      * the cfg's own (first) "walls" either way, never deleted: a later
      * "walls" in ?cfg= (cfgRepeats) still goes to oc_init to be checked, and
      * would be the one it runs if the first were gone. An Ocean link is one
-     * with any of the keys only the Ocean reads (ocean.html's OCEAN_ONLY, the
-     * same list: tests/ocean_turbo_handoff.js holds them equal), ?speed= among
-     * them; the keys both pages read (colour, guide, intro) and those newer
-     * than walls (clarity) make no link old. */
-    var OCEAN_KEYS = ["seed", "pop", "depth", "w", "h", "cfg", "speed", "e1", "mock", "walls"];
+     * with any of OCEAN_KEYS (below, at the start). */
     var freshVisit = OCEAN_KEYS.every(function (k) { return !P.has(k); });
     if (P.has("walls")) {
       var wv = P.get("walls");
@@ -2468,7 +2475,7 @@
       bodyScale: bodyScale, onFollowChange: onFollowChange,
       profiler: PERF ? PROF : null, visualRandom: BENCH ? PERF.visualRandom(2463534242) : null
     });
-    if (!scene) throw new Error("WebGL2 is unavailable, and the 3-D Ocean has only the 3D tank");
+    if (!scene) throw new Error("This browser could not start WebGL2, which the 3-D tank needs. 2-D Classic draws its world without it.");
     detail0 = scene.quality();
     scene.setWorld(W, H, D, { walls: WALLS });
     scene.setLight(LIGHT);
@@ -2548,13 +2555,24 @@
   }).catch(function (e) {
     var why = String(e && e.message || e);
     splashSay("The 3-D Ocean could not start.\n" + why, true);
-    if (linkRefused) {   /* the same link without its settings */
+    /* the ways on, over the splash that covers the page: this link fresh,
+     * and 2-D Classic (#to2d's address, which the deploy build rewrites) */
+    var acts = document.createElement("div");
+    acts.className = "splash-acts";
+    if (linkRefused) {   /* this page with the default settings: a fresh visit's, every world key gone (glass walls) */
       var u = new URL(location.href), a = document.createElement("a");
-      ["cfg", "e1", "walls", "w", "h", "pop", "depth", "seed"].forEach(function (k) { u.searchParams.delete(k); });
+      OCEAN_KEYS.forEach(function (k) { u.searchParams.delete(k); });
       a.href = u.href; a.id = "splashplain"; a.className = "btn";
       a.textContent = "Open it with the default settings";
-      el("splashstate").parentNode.appendChild(a);
+      acts.appendChild(a);
     }
+    if (!noSimd) {
+      var c = document.createElement("a");
+      c.href = el("to2d").href; c.id = "splashclassic"; c.className = "btn" + (linkRefused ? "" : " primary");
+      c.textContent = "Open 2-D Classic";
+      acts.appendChild(c);
+    }
+    if (acts.children.length) el("splashstate").parentNode.appendChild(acts);
     console.error("ocean: " + why);
   });
 })();

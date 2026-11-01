@@ -861,6 +861,14 @@ std::string compilerId() {
 }  // namespace
 
 int main(int argc, char** argv) {
+    if (argc == 2 && !std::strcmp(argv[1], "--capabilities")) {   // the build's capabilities, for the build manifest
+        std::printf("{\"NUM_SENSES\":%d,\"NUM_ACTIONS\":%d,\"eye_build\":%s,\"label_frame\":%s,\"fingerprint_format\":%d,"
+                    "\"diag_format\":%d,\"branch_format\":%d,\"encounter_format\":%d,\"cplusplus\":%ld,\"compiler\":\"%s\"}\n",
+                    (int)NUM_SENSES, (int)NUM_ACTIONS, kOceanHasEye ? "true" : "false",
+                    alx::hasLabelFrame() ? "true" : "false", ofp::kFormatVersion, alx::kDiagFormat, alx::kBranchFormat,
+                    alx::kEncounterFormat, (long)__cplusplus, alx::jsonEscape(compilerId()).c_str());
+        return 0;
+    }
     unsigned seed = 1;
     long steps = 100000, every = 10000, evolve = 30000;
     int W = 1920, H = 1080, pop = 300, reps = 7, warm = 20, bsteps = 200;
@@ -941,7 +949,7 @@ int main(int argc, char** argv) {
         else if (branchOn && branchOrder != "forward" && branchOrder != "reverse") e = "--branch-order is forward or reverse";
         else if (branchOn && (branchAt.front() < 1 || branchAt.back() > steps)) e = "--branch-at steps must be in 1..--steps";
         else if (!behavAt.empty() && (behavAt.front() < 1 || behavAt.back() > steps)) e = "--behav-at steps must be in 1..--steps";
-        else if (labelFrameArg >= 0 && !alx::hasLabelFrame()) e = "--label-frame: this engine has no labelFrame";
+        else if (labelFrameArg > 0 && !alx::hasLabelFrame()) e = "--label-frame: this engine has no labelFrame";
         if (!e.empty()) { std::fprintf(stderr, "%s\n", e.c_str()); return 2; }
     }
     if (fpOn && fpEvery == 0) fpEvery = every;
@@ -1003,7 +1011,7 @@ int main(int argc, char** argv) {
     w.ocfg.eyeOnly = arm->eyeOnly;
     if (armArg.size() > 1) w.ocfg.steerFrame = armArg[1] - '0';   // "C1": steerFrame 1
     if (eyeCodeArg >= 0) w.ocfg.eyeCode = eyeCodeArg;             // after the common initialization, like the arm
-    if (labelFrameArg >= 0) {
+    if (labelFrameArg > 0 || (labelFrameArg == 0 && alx::hasLabelFrame())) {   // 0 is the default: a no-op without the key
         std::string e;
         if (!alx::setArmKey(w.ocfg, "labelFrame", labelFrameArg, e)) { std::fprintf(stderr, "%s\n", e.c_str()); return 4; }
     }

@@ -506,9 +506,11 @@
   /* ---------------- the benchmark controls (EvoOcean.bench, ?renderBench=1) ----------------
    * hooks (from web/ocean.js): module, scene, profiler, page (EvoOcean), last()
    * (the current snapshot), epoch(), initArgs(), importWorld(...) (the page's
-   * own setup import: oc_init, the sheet, afterNewWorld), setPaused(on).
+   * own setup import: oc_init, the sheet, afterNewWorld), setPaused(on),
+   * setColourMode(mode) / colourMode() (the page's own colour switch, the View
+   * menu's buttons' too, and the mode it is in), dashOpen() (the charts are up).
    *   prepare(case)   the world (through importWorld when it differs), paused,
-   *                   colour mode (the page's select), detail, Hold 60 fps off,
+   *                   colour mode (setColourMode), detail, Hold 60 fps off,
    *                   the tick, then the camera case: "whole", "dense" or
    *                   "follow"; resolves with what it set (the manifest's case)
    *   capture(o)      {durationMs, cpu, gpu, sampleEvery, drainMs}: record, stop
@@ -525,11 +527,9 @@
       return new Promise(function (res) { var i = 0; (function f() { if (i++ >= k) res(); else root.requestAnimationFrame(f); })(); });
     }
     function wait(ms) { return new Promise(function (res) { setTimeout(res, ms); }); }
-    function setSelect(id, v) {
-      var e = doc.getElementById(id);
-      if (!e) throw new Error("no #" + id);
-      if (e.value !== v) { e.value = v; e.dispatchEvent(new Event("change")); }
-      if (e.value !== v) throw new Error("#" + id + " has no option " + v);
+    /* the case's colour mode through the page's own switch; the mode the page is then in */
+    function setColour(mode) {
+      if (!h.setColourMode(mode) || h.colourMode() !== mode) throw new Error("the page has no colour mode " + mode);
     }
     function setCheck(id, on) {
       var e = doc.getElementById(id);
@@ -622,7 +622,7 @@
           var why = h.importWorld(want.seed, want.pop, world[2], want.cfg, undefined, [], [world[0], world[1]]);
           if (why) return Promise.reject(new Error("the case's world was refused: " + why));
         }
-        if (cd.colourMode) setSelect("colourMode", cd.colourMode);
+        if (cd.colourMode) setColour(cd.colourMode);
         if (cd.quality) scene.setQuality(cd.quality);
         setCheck("governor", cd.governor === true);
         return stepToTick(target).then(function () { return frames(3); }).then(function () {
@@ -632,7 +632,7 @@
             var st = api.state();
             cam.view = st.view; cam.flashlightLevel = st.flashlightLevel; cam.following = st.following; cam.selectedId = st.selectedId;
             return { world: [st.W, st.H, st.D], walls: st.walls, n: st.n, tick: st.frame, worldEpoch: h.epoch(), seed: st.seed,
-                     colourMode: doc.getElementById("colourMode").value, quality: scene.quality(), paused: st.paused,
+                     colourMode: h.colourMode(), quality: scene.quality(), paused: st.paused,
                      governor: doc.getElementById("governor").checked, camera: cam, appearance: scene.appearance() };
           });
         });
@@ -660,12 +660,13 @@
         return scene.appearanceTextureParity(o.expected === undefined ? snapshotCopy() : o.expected, o);
       },
       info: function () {
-        var cv = doc.getElementById("tank"), dash = doc.getElementById("dash"), drawer = doc.querySelector(".drawer, #drawer");
+        var cv = doc.getElementById("tank"), drawer = doc.querySelector(".drawer, #drawer");
         return { context: scene.contextInfo ? scene.contextInfo() : null, dpr: root.devicePixelRatio,
                  canvasCss: cv ? [cv.clientWidth, cv.clientHeight] : null, crossOriginIsolated: !!root.crossOriginIsolated,
                  userAgent: root.navigator.userAgent, hardwareConcurrency: root.navigator.hardwareConcurrency,
-                 colourMode: doc.getElementById("colourMode").value, quality: scene.quality(), clarity: scene.clarity ? scene.clarity() : null,
-                 dashboardOpen: !!(dash && !dash.hidden && dash.classList.contains("open")),
+                 colourMode: h.colourMode(), quality: scene.quality(), clarity: scene.clarity ? scene.clarity() : null,
+                 /* the charts' own state (EvoOceanDash.isOpen: the page stops drawing the tank under them) */
+                 dashboardOpen: !!h.dashOpen(),
                  drawerOpen: !!(drawer && drawer.classList.contains("open")),
                  reducedMotion: root.matchMedia ? root.matchMedia("(prefers-reduced-motion: reduce)").matches : null,
                  profiler: prof.capabilities(), appearance: scene.appearance(), state: api.state() };

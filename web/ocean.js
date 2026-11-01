@@ -2104,15 +2104,24 @@
   function showColourMode() {
     el("colourMode").querySelectorAll("button").forEach(function (b) { b.setAttribute("aria-pressed", b.dataset.c === colourMode ? "true" : "false"); });
   }
-  el("colourMode").addEventListener("click", function (e) {
-    var b = e.target.closest("button[data-c]");
-    if (!b) return;
-    colourMode = b.dataset.c === "brain" || b.dataset.c === "appearance" ? b.dataset.c : "family";
+  /* The one way the colour mode changes: the View menu's buttons and the
+   * benchmark's cases (web/ocean_perf.js prepare) both come here, so a case
+   * runs in the mode it names. false: no such mode (nothing changes). The
+   * visitor's choice is stored, never a benchmark's. */
+  function setColourMode(mode) {
+    if (mode !== "appearance" && mode !== "family" && mode !== "brain") return false;
+    colourMode = mode;
     colourBrain = colourMode === "brain";
     if (!BENCH) store("evo_boids.colourBy", colourMode);   /* a benchmark's cases are not the visitor's choice */
     showColourMode();
     if (M) applyDisplaySwitches();
     updateModeline();
+    return true;
+  }
+  el("colourMode").addEventListener("click", function (e) {
+    var b = e.target.closest("button[data-c]");
+    if (!b) return;
+    setColourMode(b.dataset.c);
     pointerBlur(b);
   });
   el("colourwhy").addEventListener("click", function (e) {   /* "Settings › Life › Appearance genes" */
@@ -2468,7 +2477,7 @@
                  hasVz: HAS_VZ, view: scene.view(), e1: E1, cfg: initArgs ? initArgs.cfg : null, seed: initArgs ? initArgs.seed : null,
                  runCfg: Object.assign({}, runCfg), light: LIGHT, flashlight: scene.flashlight(), flashlightLevel: scene.flashlightLevel(),
                  stepMs: stepMs, fps: fps, following: scene.following(), selectedId: selectedId, selIdx: s.selIdx,
-                 turbo: turboState, colourBrain: colourBrain, frame: s.stats[1],
+                 turbo: turboState, colourMode: colourMode, colourBrain: colourBrain, frame: s.stats[1],
                  held: live.held(), inflight: live.inflight(), fixedSize: [URL_W, URL_H], walls: WALLS, hasWalls: hasWalls(),
                  stats: Array.prototype.slice.call(s.stats), depthMin: s.n ? lo : 0, depthMax: s.n ? hi : 0,
                  dashRows: dash() ? dash()._rows().length : 0, worldEpoch: worldEpoch };
@@ -2477,7 +2486,10 @@
     if (PROF.enabled) EvoOcean.perf = PROF;   /* ?renderBench=1 / ?perf=1 (web/ocean_perf.js) */
     if (BENCH) EvoOcean.bench = PERF.bench({ module: M, scene: scene, profiler: PROF, page: EvoOcean, setPaused: setPaused,
       last: function () { return fresh(lastS); }, epoch: function () { return worldEpoch; }, initArgs: function () { return initArgs; },
-      importWorld: importWorld });
+      importWorld: importWorld,
+      /* the page's own colour switch and state, and whether the charts are up (they suspend the tank) */
+      setColourMode: setColourMode, colourMode: function () { return colourMode; },
+      dashOpen: function () { return !!(dash() && dash().isOpen()); } });
     requestAnimationFrame(frame);
     window.EvoApp.ready = true;
     window.dispatchEvent(new Event("evo:ready"));

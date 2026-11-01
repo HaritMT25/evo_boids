@@ -1781,6 +1781,61 @@ async function pageRoundTrip() {
     ok(p.uncaught.length === 0, 'no exception escaped the page\'s handlers');
 }
 
+/* ---------------------------------------------------------------------
+ * Post-merge audit of main 43fedc0 (#32-#35), its findings on the page's
+ * controls. These run the real ocean.js (and ocean_perf.js / guide.js
+ * where ocean.html loads them) on the test DOM: keys dispatched as a
+ * browser does (the window's capture listeners first, a focused control's
+ * own keys), :focus-visible while the keyboard is in use, the 960 px media
+ * query as a list that changes and tells its listeners. Layout, stacking
+ * and real focus are the browser script's (pagefix4/ui_matrix.cjs).
+ * --------------------------------------------------------------------- */
+const sheetOpen = (p) => p.el('drawer').classList.contains('open');
+const dashUp = (p) => p.ctx.EvoOceanDash.isOpen();
+const focused = (p) => (p.doc.activeElement && p.doc.activeElement.id) || null;
+
+/* Finding 1: the benchmark's colour mode went to a <span>'s .value (the
+ * View menu's buttons replaced the select), so a case "in Brain" ran in
+ * Appearance. Finding 12: bench.info() read a class #dash never has. */
+async function pageColourBench() {
+    section('The page: the benchmark runs in the colour mode it names, and reads the charts\' state (audit 43fedc0, findings 1 and 12)');
+    const p = await bootPage('?renderBench=1&' + PAGE_Q.slice(1), { perf: true });
+    const B = p.ctx.EvoOcean && p.ctx.EvoOcean.bench;
+    if (!B) { ok(false, 'EvoOcean.bench with ?renderBench=1 and ocean_perf.js (' + (p.failed || 'none') + ')'); return; }
+    const look = () => {
+        const st = p.ctx.EvoOcean.state();
+        return { mode: st.colourMode, brain: st.colourBrain, skin: p.ctx.EvoOcean.scene.appearance().skin,
+                 pressed: p.el('colourMode').querySelectorAll('button[aria-pressed="true"]').map(b => b.dataset.c).join() };
+    };
+    for (const m of ['brain', 'family', 'appearance']) {
+        let prep = null, err = '';
+        try { prep = await p.pump(B.prepare({ colourMode: m, settleMs: 0 })); } catch (e) { err = String(e && e.message || e); }
+        const l = look(), info = B.info();
+        ok(prep && prep.colourMode === m && info.colourMode === m && l.mode === m && l.pressed === m && l.brain === (m === 'brain') &&
+           l.skin === (m === 'appearance'),
+           'prepare({colourMode: "' + m + '"}): the page is in it — the controller, its pressed button, colourBrain ' + (m === 'brain') +
+           ', the scene\'s skin ' + (m === 'appearance') + '; the case and info() report it (' +
+           (err || 'case ' + (prep && prep.colourMode) + ', info ' + info.colourMode + ', page ' + JSON.stringify(l)) + ')');
+    }
+    ok(p.ctx.localStorage.getItem('evo_boids.colourBy') === null, 'the benchmark\'s colour modes were not stored as the visitor\'s choice');
+    {
+        let bad = false;
+        try { await p.pump(B.prepare({ colourMode: 'rainbow', settleMs: 0 })); } catch (e) { bad = /colour mode rainbow/.test(String(e && e.message)); }
+        ok(bad && look().mode === 'appearance', 'a case with an unknown colour mode is refused, the mode kept');
+    }
+    const seen = [];
+    seen.push([B.info().dashboardOpen, dashUp(p)]);
+    p.ctx.EvoOceanDash.open();
+    seen.push([B.info().dashboardOpen, dashUp(p)]);
+    await p.pump(B.capture({ durationMs: 30, drainMs: 0, raw: true }));
+    seen.push([B.info().dashboardOpen, dashUp(p)]);
+    p.ctx.EvoOceanDash.close();
+    seen.push([B.info().dashboardOpen, dashUp(p)]);
+    ok(seen.map(String).join(' ') === 'false,false true,true true,true false,false',
+       'bench.info().dashboardOpen is EvoOceanDash.isOpen() closed, open, after a capture with them open, closed again (' + seen.map(s => s.join('/')).join(' ') + ')');
+    ok(p.uncaught.length === 0, 'no exception escaped the page\'s handlers' + (p.uncaught.length ? ' (' + p.uncaught[0] + ')' : ''));
+}
+
 /* Every section, in order; `node tests/ocean_turbo_handoff.js NAME...` runs only those. */
 const SECTIONS = {
     repeatedKeys, liveLedger, growthPage, randomize, imports,
@@ -1794,7 +1849,8 @@ const SECTIONS = {
     },
     failures: failures_,
     pageHeld, pageRefusal, pageAsyncSetup, pageStartFailures, pageOverflow, pageBools, pageDashboards,
-    pageWallsOverride, pageFreshVisit, pageSizeFields, pageRoundTrip
+    pageWallsOverride, pageFreshVisit, pageSizeFields, pageRoundTrip,
+    pageColourBench
 };
 const unhandled = [];
 process.on('unhandledRejection', (e) => { unhandled.push(e); });

@@ -1942,6 +1942,23 @@
     if (open) { setStatPanel(false); setPop(null); hideCoach(); }
     if (scene) { updateInsets(); setTimeout(updateInsets, 320); }
   }
+  /* Crossing 960 px (a resize, a rotation): a wide screen lets the settings
+   * panel stay beside a popover or the live numbers, a narrow one's sheet
+   * would cover them (and hide the dock under the View menu). What opened
+   * last stays — a popover or the live numbers, since opening the settings
+   * closes both — so the sheet closes, as it would have on this screen
+   * (setPop, setStatPanel); the focus, if it was in the sheet, goes to the
+   * popover's first control, else to the settings button. */
+  function onWideChange() {
+    if (!wideMQ.matches && drawerEl.classList.contains("open") && (openPop || statOpen)) {
+      var inSheet = drawerEl.contains(document.activeElement);
+      setDrawer(false);
+      if (inSheet) (openPop ? el(POPS[openPop][2]) : menuBtn).focus();
+    }
+    placePop();
+  }
+  if (wideMQ.addEventListener) wideMQ.addEventListener("change", onWideChange);
+  else if (wideMQ.addListener) wideMQ.addListener(onWideChange);   /* Safari before 14 */
   menuBtn.addEventListener("click", function () { setDrawer(!drawerEl.classList.contains("open")); this.blur(); });
   el("drawerclose").addEventListener("click", function () { setDrawer(false); this.blur(); });
   (function () {   /* drag the sheet's grip (or header) down to close it */

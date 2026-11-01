@@ -1880,6 +1880,36 @@ async function pageLayers() {
     ok(p.uncaught.length === 0, 'no exception escaped the page\'s handlers' + (p.uncaught.length ? ' (' + p.uncaught[0] + ')' : ''));
 }
 
+/* Finding 3: Settings beside a popover (or the live numbers) on a wide
+ * screen, then narrower than 960 px: the sheet covered them. */
+async function pageResize() {
+    section('The page: crossing 960 px with the settings and a popover or the live numbers open (audit 43fedc0, finding 3)');
+    for (const [w, h] of [[890, 453], [390, 844]]) {
+        const p = await bootPage(PAGE_Q, { media: { '(min-width: 960px)': true } });
+        p.ctx.innerWidth = 1000; p.ctx.innerHeight = 700;
+        for (const pop of ['view', 'help']) {
+            p.click('menubtn');
+            p.click(pop === 'view' ? 'viewmenubtn' : 'helpbtn');
+            const before = sheetOpen(p) && p.T.openPop === pop;
+            p.resize(w, h);
+            ok(before && !sheetOpen(p) && p.T.openPop === pop && p.shown(pop + 'pop'),
+               'wide, Settings and ' + pop + ' open, then ' + w + ' x ' + h + ': the sheet closes, ' + pop + ' stays (sheet ' + sheetOpen(p) + ', popover ' + p.T.openPop + ')');
+            p.click(pop + 'close');
+            ok(p.T.openPop === null, '  and its × closes it');
+            p.resize(1000, 700);
+        }
+        p.click('menubtn'); p.click('readout');
+        const before = sheetOpen(p) && p.shown('statpanel');
+        p.resize(w, h);
+        ok(before && !sheetOpen(p) && p.shown('statpanel'), 'wide, Settings and the live numbers open, then ' + w + ' x ' + h + ': the sheet closes, the numbers stay');
+        p.resize(1000, 700);
+        p.click('readout'); p.click('menubtn');
+        p.resize(w, h);
+        ok(sheetOpen(p), 'the settings alone stay open across the breakpoint');
+        ok(p.uncaught.length === 0, 'no exception escaped the page\'s handlers' + (p.uncaught.length ? ' (' + p.uncaught[0] + ')' : ''));
+    }
+}
+
 /* Finding 9: in the tour's "Your own settings", Esc in a number field
  * closed the settings (the page's) but not the tour (guide.js's typing
  * guard came first), which then pointed at nothing. */
@@ -1918,7 +1948,7 @@ const SECTIONS = {
     failures: failures_,
     pageHeld, pageRefusal, pageAsyncSetup, pageStartFailures, pageOverflow, pageBools, pageDashboards,
     pageWallsOverride, pageFreshVisit, pageSizeFields, pageRoundTrip,
-    pageColourBench, pageLayers, pageTourEscape
+    pageColourBench, pageLayers, pageResize, pageTourEscape
 };
 const unhandled = [];
 process.on('unhandledRejection', (e) => { unhandled.push(e); });

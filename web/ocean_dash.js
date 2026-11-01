@@ -270,15 +270,31 @@
   var tabsEl = el("dtabs"), gridEl = el("dgrid"), noteEl = el("dnote");
   TABS.forEach(function (tb) {
     var b = document.createElement("button");
+    b.type = "button";
     b.textContent = tb.name;
     b.setAttribute("role", "tab");
     b.dataset.tab = tb.id;
-    b.addEventListener("click", function () { showTab(tb.id); this.blur(); });
+    /* a pointer's press lets the focus go (Space pauses again); the keyboard's keeps it */
+    b.addEventListener("click", function () { showTab(tb.id); if (!this.matches(":focus-visible")) this.blur(); });
     tabsEl.appendChild(b);
+  });
+  /* the tabs from the keyboard (the page leaves a focused tab its arrows):
+   * Left / Right the next one round, Home / End the first and last; the
+   * focus goes with the selection, and Tab lands on the selected one */
+  tabsEl.addEventListener("keydown", function (e) {
+    var ids = TABS.map(function (t) { return t.id; }), i = ids.indexOf(tab), n = ids.length;
+    var j = e.key === "ArrowRight" ? (i + 1) % n : e.key === "ArrowLeft" ? (i - 1 + n) % n : e.key === "Home" ? 0 : e.key === "End" ? n - 1 : -1;
+    if (j < 0) return;
+    showTab(ids[j]);
+    tabsEl.children[j].focus();
+    e.preventDefault();
   });
   function showTab(id) {
     tab = id;
-    Array.prototype.forEach.call(tabsEl.children, function (b) { b.setAttribute("aria-selected", b.dataset.tab === id ? "true" : "false"); });
+    Array.prototype.forEach.call(tabsEl.children, function (b) {
+      b.setAttribute("aria-selected", b.dataset.tab === id ? "true" : "false");
+      b.tabIndex = b.dataset.tab === id ? 0 : -1;
+    });
     C.tip(null);
     gridEl.innerHTML = "";
     cards = {};

@@ -2210,6 +2210,51 @@ async function pageEscOwner() {
     ok(p.uncaught.length === 0, 'no exception escaped the page\'s handlers' + (p.uncaught.length ? ' (' + p.uncaught[0] + ')' : ''));
 }
 
+/* Review findings 5 and 6: a focused settings tab's arrows also paged the
+ * tour; the charts' tabs reserved the arrows (role tab) without moving. */
+async function pageTabKeys() {
+    section('The page: the tabs\' own arrow keys (settings, charts), during the tour too (review of PR #37, findings 5 and 6)');
+    const p = await bootPage(PAGE_Q, { guide: true });
+    const title = () => { const g = p.el('guide'), h = g && g.querySelector('h2'); return h ? h.textContent : ''; };
+    const dt = () => p.el('dtabs').children, sel = () => dt().findIndex(b => b.getAttribute('aria-selected') === 'true');
+    /* the charts' tabs, no tour */
+    p.key('g');
+    const n = dt().length;
+    p.focusVisible = true; dt()[sel()].focus();
+    const s0 = sel(), spd0 = p.el('speedlabel').textContent;
+    p.key('ArrowRight');
+    const s1 = sel(), f1 = p.doc.activeElement === dt()[s1];
+    p.key('End'); const s2 = sel();
+    p.key('Home'); const s3 = sel();
+    p.key('ArrowLeft'); const s4 = sel();
+    p.key('ArrowUp');
+    ok(n > 2 && s1 === (s0 + 1) % n && f1 && s2 === n - 1 && s3 === 0 && s4 === n - 1 && p.doc.activeElement === dt()[n - 1] &&
+       p.el('speedlabel').textContent === spd0,
+       'the charts\' tabs: Right, End, Home, Left move the selection and the focus (' + [s0, s1, s2, s3, s4].join(' -> ') + ' of ' + n + '); the arrows are not speed keys there');
+    ok(dt().every((b, i) => b.tabIndex === (i === sel() ? 0 : -1)), '  Tab lands on the selected one (roving tabindex)');
+    p.key('Enter');
+    ok(p.doc.activeElement === dt()[sel()], '  Enter on a focused tab keeps the focus there');
+    p.key('Escape');
+    /* the tour: a focused settings tab's arrows are the tab's */
+    p.ctx.EvoGuide.start();
+    for (let i = 0; i < 20 && title() !== 'Your own settings'; i++) { p.doc.activeElement = null; p.key('ArrowRight'); }
+    const at = title(), tabSel = () => p.el('tabs').children.findIndex(b => b.getAttribute('aria-selected') === 'true');
+    const t0 = tabSel();
+    p.tabTo(p.el('tabs').children[t0].id);
+    p.key('ArrowRight');
+    ok(at === 'Your own settings' && tabSel() === t0 + 1 && title() === 'Your own settings',
+       'the tour at "Your own settings", a settings tab focused: Right moves the tab (' + t0 + ' -> ' + tabSel() + ') and the tour stays (' + title() + ')');
+    p.key('g');
+    p.focusVisible = true; dt()[sel()].focus();
+    const c0 = sel();
+    p.key('ArrowRight');
+    ok(sel() === (c0 + 1) % n && title() === 'Your own settings', '  a chart tab focused: Right moves the chart tab, the tour stays');
+    p.doc.activeElement = null;
+    p.key('ArrowRight');
+    ok(title() === 'You\'re set', '  with nothing focused, Right pages the tour (' + title() + ')');
+    ok(p.uncaught.length === 0, 'no exception escaped the page\'s handlers' + (p.uncaught.length ? ' (' + p.uncaught[0] + ')' : ''));
+}
+
 /* Every section, in order; `node tests/ocean_turbo_handoff.js NAME...` runs only those. */
 const SECTIONS = {
     repeatedKeys, liveLedger, growthPage, randomize, imports,
@@ -2225,7 +2270,7 @@ const SECTIONS = {
     pageHeld, pageRefusal, pageAsyncSetup, pageStartFailures, pageOverflow, pageBools, pageDashboards,
     pageWallsOverride, pageFreshVisit, pageSizeFields, pageRoundTrip,
     pageColourBench, pageLayers, pageResize, pageKeys, pageStartupFailures, pageTourEscape, pageWholeFields,
-    pageTurboFraction, pageCardNumbers, pageMixedRecovery, pageEscOwner
+    pageTurboFraction, pageCardNumbers, pageMixedRecovery, pageEscOwner, pageTabKeys
 };
 const unhandled = [];
 process.on('unhandledRejection', (e) => { unhandled.push(e); });

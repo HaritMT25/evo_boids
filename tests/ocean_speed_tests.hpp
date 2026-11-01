@@ -4,6 +4,13 @@
 // ocean_sense_tests.hpp (namespace ot: Test, initQuiet, sameDynamics,
 // sense::sameBits are those files').
 //
+//   sense_mask      ocean::sensesRead (the sensors a net reads, which
+//                   computeSensors' dead-sensor skip computes): one bit per
+//                   sensor source of ANY flat connection — a zero weight, a
+//                   hidden-neuron sink — and none for a hidden-neuron source;
+//                   every source index the packing allows; the last sensor's
+//                   bit (63 in the eye build); built nets == their genes;
+//                   kAllSenses has NUM_SENSES bits
 //   sense_dce       capture off vs on, one sensor at a time (what a skip of
 //                   the sensors a net does not read must keep): every fish
 //                   rewired to read only sensor s (into hidden neuron 0 and
@@ -85,6 +92,54 @@ inline bool sameArrays(const Fish& a, const Fish& b) {
 }
 
 }  // namespace speed
+
+void testSenseMask() {
+    Test t("sense_mask");
+    using ocean::senseBit;
+    auto conn = [](int src, int sink, int16_t w) {
+        return NeuralNet::FlatConn{(uint16_t)(src | (sink << NeuralNet::FlatConn::SRC_BITS)), w};
+    };
+    NeuralNet nn;
+    t.expect(ocean::sensesRead(nn) == 0, "an empty net reads %llx", (unsigned long long)ocean::sensesRead(nn));
+    nn.flat = {conn(AGE, STEER_X, 0)};   // a zero weight still reads its sensor
+    t.expect(ocean::sensesRead(nn) == senseBit(AGE), "zero-weight wire: %llx", (unsigned long long)ocean::sensesRead(nn));
+    nn.flat = {conn(PREDATOR_PROX, NUM_ACTIONS + 3, 100)};   // a hidden-neuron sink reads it too
+    t.expect(ocean::sensesRead(nn) == senseBit(PREDATOR_PROX), "hidden sink: %llx", (unsigned long long)ocean::sensesRead(nn));
+    nn.flat = {conn(NUM_SENSES + 0, STEER_X, 100), conn(NUM_SENSES + MAX_INTERNAL_NEURONS - 1, NUM_ACTIONS, -5)};
+    t.expect(ocean::sensesRead(nn) == 0, "hidden sources read no sensor: %llx", (unsigned long long)ocean::sensesRead(nn));
+    nn.flat = {conn(0, 0, 1), conn(NUM_SENSES - 1, NUM_ACTIONS + 1, 1), conn(NUM_SENSES + 2, 1, 1), conn(RANDOM_SENSOR, 2, 1)};
+    t.expect(ocean::sensesRead(nn) == (senseBit(0) | senseBit(NUM_SENSES - 1) | senseBit(RANDOM_SENSOR)),
+             "first / last / random: %llx", (unsigned long long)ocean::sensesRead(nn));
+    // every source index the packing allows, sensor or not (eye build: 0..127, the hidden ones 64..75)
+    for (int src = 0; src < (1 << NeuralNet::FlatConn::SRC_BITS); ++src) {
+        nn.flat = {conn(src, 0, 1)};
+        const ocean::SenseMask want = (src < NUM_SENSES) ? senseBit(src) : 0;
+        t.expect(ocean::sensesRead(nn) == want, "source %d: %llx, want %llx", src, (unsigned long long)ocean::sensesRead(nn),
+                 (unsigned long long)want);
+    }
+    int bits = 0;
+    for (int s = 0; s < 64; ++s) bits += (int)((ocean::kAllSenses >> s) & 1);
+    t.expect(bits == NUM_SENSES && (ocean::kAllSenses & 1), "kAllSenses has %d bits, NUM_SENSES %d", bits, (int)NUM_SENSES);
+    // a built net: the mask is exactly its sensor-sourced genes' sensors (zero weights included)
+    std::uint32_t r = 0x9e3779b9u;
+    for (int rep = 0; rep < 200; ++rep) {
+        Genome g;
+        const int n = 1 + (int)(r % 60);
+        ocean::SenseMask want = 0;
+        for (int k = 0; k < n; ++k) {
+            r ^= r << 13; r ^= r >> 17; r ^= r << 5;
+            Gene x;
+            x.sourceType = r & 1; x.sourceNum = (r >> 1) & 127; x.sinkType = (r >> 8) & 1; x.sinkNum = (r >> 9) & 127;
+            x.weight = (int16_t)((r >> 16) % 3 == 0 ? 0 : (int)(r >> 16) - 32768);
+            g.push_back(x);
+            if (x.sourceType == SOURCE_SENSOR) want |= senseBit(x.sourceNum % NUM_SENSES);
+        }
+        NeuralNet b;
+        buildNeuralNet(g, b);
+        t.expect(ocean::sensesRead(b) == want, "genome %d: %llx, want %llx", rep, (unsigned long long)ocean::sensesRead(b),
+                 (unsigned long long)want);
+    }
+}
 
 // One world with its own rng stream (the engine's rng is global): step() swaps
 // the stream in, steps, and keeps where it got to.

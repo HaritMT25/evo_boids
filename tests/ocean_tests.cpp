@@ -48,12 +48,14 @@
 //                 tests/ocean_sense_tests.hpp, which lists what they pin)
 //   food_grid     OceanFoodGrid == SpatialGrid: the same lists and visits, and
 //                 each entry's payload is its item's
+//   sense_mask    the sensors a net reads (ocean::sensesRead: the dead-sensor
+//                 skip computes only those while capture is off)
 //   sense_dce     every fish reading one sensor, each sensor, each topology /
 //                 eye mode: capture off == capture on, bit for bit
 //   capture_toggle  capture on -> off -> on: the same run; captured arrays
 //                 untouched while off
 //   food_scan     the food scans' item lists == their scalar definition, bit
-//                 for bit (the three in tests/ocean_speed_tests.hpp)
+//                 for bit (the four in tests/ocean_speed_tests.hpp)
 //   food_life     foodLife: an item goes on the step its age reaches foodLife;
 //                 off, none do; the first stock's ages spread; draws unchanged;
 //                 the spawn cap counts live items (what expires frees its place
@@ -4825,7 +4827,8 @@ int main(int argc, char** argv) {
     ot::testSenseEdges();   // tests/ocean_sense_tests.hpp: the scans' edges, pinned
     ot::testSenseRef();
     ot::testFoodGrid();
-    ot::testSenseDce();    // tests/ocean_speed_tests.hpp: what the speed-ups must keep
+    ot::testSenseMask();   // tests/ocean_speed_tests.hpp: the dead-sensor skip's mask,
+    ot::testSenseDce();    // and what the speed-ups must keep
     ot::testCaptureToggle();
     ot::testFoodScan();
     ot::testFoodLife();

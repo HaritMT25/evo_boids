@@ -13,6 +13,148 @@
 //   exp_branches    sham continuation == the uninterrupted run; parent world
 //                   and rng untouched; continuation order irrelevant; every
 //                   intervention changes the run; branch-spec parsing
+//   label_frame     (both builds) OceanConfig::labelFrame, the A1 arm's own-frame
+//                   labels, on hand-built scenes: the six projected inputs'
+//                   exact values (food, neighbour offset before tanh, heading),
+//                   every other input bit-identical to labelFrame 0 (predator /
+//                   population FWD / LR not rotated again), exact invariance
+//                   under a 90-degree turn of the whole scene (world-frame
+//                   labels are not), a NEAREST_FOOD_DX -> STEER_X wire turning
+//                   toward food on either side from 8 headings under
+//                   steerFrame 1; 0 / 1 valid, others refused; labelFrame 0 ==
+//                   the key absent, every section (sense_ref_a1 in
+//                   tests/ocean_sense_tests.hpp checks 600 random scenes)
+
+// One step of a quiet scene around a viewer at (500, 500, 120) heading `head`
+// (rotated by quarter turns `q`, about the viewer): food 20 to world +x, two
+// neighbours, a predator; returns the viewer's captured inputs.
+inline void labelScene(int labelFrame, int q, float out[NUM_SENSES]) {
+    auto rot = [q](Vec2 v) { for (int i = 0; i < q; ++i) v = {-v.y, v.x}; return v; };
+    OceanConfig oc;
+    oc.labelFrame = labelFrame;
+    OceanWorld w;
+    initQuiet(w, 2027, 240.0f, oc, /*capture*/ true);
+    const Vec2 P = {500.0f, 500.0f};
+    auto at = [&](float dx, float dy) { const Vec2 d = rot({dx, dy}); return Vec2{P.x + d.x, P.y + d.y}; };
+    sense::addQuiet(w, P.x, P.y, 120.0f, rot({0.0f, 1.0f}));
+    sense::addQuiet(w, at(10, 30).x, at(10, 30).y, 120.0f, rot({1.0f, 0.0f}));
+    sense::addQuiet(w, at(-20, 10).x, at(-20, 10).y, 130.0f, rot({0.0f, -1.0f}));
+    sense::addFood(w, at(20, 0).x, at(20, 0).y, 120.0f);
+    OceanPredator p;
+    p.pos = at(-30, -60);
+    p.depth = 110.0f;
+    p.vel = rot({1.0f, 0.0f});
+    p.digestTimer = 1e9f;
+    w.predators.push_back(p);
+    w.update(0.016f);
+    std::memcpy(out, w.creatures[0].lastSensors, sizeof(float) * NUM_SENSES);
+}
+
+inline void testLabelFrame() {
+    Test t("label_frame");
+    constexpr int kOwn[] = {NEAREST_FOOD_DX, NEAREST_FOOD_DY, AVG_NEIGHBOR_DX, AVG_NEIGHBOR_DY, AVG_NEIGHBOR_HEADING_X,
+                            AVG_NEIGHBOR_HEADING_Y};
+    auto isOwn = [&](int k) { for (int o : kOwn) if (o == k) return true; return false; };
+    float w0[NUM_SENSES], w1[NUM_SENSES];
+    labelScene(0, 0, w0);
+    labelScene(1, 0, w1);
+    // heading +y: fwd (0, 1), right (-1, 0). Food at world +x is on the LEFT.
+    t.expect(w0[NEAREST_FOOD_DX] == 1.0f && w0[NEAREST_FOOD_DY] == 0.0f, "world-frame food (%g, %g)", w0[NEAREST_FOOD_DX],
+             w0[NEAREST_FOOD_DY]);
+    t.expect(w1[NEAREST_FOOD_DX] == -1.0f && w1[NEAREST_FOOD_DY] == 0.0f, "own-frame food (%g, %g), want (-1, 0)",
+             w1[NEAREST_FOOD_DX], w1[NEAREST_FOOD_DY]);
+    // neighbours at (+10, +30) and (-20, +10): mean offset (-5, 20) -> right 5, ahead 20, BEFORE the tanh
+    const float R = 100.0f;
+    t.expect(sense::sameBits(w1[AVG_NEIGHBOR_DX], evomath::tanhf(((-5.0f) * (-1.0f) + 20.0f * 0.0f) / R)) &&
+                 sense::sameBits(w1[AVG_NEIGHBOR_DY], evomath::tanhf(((-5.0f) * 0.0f + 20.0f * 1.0f) / R)),
+             "own-frame neighbour offset (%.9g, %.9g)", w1[AVG_NEIGHBOR_DX], w1[AVG_NEIGHBOR_DY]);
+    t.expect(sense::sameBits(w0[AVG_NEIGHBOR_DX], evomath::tanhf(-5.0f / R)) && sense::sameBits(w0[AVG_NEIGHBOR_DY], evomath::tanhf(20.0f / R)),
+             "world-frame neighbour offset (%.9g, %.9g)", w0[AVG_NEIGHBOR_DX], w0[AVG_NEIGHBOR_DY]);
+    // neighbour headings (1, 0) and (0, -1): mean (0.5, -0.5) -> right -0.5, ahead -0.5
+    t.expect(w1[AVG_NEIGHBOR_HEADING_X] == -0.5f && w1[AVG_NEIGHBOR_HEADING_Y] == -0.5f && w0[AVG_NEIGHBOR_HEADING_X] == 0.5f &&
+                 w0[AVG_NEIGHBOR_HEADING_Y] == -0.5f,
+             "headings own (%g, %g) world (%g, %g)", w1[AVG_NEIGHBOR_HEADING_X], w1[AVG_NEIGHBOR_HEADING_Y],
+             w0[AVG_NEIGHBOR_HEADING_X], w0[AVG_NEIGHBOR_HEADING_Y]);
+    long same = 0;
+    for (int k = 0; k < NUM_SENSES; ++k)
+        if (!isOwn(k)) same += t.expect(sense::sameBits(w0[k], w1[k]), "%s changed with labelFrame", ocean::kSensorNames[k]);
+    t.expect(w1[PREDATOR_PROX] > 0.0f && w1[PREDATOR_FWD] != 0.0f && w1[POPULATION_FWD] != 0.0f,
+             "fixture: the predator / population inputs are live");
+    // the whole scene turned by quarter turns: own-frame labels exactly invariant, world-frame ones not
+    long inv = 0, moved = 0;
+    for (int q = 1; q < 4; ++q) {
+        float r0[NUM_SENSES], r1[NUM_SENSES];
+        labelScene(0, q, r0);
+        labelScene(1, q, r1);
+        for (int k : kOwn) inv += t.expect(sense::sameBits(r1[k], w1[k]), "turn %d: own-frame %s %.9g != %.9g", q, ocean::kSensorNames[k], r1[k], w1[k]);
+        for (int k : {PREDATOR_FWD, PREDATOR_LR, POPULATION_FWD, POPULATION_LR, NEAREST_FOOD_DZ, AVG_NEIGHBOR_DZ})
+            t.expect(sense::sameBits(r1[k], w1[k]) && sense::sameBits(r0[k], w0[k]), "turn %d: body-relative %s changed", q,
+                     ocean::kSensorNames[k]);
+        moved += !sense::sameBits(r0[NEAREST_FOOD_DX], w0[NEAREST_FOOD_DX]) || !sense::sameBits(r0[NEAREST_FOOD_DY], w0[NEAREST_FOOD_DY]);
+    }
+    t.expect(moved == 3, "world-frame food labels did not move with the scene");
+    // own-frame steering on own-frame labels: NEAREST_FOOD_DX -> STEER_X (+) turns toward food on either side
+    int toward[2] = {0, 0};
+    for (int lf = 0; lf < 2; ++lf)
+        for (int h = 0; h < 8; ++h)
+            for (int side = -1; side <= 1; side += 2) {
+                OceanConfig oc;
+                oc.labelFrame = lf;
+                oc.steerFrame = 1;
+                OceanWorld w;
+                initQuiet(w, 3000 + h, 240.0f, oc);
+                const float a = 6.2831853f * (float)h / 8.0f + 0.2f;
+                const Vec2 f0 = {evomath::cosf(a), evomath::sinf(a)}, r0 = {-f0.y, f0.x};
+                const int k = addFish(w, {960.0f, 540.0f}, 120.0f, {mkGene(true, NEAREST_FOOD_DX, STEER_X, 8000)}, 0.5f);
+                w.creatures[k].vel = f0;
+                w.creatures[k].interactTimer = 1e9f;
+                sense::addFood(w, 960.0f + 40.0f * (f0.x + side * r0.x), 540.0f + 40.0f * (f0.y + side * r0.y), 120.0f);
+                w.update(0.016f);
+                const Vec2 f1 = w.creatures[k].forward();
+                const float turn = f0.x * f1.y - f0.y * f1.x;   // + = toward the right (r0 = f0 turned +90)
+                toward[lf] += (turn * (float)side > 0.0f);
+            }
+    t.expect(toward[1] == 16, "own-frame labels + own-frame steering: turned toward the food in %d of 16", toward[1]);
+    t.expect(toward[0] < 16, "world-frame labels steered toward the food from every heading (%d of 16): no mismatch?", toward[0]);
+    // validation, and the key's absence == 0
+    OceanConfig oc;
+    t.expect(oceanConfigValid(oc), "default refused");
+    for (int v : {-1, 2, 7}) {
+        oc.labelFrame = v;
+        t.expect(!oceanConfigValid(oc), "labelFrame %d accepted", v);
+    }
+    t.note("own-frame labels: food (%g, %g), offset (%.6f, %.6f), heading (%g, %g); %ld other inputs unchanged; "
+           "%ld own-frame values invariant under 3 quarter turns; turned toward food %d / 16 (own) vs %d / 16 (world frame)",
+           w1[NEAREST_FOOD_DX], w1[NEAREST_FOOD_DY], w1[AVG_NEIGHBOR_DX], w1[AVG_NEIGHBOR_DY], w1[AVG_NEIGHBOR_HEADING_X],
+           w1[AVG_NEIGHBOR_HEADING_Y], same, inv, toward[1], toward[0]);
+}
+
+inline void testLabelFrameNeutral() {
+    Test t("label_frame_off");
+    // labelFrame 0 written explicitly == absent: the same world and run, every section
+    OceanWorld a, b;
+    std::string err;
+    const bool ok = ofp::initWorld(a, 61, 900, 600, 240.0f, 80, R"({"predatorCount":2,"steerFrame":1})", err);
+    const RandomGen ra = rng;
+    const bool ok2 = ofp::initWorld(b, 61, 900, 600, 240.0f, 80, R"({"predatorCount":2,"steerFrame":1,"labelFrame":0})", err);
+    if (!t.expect(ok && ok2, "init: %s", err.c_str())) return;
+    t.expect(ra.state() == rng.state(), "init consumed the rng differently");
+    rng = ra;
+    for (int s = 0; s < 200; ++s) a.update(0.016f);
+    const ofp::Fingerprint fa = ofp::fingerprint(a);
+    rng = ra;
+    for (int s = 0; s < 200; ++s) b.update(0.016f);
+    t.expect(fa == ofp::fingerprint(b), "labelFrame 0 changed the run (or its config hash)");
+    // labelFrame 1 at init: only the config section differs at step 0
+    OceanWorld c, d;
+    t.expect(ofp::initWorld(c, 62, 900, 600, 240.0f, 80, R"({"predatorCount":2,"labelFrame":1})", err) &&
+                 ofp::initWorld(d, 62, 900, 600, 240.0f, 80, R"({"predatorCount":2})", err),
+             "init: %s", err.c_str());
+    const ofp::Fingerprint fc = ofp::fingerprint(c), fd = ofp::fingerprint(d);
+    t.expect(fc.cfg != fd.cfg && fc.fish == fd.fish && fc.food == fd.food && fc.ctr == fd.ctr && fc.pred == fd.pred,
+             "labelFrame 1 at init: the config hash did not change, or another section did");
+    t.note("labelFrame 0 == the key absent over 200 steps, every section; labelFrame 1 is hashed (cfg) and changes nothing at init");
+}
 #ifdef EVO_OCEAN_EYE
 // protocol v2's L12 ecology (experiments/alife2027/v2/common_l12.json)
 constexpr const char* kExpL12 =

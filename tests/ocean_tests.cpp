@@ -4127,7 +4127,7 @@ void testVisionKeys() {
     Test t("vision_keys");
     int refused = 0, accepted = 0;
     auto tryInit = [&](const std::string& c) { return oc_init(1201, 1920, 1080, 240.0, 50, c.c_str()); };
-    for (const char* k : {"eye", "eyeOnly", "eyeCode", "steerFrame"}) {
+    for (const char* k : {"eye", "eyeOnly", "eyeCode", "steerFrame", "labelFrame"}) {
         for (const char* v : {"0.5", "1e300", "-1e300", "2147483648", "-2147483649", "1e999", "-0.25", "1.0000001"}) {
             const std::string c = std::string("{\"") + k + "\":" + v + "}";
             const int ok = tryInit(c);
@@ -4159,6 +4159,7 @@ void testVisionKeys() {
     const R rs[] = {
         {R"({"steerFrame":1})", true, true},      {R"({"steerFrame":1.0})", true, true},
         {R"({"steerFrame":2})", false, false},
+        {R"({"labelFrame":1})", true, true},      {R"({"labelFrame":2})", false, false},
         {R"({"eye":1})", true, false},            {R"({"eye":2})", false, false},
         {R"({"eyeOnly":1})", true, false},        {R"({"eyeOnly":2})", false, false},
         {R"({"eye":1,"eyeOnly":1,"eyeCode":7})", true, false},
@@ -4198,6 +4199,8 @@ void testVisionKeys() {
         const int sf = oc_set_param("steerFrame", 1.0), fl = oc_set_param("foodLife", 8.0);
         t.expect(sf == 1 && fl == 1 && g_world->ocfg.steerFrame == 1 && g_world->ocfg.foodLife == 8.0f,
                  "oc_set_param steerFrame 1 / foodLife 8 not stored: %s", oc_last_error());
+        const int lf = oc_set_param("labelFrame", 1.0), lfBad = oc_set_param("labelFrame", 2.0);
+        t.expect(lf == 1 && lfBad == 0 && g_world->ocfg.labelFrame == 1, "oc_set_param labelFrame 1 / 2: %d / %d", lf, lfBad);
         const int eye = oc_set_param("eye", 1.0);
         t.expect(eye == (kOceanHasEye ? 1 : 0), "oc_set_param(eye, 1) returned %d in the %s build", eye,
                  kOceanHasEye ? "eye" : "plain");
@@ -4818,6 +4821,9 @@ int main(int argc, char** argv) {
     ot::testEyeCode();
     ot::testSenseEdges();   // tests/ocean_sense_tests.hpp: the scans' edges, pinned
     ot::testSenseRef();
+    ot::testSenseRef(1);   // the same scenes with own-frame labels (OceanConfig::labelFrame, the A1 arm)
+    ot::testLabelFrame();
+    ot::testLabelFrameNeutral();
     ot::testFoodGrid();
     ot::testFoodLife();
     ot::testRemovedNonFinite();

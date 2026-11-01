@@ -293,6 +293,8 @@ const PAGE_SRC = (() => {
         '    get runCfg() { return runCfg; }, get initArgs() { return initArgs; }, get live() { return live; },\n' +
         '    get W() { return W; }, get H() { return H; }, get D() { return D; }, get WALLS() { return WALLS; },\n' +
         '    get paused() { return paused; }, get openPop() { return openPop; }, get statOpen() { return statOpen; },\n' +
+        '    get worldEpoch() { return worldEpoch; }, get pendingStart() { return pendingStart; }, get asking() { return asking; },\n' +
+        '    get usedTurbo() { return usedTurbo; }, get turboStats() { return turboStats; }, startWorld: startWorld,\n' +
         '    getVal: getVal, importWorld: importWorld, wiringNow: wiringNow, frame: frame,\n' +
         '    urlImport: function (P) {\n' + src.slice(a, b) + '    }\n  };';
     return src.slice(0, end) + access + src.slice(end);
@@ -415,7 +417,7 @@ function makeDom(page) {
             for (let n = this; n; n = ev.bubbles && !ev.stopped ? n.parentNode : null) fireOn(n, ev);
             return !ev.defaultPrevented;
         }
-        click() { this.dispatchEvent(new Ev('click', { bubbles: true })); }
+        click() { if (this.disabled) return; this.dispatchEvent(new Ev('click', { bubbles: true })); }   /* a disabled control can't be pressed */
         focus() { doc.activeElement = this; }
         blur() { if (doc.activeElement === this) doc.activeElement = null; }
         /* no layout: a zero box, unless a test gives the element one (_rect: {left, top, right, bottom}) */
@@ -628,6 +630,8 @@ async function bootPage(query, opts) {
     page.failed = page.el('splashstate').className === 'error' ? page.el('splashstate').textContent : '';
     page.M = page.T.M;
     page.click = (id) => page.el(id).click();
+    /* Start, and Replace it when the page asks (a run with a live tweak, Turbo used, 5 minutes): for the tests about what starts, not whether */
+    page.start = () => { page.click('restart'); if (page.T.asking) page.click('startconfirm'); };
     page.msg = () => page.el('err').textContent;
     page.worker = () => page.workers[page.workers.length - 1];
     /* a field changed by hand: its input, then its change (the live ones apply on change) */
@@ -2059,7 +2063,7 @@ async function pageWholeFields() {
         p.edit(key, def);
     }
     p.edit('predatorCount', '2');
-    p.click('restart');
+    p.start();   /* (the live 300 above: the page asks first) */
     ok(p.T.initArgs.cfg.predatorCount === 2 && p.T.runCfg.predatorCount === 2, 'a whole number runs as typed (predatorCount 2)');
     ok(p.uncaught.length === 0, 'no exception escaped the page\'s handlers' + (p.uncaught.length ? ' (' + p.uncaught[0] + ')' : ''));
 }
@@ -2268,7 +2272,7 @@ async function pageIntegralFloats() {
     const sets0 = p.sets.length;
     p.edit('maxPopulation', '300.0');
     ok(p.T.runCfg.maxPopulation === 300 && p.sets.length === sets0 + 1 && p.sets[sets0][2] === 300, 'live: 300.0 applies as 300');
-    p.edit('predatorCount', '2.0'); p.click('restart');
+    p.edit('predatorCount', '2.0'); p.start();   /* (the live 300.0 above: the page asks first) */
     ok(p.T.initArgs.cfg.predatorCount === 2, 'Restart: predatorCount 2.0 runs as 2 ("' + p.msg() + '")');
     p.el('err').textContent = '';
     p.loadFile({ name: 'setup.json', text: () => Promise.resolve('{"format":"evo_ocean_setup","version":1,"seed":7,"population":12.0,"width":1920,' +
@@ -2354,6 +2358,233 @@ async function pageTurboMode() {
     ok(p.uncaught.length === 0, 'no exception escaped the page\'s handlers' + (p.uncaught.length ? ' (' + p.uncaught[0] + ')' : ''));
 }
 
+/* the page's world starts so far: oc_init calls (refused ones too), oc_reset calls, the epoch */
+function startCounter(p) {
+    if (p.resets === undefined) {
+        p.resets = 0;
+        const r = p.M._oc_reset;
+        p.M._oc_reset = function () { p.resets++; return r.apply(this, arguments); };
+    }
+    return () => ({ inits: p.inits.length, resets: p.resets, epoch: p.T.worldEpoch });
+}
+const delta = (a, b) => ({ inits: b.inits - a.inits, resets: b.resets - a.resets, epoch: b.epoch - a.epoch });
+const asked = (p) => !!p.T.asking && !p.el('startask').hidden;
+
+/* UI-4 / UI-3, one door: every world-starting path reaches startWorld and
+ * moves the epoch exactly once; the only oc_init / oc_reset calls are
+ * startWorld's; the inline question before a run with something to lose
+ * (a live tweak, five simulated minutes, Turbo); and during Turbo, Stop
+ * Turbo & start: the ordinary hand-back first, then the start, or no start
+ * (a refused edit or a change meanwhile, Stop, a failing worker, a refused
+ * hand-back, a world the engine refuses), never a stale message's. */
+async function pageStartDoor() {
+    section('UI-4: one door to a new world: every start through startWorld, the question before losing a run, Stop Turbo & start');
+    {   /* the only world-changing calls are startWorld's */
+        const src = fs.readFileSync(path.join(WEB, 'ocean.js'), 'utf8');
+        const where = (re) => [...src.matchAll(re)].map(m => { const f = src.lastIndexOf('\n  function ', m.index); return /function (\w+)/.exec(src.slice(f, f + 60))[1]; });
+        const init = where(/M\._oc_init\(/g), reset = where(/M\._oc_reset\(/g), iw = where(/[!\s]initWorld\(/g).filter(n => n !== 'initWorld');
+        ok(init.join() === 'initWorld' && reset.join() === 'startWorld' && iw.join() === 'startWorld',
+           'web/ocean.js calls oc_init only in initWorld, oc_reset and initWorld only in startWorld (' + init + ' / ' + reset + ' / ' + iw + ')');
+    }
+    const p = await bootPage(PAGE_Q7);
+    const c = startCounter(p);
+    const v1 = '{"format":"evo_ocean_setup","version":1,"seed":11,"population":20,"depth":200,"width":1920,"height":1080,"config":{"foodEnergy":6}}';
+    const ways = [
+        ['Restart', () => p.click('restart'), 'init'],
+        ['R (a new seed)', () => p.key('r'), 'init'],
+        ['Shift+R (Replay)', () => p.key('R', { shift: true }), 'reset'],
+        ['Randomize', () => p.click('randombig'), 'init'],
+        ['the E1 preset, then Restart', () => { p.click('e1btn'); p.click('restart'); }, 'init'],
+        ['Fit the world to this screen', () => { p.ctx.innerWidth = 800; p.ctx.innerHeight = 1200; p.click('fitbtn'); p.ctx.innerWidth = 1920; p.ctx.innerHeight = 1080; }, 'init'],
+        ['Load setup', async () => { p.loadFile({ name: 's.json', text: () => Promise.resolve(v1) }); await until(() => p.T.initArgs.seed === 11, 'the setup'); }, 'init'],
+        ['the link\'s import (start-up, benchmark)', () => p.T.importWorld(7, 12, 240, { walls: true }, undefined, [], [1920, 1080]), 'init'],
+        ['Big tank', () => p.click('bigbtn'), 'init']
+    ];
+    const bad = [];
+    for (const [what, act, kind] of ways) {
+        const a = c();
+        await act();
+        const d = delta(a, c());
+        if (d.epoch !== 1 || d.inits !== (kind === 'init' ? 1 : 0) || d.resets !== (kind === 'reset' ? 1 : 0) || asked(p))
+            bad.push(what + ' ' + JSON.stringify(d) + ' "' + p.msg() + '"');
+    }
+    ok(!bad.length, 'each start moves the epoch once, through one oc_init (Replay: oc_reset), with nothing to ask on a fresh run: ' +
+       ways.map(w => w[0]).join(', ') + (bad.length ? ' — ' + bad.join('; ') : ''));
+    {   /* a live tweak: asked, Keep it, an edit meanwhile, then Replace it (the tweak carries over) */
+        const q = await bootPage(PAGE_Q7), cq = startCounter(q), a = cq();
+        q.edit('minSpeed', 40);
+        q.click('restart');
+        const ask1 = asked(q) && sheetOpen(q) && /live tweak/.test(q.el('startaskmsg').textContent), d1 = delta(a, cq());
+        q.click('startcancel');
+        q.click('restart');
+        const ask2 = asked(q);
+        q.edit('population', 50);
+        const gone = !asked(q) && delta(a, cq()).inits === 0;
+        q.click('restart');
+        q.click('startconfirm');
+        const d3 = delta(a, cq());
+        ok(ask1 && d1.inits === 0 && ask2 && gone && d3.inits === 1 && d3.epoch === 1 && q.T.initArgs.cfg.minSpeed === 40 && q.T.initArgs.population === 50,
+           'a live tweak: Restart asks ("' + q.el('startaskmsg').textContent + '"); Keep it starts nothing; an edit while asked takes the question away; ' +
+           'Replace it starts once, the tweak (40) and the edit (50 fish) in the new world (' + JSON.stringify(d3) + ')');
+    }
+    {   /* five simulated minutes: R asks, R again asks nothing more, Enter on the focused confirm starts once */
+        const q = await bootPage(PAGE_Q7), cq = startCounter(q);
+        q.M._oc_step(18760); q.raf(performance.now());
+        const a = cq();
+        q.key('r');
+        const ask = asked(q) && /of evolution/.test(q.el('startaskmsg').textContent) && focused(q) === 'startconfirm';
+        q.key('r');
+        const d1 = delta(a, cq());
+        q.key('Enter');
+        const d2 = delta(a, cq());
+        ok(ask && d1.inits === 0 && d2.inits === 1 && d2.epoch === 1 && !asked(q),
+           '5 simulated minutes: R asks ("' + q.el('startaskmsg').textContent + '"), its confirm focused; R again starts nothing; Enter starts once (' + JSON.stringify(d2) + ')');
+    }
+    {   /* Turbo: a restart-only edit stages (no Stop, no oc_init); Start asks; the ordinary hand-back, then the start */
+        const { p: q, sh } = await pageInTurbo();
+        const cq = startCounter(q), a = cq();
+        q.edit('population', 40);
+        const staged = q.T.turboState === 'turbo' && !sh.toWorker.some(m => m.cmd === 'stop') && delta(a, cq()).inits === 0;
+        const handler = sh.onmessage;
+        q.click('restart');
+        const ask = asked(q) && q.el('startconfirm').textContent === 'Stop Turbo & start';
+        q.click('startconfirm');
+        const st = q.T.turboState, pend = !!q.T.pendingStart;
+        await until(() => q.T.turboState === 'live' && !q.T.pendingStart, 'the hand-back and the start');
+        const d = delta(a, cq());
+        ok(staged && ask && st === 'exiting' && pend && d.inits === 1 && d.epoch === 1 && q.T.initArgs.population === 40 && sh.terminated === 1 &&
+           q.T.turboWorker === null && !q.T.paused && !q.T.usedTurbo,
+           'in Turbo: a restart-only edit only stages; Start asks "Stop Turbo & start", then Stopping Turbo, the hand-back, and one start with 40 fish; ' +
+           'the old worker terminated, the new world running (' + JSON.stringify(d) + ')');
+        /* its late messages, delivered anyway (as a captured handler would): none reaches the world */
+        const e0 = q.T.worldEpoch, cfg0 = JSON.stringify(q.T.runCfg);
+        const stale = [{ type: 'stats', frame: 1e6, pop: 1, st: [1, 1e6], su: [] }, { type: 'set', key: 'minSpeed', value: 99, ok: true },
+                       { type: 'rec', rows: [] }, { type: 'wiring', n: 1 }, { type: 'memory', mem: new ArrayBuffer(8) }, { type: 'error', message: 'stale' }];
+        for (const m of stale) handler.call(sh, { data: m });
+        const quiet = q.T.turboState === 'live' && q.T.worldEpoch === e0 && JSON.stringify(q.T.runCfg) === cfg0 && !(q.T.turboStats && q.T.turboStats.frame === 1e6);
+        q.click('turbobtn');
+        await until(() => q.T.turboState === 'turbo', 'a second Turbo');
+        for (const m of stale.slice(0, 4)) handler.call(sh, { data: m });
+        const quiet2 = q.T.turboState === 'turbo' && JSON.stringify(q.T.runCfg) === cfg0 && !(q.T.turboStats && q.T.turboStats.frame === 1e6);
+        q.click('turboexit');
+        await until(() => q.T.turboState === 'live', 'its hand-back');
+        ok(quiet && quiet2 && q.T.worldEpoch === e0 && q.uncaught.length === 0,
+           'the old worker\'s stats, set, rec, wiring, memory and error, delivered after the start and during the next Turbo: ignored; that Turbo runs and hands back');
+    }
+    {   /* an edit on its way to the worker: settled by the hand-back, then in the new world */
+        const { p: q, sh } = await pageInTurbo();
+        sh.pause();
+        q.edit('minSpeed', 40);
+        q.click('restart'); q.click('startconfirm');
+        sh.resume();
+        await until(() => q.T.turboState === 'live' && !q.T.pendingStart, 'the start');
+        ok(q.T.initArgs.cfg.minSpeed === 40 && q.T.runCfg.minSpeed === 40, 'a live edit still in flight when Stop Turbo & start is pressed: answered, then started with it (minSpeed ' + q.T.initArgs.cfg.minSpeed + ')');
+    }
+    {   /* a refused edit changes the plan meanwhile: no start, the run carries on */
+        const { p: q, img, sh } = await pageInTurbo();
+        const cq = startCounter(q), a = cq();
+        sh.pause();
+        q.edit('minSpeed', 200);
+        q.click('restart'); q.click('startconfirm');
+        sh.resume();
+        await until(() => q.T.turboState === 'live' && !q.T.pendingStart, 'the hand-back');
+        const d = delta(a, cq()), ref = await controlRun(img, workerEdits(sh), frame(q.M)), diff = sameFor(q.M, ref, 100);
+        ok(d.inits === 0 && d.epoch === 0 && /setup changed/.test(q.msg()) && diff === '',
+           'an edit refused during the hand-back (minSpeed 200): the plan asked about is gone, so no start; the run handed back carries on, 100 steps bit-identical ("' + q.msg() + '")' + (diff ? ': ' + diff : ''));
+    }
+    {   /* Stop (here: Cancel) while the hand-back is on its way: an ordinary Stop */
+        const { p: q, f0, sh } = await pageInTurbo();
+        const cq = startCounter(q), a = cq();
+        sh.pause();
+        q.click('restart'); q.click('startconfirm');
+        await until(() => sh.queued(isType('memory')), 'the memory');
+        const label = q.el('turboexit').getAttribute('aria-label');
+        q.click('turboexit');
+        sh.resume();
+        await until(() => q.T.turboState === 'live', 'the hand-back');
+        const d = delta(a, cq());
+        ok(label === 'cancel the new world' && d.inits === 0 && d.epoch === 0 && frame(q.M) > f0 && !q.T.pendingStart,
+           'Stop Turbo & start, then Cancel while the world comes back: no start, the run handed back as by Stop (frame ' + f0 + ' -> ' + frame(q.M) + ')');
+    }
+    {   /* asked while Turbo is still starting: its first stats stop it, then the start */
+        const q = await bootPage(PAGE_Q);
+        const cq = startCounter(q), a = cq();
+        q.hooks.onWorker = (sh) => sh.pause();
+        q.click('turbobtn');
+        const sh = q.worker();
+        q.click('restart');
+        const ask = asked(q);
+        q.click('startconfirm');
+        const st = q.T.turboState;
+        sh.resume();
+        await until(() => q.T.turboState === 'live' && !q.T.pendingStart, 'the start');
+        const d = delta(a, cq());
+        ok(ask && st === 'entering' && d.inits === 1 && d.epoch === 1 && sh.toWorker.some(m => m.cmd === 'stop'),
+           'Stop Turbo & start while Turbo is starting: it starts, stops at once, hands back, and the new world starts (' + JSON.stringify(d) + ')');
+    }
+    {   /* the worker fails meanwhile: its world recovered, no start */
+        const { p: q, f0, sh } = await pageInTurbo();
+        const cq = startCounter(q), a = cq();
+        sh.pause();
+        trapNext(sh);
+        await until(() => sh.queued(isType('error')), 'the trap');
+        q.click('restart'); q.click('startconfirm');
+        await sh.release(isType('error'), 'the error');
+        await until(() => q.T.turboState === 'live', 'the recovery');
+        const d = delta(a, cq());
+        ok(d.inits === 0 && d.epoch === 0 && !q.T.pendingStart && frame(q.M) === f0 && /new world did not start/.test(q.msg()),
+           'the worker fails during Stop Turbo & start: the run recovered (its own copy, frame ' + f0 + '), no start ("' + q.msg().slice(0, 90) + '…")');
+    }
+    {   /* a hand-back the page can't take: Turbo resumes, no start; the next Stop works */
+        const { p: q, sh } = await pageInTurbo();
+        const cq = startCounter(q), a = cq();
+        sh.pause();
+        q.click('restart'); q.click('startconfirm');
+        await until(() => sh.queued(isType('memory')), 'the memory');
+        const H = q.ctx.EvoOceanHandoff, take = H.take;
+        H.take = function () { H.take = take; throw new Error('injected: no room'); };
+        sh.resume();
+        await until(() => q.T.turboState === 'turbo', 'Turbo resumed');
+        const d = delta(a, cq()), said = q.msg();
+        q.click('turboexit');
+        await until(() => q.T.turboState === 'live', 'the second Stop');
+        ok(d.inits === 0 && !q.T.pendingStart && /did not start/.test(said) && delta(a, cq()).epoch === 0,
+           'a refused hand-back during Stop Turbo & start: Turbo keeps running, no start ("' + said.slice(0, 80) + '…"); the next Stop hands back');
+    }
+    {   /* a world the engine refuses (walls and wrap-around together): Turbo stopped, the run carries on */
+        const { p: q, img, sh } = await pageInTurbo();
+        const cq = startCounter(q), a = cq();
+        q.edit('toroidal', true);
+        q.click('restart'); q.click('startconfirm');
+        await until(() => q.T.turboState === 'live' && !q.T.pendingStart, 'the hand-back');
+        const d = delta(a, cq()), ref = await controlRun(img, workerEdits(sh), frame(q.M)), diff = sameFor(q.M, ref, 100);
+        const said = q.msg();
+        q.edit('toroidal', false);
+        q.click('turbobtn');
+        await until(() => q.T.turboState === 'turbo', 'Turbo again');
+        q.click('turboexit');
+        await until(() => q.T.turboState === 'live', 'its hand-back');
+        ok(d.inits === 1 && d.epoch === 0 && /your run carries on, but that world was refused/.test(said) && diff === '' && q.uncaught.length === 0,
+           'a world oc_init refuses after the hand-back: one oc_init attempt, no new epoch, the handed-back run goes on (100 steps bit-identical); ' +
+           'a second Turbo works ("' + said.slice(0, 100) + '…")' + (diff ? ': ' + diff : ''));
+    }
+    {   /* Save during Turbo: the accepted setup only */
+        const { p: q, sh } = await pageInTurbo();
+        q.edit('maxPopulation', 200);
+        await until(() => sh.delivered.some(m => m.type === 'set' && m.key === 'maxPopulation'), 'its answer');
+        sh.pause();
+        q.edit('minSpeed', 40);
+        q.edit('population', 50);
+        q.click('savecp');
+        const f = JSON.parse(q.blobs[q.blobs.length - 1]), t = toastText(q);
+        sh.resume();
+        ok(q.T.turboState === 'turbo' && f.config.maxPopulation === 200 && !('minSpeed' in f.config) && f.population === 60 &&
+           /still on the way/.test(t) && /waiting for the next start/.test(t),
+           'Save during Turbo: the acknowledged maxPopulation 200, not the minSpeed still on its way nor the 50 fish waiting; it says both ("' + t.slice(-160) + '")');
+    }
+    ok(p.uncaught.length === 0, 'no exception escaped the page\'s handlers' + (p.uncaught.length ? ' (' + p.uncaught[0] + ')' : ''));
+}
+
 /* Every section, in order; `node tests/ocean_turbo_handoff.js NAME...` runs only those. */
 const SECTIONS = {
     repeatedKeys, liveLedger, growthPage, randomize, imports,
@@ -2370,7 +2601,7 @@ const SECTIONS = {
     pageWallsOverride, pageFreshVisit, pageSizeFields, pageRoundTrip,
     pageColourBench, pageLayers, pageResize, pageKeys, pageStartupFailures, pageTourEscape, pageWholeFields,
     pageTurboFraction, pageCardNumbers, pageMixedRecovery, pageEscOwner, pageTabKeys, pageIntegralFloats,
-    pageTurboMode
+    pageTurboMode, pageStartDoor
 };
 const unhandled = [];
 process.on('unhandledRejection', (e) => { unhandled.push(e); });

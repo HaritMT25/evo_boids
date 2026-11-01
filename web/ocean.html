@@ -561,6 +561,12 @@
     border-top: 1px solid var(--line-soft);
     background: var(--surface);
   }
+  #applybar { flex-wrap: wrap; }
+  #startask { flex: 1 1 100%; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; }
+  #startask[hidden] { display: none; }
+  #startaskmsg { flex: 1 1 100%; font-size: 13px; line-height: 1.4; color: var(--ink); }
+  #startask .btn { min-height: 44px; }
+  #applybar.asking #restart { display: none; }   /* the question takes the start row's place (a 320 px phone has room for one) */
   #restart { flex: none; min-width: 120px; }
   #restart.pending { background: var(--plankton); color: var(--plankton-ink); border-color: transparent; }
   #err { flex: 1; min-width: 0; font-size: 13px; line-height: 1.35; color: var(--ink-3); }
@@ -1000,6 +1006,12 @@
       <!-- the other panels are built by ocean.js (EvoOceanConfig.TABS) -->
     </div>
     <div id="applybar">
+      <!-- asked before a start replaces a run with something to lose; it takes the start row's place -->
+      <div id="startask" role="group" aria-labelledby="startaskmsg" hidden>
+        <p id="startaskmsg"></p>
+        <button id="startconfirm" class="btn primary">Replace it</button>
+        <button id="startcancel" class="btn ghost">Keep it</button>
+      </div>
       <button id="restart" class="btn"><svg class="i"><use href="#i-restart"/></svg><span>Restart</span></button>
       <span id="err" role="status"></span>
     </div>

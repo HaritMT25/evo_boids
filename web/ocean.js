@@ -245,19 +245,23 @@
     el("fitbtn").hidden = !M || !(W === f[1] && H === f[0]);
   }
   function fitToScreen() {
-    if (!M || guardTurbo()) return;
+    if (!M) return;
     var w0 = el("o_width").value, h0 = el("o_height").value, f = screenWorld();   /* as typed, to put back */
     setVal("width", f[0]); setVal("height", f[1]);
-    if (!restart()) { setVal("width", w0); setVal("height", h0); }
+    var r = restart();
+    if (r === "refused") { setVal("width", w0); setVal("height", h0); }
+    else if (r !== "started") setPending(true);
   }
   /* the tank's sides: glass walls in the running world (oc_walls_enabled), and
    * whether this module knows them at all */
   function hasWalls() { return has("oc_walls_enabled"); }
   function wallsOn() { return hasWalls() && !!M._oc_walls_enabled(); }
   var worldReady = false, worldEpoch = 0;   /* epoch: a new world's (fish ids start over); Turbo keeps it */
-  /* repeats: the later occurrences of cfg's repeated keys (HO.parseFirst), so
+  /* oc_init, and the bookkeeping of what it took: startWorld's alone.
+   * repeats: the later occurrences of cfg's repeated keys (HO.parseFirst), so
    * oc_init checks each and takes the first, as it does for its own JSON.
-   * size: [width, height] (the sheet's, the link's, a setup's). */
+   * size: [width, height] (the sheet's, the link's, a setup's). A refusal
+   * changes nothing: oc_init checks everything before it replaces the world. */
   function initWorld(seed, population, depth, cfg, rawCfg, repeats, size) {
     if (cfg && (cfg.walls === true || cfg.walls === 1) && !hasWalls()) {   /* a stale module: it would ignore the key */
       pageError = "glass walls need a newer engine module (this one has no oc_walls_enabled: rebuild web/evo_ocean)";
@@ -274,9 +278,62 @@
     });
     initArgs = { seed: seed >>> 0, population: population, depth: depth, width: size[0], height: size[1], cfg: accepted };
     runCfg = Object.assign({}, accepted);
+    return true;
+  }
+
+  /* ---------------- one door to a new world ----------------
+   * Every world start is a plan, and only startWorld(plan) turns one into a
+   * world: Start and its menu, R / Shift+R, Replay, a scenario, a setup
+   * file, the link at start-up (importWorld), the benchmark (importWorld).
+   * A Turbo hand-back is not a start (the same world: no new epoch, the
+   * charts kept). startWorld runs only while this page owns the world, and
+   * at once, never from a frame: oc_init (or oc_reset for Replay), then the
+   * page's bookkeeping, once — the epoch, the charts, the selection, the
+   * sheet, the address. It answers {ok, why}; a refusal changes nothing.
+   * requestStart (below) is the visitor's way to it: it checks the plan,
+   * asks inline when the run has something to lose, and in Turbo stops it
+   * first (the ordinary hand-back), then starts.
+   * plan: {source, op: "init" | "replay", engine, build() -> {seed,
+   *   population, depth, size: [w, h], cfg, raw, repeats}, url (write the
+   *   address), check() -> "" or why not (before anything stops),
+   *   done(), the toast on success, failed: the refusal's opening}
+   * engine: the module the world runs in, "ocean" (this page's, the
+   * default); a plan may name another, which this page refuses until it
+   * can load one (the eye world will). */
+  var ENGINE = "ocean";
+  var usedTurbo = false;     /* Turbo ran this world (a reason to ask before replacing it) */
+  var turboReturn = null;    /* the fish to select / follow again after Turbo (restoreAfterTurbo) */
+  function startWorld(plan) {
+    if (!M) return { ok: false, why: "the engine is not loaded" };
+    if (turboState !== "live") return { ok: false, why: "Turbo owns the world" };
+    if ((plan.engine || ENGINE) !== ENGINE)
+      return { ok: false, why: "that world needs the " + plan.engine + " engine module, and this page runs the " + ENGINE + " one" };
+    var a = plan.op === "replay" ? null : plan.build();
+    if (plan.op === "replay") {
+      if (!initArgs || !M._oc_reset()) return { ok: false, why: "oc_reset failed: " + lastError() };
+      runCfg = Object.assign({}, initArgs.cfg);
+    } else if (!initWorld(a.seed, a.population, a.depth, a.cfg, a.raw, a.repeats, a.size)) {
+      return { ok: false, why: lastError() };
+    }
+    /* committed: the page's bookkeeping, once */
     clearFieldNotes();
     afterNewWorld();
-    return true;
+    stepOnce = false; summary = null; usedTurbo = false; turboReturn = null;
+    projectForm();
+    if (plan.imported) warnOdd(plan.imported);
+    if (plan.url) writeUrl();
+    hideAsk();
+    setPending(false);
+    return { ok: true, why: "" };
+  }
+  /* the sheet shows the world that now runs: its seed, size and settings
+   * (initArgs; the keys it has no field for kept aside) */
+  function projectForm() {
+    resetForm();
+    setVal("seed", initArgs.seed); setVal("population", initArgs.population); setVal("depth", initArgs.depth);
+    setVal("width", W); setVal("height", H);
+    cfgToForm(initArgs.cfg);
+    updateNeeds(); updateTabDots();
   }
   /* A setup from outside the sheet (the link's, a setup file's), started as
    * it is: oc_init sees its values themselves, so a refusal says why, and
@@ -293,23 +350,28 @@
    * repeats: the later occurrences of a repeated key (HO.parseFirst; cfg
    * holds the first): they go on to oc_init, which checks each and runs the
    * first, as the sheet then shows. */
+  /* (startWorld's adapter for the start-up's link and the benchmark, which
+   * want its answer as "" or why; neither writes the address) */
   function importWorld(seed, population, depth, cfg, raw, repeats, size) {
+    var r = startWorld(importPlan("import", seed, population, depth, cfg, raw, repeats, size, false));
+    return r.ok ? "" : r.why;
+  }
+  function importPlan(source, seed, population, depth, cfg, raw, repeats, size, url) {
     var clean = {}, more = [];
     Object.keys(cfg || {}).forEach(function (k) { if (!ARGS[k]) clean[k] = cfg[k]; });
     (repeats || []).forEach(function (r) { if (!ARGS[r.key]) more.push(r); });
-    if (!initWorld(seed, population, depth, clean, raw, more, size)) return lastError();
-    resetForm();
-    setVal("seed", seed >>> 0); setVal("population", population); setVal("depth", depth);
-    setVal("width", W); setVal("height", H);
-    cfgToForm(clean);
-    updateNeeds(); updateTabDots(); setPending(false);
+    return { source: source, op: "init", url: url, imported: clean,
+             build: function () { return { seed: seed, population: population, depth: depth, cfg: clean, raw: raw, repeats: more, size: size }; } };
+  }
+  /* the sheet can't hold every value a setup may have (an on / off key as 2):
+   * said in the console, the world runs what the setup says */
+  function warnOdd(clean) {
     var odd = Object.keys(clean).filter(function (k) {
       if (!KEYS[k]) return false;
       var a = getVal(k), b = clean[k], bool = typeof KEYS[k][0] === "boolean" || (KEYS[k][1] || {}).bit;
       return bool ? !!a !== !!b : a !== b;
     });
     if (odd.length) console.warn("ocean: the sheet shows " + odd.join(", ") + " differently from the setup it runs");
-    return "";
   }
   /* a new world (oc_init or oc_reset), or one handed back by Turbo */
   function afterNewWorld(fromTurbo) {
@@ -674,15 +736,15 @@
     return box;
   }
   function startBigTank() {
-    if (!M || guardTurbo()) return;
+    if (!M) return;
     if (!hasWalls()) { showError("The Big tank needs glass walls: this engine module has none (rebuild web/evo_ocean)."); return; }
     var b = CFG.BIG_TANK, seed = getVal("seed");
     resetForm();
     setVal("seed", seed);
     setVal("width", b.width); setVal("height", b.height); setVal("depth", b.depth); setVal("population", b.population);
     cfgToForm(b.cfg);
-    updateNeeds(); updateTabDots();
-    if (restart()) toast("The Big tank: " + b.width + " × " + b.height + " × " + b.depth + ", " + b.population + " fish, glass walls.");
+    updateNeeds(); updateTabDots(); setPending(true);
+    restart(function () { toast("The Big tank: " + b.width + " × " + b.height + " × " + b.depth + ", " + b.population + " fish, glass walls."); });
   }
   function setSheetTab(id) {
     currentTab = id;
@@ -775,13 +837,16 @@
     if (tor) tor.disabled = !!getVal("walls");
     if (wl) wl.disabled = !!M && !hasWalls();
   }
-  function setPending(on) {
-    var b = el("restart");
-    b.classList.toggle("pending", on);
-    b.querySelector("span").textContent = on ? "Restart to apply" : "Restart";
+  var pendingEdits = false;   /* edits waiting for the next start */
+  function setPending(on) { pendingEdits = on; paintStart(); }
+  function paintStart() {
+    var b = el("restart"), turbo = turboState !== "live";
+    b.classList.toggle("pending", pendingEdits || turbo);
+    b.querySelector("span").textContent = pendingStart ? "Stopping Turbo…" : turbo ? "Stop Turbo & restart" : pendingEdits ? "Restart to apply" : "Restart";
   }
   function onEdit(e) {
     var t = e.target;
+    if (asking) { hideAsk(); showNote("The setup changed: start again to review it."); }   /* never a start other than the one asked about */
     if (t && t.id === "o_walls" && t.checked) setVal("toroidal", false);   /* walls need toroidal off */
     updateNeeds();
     updateTabDots();
@@ -789,51 +854,146 @@
     setPending(true);
   }
 
-  /* ---- restart, new world, replay, randomize, setups ---- */
+  /* ---- the visitor's starts: requestStart, its inline question ----
+   * Ask first when the run has something to lose (the approved rule): five
+   * simulated minutes or more, Turbo used (or running), or live tweaks
+   * accepted since it started. During Turbo the start waits for the
+   * ordinary hand-back (pendingStart): the progressed world comes back and
+   * every edit on its way is settled, then the plan is built again and must
+   * be the one that was asked about (a refused edit or a change made
+   * meanwhile cancels it: the run carries on, and says so); then the old
+   * worker goes and startWorld runs, in the hand-back's message, never in a
+   * frame. A world the engine refuses then leaves the run going (Live).
+   * Stop (or the question's Cancel) meanwhile cancels the start, not the
+   * hand-back. A worker that fails meanwhile cancels it too. */
+  var pendingStart = null;   /* {plan, key}: waiting for Turbo's hand-back */
+  var asking = null;         /* {plan, key}: the inline question is showing */
   function guardTurbo() {
     if (turboState === "live") return false;
     showNote("Stop Turbo first.");
     return true;
   }
-  function restart() {
-    if (!M || guardTurbo()) return false;
+  function planKey(plan) { return plan.op === "replay" ? "replay " + (initArgs ? initArgs.seed : "") : JSON.stringify(plan.build()); }
+  function runAge() {
+    var f = turboState !== "live" && turboStats ? turboStats.frame : (lastS ? (fresh(lastS).stats[1] || 0) : 0);
+    return f * DT;
+  }
+  /* the live settings changed since this world started (accepted ones) */
+  function liveTweaks() {
+    if (!initArgs) return [];
+    var seen = {}, out = [];
+    Object.keys(runCfg).concat(Object.keys(initArgs.cfg)).forEach(function (k) {
+      if (seen[k] || !LIVE[k]) return;
+      seen[k] = true;
+      var a = k in runCfg ? runCfg[k] : KEYS[k][0], b = k in initArgs.cfg ? initArgs.cfg[k] : KEYS[k][0];
+      if (a !== b) out.push(k);
+    });
+    return out;
+  }
+  function loseReasons() {
+    var r = [], age = runAge(), tw = liveTweaks();
+    if (age >= 300) r.push(fmtTime(age) + " of evolution");
+    if (usedTurbo || turboState !== "live") r.push("Turbo's progress");
+    if (tw.length) r.push(tw.length === 1 ? "a live tweak (" + (LABELS[tw[0]] || tw[0]) + ")" : tw.length + " live tweaks");
+    return r;
+  }
+  /* "started", "asked", "waiting" (for Turbo's hand-back) or "refused" */
+  function requestStart(plan, confirmed) {
+    if (!M) return "refused";
+    var why = plan.check ? plan.check() : "";
+    if (why) { showError("Couldn't start that world: " + why + "."); return "refused"; }
+    if (pendingStart) { showNote("A new world is already waiting for Turbo to stop."); return "waiting"; }
+    if (loseReasons().length && !confirmed) { askStart(plan); return "asked"; }
     clearError();
-    var f = readForm(), why = sizeProblem(f);
-    if (why) { showError("Couldn't start that world: " + why + "."); return false; }
-    if (!initWorld(f.seed, f.population, f.depth, f.cfg, undefined, undefined, [f.width, f.height])) {
-      showError("Couldn't start that world: " + lastError());
-      return false;
-    }
-    setPending(false);
-    el("randnote").textContent = "";
-    writeUrl();
+    if (turboState === "live") return commitStart(plan) ? "started" : "refused";
+    pendingStart = { plan: plan, key: planKey(plan) };
+    if (turboState === "turbo") exitTurbo();   /* entering: its first stats stop it; exiting: on its way */
+    updateLocks();
+    showNote("Stopping Turbo, then starting the new world.");
+    return "waiting";
+  }
+  function commitStart(plan) {
+    var r = startWorld(plan);
+    if (!r.ok) { showError((plan.failed || "Couldn't start that world: ") + r.why); return false; }
+    if (plan.done) plan.done();
     return true;
   }
+  /* Turbo handed the world back with a start waiting: the same plan, or none */
+  function finishPendingStart(ps) {
+    if (planKey(ps.plan) !== ps.key) {
+      showError("The setup changed while Turbo stopped (an edit was refused or made meanwhile), so the new world did not start: your run carries on. Check it and start again.");
+      return;
+    }
+    dropWorker();   /* a clean slate: the next Turbo gets a fresh worker */
+    ps.plan.failed = "Turbo stopped and your run carries on, but that world was refused: ";
+    commitStart(ps.plan);
+  }
+  function cancelPendingStart(why) {
+    if (!pendingStart) return;
+    pendingStart = null;
+    if (why) showNote(why);
+    updateLocks();
+  }
+  /* the inline question, in the start bar (the setup sheet opens for it) */
+  function askStart(plan) {
+    asking = { plan: plan, key: planKey(plan) };
+    var turbo = turboState !== "live", replaying = plan.op === "replay", age = runAge(), lose = [], tw = liveTweaks();
+    if (age >= 300) lose.push(fmtTime(age) + " of evolution");
+    if (usedTurbo || turbo) lose.push("what Turbo ran");
+    var one = tw.length === 1, tweaks = tw.map(function (k) { return (LABELS[k] || k) + " " + shown(cfgVal(k)); }).join(", ");
+    el("startaskmsg").textContent =
+      (replaying ? "Replay starts this world again from its seed" : turbo ? "This stops Turbo and replaces your run" : "This replaces your run") +
+      (lose.length ? ", and " + lose.join(" and ") + " with it" : "") + "." +
+      (tw.length ? " Your live tweak" + (one ? "" : "s") + " (" + tweaks + ") " + (replaying ? (one ? "is" : "are") + " dropped." :
+                   (one ? "carries" : "carry") + " over to the new world.") : "") +
+      (replaying && pendingEdits ? " Edits waiting for a start stay waiting." : "");
+    el("startconfirm").textContent = replaying ? "Replay" : turbo ? "Stop Turbo & start" : "Replace it";
+    el("startcancel").textContent = "Keep it";
+    el("startask").hidden = false;
+    el("applybar").classList.add("asking");
+    if (!drawerEl.classList.contains("open")) setDrawer(true);
+  }
+  function hideAsk() {
+    asking = null;
+    el("startask").hidden = true;
+    el("applybar").classList.remove("asking");
+  }
+  function confirmAsk() {
+    var a = asking;
+    hideAsk();
+    if (!a) return;
+    if (planKey(a.plan) !== a.key) { showNote("The setup changed: start again to review it."); return; }
+    requestStart(a.plan, true);
+  }
+  /* a plan from the sheet: its seed (or a new one, drawn once per request),
+   * size and settings as typed, checked before anything stops */
+  function formPlan(source, seed) {
+    function f() { var x = readForm(); if (seed !== undefined) x.seed = seed; return x; }
+    return { source: source, op: "init", url: true,
+             check: function () { return sizeProblem(f()); },
+             build: function () { var x = f(); return { seed: x.seed, population: x.population, depth: x.depth, size: [x.width, x.height], cfg: x.cfg }; } };
+  }
+  function restart(done) {
+    var plan = formPlan("start");
+    plan.done = function () { el("randnote").textContent = ""; if (done) done(); };
+    return requestStart(plan);
+  }
   function newWorld() {
-    if (!M || guardTurbo()) return;
-    setVal("seed", (Math.random() * 0x100000000) >>> 0);
-    if (restart()) toast("A new world, seed " + getVal("seed") + ".");
+    var plan = formPlan("fresh", (Math.random() * 0x100000000) >>> 0);
+    plan.done = function () { el("randnote").textContent = ""; toast("A new world, seed " + initArgs.seed + "."); };
+    requestStart(plan);
   }
   /* this world again from its start: oc_reset (the last init's seed and
    * config; live changes since are dropped), and the sheet back to them */
   function replay() {
-    if (!M || guardTurbo() || !initArgs) return;
-    if (!M._oc_reset()) { showError("oc_reset failed: " + lastError()); return; }
-    clearError();   /* e.g. a refused restart's message: the sheet goes back to this world */
-    resetForm();
-    setVal("seed", initArgs.seed); setVal("population", initArgs.population); setVal("depth", initArgs.depth);
-    setVal("width", initArgs.width); setVal("height", initArgs.height);
-    cfgToForm(initArgs.cfg);
-    runCfg = Object.assign({}, initArgs.cfg);
-    updateNeeds(); updateTabDots(); setPending(false);
-    afterNewWorld();
-    toast("Replaying seed " + initArgs.seed + " from its start.");
+    if (!initArgs) return;
+    requestStart({ source: "replay", op: "replay", done: function () { clearError(); toast("Replaying seed " + initArgs.seed + " from its start."); } });
   }
   /* Randomize keeps the tank as it is set (its size, depth and sides) and
    * draws a recipe for it: drawn for the standard tank, scaled once to this
    * volume (EvoOceanConfig.draw); with glass walls it never wraps */
   function randomize() {
-    if (!M || guardTurbo()) return;
+    if (!M) return;
     var keep = { width: getVal("width"), height: getVal("height"), depth: getVal("depth"), walls: getVal("walls"),
                  sideWallBand: getVal("sideWallBand"), sideWallTurnRate: getVal("sideWallTurnRate") };
     var pick = CFG.draw(Math.random, KEYS.population[0], e1Preset(), [keep.width, keep.height, keep.depth, keep.walls]);
@@ -842,12 +1002,12 @@
     Object.keys(pick.set).forEach(function (k) { setVal(k, pick.set[k]); });
     setVal("population", pick.population);
     setVal("seed", (Math.random() * 0x100000000) >>> 0);
-    updateNeeds(); updateTabDots();
-    if (restart()) {
-      var what = pick.population + " fish" + (pick.labels.length ? " · " + pick.labels.join(" · ") : " · the default world");
+    updateNeeds(); updateTabDots(); setPending(true);
+    var what = pick.population + " fish" + (pick.labels.length ? " · " + pick.labels.join(" · ") : " · the default world");
+    restart(function () {
       el("randnote").textContent = "Picked: " + what + ". Every setting is in the tabs above.";
       toast("New world: " + what);
-    }
+    });
   }
   /* a Restart writes the setup into the address, so a reload or a shared
    * link is this world: its size too, on a screen of any shape */
@@ -870,8 +1030,9 @@
     } catch (e) { /* file:// or a sandboxed frame */ }
   }
   /* Save setup: the running world's — its seed, size and settings, with the
-   * live changes that applied since it started. Edits still waiting for a
-   * Restart are not in it (they are not the running world's), and it says so. */
+   * live changes that applied since it started (in Turbo: those the worker
+   * acknowledged). Edits still waiting for a start, or on their way to the
+   * world, are not in it (they are not the running world's), and it says so. */
   /* Version 2 (glass walls): `walls` is its own field, always written; a
    * version-1 file (before walls existed) loads as a wrapping world. */
   var SETUP_VERSION = 2;
@@ -886,9 +1047,11 @@
     a.href = url; a.download = "evo_ocean_setup_seed" + initArgs.seed + ".json";
     document.body.appendChild(a); a.click(); a.remove();
     URL.revokeObjectURL(url);
-    var waiting = el("restart").classList.contains("pending");
+    /* during Turbo too: runCfg is what the world accepted (the worker's acknowledgements) */
+    var onWay = Object.keys(live.held()).concat(live.inflight().map(function (e) { return e[0]; }));
     toast("Saved this world's setup (seed " + initArgs.seed + ")" +
-          (waiting ? ". Edits waiting for a Restart are not in it: Restart first to include them." : "."));
+          (pendingEdits ? ". Edits waiting for the next start are not in it: start first to include them." : ".") +
+          (onWay.length ? " Not in it yet: " + onWay.map(function (k) { return LABELS[k] || k; }).join(", ") + ", still on the way to the world." : ""));
   }
   /* Load setup: that world from its start, at its size, exactly as saved
    * (importWorld: a value the engine refuses is reported, and nothing
@@ -936,14 +1099,13 @@
     var config = Object.assign({}, s.config);
     if (version !== 1) config.walls = walls;
     clearError();
-    var why = importWorld(seed, pop, depth, config, undefined, cfgRepeats, [w, h]);
-    if (why) {
-      showError("That setup was refused: " + why);
-      return;
-    }
-    el("randnote").textContent = "";
-    writeUrl();
-    showNote("Setup loaded: seed " + (seed >>> 0) + ", " + W + " × " + H + ", replaying from its start.");
+    var plan = importPlan("file", seed, pop, depth, config, undefined, cfgRepeats, [w, h], true);
+    plan.failed = "That setup was refused: ";
+    plan.done = function () {
+      el("randnote").textContent = "";
+      showNote("Setup loaded: seed " + (seed >>> 0) + ", " + W + " × " + H + ", replaying from its start.");
+    };
+    requestStart(plan);
   }
 
   /* ---------------- per-frame data ---------------- */
@@ -1669,7 +1831,8 @@
     var w = r.querySelector(".rs-word");
     if (w) w.textContent = RUNSTATE[s][0];
   }
-  var LOCK_IDS = ["restart", "savecp", "loadcp", "randombig", "newworld", "replay"];
+  /* what waits for Turbo to stop (every start goes through requestStart, which stops it first; Save reads what was accepted) */
+  var LOCK_IDS = ["loadcp"];
   function updateLocks() {
     var s = turboState, on = s !== "live";
     document.body.classList.toggle("turbo-on", on);
@@ -1680,18 +1843,21 @@
     el("turbo-strip").hidden = !on;
     el("setup-turbo").hidden = !on;
     el("dash-turbo").hidden = !on;
-    var word = s === "entering" ? "Starting…" : s === "exiting" ? "Stopping…" : "Stop";
+    /* Stop; with a new world waiting for the hand-back, Cancel (that start, not the hand-back) */
+    var can = s === "turbo" || (on && !!pendingStart);
+    var word = pendingStart ? "Cancel" : s === "entering" ? "Starting…" : s === "exiting" ? "Stopping…" : "Stop";
     var stop = el("turboexit");
-    stop.disabled = s !== "turbo";
-    stop.setAttribute("aria-label", s === "turbo" ? "stop Turbo" : word.toLowerCase());
+    stop.disabled = !can;
+    stop.setAttribute("aria-label", pendingStart ? "cancel the new world" : s === "turbo" ? "stop Turbo" : word.toLowerCase());
     var sw = stop.querySelector(".ts-word");
     if (sw) sw.textContent = word;
     ["setup-turbo-stop", "dash-turbo-stop"].forEach(function (id) {
       var b = el(id);
-      b.disabled = s !== "turbo";
-      b.textContent = s === "turbo" ? "Stop Turbo" : s === "entering" ? "Starting…" : "Stopping…";
+      b.disabled = !can;
+      b.textContent = pendingStart ? "Cancel the new world" : s === "turbo" ? "Stop Turbo" : s === "entering" ? "Starting…" : "Stopping…";
     });
     paintRunState();
+    paintStart();
     if (on) paintTurbo();
     updateKeysLegend();
     dirtyHud = true;
@@ -1733,8 +1899,14 @@
     else if (turboState === "turbo") stopTurbo();
     else turboWait();
   }
-  /* Stop Turbo (the strip's ■, the bars', Space, T): the ordinary hand-back */
+  /* Stop Turbo (the strip's ■, the bars', Space, T): the ordinary hand-back.
+   * With a new world waiting for it (Stop Turbo & start), Stop cancels that
+   * start, not the hand-back: the run comes back as after any Stop. */
   function stopTurbo() {
+    if (pendingStart) {
+      cancelPendingStart("The new world is cancelled: " + (turboState === "entering" ? "Turbo carries on." : "Turbo hands your run back as usual."));
+      return;
+    }
     if (turboState === "turbo") exitTurbo();
     else if (turboState !== "live") turboWait();
   }
@@ -1750,13 +1922,20 @@
   var turboEntryCfg = null;   /* runCfg when Turbo took the world */
   var turboEntryPaused = false;   /* and whether it was paused then: a start that fails leaves it so */
   function onTurboMessage(e) {
+    /* only the worker this page runs now: a dropped one's late messages (it
+     * was detached and terminated: dropWorker) never reach the world */
+    if (this !== turboWorker) return;
     var msg = e.data || {};
     if (msg.type === "stats") {
       turboStats = msg;
       if (msg.st && msg.su) turboView = { st: msg.st, su: msg.su };
       spark.push(msg.pop);
       if (spark.length > SPARK_N) spark.shift();
-      if (turboState === "entering") { turboState = "turbo"; updateLocks(); flushHeld(); }
+      if (turboState === "entering") {
+        turboState = "turbo"; usedTurbo = true;
+        updateLocks(); flushHeld();
+        if (pendingStart) exitTurbo();   /* Stop Turbo & start, asked while it was starting */
+      }
       paintTurbo();
     } else if (msg.type === "wiring") {
       wireAsked = false;   /* answered: the next one may be asked */
@@ -1777,16 +1956,22 @@
       if (turboState !== "exiting") return;
       try { takeMemory(msg.mem); }
       catch (err) {
-        /* the worker still has the world: it carries on, nothing is lost */
+        /* the worker still has the world: it carries on, nothing is lost (a start waiting for it is cancelled) */
+        var hadStart = !!pendingStart;
+        pendingStart = null;
         turboWorker.postMessage({ cmd: "resume" });
         turboState = "turbo";
         updateLocks();
-        showError("Turbo could not hand the world back (" + (err.message || err) + "), so it keeps running. Stop it again to retry.");
+        showError("Turbo could not hand the world back (" + (err.message || err) + "), so it keeps running" +
+                  (hadStart ? " and the new world did not start" : "") + ". Stop it again to retry.");
         flushHeld();
         return;
       }
+      var ps = pendingStart;
+      pendingStart = null;
       turboBack();
-      showNote("Turbo ran " + (msg.totalSteps || 0).toLocaleString() + " steps.");
+      if (ps) finishPendingStart(ps);   /* in this message, before any frame steps the world handed back */
+      else showNote("Turbo ran " + (msg.totalSteps || 0).toLocaleString() + " steps.");
     } else if (msg.type === "error") {
       turboFailed("Turbo stopped: " + (msg.message || "unknown error"), msg.mem);
     }
@@ -1819,6 +2004,7 @@
     var was = turboState;
     dropWorker();
     if (was === "live") return;
+    if (pendingStart) { pendingStart = null; why = "The new world did not start. " + why; }   /* the recovered run is the visitor's to replace */
     var back = false;
     if (mem && was !== "entering") {
       try { takeMemory(mem); back = true; } catch (err) { why += "; the world it had could not come back (" + (err.message || err) + ")"; }
@@ -2047,15 +2233,24 @@
         if (k === " " || k === "Spacebar") { if (!e.repeat) stopTurbo(); e.preventDefault(); }
         else if (k === "ArrowUp" || k === "ArrowDown" || k === "+" || k === "=" || k === "-" || k === "_" || k === ".") {
           showNote("Turbo runs as fast as it can: stop it (Space) to set the speed or step."); e.preventDefault();
-        } else if (lk === "r") showNote("Stop Turbo first.");
+        } else if (lk === "r") startKey(e);   /* Stop Turbo & start, asked first (Turbo used) */
         return;
       }
       if (k === " " || k === "Spacebar") { setPaused(!paused); e.preventDefault(); }
       else if (k === "+" || k === "=" || k === "ArrowUp") { changeSpeed(1); e.preventDefault(); }
       else if (k === "-" || k === "_" || k === "ArrowDown") { changeSpeed(-1); e.preventDefault(); }
-      else if (lk === "r") { if (e.shiftKey) replay(); else newWorld(); }
+      else if (lk === "r") startKey(e);
       else if (k === "." && paused) stepOnce = true;
     });
+    /* R a new world, Shift+R Replay: the same door as Start (the question in
+     * the setup sheet when the run has something to lose, its confirm button
+     * focused); a held key starts nothing twice, nor does R again while asked */
+    function startKey(e) {
+      if (e.repeat) return;
+      if (asking) { el("startconfirm").focus(); return; }
+      if (e.shiftKey) replay(); else newWorld();
+      if (asking) el("startconfirm").focus();
+    }
     /* a short tap or click selects the fish nearest it on screen; empty water
      * lets go. A drag, pinch or long press belongs to the camera. */
     var tap = null;
@@ -2109,7 +2304,7 @@
     drawerEl.classList.toggle("open", open);
     document.body.classList.toggle("sheet-open", open);
     menuBtn.setAttribute("aria-expanded", open ? "true" : "false");
-    if (!open) hideTip();
+    if (!open) { hideTip(); if (asking) hideAsk(); }   /* a question no one can see is no question: closing the sheet keeps the run */
     if (open) { setStatPanel(false); setPop(null); hideCoach(); }
     if (scene) { updateInsets(); setTimeout(updateInsets, 320); }
   }
@@ -2263,7 +2458,9 @@
     setPending(true); updateNeeds(); updateTabDots();
     showNote("Every setting is back to its default. Restart to apply.");
   });
-  btn("savecp", function () { if (guardTurbo()) return; saveSetup(); });
+  btn("savecp", saveSetup);   /* in Turbo too: the accepted setup */
+  btn("startconfirm", confirmAsk);
+  btn("startcancel", function () { hideAsk(); showNote("Kept your run."); });
   btn("loadcp", function () { if (guardTurbo()) return; el("cpfile").click(); });
   el("cpfile").addEventListener("change", function () {
     var file = this.files && this.files[0];

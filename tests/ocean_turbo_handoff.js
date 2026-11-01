@@ -264,9 +264,17 @@ const statsAt = (f) => (m) => m.type === 'stats' && m.frame >= f;
  * its start-up's URL-import block, a verbatim slice, as a function of the
  * query (urlImport); each marker must occur exactly once.
  * --------------------------------------------------------------------- */
-const PAGE_IDS = (() => {
+const PAGE_IDS = (() => {   /* id -> {tag, type, href}: ocean.html's elements, as the page finds them */
     const m = new Map(), html = fs.readFileSync(path.join(WEB, 'ocean.html'), 'utf8');
-    for (const x of html.matchAll(/<([a-zA-Z][\w-]*)\b[^>]*?\sid="([^"]+)"/g)) if (!m.has(x[2])) m.set(x[2], x[1]);
+    for (const x of html.matchAll(/<([a-zA-Z][\w-]*)\b([^>]*)>/g)) {
+        const id = /\sid="([^"]+)"/.exec(x[2]);
+        if (!id || m.has(id[1])) continue;
+        const type = /\stype="([^"]+)"/.exec(x[2]), href = /\shref="([^"]+)"/.exec(x[2]);
+        m.set(id[1], { tag: x[1], type: type ? type[1] : '', href: href ? new URL(href[1], 'http://ocean.test/ocean.html').href : null, colours: [] });
+    }
+    /* the View menu's colour buttons (their data-c), the one group the page reads by its children */
+    const cm = /<span id="colourMode"[^>]*>([\s\S]*?)<\/span>/.exec(html);
+    if (cm && m.has('colourMode')) m.get('colourMode').colours = [...cm[1].matchAll(/data-c="([^"]+)"/g)].map(x => x[1]);
     return m;
 })();
 function onceIn(src, marker, file) {
@@ -284,14 +292,22 @@ const PAGE_SRC = (() => {
         '    get M() { return M; }, get turboState() { return turboState; }, get turboWorker() { return turboWorker; },\n' +
         '    get runCfg() { return runCfg; }, get initArgs() { return initArgs; }, get live() { return live; },\n' +
         '    get W() { return W; }, get H() { return H; }, get D() { return D; }, get WALLS() { return WALLS; },\n' +
+        '    get paused() { return paused; }, get openPop() { return openPop; }, get statOpen() { return statOpen; },\n' +
         '    getVal: getVal, importWorld: importWorld, wiringNow: wiringNow, frame: frame,\n' +
         '    urlImport: function (P) {\n' + src.slice(a, b) + '    }\n  };';
     return src.slice(0, end) + access + src.slice(end);
 })();
+/* the scene: fixed answers, but the skin it was last told to draw (setAppearance -> appearance().skin) */
 const SCENE_STUB = `window.EvoOceanScene = { load: function () { return Promise.resolve(); }, create: function () {
-  var fixed = { following: false, flashlight: false, quality: 3, flashlightLevel: 0, pick: -1, project: null, view: null, degrade: false };
-  return new Proxy({}, { get: function (t, k) { return function () { return fixed[k]; }; } });
+  var fixed = { following: false, flashlight: false, quality: 3, flashlightLevel: 0, pick: -1, project: null, view: null, degrade: false,
+                appearance: { want: false, skin: false, shapes: true, drawing: false } };
+  return new Proxy({}, { get: function (t, k) {
+    if (k === "setAppearance") return function (on) { fixed.appearance = { want: !!on, skin: !!on, shapes: true, drawing: !!on }; };
+    return function () { return fixed[k]; };
+  } });
 } };`;
+/* a browser whose WebGL2 context can't be made: ocean_scene.js's create() returns null */
+const SCENE_NOGL = `window.EvoOceanScene = { load: function () { return Promise.resolve(); }, create: function () { return null; } };`;
 const CHARTS_STUB = `(function () {
   var charts = [];
   function Chart(box, kind) { this.box = box; this.kind = kind; this.data = undefined; charts.push(this); }
@@ -305,13 +321,17 @@ const CHARTS_STUB = `(function () {
 function makeDom(page) {
     const byId = new Map();
     const parse = (s) => {
-        const m = /^([a-zA-Z][\w-]*)?((?:[#.][\w-]+)*)$/.exec(s);
+        const m = /^([a-zA-Z][\w-]*)?((?:[#.][\w-]+|\[[\w-]+(?:="[^"]*")?\])*)$/.exec(s);
         if (!m) throw new Error('the test DOM has no selector ' + JSON.stringify(s));
-        const parts = m[2].match(/[#.][\w-]+/g) || [];
+        const parts = m[2].match(/[#.][\w-]+|\[[^\]]+\]/g) || [];
         return { tag: (m[1] || '').toUpperCase(), id: (parts.find(x => x[0] === '#') || '#').slice(1),
-                 cls: parts.filter(x => x[0] === '.').map(x => x.slice(1)) };
+                 cls: parts.filter(x => x[0] === '.').map(x => x.slice(1)),
+                 attrs: parts.filter(x => x[0] === '[').map(x => { const a = /^\[([\w-]+)(?:="([^"]*)")?\]$/.exec(x); return [a[1], a[2]]; }) };
     };
-    const one = (e, p) => (!p.tag || e.tagName === p.tag) && (!p.id || e._id === p.id) && p.cls.every(c => e._cls.has(c));
+    /* an attribute: data-* from the dataset (the page sets those as properties) */
+    const attrOf = (e, k) => k.startsWith('data-') ? (e.dataset[k.slice(5).replace(/-(\w)/g, (x, c) => c.toUpperCase())] ?? null) : e.getAttribute(k);
+    const one = (e, p) => (!p.tag || e.tagName === p.tag) && (!p.id || e._id === p.id) && p.cls.every(c => e._cls.has(c)) &&
+                          p.attrs.every(([k, v]) => { const a = attrOf(e, k); return v === undefined ? a !== null : a === v; });
     const matches = (e, sel) => sel.split(',').some(alt => {
         const chain = alt.trim().split(/\s+/).map(parse);
         if (!one(e, chain[chain.length - 1])) return false;
@@ -320,9 +340,10 @@ function makeDom(page) {
         return k < 0;
     });
     function* walk(e) { for (const c of e.children) { yield c; yield* walk(c); } }
-    function fireOn(n, ev) {
+    /* type: the listener list (a window's capture listeners are "keydown:capture") */
+    function fireOn(n, ev, type) {
         ev.currentTarget = n;
-        for (const f of (n._ls[ev.type] || []).slice()) {
+        for (const f of (n._ls[type || ev.type] || []).slice()) {
             try { f.call(n, ev); } catch (e) { page.uncaught.push(e); }   /* a browser reports it and goes on */
         }
     }
@@ -397,7 +418,12 @@ function makeDom(page) {
         click() { this.dispatchEvent(new Ev('click', { bubbles: true })); }
         focus() { doc.activeElement = this; }
         blur() { if (doc.activeElement === this) doc.activeElement = null; }
-        getBoundingClientRect() { return { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0, x: 0, y: 0 }; }
+        /* no layout: a zero box, unless a test gives the element one (_rect: {left, top, right, bottom}) */
+        getBoundingClientRect() {
+            const r = this._rect;
+            return r ? { left: r.left, top: r.top, right: r.right, bottom: r.bottom, width: r.right - r.left, height: r.bottom - r.top, x: r.left, y: r.top }
+                     : { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0, x: 0, y: 0 };
+        }
         getContext() { return ctx2d; }
         setPointerCapture() {}
         releasePointerCapture() {}
@@ -413,6 +439,11 @@ function makeDom(page) {
             return this.appendChild(c);
         }
         closest(sel) { for (let n = this; n; n = n.parentNode) if (matches(n, sel)) return n; return null; }
+        /* :focus-visible: focused while the keyboard is in use (page.key / page.tabTo; a click, page.pointer, ends it) */
+        matches(sel) { return sel === ':focus-visible' ? doc.activeElement === this && !!page.focusVisible : matches(this, sel); }
+        contains(n) { for (; n; n = n.parentNode) if (n === this) return true; return false; }
+        get isConnected() { return docEl.contains(this); }
+        scrollIntoView() {}
     }
     const docEl = new El('html'), body = new El('body');
     head = new El('head');
@@ -422,7 +453,17 @@ function makeDom(page) {
         createElement: t => new El(t),
         getElementById(id) {
             let e = byId.get(id);
-            if (!e && PAGE_IDS.has(id)) { e = new El(PAGE_IDS.get(id)); e._auto = true; e.id = id; body.appendChild(e); }
+            if (e && !e.isConnected) e = null;   /* removed (the tour's root once it ends) */
+            if (!e && PAGE_IDS.has(id)) {
+                const d = PAGE_IDS.get(id);
+                e = new El(d.tag); e._auto = true; e.id = id;
+                if (d.type) e.type = d.type;
+                if (d.href !== null) e.href = d.href;
+                for (const c of d.colours) {   /* #colourMode's buttons */
+                    const b = new El('button'); b.type = 'button'; b.dataset.c = c; b.setAttribute('aria-pressed', 'false'); e.appendChild(b);
+                }
+                body.appendChild(e);
+            }
             return e || null;
         },
         querySelector: s => docEl.querySelector(s),
@@ -444,26 +485,41 @@ async function until(pred, what, ms) {
 }
 const unref = (t) => { if (t && t.unref) t.unref(); return t; };
 
-/* A page at ocean.html?query, started (or refused: page.failed). */
-async function bootPage(query) {
-    const page = { hooks: {}, workers: [], uncaught: [], logs: [], inits: [], sets: [], blobs: [], raf: null };
+/* A page at ocean.html?query, started (or refused: page.failed). opts: perf
+ * (web/ocean_perf.js loaded, as ocean.html loads it), guide (web/guide.js
+ * after ocean.js, as ocean.html), nogl (no WebGL2: the scene can't be made),
+ * nosimd (WebAssembly without SIMD), media {query: true} (matchMedia; every
+ * other query false; page.setMedia changes one and tells its listeners). */
+async function bootPage(query, opts) {
+    opts = opts || {};
+    const page = { hooks: {}, workers: [], uncaught: [], logs: [], inits: [], sets: [], blobs: [], raf: null, focusVisible: false };
     const { doc, Ev, fireOn } = makeDom(page);
     const loc = {};
     const setLoc = (u) => { const x = new URL(u); Object.assign(loc, { href: x.href, search: x.search, origin: x.origin, protocol: x.protocol, pathname: x.pathname }); };
     setLoc('http://ocean.test/ocean.html' + (query || ''));
-    const storage = new Map(), winLs = {};
+    const storage = new Map(), winLs = {}, mqs = new Map();
     const say = (level) => (...a) => page.logs.push([level, a.map(String).join(' ')]);
+    /* one MediaQueryList per query, as a browser's: its matches can change, and it tells its listeners */
+    const matchMedia = (q) => {
+        if (!mqs.has(q)) mqs.set(q, { media: q, matches: !!(opts.media && opts.media[q]), _ls: [],
+                                      addEventListener(t, f) { if (t === 'change') this._ls.push(f); }, removeEventListener() {},
+                                      addListener(f) { this._ls.push(f); } });
+        return mqs.get(q);
+    };
+    const wasm = opts.nosimd ? Object.assign(Object.create(WebAssembly), { validate: () => false }) : WebAssembly;
     const ctx = {
         document: doc, location: loc, navigator: { userAgent: 'node' },
         history: { replaceState: (s, t, u) => setLoc(String(u)) },
         localStorage: { getItem: k => (storage.has(k) ? storage.get(k) : null), setItem: (k, v) => storage.set(k, String(v)), removeItem: k => storage.delete(k) },
-        matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {}, addListener() {} }),
+        matchMedia,
         getComputedStyle: () => ({ fontFamily: 'sans-serif', getPropertyValue: () => '' }),
         requestAnimationFrame: (cb) => { page.raf = cb; return 1; }, cancelAnimationFrame() {},
         innerWidth: 1920, innerHeight: 1080, devicePixelRatio: 1, _ls: winLs,
-        addEventListener: (t, f) => { (winLs[t] = winLs[t] || []).push(f); }, removeEventListener() {},
-        dispatchEvent: (ev) => { fireOn(ctx, ev); return true; },
-        Event: Ev, URL, URLSearchParams, ImageData: class {}, performance, WebAssembly, TextEncoder, TextDecoder,
+        /* a capture listener ("keydown:capture") runs before the bubbling ones, as on a browser's window */
+        addEventListener: (t, f, o) => { const k = o === true || (o && o.capture) ? t + ':capture' : t; (winLs[k] = winLs[k] || []).push(f); },
+        removeEventListener() {},
+        dispatchEvent: (ev) => { fireOn(ctx, ev, ev.type + ':capture'); fireOn(ctx, ev); return true; },
+        Event: Ev, URL, URLSearchParams, ImageData: class {}, performance, WebAssembly: wasm, TextEncoder, TextDecoder,
         Blob: function (parts, o) { page.blobs.push(parts.map(String).join('')); return new Blob(parts, o); },   /* Save setup's file */
         console: { log: say('log'), info: say('info'), warn: say('warn'), error: say('error'), debug: say('debug') },
         setTimeout: (f, ms) => unref(setTimeout(f, ms)), clearTimeout, setInterval: (f, ms) => unref(setInterval(f, ms)), clearInterval,
@@ -519,10 +575,55 @@ async function bootPage(query) {
         return sh;
     };
     const run = (name, src) => vm.runInContext(src !== undefined ? src : fs.readFileSync(path.join(WEB, name), 'utf8'), ctx, { filename: path.join(WEB, name) });
-    run('ocean_handoff.js'); run('ocean_scene_stub.js', SCENE_STUB); run('ocean_config.js');
+    run('ocean_handoff.js');
+    if (opts.perf) run('ocean_perf.js');
+    run('ocean_scene_stub.js', opts.nogl ? SCENE_NOGL : SCENE_STUB); run('ocean_config.js');
     run('charts_stub.js', CHARTS_STUB); run('ocean_dash.js'); run('ocean.js', PAGE_SRC);
+    if (opts.guide) run('guide.js');
     page.ctx = ctx; page.doc = doc; page.Ev = Ev; page.T = ctx.__oceanPage; page.KEYS = ctx.EvoOceanConfig.KEYS;
     page.el = (id) => doc.getElementById(id);
+    page.shown = (id) => { const e = page.el(id); return !!e && !e.hidden; };
+    page.setMedia = (q, on) => { const m = matchMedia(q); if (m.matches === on) return; m.matches = on; for (const f of m._ls.slice()) f.call(m, { matches: on, media: q }); };
+    /* the window at w x h: the wide layout's query from 960 px (ocean.js wideMQ), then a resize */
+    page.resize = (w, h) => {
+        ctx.innerWidth = w; ctx.innerHeight = h;
+        page.setMedia('(min-width: 960px)', w >= 960);
+        ctx.dispatchEvent(new Ev('resize'));
+    };
+    /* the keyboard: focus moved by Tab (its ring showing) */
+    page.tabTo = (id) => { page.focusVisible = true; page.el(id).focus(); };
+    /* a pointer's press: no focus ring */
+    page.pointer = () => { page.focusVisible = false; };
+    /* a key pressed where the focus is (else on the body), as a browser dispatches it: the
+     * window's capture listeners, the target and its ancestors, the document, the window; then,
+     * not prevented, what the focused control does itself: Enter or Space presses a button,
+     * Space turns a switch */
+    page.key = (key, o) => {
+        o = o || {};
+        page.focusVisible = true;
+        const t = doc.activeElement || doc.body, ev = new Ev('keydown', { bubbles: true });
+        Object.assign(ev, { key, code: o.code || (/^[a-z]$/i.test(key) ? 'Key' + key.toUpperCase() : key === ' ' ? 'Space' : ''),
+                            shiftKey: !!o.shift, ctrlKey: false, metaKey: false, altKey: false, repeat: false, target: t });
+        fireOn(ctx, ev, 'keydown:capture');
+        for (let n = t; n && !ev.stopped; n = n.parentNode) fireOn(n, ev);
+        fireOn(doc, ev);
+        fireOn(ctx, ev);
+        if (ev.defaultPrevented) return ev;
+        if (t.tagName === 'BUTTON' && (key === 'Enter' || key === ' ')) t.click();
+        else if (t.tagName === 'INPUT' && t.type === 'checkbox' && key === ' ') {
+            t.checked = !t.checked;
+            t.dispatchEvent(new Ev('input', { bubbles: true }));
+            t.dispatchEvent(new Ev('change', { bubbles: true }));
+        }
+        return ev;
+    };
+    /* run the queued animation frames until p settles (EvoOcean.bench's frames(); the page's loop) */
+    page.pump = async (p) => {
+        let done = false;
+        p.then(() => { done = true; }, () => { done = true; });
+        while (!done) { const cb = page.raf; page.raf = null; if (cb) cb(performance.now()); await tick(); }
+        return p;
+    };
     await until(() => (ctx.EvoApp && ctx.EvoApp.ready) || page.el('splashstate').className === 'error', 'the page to start', 60000);
     page.failed = page.el('splashstate').className === 'error' ? page.el('splashstate').textContent : '';
     page.M = page.T.M;
@@ -1252,26 +1353,43 @@ async function pageAsyncSetup() {
  * for good: controls locked, no Stop. Each injected failure first makes the
  * held three-edit sequence (as an edit landing in that moment would be
  * held), so the recovery must apply it too; then a second start must work. */
+/* Post-merge audit 43fedc0, finding 6: a start that fails also left a
+ * paused world running (turboBack's setPaused(false)); each failure now
+ * runs from a paused page too, which must stay paused, and the worker's
+ * asynchronous load failure (its onerror, while starting) joins them. */
 async function pageStartFailures() {
-    section('The page: a Turbo start that throws recovers (the Worker, its first message, the memory copy)');
+    section('The page: a Turbo start that throws or fails to load recovers, paused or running as it was (the Worker, its first message, the memory copy, its load)');
     const injections = [
         ['the Worker constructor throws', (p) => { p.hooks.ctor = () => { edit3(p); throw new Error('injected: no worker'); }; }],
         ['the first postMessage throws', (p) => { p.hooks.post = () => { edit3(p); throw new Error('injected: could not post'); }; }],
         ['the memory copy throws', (p) => {
             const b = HO.buffer(p.M);
             Object.defineProperty(b, 'slice', { configurable: true, value: () => { delete b.slice; edit3(p); throw new RangeError('injected: out of memory'); } });
+        }],
+        ['the worker fails to load', (p) => {   /* its script: the Worker is made, then its error event, before any answer */
+            p.hooks.onWorker = (sh) => {
+                p.hooks.onWorker = null;
+                sh.pause();
+                edit3(p);
+                setImmediate(() => { if (sh.onerror) sh.onerror({ message: 'injected: could not load ocean_worker.js', preventDefault() {} }); });
+            };
         }]
     ];
-    for (const [what, arm] of injections) {
-        const p = await bootPage(PAGE_Q);
+    for (const paused of [false, true]) for (const [what0, arm] of injections) {
+        const p = await bootPage(PAGE_Q), what = (paused ? 'paused, ' : '') + what0;
+        if (paused) p.click('pausebtn');
         const img = HO.buffer(p.M).slice(0), f0 = frame(p.M), sets0 = p.sets.length, nW = p.workers.length;
         arm(p);
         p.click('turbobtn');
         for (let i = 0; i < 4; i++) await tick();
         const sh = p.workers.length > nW ? p.worker() : null, c = turboControls(p);
-        ok(p.T.turboState === 'live' && p.T.turboWorker === null && !c.card && c.button && !c.locked.length && /Turbo could not start/.test(p.msg()),
+        ok(p.T.turboState === 'live' && p.T.turboWorker === null && !c.card && c.button && !c.locked.length &&
+           /Turbo could not start|The Turbo worker failed/.test(p.msg()),
            what + ': the page is live again, no worker, the Turbo card hidden, its button on, nothing locked ("' + p.msg() + '"; state ' +
            p.T.turboState + (c.locked.length ? ', locked ' + c.locked.join(' ') : '') + ')');
+        const playing = p.el('pausebtn').getAttribute('aria-label') === 'pause';
+        ok(p.T.paused === paused && playing === !paused && p.el('stepbtn').hidden === !paused,
+           what + ': ' + (paused ? 'still paused (▶ and the step button showing)' : 'still running') + ' (paused ' + p.T.paused + ')');
         if (sh) ok(sh.terminated === 1 && sh.onmessage === null && sh.onerror === null,
                    what + ': the worker it had made is terminated once, its handlers detached (' + sh.terminated + ')');
         ok(at5to10(p), what + ': the edits held in that moment apply, in order (' + speeds(p) + ')');
@@ -1284,7 +1402,8 @@ async function pageStartFailures() {
             await until(() => p.worker().fromWorker.some(m => m.type === 'stats' && m.frame >= f1 + 60), 'the second run');
             p.click('turboexit');
             await until(() => p.T.turboState === 'live', 'the second hand-back');
-            ok(frame(p.M) > f1 && at5to10(p), what + ': a second Turbo starts and hands back (frame ' + f1 + ' -> ' + frame(p.M) + ')');
+            ok(frame(p.M) > f1 && at5to10(p) && !p.T.paused,
+               what + ': a second Turbo starts and hands back, and the world runs on, as after any Stop (frame ' + f1 + ' -> ' + frame(p.M) + ')');
         } else ok(false, what + ': a second Turbo start (the page is stuck "' + p.T.turboState + '")');
         ok(p.uncaught.length === 0, what + ': no exception escaped the page\'s handlers' + (p.uncaught.length ? ' (' + p.uncaught[0] + ')' : ''));
     }
@@ -1685,6 +1804,476 @@ async function pageRoundTrip() {
     ok(p.uncaught.length === 0, 'no exception escaped the page\'s handlers');
 }
 
+/* ---------------------------------------------------------------------
+ * Post-merge audit of main 43fedc0 (#32-#35), its findings on the page's
+ * controls. These run the real ocean.js (and ocean_perf.js / guide.js
+ * where ocean.html loads them) on the test DOM: keys dispatched as a
+ * browser does (the window's capture listeners first, a focused control's
+ * own keys), :focus-visible while the keyboard is in use, the 960 px media
+ * query as a list that changes and tells its listeners. Layout, stacking
+ * and real focus are the browser script's (pagefix4/ui_matrix.cjs).
+ * --------------------------------------------------------------------- */
+const sheetOpen = (p) => p.el('drawer').classList.contains('open');
+const dashUp = (p) => p.ctx.EvoOceanDash.isOpen();
+const focused = (p) => (p.doc.activeElement && p.doc.activeElement.id) || null;
+
+/* Finding 1: the benchmark's colour mode went to a <span>'s .value (the
+ * View menu's buttons replaced the select), so a case "in Brain" ran in
+ * Appearance. Finding 12: bench.info() read a class #dash never has. */
+async function pageColourBench() {
+    section('The page: the benchmark runs in the colour mode it names, and reads the charts\' state (audit 43fedc0, findings 1 and 12)');
+    const p = await bootPage('?renderBench=1&' + PAGE_Q.slice(1), { perf: true });
+    const B = p.ctx.EvoOcean && p.ctx.EvoOcean.bench;
+    if (!B) { ok(false, 'EvoOcean.bench with ?renderBench=1 and ocean_perf.js (' + (p.failed || 'none') + ')'); return; }
+    const look = () => {
+        const st = p.ctx.EvoOcean.state();
+        return { mode: st.colourMode, brain: st.colourBrain, skin: p.ctx.EvoOcean.scene.appearance().skin,
+                 pressed: p.el('colourMode').querySelectorAll('button[aria-pressed="true"]').map(b => b.dataset.c).join() };
+    };
+    for (const m of ['brain', 'family', 'appearance']) {
+        let prep = null, err = '';
+        try { prep = await p.pump(B.prepare({ colourMode: m, settleMs: 0 })); } catch (e) { err = String(e && e.message || e); }
+        const l = look(), info = B.info();
+        ok(prep && prep.colourMode === m && info.colourMode === m && l.mode === m && l.pressed === m && l.brain === (m === 'brain') &&
+           l.skin === (m === 'appearance'),
+           'prepare({colourMode: "' + m + '"}): the page is in it — the controller, its pressed button, colourBrain ' + (m === 'brain') +
+           ', the scene\'s skin ' + (m === 'appearance') + '; the case and info() report it (' +
+           (err || 'case ' + (prep && prep.colourMode) + ', info ' + info.colourMode + ', page ' + JSON.stringify(l)) + ')');
+    }
+    ok(p.ctx.localStorage.getItem('evo_boids.colourBy') === null, 'the benchmark\'s colour modes were not stored as the visitor\'s choice');
+    {
+        let bad = false;
+        try { await p.pump(B.prepare({ colourMode: 'rainbow', settleMs: 0 })); } catch (e) { bad = /colour mode rainbow/.test(String(e && e.message)); }
+        ok(bad && look().mode === 'appearance', 'a case with an unknown colour mode is refused, the mode kept');
+    }
+    const seen = [];
+    seen.push([B.info().dashboardOpen, dashUp(p)]);
+    p.ctx.EvoOceanDash.open();
+    seen.push([B.info().dashboardOpen, dashUp(p)]);
+    await p.pump(B.capture({ durationMs: 30, drainMs: 0, raw: true }));
+    seen.push([B.info().dashboardOpen, dashUp(p)]);
+    p.ctx.EvoOceanDash.close();
+    seen.push([B.info().dashboardOpen, dashUp(p)]);
+    ok(seen.map(String).join(' ') === 'false,false true,true true,true false,false',
+       'bench.info().dashboardOpen is EvoOceanDash.isOpen() closed, open, after a capture with them open, closed again (' + seen.map(s => s.join('/')).join(' ') + ')');
+    ok(p.uncaught.length === 0, 'no exception escaped the page\'s handlers' + (p.uncaught.length ? ' (' + p.uncaught[0] + ')' : ''));
+}
+
+/* Finding 2: I opened the live numbers under the charts or a narrow
+ * screen's settings, and the charts' Esc closed them too. Finding 8: an
+ * open coach mark stayed over the fish card, the live numbers, the charts. */
+async function pageLayers() {
+    section('The page: the live numbers open on top, the charts\' Esc leaves them, the coach mark gives way (audit 43fedc0, findings 2 and 8)');
+    const p = await bootPage(PAGE_Q);   /* a narrow screen: matchMedia false */
+    p.key('g');
+    const g1 = dashUp(p);
+    p.key('i');
+    ok(g1 && !dashUp(p) && p.shown('statpanel') && p.T.statOpen, 'G then I: the charts close and the live numbers show (charts ' + g1 + ' -> ' + dashUp(p) + ')');
+    ok(p.doc.body.classList.contains('stat-open'), '  the body says so (stat-open: the Fit button waits, rather than cover their first rows)');
+    p.key('Escape');
+    p.key('o');
+    const o1 = sheetOpen(p);
+    p.key('i');
+    ok(o1 && !sheetOpen(p) && p.shown('statpanel'), 'O then I below 960 px: the settings sheet closes, the live numbers show (sheet ' + o1 + ' -> ' + sheetOpen(p) + ')');
+    p.key('Escape');
+    p.key('v');
+    p.key('i');
+    ok(p.T.openPop === null && p.shown('statpanel'), 'V then I: the View menu closes, the live numbers show');
+    p.key('Escape');
+    p.key('i'); p.key('g');
+    const both = p.shown('statpanel') && dashUp(p);
+    p.key('Escape');
+    ok(both && !dashUp(p) && p.shown('statpanel'), 'I, G, Esc: Esc closes the charts and only them: the live numbers are still there (' + p.shown('statpanel') + ')');
+    p.key('Escape');
+    ok(!p.shown('statpanel'), 'a second Esc closes the live numbers');
+    p.resize(1400, 900);
+    p.key('o'); p.key('i');
+    ok(sheetOpen(p) && p.shown('statpanel'), 'O then I on a wide screen: the settings panel stays beside the live numbers');
+    p.key('Escape'); p.key('Escape');
+    p.resize(1920, 1080); p.resize(800, 900);
+    /* the coach mark, shown, then each surface that opens where it sits */
+    const surfaces = [['selecting a fish', () => p.ctx.EvoOcean.select(0)], ['I', () => p.key('i')], ['the readout', () => p.click('readout')],
+                      ['G', () => p.key('g')], ['the charts button', () => p.click('dashbtn')]];
+    for (const [what, act] of surfaces) {
+        p.ctx.EvoOceanDash.close(); if (p.T.statOpen) p.click('readout'); p.ctx.EvoOcean.select(-1);
+        p.el('coach').hidden = false;
+        act();
+        ok(!p.shown('coach'), 'the coach mark goes when ' + what + ' opens ' + (what === 'selecting a fish' ? 'its card' : what === 'G' || what === 'the charts button' ? 'the charts' : 'the live numbers'));
+    }
+    ok(p.uncaught.length === 0, 'no exception escaped the page\'s handlers' + (p.uncaught.length ? ' (' + p.uncaught[0] + ')' : ''));
+}
+
+/* Finding 3: Settings beside a popover (or the live numbers) on a wide
+ * screen, then narrower than 960 px: the sheet covered them. */
+async function pageResize() {
+    section('The page: crossing 960 px with the settings and a popover or the live numbers open (audit 43fedc0, finding 3)');
+    for (const [w, h] of [[890, 453], [390, 844]]) {
+        const p = await bootPage(PAGE_Q, { media: { '(min-width: 960px)': true } });
+        p.ctx.innerWidth = 1000; p.ctx.innerHeight = 700;
+        for (const pop of ['view', 'help']) {
+            p.click('menubtn');
+            p.click(pop === 'view' ? 'viewmenubtn' : 'helpbtn');
+            const before = sheetOpen(p) && p.T.openPop === pop;
+            p.resize(w, h);
+            ok(before && !sheetOpen(p) && p.T.openPop === pop && p.shown(pop + 'pop'),
+               'wide, Settings and ' + pop + ' open, then ' + w + ' x ' + h + ': the sheet closes, ' + pop + ' stays (sheet ' + sheetOpen(p) + ', popover ' + p.T.openPop + ')');
+            p.click(pop + 'close');
+            ok(p.T.openPop === null, '  and its × closes it');
+            p.resize(1000, 700);
+        }
+        p.click('menubtn'); p.click('readout');
+        const before = sheetOpen(p) && p.shown('statpanel');
+        p.resize(w, h);
+        ok(before && !sheetOpen(p) && p.shown('statpanel'), 'wide, Settings and the live numbers open, then ' + w + ' x ' + h + ': the sheet closes, the numbers stay');
+        p.resize(1000, 700);
+        p.click('readout'); p.click('menubtn');
+        p.resize(w, h);
+        ok(sheetOpen(p), 'the settings alone stay open across the breakpoint');
+        ok(p.uncaught.length === 0, 'no exception escaped the page\'s handlers' + (p.uncaught.length ? ' (' + p.uncaught[0] + ')' : ''));
+    }
+}
+
+/* Finding 4: with a button focused (as Esc leaves the View button) every
+ * letter shortcut was ignored; V and ? opened without the focus. */
+async function pageKeys() {
+    section('The page: shortcuts with a control focused, and V / ? opening with the focus (audit 43fedc0, finding 4)');
+    const p = await bootPage(PAGE_Q);
+    p.tabTo('viewmenubtn');
+    p.key('Enter');
+    const opened = p.T.openPop === 'view' && focused(p) === 'lightnow';
+    p.key('Escape');
+    ok(opened && p.T.openPop === null && focused(p) === 'viewmenubtn',
+       'Tab to View, Enter: it opens with the focus on its first switch; Esc: closed, the focus back on View (' + focused(p) + ')');
+    const light0 = p.el('lightbtn').getAttribute('aria-pressed');
+    p.key('l');
+    const light1 = p.el('lightbtn').getAttribute('aria-pressed');
+    p.key('f');
+    const sel = p.ctx.EvoOcean.state().selectedId;
+    p.key('+');
+    const spd = p.el('speedlabel').textContent;
+    p.key('c');
+    ok(light0 === 'false' && light1 === 'true' && sel !== null && spd === '2×' && p.uncaught.length === 0,
+       'then, View still focused: L turns the light on (' + light0 + ' -> ' + light1 + '), F follows a fish (' + sel + '), + speeds up (' + spd + '), C fits the view');
+    p.key('Escape');
+    p.key('v');
+    const v1 = p.T.openPop === 'view' && focused(p) === 'lightnow';
+    p.key('v');
+    ok(v1 && p.T.openPop === null && focused(p) === 'viewmenubtn', 'V opens View with the focus inside; V again closes it, the focus back on View (' + focused(p) + ')');
+    p.key('?', { shift: true });
+    const h1 = p.T.openPop === 'help' && focused(p) === 'tourbtn';
+    p.key('Escape');
+    ok(h1 && p.T.openPop === null && focused(p) === 'helpbtn', '? opens Help with the focus on its first button; Esc closes it, the focus back on Help (' + focused(p) + ')');
+    p.key('v');
+    const paused0 = p.T.paused, sw0 = p.el('lightnow').checked;
+    p.key(' ');
+    ok(p.T.paused === paused0 && p.el('lightnow').checked !== sw0 && p.el('lightbtn').getAttribute('aria-pressed') === String(!sw0),
+       'Space on the focused flashlight switch turns it, and does not pause (switch ' + sw0 + ' -> ' + p.el('lightnow').checked + ')');
+    p.key('l');
+    ok(p.el('lightnow').checked === sw0, '  L there turns the light back (a switch is not a text field)');
+    p.key('Escape');
+    p.key(' ');
+    ok(p.T.paused === paused0 && p.T.openPop === 'view', 'Space on the focused View button presses it (View opens), and does not pause');
+    p.key('Escape');
+    p.tabTo('o_kBuoy');
+    p.key('l');
+    ok(p.el('lightnow').checked === sw0, 'a number field keeps its keys: L typed there is no shortcut');
+    ok(p.uncaught.length === 0, 'no exception escaped the page\'s handlers' + (p.uncaught.length ? ' (' + p.uncaught[0] + ')' : ''));
+}
+
+/* Finding 5: no WebGL2, and the landing page's error splash had no way on;
+ * finding 11: "Open it with the default settings" kept ?speed=, so it
+ * started a wrapping world where a fresh visit has glass walls. */
+async function pageStartupFailures() {
+    section('The page: a start that fails offers 2-D Classic, and "default settings" is a fresh visit (audit 43fedc0, findings 5 and 11)');
+    {
+        const p = await bootPage(PAGE_Q, { nogl: true });
+        const c = p.el('splashclassic');
+        ok(/WebGL2/.test(p.failed) && c && c.isConnected && c.href === p.el('to2d').href && /\/index\.html$/.test(c.href),
+           'no WebGL2: the splash says why and offers "Open 2-D Classic", at #to2d\'s address (' + (c ? c.href : 'none') + '; "' + p.failed.split('\n').pop() + '")');
+    }
+    {
+        const p = await bootPage(PAGE_Q, { nosimd: true });
+        ok(/SIMD/.test(p.failed) && !p.el('splashclassic'), 'no WebAssembly SIMD: no Classic offered (its modules need SIMD too)');
+    }
+    {
+        const p = await bootPage('?speed=2&colour=family&cfg=' + encodeURIComponent('{"maxPopulation":0.5}'));
+        const a = p.el('splashplain'), c = p.el('splashclassic'), u = a ? new URL(a.href) : null;
+        const left = u ? ['seed', 'pop', 'depth', 'w', 'h', 'cfg', 'speed', 'e1', 'mock', 'walls'].filter(k => u.searchParams.has(k)) : null;
+        ok(/refused/.test(p.failed) && u && left.length === 0 && u.searchParams.get('colour') === 'family' && c,
+           'a refused link with ?speed=: "Open it with the default settings" drops every world key (' + (u ? u.search : 'no link') + '), and Classic is offered too');
+        const q = await bootPage(u ? u.search : '?speed=2');
+        ok(!q.failed && q.M._oc_walls_enabled() === 1 && q.el('o_walls').checked, 'that link starts as a bare address does: glass walls (' + (q.failed || 'walls ' + q.M._oc_walls_enabled()) + ')');
+    }
+}
+
+/* Finding 9: in the tour's "Your own settings", Esc in a number field
+ * closed the settings (the page's) but not the tour (guide.js's typing
+ * guard came first), which then pointed at nothing. */
+async function pageTourEscape() {
+    section('The page: Esc in a field during the tour ends the tour, once (audit 43fedc0, finding 9)');
+    const p = await bootPage(PAGE_Q, { guide: true });
+    const title = () => { const g = p.el('guide'), h = g && g.querySelector('h2'); return h ? h.textContent : ''; };
+    p.ctx.EvoGuide.start();
+    for (let i = 0; i < 20 && title() !== 'Your own settings'; i++) p.key('ArrowRight');
+    ok(title() === 'Your own settings' && sheetOpen(p), 'the tour is at "Your own settings", its settings open');
+    p.tabTo('o_kBuoy');
+    p.key('ArrowRight');
+    ok(title() === 'Your own settings', '  an arrow key in its number field stays the field\'s (the tour waits)');
+    p.key('Escape');
+    ok(!p.el('guide') && !sheetOpen(p) && focused(p) === null,
+       'Esc in that field ends the tour, which closes its settings: no tour left pointing at a closed sheet (tour ' + !!p.el('guide') + ', sheet ' + sheetOpen(p) + ')');
+    p.ctx.EvoGuide.start();
+    p.key('i');
+    const both = !!p.el('guide') && p.shown('statpanel');
+    p.key('Escape');
+    ok(both && !p.el('guide') && p.shown('statpanel'), 'the live numbers opened during the tour: Esc ends the tour and leaves them (' + p.shown('statpanel') + ')');
+    ok(p.uncaught.length === 0, 'no exception escaped the page\'s handlers' + (p.uncaught.length ? ' (' + p.uncaught[0] + ')' : ''));
+}
+
+/* Finding 10: a whole-number setting typed 300.5 ran as 301 (live, and on
+ * Restart) under a field showing 300.5. */
+async function pageWholeFields() {
+    section('The page: whole-number settings typed with a fraction are refused, not rounded (audit 43fedc0, finding 10)');
+    const p = await bootPage(PAGE_Q7);
+    const sets0 = p.sets.length, run0 = JSON.stringify(p.T.runCfg), print0 = fingerprint(p.M);
+    p.edit('maxPopulation', '300.5');
+    ok(p.sets.length === sets0 && JSON.stringify(p.T.runCfg) === run0 && fingerprint(p.M) === print0 && p.el('o_maxPopulation').value === '0' &&
+       /whole number/.test(p.msg()),
+       'live: the population cap (maxPopulation) 300.5 is refused visibly, nothing sent to the world, the field back to what runs ("' + p.msg() + '"; field ' +
+       p.el('o_maxPopulation').value + ')');
+    p.edit('maxPopulation', '300');
+    ok(p.T.runCfg.maxPopulation === 300 && p.sets.length === sets0 + 1 && p.sets[sets0][1] === 'maxPopulation' && p.sets[sets0][2] === 300,
+       '  300 applies live');
+    for (const [key, typed, def] of [['predatorCount', '1.5', '0'], ['genomeMaxLength', '80.5', '80'], ['foodPatches', '0.5', '0']]) {
+        const n0 = p.inits.length, pr0 = fingerprint(p.M);
+        p.edit(key, typed);
+        p.click('restart');
+        ok(p.inits.length === n0 && fingerprint(p.M) === pr0 && p.el('o_' + key).value === typed && /whole number/.test(p.msg()) &&
+           new RegExp('got ' + typed.replace('.', '\\.')).test(p.msg()),
+           'Restart with ' + key + ' ' + typed + ': refused with the reason, no oc_init, the field as typed ("' + p.msg() + '")');
+        p.edit(key, def);
+    }
+    p.edit('predatorCount', '2');
+    p.click('restart');
+    ok(p.T.initArgs.cfg.predatorCount === 2 && p.T.runCfg.predatorCount === 2, 'a whole number runs as typed (predatorCount 2)');
+    ok(p.uncaught.length === 0, 'no exception escaped the page\'s handlers' + (p.uncaught.length ? ' (' + p.uncaught[0] + ')' : ''));
+}
+
+/* ---------------------------------------------------------------------
+ * Review of PR #37 (Codex, 2026-11-01): its findings, and the coverage it
+ * asked for where the test DOM can show it.
+ * --------------------------------------------------------------------- */
+
+/* Review finding 1: a valid edit of a key on its way to the world (held
+ * while Turbo starts or stops, or sent and not yet answered), then a
+ * fraction of the same key, refused: the field went back to what ran
+ * before and lost the held edit's note, and the valid edit then applied
+ * under a field showing the old value. */
+async function pageTurboFraction() {
+    section('The page: a fraction refused while a valid edit of the key is on its way keeps that edit in the field (review of PR #37, finding 1)');
+    const look = (p) => ({ field: p.el('o_maxPopulation').value, note: p.note('maxPopulation') });
+    const twoEdits = (p) => { p.edit('maxPopulation', '300'); p.edit('maxPopulation', '300.5'); return Object.assign(look(p), { msg: p.msg() }); };
+    const answered = (sh) => sh.delivered.filter(isType('set')).length === sh.toWorker.filter(m => m.cmd === 'set').length;
+    {   /* entering: the first stats held */
+        const p = await bootPage(PAGE_Q);
+        p.hooks.onWorker = (sh) => sh.pause();
+        p.click('turbobtn');
+        const sh = p.worker();
+        await until(() => sh.queued(isType('stats')), 'the first stats');
+        const mid = twoEdits(p);
+        sh.resume();
+        await until(() => p.T.turboState === 'turbo' && answered(sh) && sh.toWorker.some(m => m.cmd === 'set'), 'the held edit\'s answer');
+        const after = look(p);
+        ok(p.T.turboState === 'turbo' && mid.field === '300' && /as soon as Turbo has started/.test(mid.note) && /whole number/.test(mid.msg) &&
+           setsTo(sh) === 'maxPopulation=300' && p.T.runCfg.maxPopulation === 300 && after.field === '300' && after.note === '',
+           'entering: 300 held, 300.5 refused: the field shows the held 300 with its note ("' + mid.note + '"); the worker gets 300 alone; then 300, no note (' +
+           JSON.stringify({ mid, after, sent: setsTo(sh) }) + ')');
+        p.click('turboexit');
+        await until(() => p.T.turboState === 'live', 'the hand-back');
+        ok(p.T.runCfg.maxPopulation === 300 && look(p).field === '300', '  handed back: 300 runs and shows');
+    }
+    {   /* exiting: the memory held */
+        const { p, sets0, sh } = await pageInTurbo();
+        sh.pause();
+        p.click('turboexit');
+        await until(() => sh.queued(isType('memory')), 'the memory');
+        const mid = twoEdits(p);
+        sh.resume();
+        await until(() => p.T.turboState === 'live', 'the hand-back');
+        const after = look(p), applied = p.sets.slice(sets0).map(e => e[1] + '=' + e[2]).join(',');
+        ok(mid.field === '300' && /as soon as Turbo hands the world back/.test(mid.note) && applied === 'maxPopulation=300' &&
+           p.T.runCfg.maxPopulation === 300 && after.field === '300' && after.note === '',
+           'exiting: 300 held, 300.5 refused: the field keeps 300 and its note; the page applies 300 alone on the world handed back (' +
+           JSON.stringify({ mid, after, applied }) + ')');
+    }
+    {   /* an acknowledgment outstanding: 300 sent, its answer held */
+        const { p, sh } = await pageInTurbo();
+        sh.pause();
+        p.edit('maxPopulation', '300');
+        await until(() => sh.queued((m) => m.type === 'set'), 'its answer');
+        p.edit('maxPopulation', '300.5');
+        const mid = look(p);
+        p.el('o_maxPopulation').value = '0';   /* and the field shown stale, as a refusal before this fix left it */
+        sh.resume();
+        await until(() => answered(sh) && sh.delivered.some(isType('set')), 'the answer');
+        const after = look(p);
+        ok(mid.field === '300' && mid.note === '' && setsTo(sh) === 'maxPopulation=300' && p.T.runCfg.maxPopulation === 300 && after.field === '300',
+           'an answer outstanding: 300.5 refused leaves the field at the 300 on its way; the answer, with nothing newer on its way, puts the field right (' +
+           JSON.stringify({ mid, after }) + ')');
+        p.click('turboexit');
+        await until(() => p.T.turboState === 'live', 'the hand-back');
+        ok(p.T.runCfg.maxPopulation === 300 && look(p).field === '300' && p.uncaught.length === 0, '  handed back: 300 runs and shows; no exception escaped');
+    }
+}
+
+/* Review finding 2: the live numbers opened under a fish card where the two
+ * overlap (a phone; a card flipped to the top, its brain open). The newer
+ * of the two shows; the fish stays selected while its card waits. Boxes
+ * given here (the test DOM has no layout). */
+async function pageCardNumbers() {
+    section('The page: the live numbers and a fish card, where they overlap: the newer shows (review of PR #37, finding 2)');
+    const p = await bootPage(PAGE_Q);
+    const run = () => p.T.frame(performance.now());
+    const box = (l, t, r, b) => ({ left: l, top: t, right: r, bottom: b });
+    p.click('pausebtn');
+    p.el('statpanel')._rect = box(10, 64, 350, 654);
+    p.el('fishcard')._rect = box(10, 64, 380, 520);   /* a phone's card flipped to the top, its brain open */
+    p.ctx.EvoOcean.select(0); run();
+    if (p.el('iexpand').getAttribute('aria-expanded') !== 'true') p.click('iexpand');
+    p.el('fishcard').classList.add('flip'); run();
+    const id0 = p.ctx.EvoOcean.state().selectedId, card0 = p.shown('fishcard');
+    p.key('i'); run(); run();
+    ok(card0 && p.shown('statpanel') && !p.shown('fishcard') && p.ctx.EvoOcean.state().selectedId === id0 &&
+       p.el('iexpand').getAttribute('aria-expanded') === 'true',
+       'a flipped card with its brain open, then I: the numbers show, the card waits, its fish still selected (' + id0 + ')');
+    p.key('Escape'); run();
+    ok(!p.shown('statpanel') && p.shown('fishcard') && p.ctx.EvoOcean.state().selectedId === id0,
+       '  Esc closes the numbers (the visible layer), and the card is back');
+    p.click('readout'); run();
+    const held = p.shown('statpanel') && !p.shown('fishcard');
+    p.ctx.EvoOcean.select(1); run();
+    const id1 = p.ctx.EvoOcean.state().selectedId;
+    ok(held && id1 !== id0 && !p.shown('statpanel') && p.shown('fishcard'),
+       'the numbers open (the readout), then another fish picked: its card shows and the numbers close (' + id0 + ' -> ' + id1 + ')');
+    p.el('fishcard')._rect = box(1530, 76, 1910, 600);   /* a wide screen's card, at the right */
+    p.key('i'); run(); run();
+    ok(p.shown('statpanel') && p.shown('fishcard'), 'where they do not overlap (a wide screen), both stay');
+    ok(p.uncaught.length === 0, 'no exception escaped the page\'s handlers' + (p.uncaught.length ? ' (' + p.uncaught[0] + ')' : ''));
+}
+
+/* Review finding 3: "Open it with the default settings" kept Classic's
+ * routing keys, so a refused link with ?threads= (or view, bench, ...) and
+ * Ocean keys went, once they were dropped, to Classic (ocean.html's head). */
+async function pageMixedRecovery() {
+    section('The page: the default-settings recovery of a link with Classic\'s keys stays on the Ocean (review of PR #37, finding 3)');
+    const html = fs.readFileSync(path.join(WEB, 'ocean.html'), 'utf8'), js = fs.readFileSync(path.join(WEB, 'ocean.js'), 'utf8');
+    const list = (src, name) => { const m = new RegExp('var ' + name + ' = (\\[[^\\]]*\\])').exec(src); return m ? JSON.parse(m[1]) : null; };
+    const CLASSIC_ONLY = list(html, 'CLASSIC_ONLY'), OCEAN_ONLY = list(html, 'OCEAN_ONLY'), CLASSIC_KEYS = list(js, 'CLASSIC_KEYS');
+    ok(CLASSIC_ONLY && JSON.stringify(CLASSIC_KEYS) === JSON.stringify(CLASSIC_ONLY), 'web/ocean.js\'s CLASSIC_KEYS are ocean.html\'s CLASSIC_ONLY (' + JSON.stringify(CLASSIC_KEYS) + ')');
+    /* ocean.html's head: a query with a Classic-only key and no Ocean-only one goes to Classic */
+    const toClassic = (q) => CLASSIC_ONLY.some(k => q.has(k)) && !OCEAN_ONLY.some(k => q.has(k));
+    for (const extra of ['threads=0', 'view=flat', 'bench=1', 'threads=0&view=flat&fish=500&gl=0&nthreads=2&bench=1']) {
+        const p = await bootPage('?speed=2&' + extra + '&colour=family&clarity=realistic&cfg=' + encodeURIComponent('{"maxPopulation":0.5}'));
+        const a = p.el('splashplain'), u = a ? new URL(a.href) : null;
+        const left = u ? [...u.searchParams.keys()] : null;
+        ok(/refused/.test(p.failed) && u && !toClassic(u.searchParams) && left.join() === 'colour,clarity',
+           '?speed=2&' + extra + ' refused: the recovery keeps only colour and clarity (' + (u ? u.search : 'no link') + ') and stays on the Ocean');
+    }
+    const q = await bootPage('?colour=family&clarity=realistic');
+    ok(!q.failed && q.M._oc_walls_enabled() === 1, '  it starts as a fresh visit: glass walls');
+}
+
+/* Review finding 4: one owner for each Esc. The tour (on top), then the
+ * charts, then the page's own; with the tour and the charts open, one Esc
+ * closed both. */
+async function pageEscOwner() {
+    section('The page: one Esc, one owner: the tour, then the charts, then the page (review of PR #37, finding 4)');
+    const p = await bootPage(PAGE_Q, { guide: true });
+    p.ctx.EvoGuide.start();
+    p.key('g');
+    const both = !!p.el('guide') && dashUp(p);
+    p.key('Escape');
+    const one = !p.el('guide') && dashUp(p);
+    p.key('Escape');
+    ok(both && one && !dashUp(p), 'the tour and the charts open: the first Esc ends the tour only, the second closes the charts');
+    p.key('i'); p.key('g');
+    p.ctx.EvoGuide.start();
+    const three = !!p.el('guide') && dashUp(p) && p.shown('statpanel');
+    p.key('Escape');
+    const s1 = [!!p.el('guide'), dashUp(p), p.shown('statpanel')].join();
+    p.key('Escape');
+    const s2 = [!!p.el('guide'), dashUp(p), p.shown('statpanel')].join();
+    p.key('Escape');
+    const s3 = [!!p.el('guide'), dashUp(p), p.shown('statpanel')].join();
+    ok(three && s1 === 'false,true,true' && s2 === 'false,false,true' && s3 === 'false,false,false',
+       'the live numbers, the charts and the tour: three presses, one layer each, from the top (tour, charts, numbers left: ' + [s1, s2, s3].join(' | ') + ')');
+    ok(p.uncaught.length === 0, 'no exception escaped the page\'s handlers' + (p.uncaught.length ? ' (' + p.uncaught[0] + ')' : ''));
+}
+
+/* Review findings 5 and 6: a focused settings tab's arrows also paged the
+ * tour; the charts' tabs reserved the arrows (role tab) without moving. */
+async function pageTabKeys() {
+    section('The page: the tabs\' own arrow keys (settings, charts), during the tour too (review of PR #37, findings 5 and 6)');
+    const p = await bootPage(PAGE_Q, { guide: true });
+    const title = () => { const g = p.el('guide'), h = g && g.querySelector('h2'); return h ? h.textContent : ''; };
+    const dt = () => p.el('dtabs').children, sel = () => dt().findIndex(b => b.getAttribute('aria-selected') === 'true');
+    /* the charts' tabs, no tour */
+    p.key('g');
+    const n = dt().length;
+    p.focusVisible = true; dt()[sel()].focus();
+    const s0 = sel(), spd0 = p.el('speedlabel').textContent;
+    p.key('ArrowRight');
+    const s1 = sel(), f1 = p.doc.activeElement === dt()[s1];
+    p.key('End'); const s2 = sel();
+    p.key('Home'); const s3 = sel();
+    p.key('ArrowLeft'); const s4 = sel();
+    p.key('ArrowUp');
+    ok(n > 2 && s1 === (s0 + 1) % n && f1 && s2 === n - 1 && s3 === 0 && s4 === n - 1 && p.doc.activeElement === dt()[n - 1] &&
+       p.el('speedlabel').textContent === spd0,
+       'the charts\' tabs: Right, End, Home, Left move the selection and the focus (' + [s0, s1, s2, s3, s4].join(' -> ') + ' of ' + n + '); the arrows are not speed keys there');
+    ok(dt().every((b, i) => b.tabIndex === (i === sel() ? 0 : -1)), '  Tab lands on the selected one (roving tabindex)');
+    p.key('Enter');
+    ok(p.doc.activeElement === dt()[sel()], '  Enter on a focused tab keeps the focus there');
+    p.key('Escape');
+    /* the tour: a focused settings tab's arrows are the tab's */
+    p.ctx.EvoGuide.start();
+    for (let i = 0; i < 20 && title() !== 'Your own settings'; i++) { p.doc.activeElement = null; p.key('ArrowRight'); }
+    const at = title(), tabSel = () => p.el('tabs').children.findIndex(b => b.getAttribute('aria-selected') === 'true');
+    const t0 = tabSel();
+    p.tabTo(p.el('tabs').children[t0].id);
+    p.key('ArrowRight');
+    ok(at === 'Your own settings' && tabSel() === t0 + 1 && title() === 'Your own settings',
+       'the tour at "Your own settings", a settings tab focused: Right moves the tab (' + t0 + ' -> ' + tabSel() + ') and the tour stays (' + title() + ')');
+    p.key('g');
+    p.focusVisible = true; dt()[sel()].focus();
+    const c0 = sel();
+    p.key('ArrowRight');
+    ok(sel() === (c0 + 1) % n && title() === 'Your own settings', '  a chart tab focused: Right moves the chart tab, the tour stays');
+    p.doc.activeElement = null;
+    p.key('ArrowRight');
+    ok(title() === 'You\'re set', '  with nothing focused, Right pages the tour (' + title() + ')');
+    ok(p.uncaught.length === 0, 'no exception escaped the page\'s handlers' + (p.uncaught.length ? ' (' + p.uncaught[0] + ')' : ''));
+}
+
+/* The review's coverage: a whole number written 300.0 (a float that is
+ * whole) is accepted as 300 by the field, a setup file and the link. */
+async function pageIntegralFloats() {
+    section('The page: 300.0 is a whole number: the field, a setup file and the link take it (review of PR #37, coverage)');
+    const p = await bootPage(PAGE_Q7);
+    const sets0 = p.sets.length;
+    p.edit('maxPopulation', '300.0');
+    ok(p.T.runCfg.maxPopulation === 300 && p.sets.length === sets0 + 1 && p.sets[sets0][2] === 300, 'live: 300.0 applies as 300');
+    p.edit('predatorCount', '2.0'); p.click('restart');
+    ok(p.T.initArgs.cfg.predatorCount === 2, 'Restart: predatorCount 2.0 runs as 2 ("' + p.msg() + '")');
+    p.el('err').textContent = '';
+    p.loadFile({ name: 'setup.json', text: () => Promise.resolve('{"format":"evo_ocean_setup","version":1,"seed":7,"population":12.0,"width":1920,' +
+                                                                '"height":1080,"depth":240,"config":{"maxPopulation":300.0}}') });
+    await until(() => p.msg() !== '', 'the setup\'s answer');
+    ok(/^Setup loaded/.test(p.msg()) && p.T.runCfg.maxPopulation === 300 && p.T.initArgs.population === 12, 'a setup file: maxPopulation 300.0, 12.0 fish load ("' + p.msg() + '")');
+    const q = await bootPage('?seed=7&pop=12&w=1920&h=1080&walls=0&cfg=' + encodeURIComponent('{"maxPopulation":300.0}'));
+    ok(!q.failed && q.T.initArgs.cfg.maxPopulation === 300 && q.el('o_maxPopulation').value === '300', 'the link: cfg maxPopulation 300.0 starts (' + (q.failed || 'field ' + q.el('o_maxPopulation').value) + ')');
+}
+
 /* Every section, in order; `node tests/ocean_turbo_handoff.js NAME...` runs only those. */
 const SECTIONS = {
     repeatedKeys, liveLedger, growthPage, randomize, imports,
@@ -1698,7 +2287,9 @@ const SECTIONS = {
     },
     failures: failures_,
     pageHeld, pageRefusal, pageAsyncSetup, pageStartFailures, pageOverflow, pageBools, pageDashboards,
-    pageWallsOverride, pageFreshVisit, pageSizeFields, pageRoundTrip
+    pageWallsOverride, pageFreshVisit, pageSizeFields, pageRoundTrip,
+    pageColourBench, pageLayers, pageResize, pageKeys, pageStartupFailures, pageTourEscape, pageWholeFields,
+    pageTurboFraction, pageCardNumbers, pageMixedRecovery, pageEscOwner, pageTabKeys, pageIntegralFloats
 };
 const unhandled = [];
 process.on('unhandledRejection', (e) => { unhandled.push(e); });

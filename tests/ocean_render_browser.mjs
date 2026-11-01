@@ -188,13 +188,32 @@ async function partCorrectness() {
   parity.attributeReference = ref;
   check("attribute-fed reference chart (64 live fish): p99.9 <= .002, finite", ref && !ref.error && ref.p999 <= 0.002 && Number.isFinite(ref.maxErr), ref);
 
-  for (const mode of ["appearance", "family", "brain"]) {
-    await L.page.evaluate(([cd, m]) => EvoOcean.bench.prepare(Object.assign({}, cd, { colourMode: m, camera: "whole", settleMs: 300 })), [c, mode]);
+  /* each mode as the page really is in it (post-merge audit 43fedc0, finding 1: the
+   * case once named a mode the page never took): the controller's mode, the View
+   * menu's pressed button, state().colourBrain, the scene's skin, the case's and
+   * info()'s report; then the texture in that mode */
+  for (const mode of ["family", "brain", "appearance"]) {
+    const prepM = await L.page.evaluate(([cd, m]) => EvoOcean.bench.prepare(Object.assign({}, cd, { colourMode: m, camera: "whole", settleMs: 300 })), [c, mode]);
+    const st = await L.page.evaluate(() => ({ mode: EvoOcean.state().colourMode, brain: EvoOcean.state().colourBrain, skin: EvoOcean.scene.appearance().skin,
+      pressed: [...document.querySelectorAll("#colourMode button[aria-pressed='true']")].map((b) => b.dataset.c).join(), info: EvoOcean.bench.info().colourMode }));
+    check("bench in " + mode + " colours: the page's mode, its pressed button, colourBrain " + (mode === "brain") + ", the scene's skin " + (mode === "appearance") + ", the case's and info()'s report",
+          st.mode === mode && st.pressed === mode && st.brain === (mode === "brain") && st.skin === (mode === "appearance") && st.info === mode && prepM.colourMode === mode,
+          Object.assign({ case: prepM.colourMode }, st));
     const t = await L.page.evaluate(() => EvoOcean.bench.textureParity());
     parity["texture_" + mode] = texSummary(t);
     check("live gene texture, " + mode + " colours: raw genes bit-exact, charts p99.9 <= .002, no probe upload",
           t.ok === true && t.rawGenes.mismatches === 0 && t.rawGenes.paddingMismatches === 0 && t.extraUploads === 0, texSummary(t));
   }
+  /* bench.info().dashboardOpen against the charts' own state (finding 12): closed, open, a capture with them open, closed */
+  const dsh = await L.page.evaluate(async () => {
+    const seen = [], look = () => seen.push([EvoOcean.bench.info().dashboardOpen, EvoOceanDash.isOpen()]);
+    look(); EvoOceanDash.open(); look();
+    await EvoOcean.bench.capture({ durationMs: 300, cpu: true, gpu: "off", drainMs: 0, raw: true }); look();
+    EvoOceanDash.close(); look();
+    return seen;
+  });
+  check("bench.info().dashboardOpen is EvoOceanDash.isOpen(): closed, open, after a capture with them open, closed",
+        dsh.map(String).join(" ") === "false,false true,true true,true false,false", dsh);
   const t0 = parity.texture_appearance;
   check("  charted slots include both sides of 31/32 and 2047/2048", t0 && [31, 32, 2047, 2048].every((d) => t0.intrinsic.charted.includes(d)), t0 && t0.intrinsic.charted);
   check("  the texture: 512 x 128 RGBA float, nearest, no mipmaps, capacity 4,096", t0 && t0.texture.width === 512 && t0.texture.height === 128 &&
@@ -458,9 +477,15 @@ async function partIframe() {
   const r = await fr.evaluate(async () => {
     const out = { coi: self.crossOriginIsolated, parentCoi: null, size: [innerWidth, innerHeight] };
     const wait = (ms) => new Promise((res) => setTimeout(res, ms));
-    const sel = document.getElementById("colourMode");
-    for (const m of ["family", "brain", "appearance"]) { sel.value = m; sel.dispatchEvent(new Event("change")); await wait(400); }
-    out.colour = sel.value;
+    /* the View menu's colour buttons, as a visitor presses them; each mode as the page is then in it */
+    out.colours = {};
+    for (const m of ["family", "brain", "appearance"]) {
+      document.querySelector("#colourMode button[data-c='" + m + "']").click();
+      await wait(400);
+      out.colours[m] = { mode: EvoOcean.state().colourMode, brain: EvoOcean.state().colourBrain, skin: EvoOcean.scene.appearance().skin,
+                         pressed: [...document.querySelectorAll("#colourMode button[aria-pressed='true']")].map((b) => b.dataset.c).join() };
+    }
+    out.colour = EvoOcean.state().colourMode;
     EvoOcean.select(0); EvoOcean.follow(); await wait(800);
     out.following = EvoOcean.state().following;
     out.texFollow = await EvoOcean.scene.appearanceTextureParity();
@@ -485,6 +510,9 @@ async function partIframe() {
   const brief = (t) => ({ ok: t.ok, error: t.error, failures: t.failures, fish: t.fish });
   report.parts.iframe = Object.assign({}, r, { texFollow: brief(r.texFollow), texAfterTurbo: brief(r.texAfterTurbo) });
   check("the child is not cross-origin isolated, at 890 x 453", r.coi === false && r.parentCoi === false && r.size[0] === 890 && r.size[1] === 453, { coi: r.coi, size: r.size });
+  check("the colour buttons in the embed: each mode, its pressed button, colourBrain, the scene's skin",
+        ["family", "brain", "appearance"].every((m) => { const x = r.colours[m]; return x.mode === m && x.pressed === m && x.brain === (m === "brain") && x.skin === (m === "appearance"); }),
+        r.colours);
   check("colours, select + follow, restart (new epoch), Turbo there and back (same epoch)",
         r.colour === "appearance" && r.following && r.epochAfterRestart[1] === r.epochAfterRestart[0] + 1 && r.turbo === "turbo" && r.back === "live" &&
         r.epochAcrossTurbo[0] === r.epochAcrossTurbo[1], report.parts.iframe);

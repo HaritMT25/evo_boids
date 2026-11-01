@@ -309,6 +309,10 @@
     if ((plan.engine || ENGINE) !== ENGINE)
       return { ok: false, why: "that world needs the " + plan.engine + " engine module, and this page runs the " + ENGINE + " one" };
     var a = plan.op === "replay" ? null : plan.build();
+    /* Replay keeps what waits (a staged recipe: the whole sheet; else the
+     * fields that differ from this world, as typed), never the live tweaks
+     * it drops: those fields equal this world, so they go back with it */
+    var keep = plan.op === "replay" && !draft && initArgs ? pendingDiff().map(function (k) { return [k, rawOf(k)]; }) : null;
     if (plan.op === "replay") {
       if (!initArgs || !M._oc_reset()) return { ok: false, why: "oc_reset failed: " + lastError() };
       runCfg = Object.assign({}, initArgs.cfg);
@@ -319,11 +323,12 @@
     clearFieldNotes();
     afterNewWorld();
     stepOnce = false; summary = null; usedTurbo = false; turboReturn = null;
-    projectForm();
+    if (plan.op !== "replay") { draft = null; draftGen++; projectForm(); }   /* a start consumes the draft */
+    else if (keep) { projectForm(); keep.forEach(function (e) { setRaw(e[0], e[1]); }); updateNeeds(); updateTabDots(); }
     if (plan.imported) warnOdd(plan.imported);
     if (plan.url) writeUrl();
     hideAsk();
-    setPending(false);
+    renderStartBar();
     return { ok: true, why: "" };
   }
   /* the sheet shows the world that now runs: its seed, size and settings
@@ -586,14 +591,14 @@
   }
   /* push one live knob into the running world (or the Turbo worker's) */
   function applyLive(key) {
-    if (!M) return;
+    if (!M || draft) return;   /* a staged scenario's or file's settings are the next world's, live ones too */
     var num = numOf(key, getVal(key));
     if (wholeKey(key) && !Number.isInteger(num)) { refuse(key, "it must be a whole number"); return; }   /* 300.5: never run as 301 */
     if (num < 0) {
       if (CFG.NEG_ON_RESTART[key]) {
-        fieldNote(key, "Applies on Restart: a running world takes only 0 or more.");
-        setPending(true);
-        showNote((LABELS[key] || key) + " " + num + " applies on Restart (a running world takes only 0 or more).");
+        fieldNote(key, "Applies at the next start: a running world takes only 0 or more.");
+        renderStartBar();
+        showNote((LABELS[key] || key) + " " + num + " waits for the next start (a running world takes only 0 or more).");
       } else refuse(key, "it must be 0 or more");
       return;
     }
@@ -633,10 +638,11 @@
      * the world, what the worker acknowledged (this page's copy is the world
      * as Turbo took it; the hand-back reads the module again) */
     if (key === "lightEnabled" || key === "L0" || key === "kWater") { if (turboState === "live") readLight(); else lightFromCfg(); }
-    var input = el("o_" + key);
-    if (input && document.activeElement !== input && !(live && live.pending(key, seq)) && getVal(key) !== v) {
+    var input = el("o_" + key);   /* (a staged recipe's field is the next world's: left alone) */
+    if (input && !draft && document.activeElement !== input && !(live && live.pending(key, seq)) && getVal(key) !== v) {
       setVal(key, v); updateNeeds(); updateTabDots();
     }
+    renderStartBar();
     if (!quiet) showNote((LABELS[key] || key) + " is now " + shown(v) + " (live)");
   }
   /* a refused live value: the field goes back to the newest edit of it still
@@ -648,11 +654,15 @@
     if (!keep) {
       p = live ? live.latest(key) : null;
       back = p ? valOf(key, p.num) : cfgVal(key);
-      setVal(key, back);
-      fieldNote(key, p && p.from === "held" ? heldNote() : "");
-      updateNeeds(); updateTabDots();
+      if (!draft) {   /* a staged recipe's field is the next world's: left alone */
+        setVal(key, back);
+        fieldNote(key, p && p.from === "held" ? heldNote() : "");
+        updateNeeds(); updateTabDots();
+      }
+      renderStartBar();
     }
-    showError((LABELS[key] || key) + ": " + why + (keep ? "" : " (back to " + shown(back) + (p ? ", on its way" : "") + ")"));
+    showError((LABELS[key] || key) + ": " + why + (keep ? "" : draft ? " (the running world keeps " + shown(back) + ")" :
+              " (back to " + shown(back) + (p ? ", on its way" : "") + ")"));
   }
   /* Edits in the order they were made (ledger entries): to the worker while
    * Turbo owns the world, else to this one. A refused edit keeps its field
@@ -783,52 +793,64 @@
     });
   }
   /* Settings that do nothing with the others as they are: dimmed, with the
-   * reason under their name. Each rule: [keys, () => "" (fine) or the reason]. */
-  function hasCurrent() { return getVal("currentStrength") > 0; }
-  function hasPredators() { return getVal("predatorCount") > 0; }
+   * reason under their name. Each rule: [keys, () => "" (fine) or the reason],
+   * reading the settings through nv: the sheet's (the next world), or the
+   * running world's. A live setting with nothing staged acts on the running
+   * world now and on the next one later, so it dims only when it does
+   * nothing in either (predators 0 typed for the next world leaves the
+   * three hunting now tunable). */
+  var nvRunning = false;
+  function nv(k) { return nvRunning ? runningVal(k) : getVal(k); }
+  function hasCurrent() { return nv("currentStrength") > 0; }
+  function hasPredators() { return nv("predatorCount") > 0; }
   var NEEDS = [
     [["walls"], function () { return M && !hasWalls() ? "needs a newer engine module (this one has no glass walls)" : ""; }],
-    [["sideWallBand", "sideWallTurnRate"], function () { return getVal("walls") ? "" : "needs glass walls on"; }],
-    [["toroidal"], function () { return getVal("walls") ? "off with glass walls: a walled tank has no seam to sense across" : ""; }],
-    [["foodPatchRadius", "foodDepthMode"], function () { return getVal("foodPatches") > 0 ? "" : "needs food patches above 0"; }],
-    [["foodDepthSpread"], function () { return getVal("foodPatches") > 0 && getVal("foodDepthMode") === 1 ? "" : "needs food patches, each at its own depth"; }],
+    [["sideWallBand", "sideWallTurnRate"], function () { return nv("walls") ? "" : "needs glass walls on"; }],
+    [["toroidal"], function () { return nv("walls") ? "off with glass walls: a walled tank has no seam to sense across" : ""; }],
+    [["foodPatchRadius", "foodDepthMode"], function () { return nv("foodPatches") > 0 ? "" : "needs food patches above 0"; }],
+    [["foodDepthSpread"], function () { return nv("foodPatches") > 0 && nv("foodDepthMode") === 1 ? "" : "needs food patches, each at its own depth"; }],
     [["foodDrift", "currentMode", "currentDrift", "deepCurrent"], function () { return hasCurrent() ? "" : "needs a current (strength above 0)"; }],
-    [["currentEddies", "currentCore"], function () { return hasCurrent() && getVal("currentMode") === 0 ? "" : "needs a current in the eddies shape"; }],
+    [["currentEddies", "currentCore"], function () { return hasCurrent() && nv("currentMode") === 0 ? "" : "needs a current in the eddies shape"; }],
     [["predatorEconomy", "predatorSpeed", "predatorPerception", "predatorCaptureRadius", "predatorCooldown"],
       function () { return hasPredators() ? "" : "needs predators above 0"; }],
     [["predatorMeal", "predatorMetabolism", "predatorReproEnergy", "predatorMaxAge", "predatorMinPopulation",
       "predatorMaxPopulation", "predatorInheritance"],
-      function () { return hasPredators() && getVal("predatorEconomy") ? "" : "needs predators, with their economy on"; }],
+      function () { return hasPredators() && nv("predatorEconomy") ? "" : "needs predators, with their economy on"; }],
     [["predatorTraitMutation"], function () {
-      return hasPredators() && getVal("predatorEconomy") && getVal("predatorInheritance") ? "" : "needs hunters inherit traits on"; }],
-    [["maxTurnRate"], function () { return getVal("triangularMotion") ? "" : "needs fast-swims-straight on"; }],
-    [["steerFrame"], function () { return getVal("triangularMotion") ? "no effect with fast-swims-straight on: it turns by steer x already" : ""; }],
-    [["reproSoftWidth", "reproGracePeriod"], function () { return getVal("reproMaxDistance") >= 0 ? "" : "needs a breeding distance limit of 0 or more"; }],
-    [["bodyMutation", "sizeFight"], function () { return getVal("bodyModel") ? "" : "needs evolving bodies on (without them every fish is size 1)"; }],
+      return hasPredators() && nv("predatorEconomy") && nv("predatorInheritance") ? "" : "needs hunters inherit traits on"; }],
+    [["maxTurnRate"], function () { return nv("triangularMotion") ? "" : "needs fast-swims-straight on"; }],
+    [["steerFrame"], function () { return nv("triangularMotion") ? "no effect with fast-swims-straight on: it turns by steer x already" : ""; }],
+    [["reproSoftWidth", "reproGracePeriod"], function () { return nv("reproMaxDistance") >= 0 ? "" : "needs a breeding distance limit of 0 or more"; }],
+    [["bodyMutation", "sizeFight"], function () { return nv("bodyModel") ? "" : "needs evolving bodies on (without them every fish is size 1)"; }],
     [["sizeDrift"], function () {
-      if (!getVal("bodyModel")) return "needs evolving bodies on (without them every fish is size 1)";
-      return hasCurrent() || getVal("waveSpeed") > 0 ? "" : "needs a current or waves to drift in";
+      if (!nv("bodyModel")) return "needs evolving bodies on (without them every fish is size 1)";
+      return hasCurrent() || nv("waveSpeed") > 0 ? "" : "needs a current or waves to drift in";
     }],
-    [["kMouth"], function () { return getVal("mouthGate") ? "" : "needs the mouth gate on"; }],
-    [["waveBand", "waveGravity"], function () { return getVal("waveSpeed") > 0 ? "" : "needs waves (strength above 0)"; }],
-    [["L0", "kWater"], function () { return getVal("lightEnabled") ? "" : "needs the light field on"; }],
-    [["depthCostScaled"], function () { return getVal("cHold") > 0 || getVal("cPress") > 0 ? "" : "needs a depth cost above 0"; }],
+    [["kMouth"], function () { return nv("mouthGate") ? "" : "needs the mouth gate on"; }],
+    [["waveBand", "waveGravity"], function () { return nv("waveSpeed") > 0 ? "" : "needs waves (strength above 0)"; }],
+    [["L0", "kWater"], function () { return nv("lightEnabled") ? "" : "needs the light field on"; }],
+    [["depthCostScaled"], function () { return nv("cHold") > 0 || nv("cPress") > 0 ? "" : "needs a depth cost above 0"; }],
     [["eye", "eyeOnly"], function () { return HAS_EYE ? "" : "needs the eye build of the module; this page runs the plain Ocean build"; }],
     [["eyeCode"], function () {
       if (!HAS_EYE) return "needs the eye build of the module; this page runs the plain Ocean build";
-      return getVal("eye") ? "" : "needs the compound eye on";
+      return nv("eye") ? "" : "needs the compound eye on";
     }]
   ];
   function updateNeeds() {
     NEEDS.forEach(function (rule) {
-      var why = rule[1]();
+      var why = rule[1](), whyNow = "";
+      if (why && !draft && initArgs && rule[0].some(function (k) { return LIVE[k]; })) {
+        nvRunning = true;
+        try { whyNow = rule[1](); } finally { nvRunning = false; }
+      }
       rule[0].forEach(function (k) {
         var row = el("f_" + k);
         if (!row) return;
         var hint = row.querySelector(".needs");
         if (!hint) { hint = document.createElement("span"); hint.className = "needs"; row.appendChild(hint); }
-        row.classList.toggle("inert", !!why);
-        hint.textContent = why;
+        var inert = !!why && !(LIVE[k] && !draft && initArgs && !whyNow);
+        row.classList.toggle("inert", inert);
+        hint.textContent = inert ? why : why ? why.replace(/^needs/, "the next world needs") + "; it still acts on this one" : "";
       });
     });
     /* glass walls and wrap-around senses exclude each other (the engine
@@ -837,21 +859,137 @@
     if (tor) tor.disabled = !!getVal("walls");
     if (wl) wl.disabled = !!M && !hasWalls();
   }
-  var pendingEdits = false;   /* edits waiting for the next start */
-  function setPending(on) { pendingEdits = on; paintStart(); }
-  function paintStart() {
-    var b = el("restart"), turbo = turboState !== "live";
-    b.classList.toggle("pending", pendingEdits || turbo);
-    b.querySelector("span").textContent = pendingStart ? "Stopping Turbo…" : turbo ? "Stop Turbo & restart" : pendingEdits ? "Restart to apply" : "Restart";
+  /* ---- the draft: the next world (UI-3) ----
+   * The sheet is the next world's setup. With nothing staged (draft null)
+   * it is this world plus the edits waiting for the next start: live
+   * settings apply at once (they are this world's too), the others wait. A
+   * staged scenario or setup file (draft {kind, id, title, summary, base,
+   * plan}) fills the whole sheet with its recipe: every edit of it, a live
+   * setting's too, is the next world's, and nothing reaches the running one
+   * (the "live" tags hide). What waits is derived from values, never
+   * remembered (pendingDiff): a field changed back waits no more. Discard
+   * drops what waits, never an accepted live tweak; a start consumes it;
+   * Replay keeps it (and drops the live tweaks). draftGen moves with every
+   * stage, discard and start: a file read from before is stale. */
+  var draft = null, draftGen = 0;
+  /* a field as typed: on / off, 0 / 1, an option's index, or a number (NaN: none) */
+  function formNum(k) {
+    var def = KEYS[k][0], opt = KEYS[k][1] || {}, input = el("o_" + k);
+    if (typeof def === "boolean") return input.checked;
+    if (opt.bit) return input.checked ? 1 : 0;
+    if (opt.options) return parseInt(input.value, 10);
+    var s = String(input.value).trim();
+    return s === "" ? NaN : Number(s);
   }
+  /* what the running world has for a field (the accepted live changes in it) */
+  function runningVal(k) {
+    if (k === "seed") return initArgs ? initArgs.seed : KEYS.seed[0];
+    if (k === "population") return initArgs ? initArgs.population : KEYS.population[0];
+    if (k === "depth") return initArgs ? initArgs.depth : KEYS.depth[0];
+    if (k === "width") return W;
+    if (k === "height") return H;
+    var v = cfgVal(k), def = KEYS[k][0], opt = KEYS[k][1] || {};
+    if (typeof def === "boolean") return v === true || v === 1;
+    if (opt.bit) return v === true || v === 1 ? 1 : 0;
+    return v;
+  }
+  /* NaN (an empty or unreadable field) differs from every number, not from
+   * itself: a file's value the sheet can't show (an option 1e400) is not an edit */
+  function differs(k, a, b) { return typeof KEYS[k][0] === "boolean" ? !!a !== !!b : !(a === b || (a !== a && b !== b)); }
+  function snapForm() { var o = {}; Object.keys(KEYS).forEach(function (k) { if (el("o_" + k)) o[k] = formNum(k); }); return o; }
+  /* the fields whose next value is not what runs now (nothing staged; an
+   * edit on its way to the world has its own note), or not the staged
+   * recipe's (a draft: "modified") */
+  function pendingDiff() {
+    var out = [];
+    Object.keys(KEYS).forEach(function (k) {
+      if (!el("o_" + k)) return;
+      var a = formNum(k);
+      if (draft) { if (differs(k, a, draft.base[k])) out.push(k); return; }
+      if (LIVE[k] && live && live.pending(k)) return;
+      if (differs(k, a, runningVal(k))) out.push(k);
+    });
+    return out;
+  }
+  function waitingNow() { return !!draft || pendingDiff().length > 0; }
+  /* a field's raw content (Replay keeps what was typed, even a half-typed number) */
+  function rawOf(k) { var i = el("o_" + k); return i.type === "checkbox" ? i.checked : i.value; }
+  function setRaw(k, v) { var i = el("o_" + k); if (i.type === "checkbox") i.checked = !!v; else i.value = v; }
+  function escHtml(s) { return String(s).replace(/[&<>"]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]; }); }
+  function fieldText(k) {
+    var v = formNum(k), opt = KEYS[k][1] || {};
+    var shownV = typeof v === "boolean" ? (v ? "on" : "off") : opt.bit ? (v ? "on" : "off") : opt.options ? opt.options[v] : v === v ? String(v) : el("o_" + k).value || "(empty)";
+    return (LABELS[k] || k) + " " + shownV;
+  }
+  function runSummary() {
+    if (!initArgs) return "";
+    var tw = liveTweaks().length;
+    return "seed " + initArgs.seed + " · " + W + " × " + H + " × " + D + " · " + initArgs.population + " fish · " +
+           (WALLS ? "glass walls" : "wrapping sides") + (tw ? " · " + tw + " live tweak" + (tw > 1 ? "s" : "") : "");
+  }
+  /* the start bar (and the readout's count): what runs, or what the next start is */
+  function renderStartBar() {
+    var diff = pendingDiff(), n = diff.length, turbo = turboState !== "live";
+    var b = el("restart");
+    b.querySelector("span").textContent = pendingStart ? "Stopping Turbo…" : turbo ? "Stop Turbo & start" :
+      draft ? "Start " + draft.title : n ? "Start with " + (n === 1 ? "the change" : "the " + n + " changes") : "Start again";
+    b.classList.toggle("pending", !!draft || n > 0 || turbo);
+    el("startdiscard").hidden = !(draft || n);
+    drawerEl.classList.toggle("staging", !!draft);
+    setHtml("startsummary", draft
+      ? "<b>Next world: " + escHtml(draft.title) + "</b> · " + escHtml(draft.summary) + (n ? " · modified (" + n + ")" : "") +
+        ". Starting it replaces this run."
+      : n ? "<b>Waiting for the next start:</b> " + diff.slice(0, 3).map(function (k) { return escHtml(fieldText(k)); }).join(" · ") +
+            (n > 3 ? " · and " + (n - 3) + " more" : "")
+      : "<b>Running</b> · " + escHtml(runSummary()));
+    var wc = el("waitingcount"), count = draft ? 1 + n : n;
+    wc.hidden = !count;
+    setHtml("waitingcount", count + "<span class='wc-word'> waiting</span>");
+    wc.title = draft ? draft.title + " is ready for the next start (Setup)" : count + " edit" + (count > 1 ? "s" : "") + " waiting for the next start (Setup)";
+  }
+  /* the sheet back to the running world: its seed and size, its settings
+   * with the live tweaks it accepted; an edit still on its way keeps its
+   * field (and note) */
+  function projectRunning() {
+    resetForm();
+    if (initArgs) { setVal("seed", initArgs.seed); setVal("population", initArgs.population); setVal("depth", initArgs.depth); }
+    setVal("width", W); setVal("height", H);
+    cfgToForm(runCfg);
+    if (live) Object.keys(LIVE).forEach(function (k) {
+      var p = live.latest(k);
+      if (p) { setVal(k, valOf(k, p.num)); if (p.from === "held") fieldNote(k, heldNote()); }
+    });
+    updateNeeds(); updateTabDots();
+  }
+  /* a scenario or a setup file into the sheet, as the next world (fill:
+   * puts its recipe in the fields; the edits waiting before are replaced) */
+  function stageDraft(d, fill) {
+    draft = null;
+    resetForm();
+    fill();
+    updateNeeds(); updateTabDots();
+    d.base = snapForm();
+    draft = d; draftGen++;
+    hideAsk();
+    renderStartBar();
+  }
+  function discardDraft() {
+    var had = waitingNow();
+    draft = null; draftGen++;
+    projectRunning();
+    hideAsk();
+    renderStartBar();
+    showNote(had ? "Discarded what was waiting. Live tweaks stay: they already apply." : "Nothing was waiting.");
+  }
+  function setPending() { renderStartBar(); }
+  function paintStart() { renderStartBar(); }
   function onEdit(e) {
     var t = e.target;
     if (asking) { hideAsk(); showNote("The setup changed: start again to review it."); }   /* never a start other than the one asked about */
     if (t && t.id === "o_walls" && t.checked) setVal("toroidal", false);   /* walls need toroidal off */
     updateNeeds();
     updateTabDots();
-    if (!t || !t.id || t.id.indexOf("o_") !== 0 || LIVE[t.id.slice(2)]) return;   /* live ones apply by themselves */
-    setPending(true);
+    renderStartBar();
   }
 
   /* ---- the visitor's starts: requestStart, its inline question ----
@@ -946,7 +1084,7 @@
       (lose.length ? ", and " + lose.join(" and ") + " with it" : "") + "." +
       (tw.length ? " Your live tweak" + (one ? "" : "s") + " (" + tweaks + ") " + (replaying ? (one ? "is" : "are") + " dropped." :
                    (one ? "carries" : "carry") + " over to the new world.") : "") +
-      (replaying && pendingEdits ? " Edits waiting for a start stay waiting." : "");
+      (replaying && waitingNow() ? " What waits for the next start stays waiting." : "");
     el("startconfirm").textContent = replaying ? "Replay" : turbo ? "Stop Turbo & start" : "Replace it";
     el("startcancel").textContent = "Keep it";
     el("startask").hidden = false;
@@ -974,13 +1112,13 @@
              build: function () { var x = f(); return { seed: x.seed, population: x.population, depth: x.depth, size: [x.width, x.height], cfg: x.cfg }; } };
   }
   function restart(done) {
-    var plan = formPlan("start");
-    plan.done = function () { el("randnote").textContent = ""; if (done) done(); };
+    var plan = startPlan(), d0 = plan.done;
+    plan.done = function () { el("randnote").textContent = ""; if (d0) d0(); if (done) done(); };
     return requestStart(plan);
   }
   function newWorld() {
-    var plan = formPlan("fresh", (Math.random() * 0x100000000) >>> 0);
-    plan.done = function () { el("randnote").textContent = ""; toast("A new world, seed " + initArgs.seed + "."); };
+    var plan = startPlan((Math.random() * 0x100000000) >>> 0), d0 = plan.done;
+    plan.done = function () { el("randnote").textContent = ""; if (d0) d0(); toast("A new world, seed " + initArgs.seed + "."); };
     requestStart(plan);
   }
   /* this world again from its start: oc_reset (the last init's seed and
@@ -1050,16 +1188,14 @@
     /* during Turbo too: runCfg is what the world accepted (the worker's acknowledgements) */
     var onWay = Object.keys(live.held()).concat(live.inflight().map(function (e) { return e[0]; }));
     toast("Saved this world's setup (seed " + initArgs.seed + ")" +
-          (pendingEdits ? ". Edits waiting for the next start are not in it: start first to include them." : ".") +
+          (waitingNow() ? ". What waits for the next start is not in it: start first to include it." : ".") +
           (onWay.length ? " Not in it yet: " + onWay.map(function (k) { return LABELS[k] || k; }).join(", ") + ", still on the way to the world." : ""));
   }
   /* Load setup: that world from its start, at its size, exactly as saved
    * (importWorld: a value the engine refuses is reported, and nothing
    * changes). A setup without a size takes this screen's. */
-  function loadSetup(text) {
-    /* the read is asynchronous: who owns the world is asked again now (the
-     * file input's check, before the read, stays: it starts no read for nothing) */
-    if (!M || guardTurbo()) return;
+  function loadSetup(text, name) {
+    if (!M) return;
     var s, pf;
     try { pf = HO.parseFirst(text); s = pf.value; } catch (e) { showError("That file is not JSON: " + e.message); return; }
     /* a repeated key, as for ?cfg=: the first occurrence counts, every one is
@@ -1099,13 +1235,37 @@
     var config = Object.assign({}, s.config);
     if (version !== 1) config.walls = walls;
     clearError();
+    /* staged, never started here (and never while Turbo runs: the next world
+     * waits in the sheet, the running one goes on); Start starts it, as it
+     * is (importPlan: oc_init sees the file's own values, repeats and keys
+     * the sheet has no field for), unless the sheet is edited first */
     var plan = importPlan("file", seed, pop, depth, config, undefined, cfgRepeats, [w, h], true);
-    plan.failed = "That setup was refused: ";
-    plan.done = function () {
-      el("randnote").textContent = "";
-      showNote("Setup loaded: seed " + (seed >>> 0) + ", " + W + " × " + H + ", replaying from its start.");
-    };
-    requestStart(plan);
+    var title = "the setup file" + (name ? " " + name : "");
+    stageDraft({ kind: "file", id: "file", title: "the setup file", plan: plan, seed: seed >>> 0,
+                 summary: (name ? name + ": " : "") + "seed " + (seed >>> 0) + " · " + w + " × " + h + " × " + depth + " · " + pop + " fish" +
+                          (config.walls === true || config.walls === 1 ? " · glass walls" : config.walls === false || config.walls === 0 ? " · wrapping sides" : "") },
+      function () {
+        setVal("seed", seed >>> 0); setVal("population", pop); setVal("depth", depth); setVal("width", w); setVal("height", h);
+        cfgToForm(plan.imported);
+      });
+    showNote("Ready: " + title + ". Start replaces this run with it, from its start.");
+  }
+  /* What Start starts: a staged file as it is (with a new seed for Start
+   * fresh) while its fields are untouched, else the sheet (seed: Start
+   * fresh's, drawn once per request). */
+  function startPlan(seed) {
+    var plan;
+    if (draft && draft.plan && !pendingDiff().length) {
+      var fp = draft.plan, s0 = seed === undefined ? draft.seed : seed;
+      plan = { source: fp.source, op: "init", url: true, imported: fp.imported,
+               build: function () { var b = fp.build(); b.seed = s0; return b; } };
+      plan.failed = "That setup was refused: ";
+      plan.done = function () { showNote("Setup loaded: seed " + initArgs.seed + ", " + W + " × " + H + ", replaying from its start."); };
+      return plan;
+    }
+    plan = formPlan(draft ? draft.kind : "start", seed);
+    if (draft && draft.kind === "file") plan.done = function () { showNote("Setup loaded (edited): seed " + initArgs.seed + ", " + W + " × " + H + "."); };
+    return plan;
   }
 
   /* ---------------- per-frame data ---------------- */
@@ -1832,7 +1992,7 @@
     if (w) w.textContent = RUNSTATE[s][0];
   }
   /* what waits for Turbo to stop (every start goes through requestStart, which stops it first; Save reads what was accepted) */
-  var LOCK_IDS = ["loadcp"];
+  var LOCK_IDS = [];
   function updateLocks() {
     var s = turboState, on = s !== "live";
     document.body.classList.toggle("turbo-on", on);
@@ -2520,13 +2680,22 @@
   btn("savecp", saveSetup);   /* in Turbo too: the accepted setup */
   btn("startconfirm", confirmAsk);
   btn("startcancel", function () { hideAsk(); showNote("Kept your run."); });
-  btn("loadcp", function () { if (guardTurbo()) return; el("cpfile").click(); });
+  btn("loadcp", function () { el("cpfile").click(); });
+  /* the read is asynchronous: its answer stages the file only if nothing
+   * newer came meanwhile (another file, a scenario, Discard, a start), and
+   * whoever owns the world then (staging changes no world) */
+  var fileReq = 0;
   el("cpfile").addEventListener("change", function () {
     var file = this.files && this.files[0];
     this.value = "";
-    if (!file || !M || guardTurbo()) return;
-    file.text().then(loadSetup, function (err) { showError("Couldn't read that file: " + err); });
+    if (!file || !M) return;
+    var my = ++fileReq, gen = draftGen;
+    file.text().then(function (text) {
+      if (my !== fileReq || gen !== draftGen) return;   /* stale: something newer is in the sheet */
+      loadSetup(text, file.name);
+    }, function (err) { if (my === fileReq) showError("Couldn't read that file: " + err); });
   });
+  btn("startdiscard", discardDraft);
   el("governor").addEventListener("change", function () {
     governorOn = this.checked;
     if (!governorOn) restoreDetail();

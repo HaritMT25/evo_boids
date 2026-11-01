@@ -2054,6 +2054,73 @@ async function pageWholeFields() {
     ok(p.uncaught.length === 0, 'no exception escaped the page\'s handlers' + (p.uncaught.length ? ' (' + p.uncaught[0] + ')' : ''));
 }
 
+/* ---------------------------------------------------------------------
+ * Review of PR #37 (Codex, 2026-11-01): its findings, and the coverage it
+ * asked for where the test DOM can show it.
+ * --------------------------------------------------------------------- */
+
+/* Review finding 1: a valid edit of a key on its way to the world (held
+ * while Turbo starts or stops, or sent and not yet answered), then a
+ * fraction of the same key, refused: the field went back to what ran
+ * before and lost the held edit's note, and the valid edit then applied
+ * under a field showing the old value. */
+async function pageTurboFraction() {
+    section('The page: a fraction refused while a valid edit of the key is on its way keeps that edit in the field (review of PR #37, finding 1)');
+    const look = (p) => ({ field: p.el('o_maxPopulation').value, note: p.note('maxPopulation') });
+    const twoEdits = (p) => { p.edit('maxPopulation', '300'); p.edit('maxPopulation', '300.5'); return Object.assign(look(p), { msg: p.msg() }); };
+    const answered = (sh) => sh.delivered.filter(isType('set')).length === sh.toWorker.filter(m => m.cmd === 'set').length;
+    {   /* entering: the first stats held */
+        const p = await bootPage(PAGE_Q);
+        p.hooks.onWorker = (sh) => sh.pause();
+        p.click('turbobtn');
+        const sh = p.worker();
+        await until(() => sh.queued(isType('stats')), 'the first stats');
+        const mid = twoEdits(p);
+        sh.resume();
+        await until(() => p.T.turboState === 'turbo' && answered(sh) && sh.toWorker.some(m => m.cmd === 'set'), 'the held edit\'s answer');
+        const after = look(p);
+        ok(p.T.turboState === 'turbo' && mid.field === '300' && /as soon as Turbo has started/.test(mid.note) && /whole number/.test(mid.msg) &&
+           setsTo(sh) === 'maxPopulation=300' && p.T.runCfg.maxPopulation === 300 && after.field === '300' && after.note === '',
+           'entering: 300 held, 300.5 refused: the field shows the held 300 with its note ("' + mid.note + '"); the worker gets 300 alone; then 300, no note (' +
+           JSON.stringify({ mid, after, sent: setsTo(sh) }) + ')');
+        p.click('turboexit');
+        await until(() => p.T.turboState === 'live', 'the hand-back');
+        ok(p.T.runCfg.maxPopulation === 300 && look(p).field === '300', '  handed back: 300 runs and shows');
+    }
+    {   /* exiting: the memory held */
+        const { p, sets0, sh } = await pageInTurbo();
+        sh.pause();
+        p.click('turboexit');
+        await until(() => sh.queued(isType('memory')), 'the memory');
+        const mid = twoEdits(p);
+        sh.resume();
+        await until(() => p.T.turboState === 'live', 'the hand-back');
+        const after = look(p), applied = p.sets.slice(sets0).map(e => e[1] + '=' + e[2]).join(',');
+        ok(mid.field === '300' && /as soon as Turbo hands the world back/.test(mid.note) && applied === 'maxPopulation=300' &&
+           p.T.runCfg.maxPopulation === 300 && after.field === '300' && after.note === '',
+           'exiting: 300 held, 300.5 refused: the field keeps 300 and its note; the page applies 300 alone on the world handed back (' +
+           JSON.stringify({ mid, after, applied }) + ')');
+    }
+    {   /* an acknowledgment outstanding: 300 sent, its answer held */
+        const { p, sh } = await pageInTurbo();
+        sh.pause();
+        p.edit('maxPopulation', '300');
+        await until(() => sh.queued((m) => m.type === 'set'), 'its answer');
+        p.edit('maxPopulation', '300.5');
+        const mid = look(p);
+        p.el('o_maxPopulation').value = '0';   /* and the field shown stale, as a refusal before this fix left it */
+        sh.resume();
+        await until(() => answered(sh) && sh.delivered.some(isType('set')), 'the answer');
+        const after = look(p);
+        ok(mid.field === '300' && mid.note === '' && setsTo(sh) === 'maxPopulation=300' && p.T.runCfg.maxPopulation === 300 && after.field === '300',
+           'an answer outstanding: 300.5 refused leaves the field at the 300 on its way; the answer, with nothing newer on its way, puts the field right (' +
+           JSON.stringify({ mid, after }) + ')');
+        p.click('turboexit');
+        await until(() => p.T.turboState === 'live', 'the hand-back');
+        ok(p.T.runCfg.maxPopulation === 300 && look(p).field === '300' && p.uncaught.length === 0, '  handed back: 300 runs and shows; no exception escaped');
+    }
+}
+
 /* Every section, in order; `node tests/ocean_turbo_handoff.js NAME...` runs only those. */
 const SECTIONS = {
     repeatedKeys, liveLedger, growthPage, randomize, imports,
@@ -2068,7 +2135,8 @@ const SECTIONS = {
     failures: failures_,
     pageHeld, pageRefusal, pageAsyncSetup, pageStartFailures, pageOverflow, pageBools, pageDashboards,
     pageWallsOverride, pageFreshVisit, pageSizeFields, pageRoundTrip,
-    pageColourBench, pageLayers, pageResize, pageKeys, pageStartupFailures, pageTourEscape, pageWholeFields
+    pageColourBench, pageLayers, pageResize, pageKeys, pageStartupFailures, pageTourEscape, pageWholeFields,
+    pageTurboFraction
 };
 const unhandled = [];
 process.on('unhandledRejection', (e) => { unhandled.push(e); });

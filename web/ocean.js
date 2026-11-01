@@ -530,11 +530,15 @@
     }
     if (turboState === "entering" || turboState === "exiting") {
       live.hold(key, num);
-      fieldNote(key, turboState === "entering" ? "Applies as soon as Turbo has started." : "Applies as soon as Turbo hands the world back.");
+      fieldNote(key, heldNote());
       return;
     }
     fieldNote(key, "");
     sendLive(key, num);
+  }
+  /* the note under a field whose edit is held for Turbo's hand-off */
+  function heldNote() {
+    return turboState === "entering" ? "Applies as soon as Turbo has started." : "Applies as soon as Turbo hands the world back.";
   }
   /* true: applied here; false: refused here (keep: the field stays, a newer
    * edit of the key follows); null: sent to the Turbo worker (seq: a held
@@ -551,20 +555,32 @@
     else refuse(key, lastError(), keep);
     return !!ok;
   }
-  function liveApplied(key, v, quiet) {
+  /* seq: the worker's acknowledgment of that edit. With no newer edit of the
+   * key on its way, the field shows what now runs (a refusal in between may
+   * have set it back), unless the visitor is in it. */
+  function liveApplied(key, v, quiet, seq) {
     if (v === KEYS[key][0]) delete runCfg[key]; else runCfg[key] = v;
     if (key === "lightEnabled" || key === "L0" || key === "kWater") readLight();
+    var input = el("o_" + key);
+    if (input && document.activeElement !== input && !(live && live.pending(key, seq)) && getVal(key) !== v) {
+      setVal(key, v); updateNeeds(); updateTabDots();
+    }
     if (!quiet) showNote((LABELS[key] || key) + " is now " + shown(v) + " (live)");
   }
-  /* a refused live value: the field goes back to what the world runs with
-   * (keep: a newer edit of it is on its way, so the field stays) */
+  /* a refused live value: the field goes back to the newest edit of it still
+   * on its way to the world (held for Turbo's hand-off, with its note, or with
+   * the worker), else to what the world runs with (keep: a newer edit of it
+   * follows, so the field stays) */
   function refuse(key, why, keep) {
+    var back = null, p = null;
     if (!keep) {
-      setVal(key, cfgVal(key));
-      fieldNote(key, "");
+      p = live ? live.latest(key) : null;
+      back = p ? valOf(key, p.num) : cfgVal(key);
+      setVal(key, back);
+      fieldNote(key, p && p.from === "held" ? heldNote() : "");
       updateNeeds(); updateTabDots();
     }
-    showError((LABELS[key] || key) + ": " + why + (keep ? "" : " (back to " + shown(cfgVal(key)) + ")"));
+    showError((LABELS[key] || key) + ": " + why + (keep ? "" : " (back to " + shown(back) + (p ? ", on its way" : "") + ")"));
   }
   /* Edits in the order they were made (ledger entries): to the worker while
    * Turbo owns the world, else to this one. A refused edit keeps its field
@@ -1644,7 +1660,7 @@
        * flight or held for the hand-off, follows the one answered */
       var answered = live.answered(msg.key, !!msg.ok);
       if (!answered) return;
-      if (msg.ok) liveApplied(msg.key, valOf(msg.key, msg.value));
+      if (msg.ok) liveApplied(msg.key, valOf(msg.key, msg.value), false, answered.seq);
       else refuse(msg.key, msg.error, live.pending(msg.key, answered.seq));
     } else if (msg.type === "memory") {
       if (turboState !== "exiting") return;

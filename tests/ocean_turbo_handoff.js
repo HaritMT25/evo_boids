@@ -2183,6 +2183,33 @@ async function pageMixedRecovery() {
     ok(!q.failed && q.M._oc_walls_enabled() === 1, '  it starts as a fresh visit: glass walls');
 }
 
+/* Review finding 4: one owner for each Esc. The tour (on top), then the
+ * charts, then the page's own; with the tour and the charts open, one Esc
+ * closed both. */
+async function pageEscOwner() {
+    section('The page: one Esc, one owner: the tour, then the charts, then the page (review of PR #37, finding 4)');
+    const p = await bootPage(PAGE_Q, { guide: true });
+    p.ctx.EvoGuide.start();
+    p.key('g');
+    const both = !!p.el('guide') && dashUp(p);
+    p.key('Escape');
+    const one = !p.el('guide') && dashUp(p);
+    p.key('Escape');
+    ok(both && one && !dashUp(p), 'the tour and the charts open: the first Esc ends the tour only, the second closes the charts');
+    p.key('i'); p.key('g');
+    p.ctx.EvoGuide.start();
+    const three = !!p.el('guide') && dashUp(p) && p.shown('statpanel');
+    p.key('Escape');
+    const s1 = [!!p.el('guide'), dashUp(p), p.shown('statpanel')].join();
+    p.key('Escape');
+    const s2 = [!!p.el('guide'), dashUp(p), p.shown('statpanel')].join();
+    p.key('Escape');
+    const s3 = [!!p.el('guide'), dashUp(p), p.shown('statpanel')].join();
+    ok(three && s1 === 'false,true,true' && s2 === 'false,false,true' && s3 === 'false,false,false',
+       'the live numbers, the charts and the tour: three presses, one layer each, from the top (tour, charts, numbers left: ' + [s1, s2, s3].join(' | ') + ')');
+    ok(p.uncaught.length === 0, 'no exception escaped the page\'s handlers' + (p.uncaught.length ? ' (' + p.uncaught[0] + ')' : ''));
+}
+
 /* Every section, in order; `node tests/ocean_turbo_handoff.js NAME...` runs only those. */
 const SECTIONS = {
     repeatedKeys, liveLedger, growthPage, randomize, imports,
@@ -2198,7 +2225,7 @@ const SECTIONS = {
     pageHeld, pageRefusal, pageAsyncSetup, pageStartFailures, pageOverflow, pageBools, pageDashboards,
     pageWallsOverride, pageFreshVisit, pageSizeFields, pageRoundTrip,
     pageColourBench, pageLayers, pageResize, pageKeys, pageStartupFailures, pageTourEscape, pageWholeFields,
-    pageTurboFraction, pageCardNumbers, pageMixedRecovery
+    pageTurboFraction, pageCardNumbers, pageMixedRecovery, pageEscOwner
 };
 const unhandled = [];
 process.on('unhandledRejection', (e) => { unhandled.push(e); });

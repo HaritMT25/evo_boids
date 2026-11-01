@@ -1889,6 +1889,10 @@
     if (t.type === "range") return /^(Arrow|Page)/.test(k) || k === "Home" || k === "End";
     return press && (t.type === "checkbox" || t.type === "radio");
   }
+  /* One owner for each Esc, the top layer: the tour (web/guide.js), then the
+   * charts (web/ocean_dash.js: it leaves an Esc to the tour), then this
+   * page's own (a popover, the settings, the live numbers, the fish). Seen
+   * here in the capture phase, before any handler has closed anything. */
   var escHandledElsewhere = false;
   window.addEventListener("keydown", function (e) {
     if (e.key === "Escape") escHandledElsewhere = !!(dash() && dash().isOpen()) || !!document.getElementById("guide");

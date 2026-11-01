@@ -1463,7 +1463,7 @@
       out.id = "benchout";
       document.body.appendChild(out);
     }
-    var lines = ["evo_boids ?bench   " + JSON.stringify(benchEnv()), "",
+    var lines = ["Finfolk ?bench   " + JSON.stringify(benchEnv()), "",
                  "agents     fps   p95 frame ms   step ms   draw ms   stable 60"];
     bench.results.forEach(function (r) {
       lines.push(String(r.agents).padStart(6) + String(r.fps).padStart(8) +

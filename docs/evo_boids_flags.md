@@ -1,4 +1,4 @@
-# evo_boids — CLI reference (v0.26.0)
+# Finfolk — evo_boids CLI reference (v0.26.0)
 
 Headless runner for the evolutionary boids simulation. Defaults reproduce the
 original behaviour, so any flag is an opt-in change.

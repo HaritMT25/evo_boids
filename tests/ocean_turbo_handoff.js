@@ -264,9 +264,17 @@ const statsAt = (f) => (m) => m.type === 'stats' && m.frame >= f;
  * its start-up's URL-import block, a verbatim slice, as a function of the
  * query (urlImport); each marker must occur exactly once.
  * --------------------------------------------------------------------- */
-const PAGE_IDS = (() => {
+const PAGE_IDS = (() => {   /* id -> {tag, type, href}: ocean.html's elements, as the page finds them */
     const m = new Map(), html = fs.readFileSync(path.join(WEB, 'ocean.html'), 'utf8');
-    for (const x of html.matchAll(/<([a-zA-Z][\w-]*)\b[^>]*?\sid="([^"]+)"/g)) if (!m.has(x[2])) m.set(x[2], x[1]);
+    for (const x of html.matchAll(/<([a-zA-Z][\w-]*)\b([^>]*)>/g)) {
+        const id = /\sid="([^"]+)"/.exec(x[2]);
+        if (!id || m.has(id[1])) continue;
+        const type = /\stype="([^"]+)"/.exec(x[2]), href = /\shref="([^"]+)"/.exec(x[2]);
+        m.set(id[1], { tag: x[1], type: type ? type[1] : '', href: href ? new URL(href[1], 'http://ocean.test/ocean.html').href : null, colours: [] });
+    }
+    /* the View menu's colour buttons (their data-c), the one group the page reads by its children */
+    const cm = /<span id="colourMode"[^>]*>([\s\S]*?)<\/span>/.exec(html);
+    if (cm && m.has('colourMode')) m.get('colourMode').colours = [...cm[1].matchAll(/data-c="([^"]+)"/g)].map(x => x[1]);
     return m;
 })();
 function onceIn(src, marker, file) {
@@ -284,14 +292,22 @@ const PAGE_SRC = (() => {
         '    get M() { return M; }, get turboState() { return turboState; }, get turboWorker() { return turboWorker; },\n' +
         '    get runCfg() { return runCfg; }, get initArgs() { return initArgs; }, get live() { return live; },\n' +
         '    get W() { return W; }, get H() { return H; }, get D() { return D; }, get WALLS() { return WALLS; },\n' +
+        '    get paused() { return paused; }, get openPop() { return openPop; }, get statOpen() { return statOpen; },\n' +
         '    getVal: getVal, importWorld: importWorld, wiringNow: wiringNow, frame: frame,\n' +
         '    urlImport: function (P) {\n' + src.slice(a, b) + '    }\n  };';
     return src.slice(0, end) + access + src.slice(end);
 })();
+/* the scene: fixed answers, but the skin it was last told to draw (setAppearance -> appearance().skin) */
 const SCENE_STUB = `window.EvoOceanScene = { load: function () { return Promise.resolve(); }, create: function () {
-  var fixed = { following: false, flashlight: false, quality: 3, flashlightLevel: 0, pick: -1, project: null, view: null, degrade: false };
-  return new Proxy({}, { get: function (t, k) { return function () { return fixed[k]; }; } });
+  var fixed = { following: false, flashlight: false, quality: 3, flashlightLevel: 0, pick: -1, project: null, view: null, degrade: false,
+                appearance: { want: false, skin: false, shapes: true, drawing: false } };
+  return new Proxy({}, { get: function (t, k) {
+    if (k === "setAppearance") return function (on) { fixed.appearance = { want: !!on, skin: !!on, shapes: true, drawing: !!on }; };
+    return function () { return fixed[k]; };
+  } });
 } };`;
+/* a browser whose WebGL2 context can't be made: ocean_scene.js's create() returns null */
+const SCENE_NOGL = `window.EvoOceanScene = { load: function () { return Promise.resolve(); }, create: function () { return null; } };`;
 const CHARTS_STUB = `(function () {
   var charts = [];
   function Chart(box, kind) { this.box = box; this.kind = kind; this.data = undefined; charts.push(this); }
@@ -305,13 +321,17 @@ const CHARTS_STUB = `(function () {
 function makeDom(page) {
     const byId = new Map();
     const parse = (s) => {
-        const m = /^([a-zA-Z][\w-]*)?((?:[#.][\w-]+)*)$/.exec(s);
+        const m = /^([a-zA-Z][\w-]*)?((?:[#.][\w-]+|\[[\w-]+(?:="[^"]*")?\])*)$/.exec(s);
         if (!m) throw new Error('the test DOM has no selector ' + JSON.stringify(s));
-        const parts = m[2].match(/[#.][\w-]+/g) || [];
+        const parts = m[2].match(/[#.][\w-]+|\[[^\]]+\]/g) || [];
         return { tag: (m[1] || '').toUpperCase(), id: (parts.find(x => x[0] === '#') || '#').slice(1),
-                 cls: parts.filter(x => x[0] === '.').map(x => x.slice(1)) };
+                 cls: parts.filter(x => x[0] === '.').map(x => x.slice(1)),
+                 attrs: parts.filter(x => x[0] === '[').map(x => { const a = /^\[([\w-]+)(?:="([^"]*)")?\]$/.exec(x); return [a[1], a[2]]; }) };
     };
-    const one = (e, p) => (!p.tag || e.tagName === p.tag) && (!p.id || e._id === p.id) && p.cls.every(c => e._cls.has(c));
+    /* an attribute: data-* from the dataset (the page sets those as properties) */
+    const attrOf = (e, k) => k.startsWith('data-') ? (e.dataset[k.slice(5).replace(/-(\w)/g, (x, c) => c.toUpperCase())] ?? null) : e.getAttribute(k);
+    const one = (e, p) => (!p.tag || e.tagName === p.tag) && (!p.id || e._id === p.id) && p.cls.every(c => e._cls.has(c)) &&
+                          p.attrs.every(([k, v]) => { const a = attrOf(e, k); return v === undefined ? a !== null : a === v; });
     const matches = (e, sel) => sel.split(',').some(alt => {
         const chain = alt.trim().split(/\s+/).map(parse);
         if (!one(e, chain[chain.length - 1])) return false;
@@ -320,9 +340,10 @@ function makeDom(page) {
         return k < 0;
     });
     function* walk(e) { for (const c of e.children) { yield c; yield* walk(c); } }
-    function fireOn(n, ev) {
+    /* type: the listener list (a window's capture listeners are "keydown:capture") */
+    function fireOn(n, ev, type) {
         ev.currentTarget = n;
-        for (const f of (n._ls[ev.type] || []).slice()) {
+        for (const f of (n._ls[type || ev.type] || []).slice()) {
             try { f.call(n, ev); } catch (e) { page.uncaught.push(e); }   /* a browser reports it and goes on */
         }
     }
@@ -413,6 +434,11 @@ function makeDom(page) {
             return this.appendChild(c);
         }
         closest(sel) { for (let n = this; n; n = n.parentNode) if (matches(n, sel)) return n; return null; }
+        /* :focus-visible: focused while the keyboard is in use (page.key / page.tabTo; a click, page.pointer, ends it) */
+        matches(sel) { return sel === ':focus-visible' ? doc.activeElement === this && !!page.focusVisible : matches(this, sel); }
+        contains(n) { for (; n; n = n.parentNode) if (n === this) return true; return false; }
+        get isConnected() { return docEl.contains(this); }
+        scrollIntoView() {}
     }
     const docEl = new El('html'), body = new El('body');
     head = new El('head');
@@ -422,7 +448,17 @@ function makeDom(page) {
         createElement: t => new El(t),
         getElementById(id) {
             let e = byId.get(id);
-            if (!e && PAGE_IDS.has(id)) { e = new El(PAGE_IDS.get(id)); e._auto = true; e.id = id; body.appendChild(e); }
+            if (e && !e.isConnected) e = null;   /* removed (the tour's root once it ends) */
+            if (!e && PAGE_IDS.has(id)) {
+                const d = PAGE_IDS.get(id);
+                e = new El(d.tag); e._auto = true; e.id = id;
+                if (d.type) e.type = d.type;
+                if (d.href !== null) e.href = d.href;
+                for (const c of d.colours) {   /* #colourMode's buttons */
+                    const b = new El('button'); b.type = 'button'; b.dataset.c = c; b.setAttribute('aria-pressed', 'false'); e.appendChild(b);
+                }
+                body.appendChild(e);
+            }
             return e || null;
         },
         querySelector: s => docEl.querySelector(s),
@@ -444,26 +480,41 @@ async function until(pred, what, ms) {
 }
 const unref = (t) => { if (t && t.unref) t.unref(); return t; };
 
-/* A page at ocean.html?query, started (or refused: page.failed). */
-async function bootPage(query) {
-    const page = { hooks: {}, workers: [], uncaught: [], logs: [], inits: [], sets: [], blobs: [], raf: null };
+/* A page at ocean.html?query, started (or refused: page.failed). opts: perf
+ * (web/ocean_perf.js loaded, as ocean.html loads it), guide (web/guide.js
+ * after ocean.js, as ocean.html), nogl (no WebGL2: the scene can't be made),
+ * nosimd (WebAssembly without SIMD), media {query: true} (matchMedia; every
+ * other query false; page.setMedia changes one and tells its listeners). */
+async function bootPage(query, opts) {
+    opts = opts || {};
+    const page = { hooks: {}, workers: [], uncaught: [], logs: [], inits: [], sets: [], blobs: [], raf: null, focusVisible: false };
     const { doc, Ev, fireOn } = makeDom(page);
     const loc = {};
     const setLoc = (u) => { const x = new URL(u); Object.assign(loc, { href: x.href, search: x.search, origin: x.origin, protocol: x.protocol, pathname: x.pathname }); };
     setLoc('http://ocean.test/ocean.html' + (query || ''));
-    const storage = new Map(), winLs = {};
+    const storage = new Map(), winLs = {}, mqs = new Map();
     const say = (level) => (...a) => page.logs.push([level, a.map(String).join(' ')]);
+    /* one MediaQueryList per query, as a browser's: its matches can change, and it tells its listeners */
+    const matchMedia = (q) => {
+        if (!mqs.has(q)) mqs.set(q, { media: q, matches: !!(opts.media && opts.media[q]), _ls: [],
+                                      addEventListener(t, f) { if (t === 'change') this._ls.push(f); }, removeEventListener() {},
+                                      addListener(f) { this._ls.push(f); } });
+        return mqs.get(q);
+    };
+    const wasm = opts.nosimd ? Object.assign(Object.create(WebAssembly), { validate: () => false }) : WebAssembly;
     const ctx = {
         document: doc, location: loc, navigator: { userAgent: 'node' },
         history: { replaceState: (s, t, u) => setLoc(String(u)) },
         localStorage: { getItem: k => (storage.has(k) ? storage.get(k) : null), setItem: (k, v) => storage.set(k, String(v)), removeItem: k => storage.delete(k) },
-        matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {}, addListener() {} }),
+        matchMedia,
         getComputedStyle: () => ({ fontFamily: 'sans-serif', getPropertyValue: () => '' }),
         requestAnimationFrame: (cb) => { page.raf = cb; return 1; }, cancelAnimationFrame() {},
         innerWidth: 1920, innerHeight: 1080, devicePixelRatio: 1, _ls: winLs,
-        addEventListener: (t, f) => { (winLs[t] = winLs[t] || []).push(f); }, removeEventListener() {},
-        dispatchEvent: (ev) => { fireOn(ctx, ev); return true; },
-        Event: Ev, URL, URLSearchParams, ImageData: class {}, performance, WebAssembly, TextEncoder, TextDecoder,
+        /* a capture listener ("keydown:capture") runs before the bubbling ones, as on a browser's window */
+        addEventListener: (t, f, o) => { const k = o === true || (o && o.capture) ? t + ':capture' : t; (winLs[k] = winLs[k] || []).push(f); },
+        removeEventListener() {},
+        dispatchEvent: (ev) => { fireOn(ctx, ev, ev.type + ':capture'); fireOn(ctx, ev); return true; },
+        Event: Ev, URL, URLSearchParams, ImageData: class {}, performance, WebAssembly: wasm, TextEncoder, TextDecoder,
         Blob: function (parts, o) { page.blobs.push(parts.map(String).join('')); return new Blob(parts, o); },   /* Save setup's file */
         console: { log: say('log'), info: say('info'), warn: say('warn'), error: say('error'), debug: say('debug') },
         setTimeout: (f, ms) => unref(setTimeout(f, ms)), clearTimeout, setInterval: (f, ms) => unref(setInterval(f, ms)), clearInterval,
@@ -519,10 +570,55 @@ async function bootPage(query) {
         return sh;
     };
     const run = (name, src) => vm.runInContext(src !== undefined ? src : fs.readFileSync(path.join(WEB, name), 'utf8'), ctx, { filename: path.join(WEB, name) });
-    run('ocean_handoff.js'); run('ocean_scene_stub.js', SCENE_STUB); run('ocean_config.js');
+    run('ocean_handoff.js');
+    if (opts.perf) run('ocean_perf.js');
+    run('ocean_scene_stub.js', opts.nogl ? SCENE_NOGL : SCENE_STUB); run('ocean_config.js');
     run('charts_stub.js', CHARTS_STUB); run('ocean_dash.js'); run('ocean.js', PAGE_SRC);
+    if (opts.guide) run('guide.js');
     page.ctx = ctx; page.doc = doc; page.Ev = Ev; page.T = ctx.__oceanPage; page.KEYS = ctx.EvoOceanConfig.KEYS;
     page.el = (id) => doc.getElementById(id);
+    page.shown = (id) => { const e = page.el(id); return !!e && !e.hidden; };
+    page.setMedia = (q, on) => { const m = matchMedia(q); if (m.matches === on) return; m.matches = on; for (const f of m._ls.slice()) f.call(m, { matches: on, media: q }); };
+    /* the window at w x h: the wide layout's query from 960 px (ocean.js wideMQ), then a resize */
+    page.resize = (w, h) => {
+        ctx.innerWidth = w; ctx.innerHeight = h;
+        page.setMedia('(min-width: 960px)', w >= 960);
+        ctx.dispatchEvent(new Ev('resize'));
+    };
+    /* the keyboard: focus moved by Tab (its ring showing) */
+    page.tabTo = (id) => { page.focusVisible = true; page.el(id).focus(); };
+    /* a pointer's press: no focus ring */
+    page.pointer = () => { page.focusVisible = false; };
+    /* a key pressed where the focus is (else on the body), as a browser dispatches it: the
+     * window's capture listeners, the target and its ancestors, the document, the window; then,
+     * not prevented, what the focused control does itself: Enter or Space presses a button,
+     * Space turns a switch */
+    page.key = (key, o) => {
+        o = o || {};
+        page.focusVisible = true;
+        const t = doc.activeElement || doc.body, ev = new Ev('keydown', { bubbles: true });
+        Object.assign(ev, { key, code: o.code || (/^[a-z]$/i.test(key) ? 'Key' + key.toUpperCase() : key === ' ' ? 'Space' : ''),
+                            shiftKey: !!o.shift, ctrlKey: false, metaKey: false, altKey: false, repeat: false, target: t });
+        fireOn(ctx, ev, 'keydown:capture');
+        for (let n = t; n && !ev.stopped; n = n.parentNode) fireOn(n, ev);
+        fireOn(doc, ev);
+        fireOn(ctx, ev);
+        if (ev.defaultPrevented) return ev;
+        if (t.tagName === 'BUTTON' && (key === 'Enter' || key === ' ')) t.click();
+        else if (t.tagName === 'INPUT' && t.type === 'checkbox' && key === ' ') {
+            t.checked = !t.checked;
+            t.dispatchEvent(new Ev('input', { bubbles: true }));
+            t.dispatchEvent(new Ev('change', { bubbles: true }));
+        }
+        return ev;
+    };
+    /* run the queued animation frames until p settles (EvoOcean.bench's frames(); the page's loop) */
+    page.pump = async (p) => {
+        let done = false;
+        p.then(() => { done = true; }, () => { done = true; });
+        while (!done) { const cb = page.raf; page.raf = null; if (cb) cb(performance.now()); await tick(); }
+        return p;
+    };
     await until(() => (ctx.EvoApp && ctx.EvoApp.ready) || page.el('splashstate').className === 'error', 'the page to start', 60000);
     page.failed = page.el('splashstate').className === 'error' ? page.el('splashstate').textContent : '';
     page.M = page.T.M;

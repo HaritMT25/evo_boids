@@ -340,7 +340,7 @@
     border-radius: 999px;
   }
   #fitbtn[hidden] { display: none; }
-  body.card-open #fitbtn { display: none; }
+  body.card-open #fitbtn, body.stat-open #fitbtn { display: none; }   /* it would sit over the card's or the live numbers' top */
   #toasts {
     position: fixed; z-index: var(--z-toast);
     left: 50%; transform: translateX(-50%);

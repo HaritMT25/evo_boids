@@ -1836,6 +1836,50 @@ async function pageColourBench() {
     ok(p.uncaught.length === 0, 'no exception escaped the page\'s handlers' + (p.uncaught.length ? ' (' + p.uncaught[0] + ')' : ''));
 }
 
+/* Finding 2: I opened the live numbers under the charts or a narrow
+ * screen's settings, and the charts' Esc closed them too. Finding 8: an
+ * open coach mark stayed over the fish card, the live numbers, the charts. */
+async function pageLayers() {
+    section('The page: the live numbers open on top, the charts\' Esc leaves them, the coach mark gives way (audit 43fedc0, findings 2 and 8)');
+    const p = await bootPage(PAGE_Q);   /* a narrow screen: matchMedia false */
+    p.key('g');
+    const g1 = dashUp(p);
+    p.key('i');
+    ok(g1 && !dashUp(p) && p.shown('statpanel') && p.T.statOpen, 'G then I: the charts close and the live numbers show (charts ' + g1 + ' -> ' + dashUp(p) + ')');
+    ok(p.doc.body.classList.contains('stat-open'), '  the body says so (stat-open: the Fit button waits, rather than cover their first rows)');
+    p.key('Escape');
+    p.key('o');
+    const o1 = sheetOpen(p);
+    p.key('i');
+    ok(o1 && !sheetOpen(p) && p.shown('statpanel'), 'O then I below 960 px: the settings sheet closes, the live numbers show (sheet ' + o1 + ' -> ' + sheetOpen(p) + ')');
+    p.key('Escape');
+    p.key('v');
+    p.key('i');
+    ok(p.T.openPop === null && p.shown('statpanel'), 'V then I: the View menu closes, the live numbers show');
+    p.key('Escape');
+    p.key('i'); p.key('g');
+    const both = p.shown('statpanel') && dashUp(p);
+    p.key('Escape');
+    ok(both && !dashUp(p) && p.shown('statpanel'), 'I, G, Esc: Esc closes the charts and only them: the live numbers are still there (' + p.shown('statpanel') + ')');
+    p.key('Escape');
+    ok(!p.shown('statpanel'), 'a second Esc closes the live numbers');
+    p.resize(1400, 900);
+    p.key('o'); p.key('i');
+    ok(sheetOpen(p) && p.shown('statpanel'), 'O then I on a wide screen: the settings panel stays beside the live numbers');
+    p.key('Escape'); p.key('Escape');
+    p.resize(1920, 1080); p.resize(800, 900);
+    /* the coach mark, shown, then each surface that opens where it sits */
+    const surfaces = [['selecting a fish', () => p.ctx.EvoOcean.select(0)], ['I', () => p.key('i')], ['the readout', () => p.click('readout')],
+                      ['G', () => p.key('g')], ['the charts button', () => p.click('dashbtn')]];
+    for (const [what, act] of surfaces) {
+        p.ctx.EvoOceanDash.close(); if (p.T.statOpen) p.click('readout'); p.ctx.EvoOcean.select(-1);
+        p.el('coach').hidden = false;
+        act();
+        ok(!p.shown('coach'), 'the coach mark goes when ' + what + ' opens ' + (what === 'selecting a fish' ? 'its card' : what === 'G' || what === 'the charts button' ? 'the charts' : 'the live numbers'));
+    }
+    ok(p.uncaught.length === 0, 'no exception escaped the page\'s handlers' + (p.uncaught.length ? ' (' + p.uncaught[0] + ')' : ''));
+}
+
 /* Every section, in order; `node tests/ocean_turbo_handoff.js NAME...` runs only those. */
 const SECTIONS = {
     repeatedKeys, liveLedger, growthPage, randomize, imports,
@@ -1850,7 +1894,7 @@ const SECTIONS = {
     failures: failures_,
     pageHeld, pageRefusal, pageAsyncSetup, pageStartFailures, pageOverflow, pageBools, pageDashboards,
     pageWallsOverride, pageFreshVisit, pageSizeFields, pageRoundTrip,
-    pageColourBench
+    pageColourBench, pageLayers
 };
 const unhandled = [];
 process.on('unhandledRejection', (e) => { unhandled.push(e); });

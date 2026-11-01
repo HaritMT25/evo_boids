@@ -356,6 +356,7 @@
     if (isOpen) return;
     isOpen = true;
     if (host && host.setDrawer) host.setDrawer(false);
+    if (host && host.onOpen) host.onOpen();   /* the page's: no popover under the charts, the coach mark gone */
     dashEl.hidden = false;
     document.body.classList.add("dash-open");
     btn.setAttribute("aria-expanded", "true");

@@ -1036,7 +1036,7 @@
   function select(id) {
     var was = selectedId;
     selectedId = id;
-    if (id !== null) everSelected = true;
+    if (id !== null) { everSelected = true; hideCoach(); }   /* its card opens where the coach mark sits */
     if ((was === null) !== (id === null) && M && has("oc_set_capture")) M._oc_set_capture(id !== null ? 1 : 0);
     dirtyHud = true;
   }
@@ -1227,6 +1227,14 @@
     statOpen = open;
     el("statpanel").hidden = !open;
     el("readout").setAttribute("aria-expanded", open ? "true" : "false");
+    document.body.classList.toggle("stat-open", open);   /* the Fit button, where it would cover its first rows, waits (ocean.html) */
+    /* opening, as a popover does (setPop): never under the charts or a narrow
+     * screen's settings sheet; no popover over it; the coach mark goes */
+    if (open) {
+      if (dash() && dash().isOpen()) dash().close();
+      if (!wideMQ.matches && drawerEl.classList.contains("open")) setDrawer(false);
+      setPop(null); hideCoach();
+    }
     dirtyHud = true;
   }
   function updateHud(s, now) {
@@ -1827,11 +1835,15 @@
     document.addEventListener("focusin", function (e) { if (typingIn(e.target)) releaseMoveKeys(); });
     window.addEventListener("keydown", function (e) {
       if (e.key === "Escape") {
-        /* the tour or the charts take this Esc themselves; else back to the popover's opener */
+        /* the tour or the charts take this Esc themselves (escHandledElsewhere),
+         * and nothing behind them closes with it; else the popover (back to its
+         * opener), the settings, the live numbers, or the fish */
         if (openPop) { if (!escHandledElsewhere) closePop(true); return; }
-        if (drawerEl.classList.contains("open")) setDrawer(false);
-        else if (statOpen) setStatPanel(false);
-        else if (!escHandledElsewhere) { if (scene.following()) unfollow(); else select(null); }
+        if (!escHandledElsewhere) {
+          if (drawerEl.classList.contains("open")) setDrawer(false);
+          else if (statOpen) setStatPanel(false);
+          else if (scene.following()) unfollow(); else select(null);
+        }
         if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
         return;
       }
@@ -2439,6 +2451,8 @@
       familyColor: function (id) { return has("oc_family_color") ? M._oc_family_color(id) : 0x3b5957; },
       wiring: wiringNow,
       setDrawer: setDrawer,
+      /* the charts cover the page: no popover left open under them, and the coach mark goes */
+      onOpen: function () { setPop(null); hideCoach(); },
       setRecEvery: function (every) {
         if (turboWorker && (turboState === "entering" || turboState === "turbo")) turboWorker.postMessage({ cmd: "rec", every: every });
       }

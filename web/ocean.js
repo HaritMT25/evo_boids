@@ -1064,10 +1064,13 @@
     if (s.n > 1 && s.ids[i] === notId) i = (i + 1 + Math.floor(Math.random() * (s.n - 1))) % s.n;
     return i;
   }
-  function select(id) {
+  /* handover: a followed fish died and another takes its place (the frame
+   * loop), not a fish the visitor picked */
+  function select(id, handover) {
     var was = selectedId;
     selectedId = id;
     if (id !== null) { everSelected = true; hideCoach(); }   /* its card opens where the coach mark sits */
+    if (id !== null && id !== was && !handover) { cardNewer = true; cardHeld = false; }   /* its card, over the live numbers (updateCard) */
     if ((was === null) !== (id === null) && M && has("oc_set_capture")) M._oc_set_capture(id !== null ? 1 : 0);
     dirtyHud = true;
   }
@@ -1254,8 +1257,15 @@
   function setHtml(id, html) { var e = el(id); if (e && e._v !== html) { e._v = html; e.innerHTML = html; } }
   function setTxt(id, t) { var e = el(id); if (e && e._v !== t) { e._v = t; e.textContent = t; } }
   var statOpen = false;
+  /* The live numbers and a fish card where they overlap (a phone; a card
+   * flipped to the top; its brain open): the newer shows (updateCard). The
+   * numbers opened over a card hide it until they close (cardHeld), its
+   * fish still selected, followed and lit; a fish picked while they are open
+   * (cardNewer) closes them. */
+  var cardNewer = false, cardHeld = false;
   function setStatPanel(open) {
     statOpen = open;
+    cardNewer = false; cardHeld = false;
     el("statpanel").hidden = !open;
     el("readout").setAttribute("aria-expanded", open ? "true" : "false");
     document.body.classList.toggle("stat-open", open);   /* the Fit button, where it would cover its first rows, waits (ocean.html) */
@@ -1420,13 +1430,22 @@
       connCount: nc, conns: new Float32Array(buf, M._oc_inspect_conns(), nc * 5), shape: sh
     };
   }
+  function overlap(a, b) {
+    return a.width > 0 && a.height > 0 && b.width > 0 && b.height > 0 &&
+           a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
+  }
   function updateCard(s) {
+    if (cardHeld && statOpen) { hideCard(); return s; }   /* under the live numbers: the fish stays selected */
     var idx = s.selIdx, f = idx >= 0 && turboState === "live" ? inspect(idx) : null;
     if (!f) { hideCard(); return s; }
     s = fresh(s);   /* oc_inspect may have grown the memory */
     if (cardEl.hidden) showCard();
     var p = scene.project(s, idx);
     if (p) placeCard(p.x, p.y);
+    if (statOpen && overlap(cardEl.getBoundingClientRect(), el("statpanel").getBoundingClientRect())) {
+      if (cardNewer) setStatPanel(false);   /* a fish picked over the numbers: its card */
+      else { cardHeld = true; hideCard(); return s; }   /* the numbers opened over the card: they */
+    }
     var info = f.info, id = Math.round(info[0]);
     var rgb = [s.colors[3 * idx], s.colors[3 * idx + 1], s.colors[3 * idx + 2]];
     var pkey = id + "|" + rgb.join() + "|" + info[4].toFixed(2) + "|" + info[5].toFixed(2);
@@ -1823,7 +1842,7 @@
     /* the selected fish, by id; a followed fish that died hands over to another */
     var idx = turboState === "live" ? indexOfId(s, selectedId) : -1;
     if (idx < 0 && selectedId !== null && turboState === "live") {
-      if (wantFollow && s.n) { idx = randomFish(s, null); select(s.ids[idx]); }
+      if (wantFollow && s.n) { idx = randomFish(s, null); select(s.ids[idx], true); }
       else select(null);
     }
     s.selIdx = idx;

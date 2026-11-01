@@ -418,7 +418,12 @@ function makeDom(page) {
         click() { this.dispatchEvent(new Ev('click', { bubbles: true })); }
         focus() { doc.activeElement = this; }
         blur() { if (doc.activeElement === this) doc.activeElement = null; }
-        getBoundingClientRect() { return { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0, x: 0, y: 0 }; }
+        /* no layout: a zero box, unless a test gives the element one (_rect: {left, top, right, bottom}) */
+        getBoundingClientRect() {
+            const r = this._rect;
+            return r ? { left: r.left, top: r.top, right: r.right, bottom: r.bottom, width: r.right - r.left, height: r.bottom - r.top, x: r.left, y: r.top }
+                     : { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0, x: 0, y: 0 };
+        }
         getContext() { return ctx2d; }
         setPointerCapture() {}
         releasePointerCapture() {}
@@ -2121,6 +2126,41 @@ async function pageTurboFraction() {
     }
 }
 
+/* Review finding 2: the live numbers opened under a fish card where the two
+ * overlap (a phone; a card flipped to the top, its brain open). The newer
+ * of the two shows; the fish stays selected while its card waits. Boxes
+ * given here (the test DOM has no layout). */
+async function pageCardNumbers() {
+    section('The page: the live numbers and a fish card, where they overlap: the newer shows (review of PR #37, finding 2)');
+    const p = await bootPage(PAGE_Q);
+    const run = () => p.T.frame(performance.now());
+    const box = (l, t, r, b) => ({ left: l, top: t, right: r, bottom: b });
+    p.click('pausebtn');
+    p.el('statpanel')._rect = box(10, 64, 350, 654);
+    p.el('fishcard')._rect = box(10, 64, 380, 520);   /* a phone's card flipped to the top, its brain open */
+    p.ctx.EvoOcean.select(0); run();
+    if (p.el('iexpand').getAttribute('aria-expanded') !== 'true') p.click('iexpand');
+    p.el('fishcard').classList.add('flip'); run();
+    const id0 = p.ctx.EvoOcean.state().selectedId, card0 = p.shown('fishcard');
+    p.key('i'); run(); run();
+    ok(card0 && p.shown('statpanel') && !p.shown('fishcard') && p.ctx.EvoOcean.state().selectedId === id0 &&
+       p.el('iexpand').getAttribute('aria-expanded') === 'true',
+       'a flipped card with its brain open, then I: the numbers show, the card waits, its fish still selected (' + id0 + ')');
+    p.key('Escape'); run();
+    ok(!p.shown('statpanel') && p.shown('fishcard') && p.ctx.EvoOcean.state().selectedId === id0,
+       '  Esc closes the numbers (the visible layer), and the card is back');
+    p.click('readout'); run();
+    const held = p.shown('statpanel') && !p.shown('fishcard');
+    p.ctx.EvoOcean.select(1); run();
+    const id1 = p.ctx.EvoOcean.state().selectedId;
+    ok(held && id1 !== id0 && !p.shown('statpanel') && p.shown('fishcard'),
+       'the numbers open (the readout), then another fish picked: its card shows and the numbers close (' + id0 + ' -> ' + id1 + ')');
+    p.el('fishcard')._rect = box(1530, 76, 1910, 600);   /* a wide screen's card, at the right */
+    p.key('i'); run(); run();
+    ok(p.shown('statpanel') && p.shown('fishcard'), 'where they do not overlap (a wide screen), both stay');
+    ok(p.uncaught.length === 0, 'no exception escaped the page\'s handlers' + (p.uncaught.length ? ' (' + p.uncaught[0] + ')' : ''));
+}
+
 /* Every section, in order; `node tests/ocean_turbo_handoff.js NAME...` runs only those. */
 const SECTIONS = {
     repeatedKeys, liveLedger, growthPage, randomize, imports,
@@ -2136,7 +2176,7 @@ const SECTIONS = {
     pageHeld, pageRefusal, pageAsyncSetup, pageStartFailures, pageOverflow, pageBools, pageDashboards,
     pageWallsOverride, pageFreshVisit, pageSizeFields, pageRoundTrip,
     pageColourBench, pageLayers, pageResize, pageKeys, pageStartupFailures, pageTourEscape, pageWholeFields,
-    pageTurboFraction
+    pageTurboFraction, pageCardNumbers
 };
 const unhandled = [];
 process.on('unhandledRejection', (e) => { unhandled.push(e); });

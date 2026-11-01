@@ -425,15 +425,18 @@
     attachTip(row, key);
     return row;
   }
+  /* a field's value as typed: a whole-number setting (opt.int) is never
+   * rounded here, so 300.5 is refused (sizeProblem on Restart, applyLive
+   * live), not run as 301 */
   function getVal(key) {
     var def = KEYS[key][0], opt = KEYS[key][1] || {}, input = el("o_" + key);
     if (typeof def === "boolean") return input.checked;
     if (opt.bit) return input.checked ? 1 : 0;
     var v = opt.options ? parseInt(input.value, 10) : parseFloat(input.value);
     if (!Number.isFinite(v)) return def;
-    if (opt.int) v = Math.round(v);
     return v;
   }
+  function wholeKey(key) { return !!(KEYS[key] && (KEYS[key][1] || {}).int); }
   function setVal(key, v) {
     var def = KEYS[key][0], opt = KEYS[key][1] || {}, input = el("o_" + key);
     if (!input) return;
@@ -476,6 +479,10 @@
     if (!wholeIn(f.height, LIM.side)) bad.push("the tank length must be a whole number from " + LIM.side[0] + " to " + LIM.side[1] + got(f.height));
     if (!depthOk(f.depth)) bad.push("the sea depth must be from " + LIM.depth[0] + " to " + LIM.depth[1] + got(f.depth));
     if (!wholeIn(f.population, LIM.population)) bad.push("the starting fish must be a whole number from 0 to " + LIM.population[1] + got(f.population));
+    /* the whole-number settings, as typed (the engine's own range checks follow in oc_init) */
+    Object.keys(f.cfg).forEach(function (k) {
+      if (wholeKey(k) && !Number.isInteger(f.cfg[k])) bad.push((LABELS[k] || k) + " must be a whole number" + got(f.cfg[k]));
+    });
     return bad.join("; ");
   }
   /* ---- live settings ----
@@ -512,6 +519,7 @@
   function applyLive(key) {
     if (!M) return;
     var num = numOf(key, getVal(key));
+    if (wholeKey(key) && !Number.isInteger(num)) { refuse(key, "it must be a whole number"); return; }   /* 300.5: never run as 301 */
     if (num < 0) {
       if (CFG.NEG_ON_RESTART[key]) {
         fieldNote(key, "Applies on Restart: a running world takes only 0 or more.");

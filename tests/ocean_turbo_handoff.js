@@ -2025,6 +2025,35 @@ async function pageTourEscape() {
     ok(p.uncaught.length === 0, 'no exception escaped the page\'s handlers' + (p.uncaught.length ? ' (' + p.uncaught[0] + ')' : ''));
 }
 
+/* Finding 10: a whole-number setting typed 300.5 ran as 301 (live, and on
+ * Restart) under a field showing 300.5. */
+async function pageWholeFields() {
+    section('The page: whole-number settings typed with a fraction are refused, not rounded (audit 43fedc0, finding 10)');
+    const p = await bootPage(PAGE_Q7);
+    const sets0 = p.sets.length, run0 = JSON.stringify(p.T.runCfg), print0 = fingerprint(p.M);
+    p.edit('maxPopulation', '300.5');
+    ok(p.sets.length === sets0 && JSON.stringify(p.T.runCfg) === run0 && fingerprint(p.M) === print0 && p.el('o_maxPopulation').value === '0' &&
+       /whole number/.test(p.msg()),
+       'live: the population cap (maxPopulation) 300.5 is refused visibly, nothing sent to the world, the field back to what runs ("' + p.msg() + '"; field ' +
+       p.el('o_maxPopulation').value + ')');
+    p.edit('maxPopulation', '300');
+    ok(p.T.runCfg.maxPopulation === 300 && p.sets.length === sets0 + 1 && p.sets[sets0][1] === 'maxPopulation' && p.sets[sets0][2] === 300,
+       '  300 applies live');
+    for (const [key, typed, def] of [['predatorCount', '1.5', '0'], ['genomeMaxLength', '80.5', '80'], ['foodPatches', '0.5', '0']]) {
+        const n0 = p.inits.length, pr0 = fingerprint(p.M);
+        p.edit(key, typed);
+        p.click('restart');
+        ok(p.inits.length === n0 && fingerprint(p.M) === pr0 && p.el('o_' + key).value === typed && /whole number/.test(p.msg()) &&
+           new RegExp('got ' + typed.replace('.', '\\.')).test(p.msg()),
+           'Restart with ' + key + ' ' + typed + ': refused with the reason, no oc_init, the field as typed ("' + p.msg() + '")');
+        p.edit(key, def);
+    }
+    p.edit('predatorCount', '2');
+    p.click('restart');
+    ok(p.T.initArgs.cfg.predatorCount === 2 && p.T.runCfg.predatorCount === 2, 'a whole number runs as typed (predatorCount 2)');
+    ok(p.uncaught.length === 0, 'no exception escaped the page\'s handlers' + (p.uncaught.length ? ' (' + p.uncaught[0] + ')' : ''));
+}
+
 /* Every section, in order; `node tests/ocean_turbo_handoff.js NAME...` runs only those. */
 const SECTIONS = {
     repeatedKeys, liveLedger, growthPage, randomize, imports,
@@ -2039,7 +2068,7 @@ const SECTIONS = {
     failures: failures_,
     pageHeld, pageRefusal, pageAsyncSetup, pageStartFailures, pageOverflow, pageBools, pageDashboards,
     pageWallsOverride, pageFreshVisit, pageSizeFields, pageRoundTrip,
-    pageColourBench, pageLayers, pageResize, pageKeys, pageStartupFailures, pageTourEscape
+    pageColourBench, pageLayers, pageResize, pageKeys, pageStartupFailures, pageTourEscape, pageWholeFields
 };
 const unhandled = [];
 process.on('unhandledRejection', (e) => { unhandled.push(e); });

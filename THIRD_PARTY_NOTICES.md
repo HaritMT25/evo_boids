@@ -1,6 +1,6 @@
 # Third-party notices
 
-evo_boids is licensed under CC BY-NC 4.0 (see `LICENSE`). The parts listed here
+Finfolk (formerly evo_boids) is licensed under CC BY-NC 4.0 (see `LICENSE`). The parts listed here
 come from other projects and stay under their own licenses. Those licenses are
 permissive and require that the notices below travel with copies of the code.
 
@@ -131,7 +131,7 @@ SOFTWARE.
 
 `web/evo_boids.{js,wasm}` and `web/evo_boids_mt.{js,wasm}` (and the copies
 `wasm/build_site.sh` puts in `dist/`) are produced by Emscripten and contain,
-besides evo_boids itself:
+besides Finfolk's own code:
 
 - **Emscripten's JavaScript runtime and system libraries**: MIT or
   University of Illinois/NCSA, at the recipient's choice.

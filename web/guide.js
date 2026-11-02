@@ -43,7 +43,7 @@
   function drawerSides() { return wide() ? ["left", "below", "above"] : ["above", "below"]; }
   var H = { app: app, q: q, rectOf: rectOf, touch: touch, tank: tank, compact: compact, wide: wide, drawerSides: drawerSides };
   var STEPS = CFG && CFG.steps ? CFG.steps(H) : [
-    { welcome: true, drawer: false, title: "Welcome to evo_boids",
+    { welcome: true, drawer: false, title: "Welcome to Finfolk",
       body: function () {
         return "Each fish has a tiny neural network wired by its genes. Fish that eat enough " +
                "have children with slightly mutated genes. Nobody programs what they do: " +

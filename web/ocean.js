@@ -965,6 +965,7 @@
       : n ? "<b>Waiting for the next start:</b> " + diff.slice(0, 3).map(function (k) { return escHtml(fieldText(k)); }).join(" · ") +
             (n > 3 ? " · and " + (n - 3) + " more" : "")
       : "<b>Running</b> · " + escHtml(runSummary()));
+    el("startsummary").title = el("startsummary").textContent;   /* (a short screen shows two lines of it) */
     var wc = el("waitingcount"), count = draft ? 1 + n : n;
     wc.hidden = !count;
     setHtml("waitingcount", count + "<span class='wc-word'> waiting</span>");
@@ -973,6 +974,7 @@
     markCards();
   }
   /* the picked card wears its Start (and Surprise me its Reroll): the same start as the bar's */
+  var cardShown = null;   /* the card last brought into view (a new pick scrolls to it, a Reroll doesn't) */
   function markCards() {
     var pickedId = draft ? (draft.kind === "file" ? "file" : draft.id) : null, acts = el("scenario-acts");
     Object.keys(CARD_IDS).forEach(function (id) {
@@ -981,14 +983,19 @@
       if (b.parentNode && b.parentNode.classList) b.parentNode.classList.toggle("picked", on);
       if (on && b.parentNode && acts.parentNode !== b.parentNode) b.parentNode.appendChild(acts);
     });
-    var shownBefore = !acts.hidden;
     acts.hidden = !pickedId;
     el("rerollbtn").hidden = pickedId !== "surprise";
     var lab = el("scenario-start").querySelector("span");
     if (lab) lab.textContent = turboState !== "live" ? "Stop & start" : "Start";
     el("scenario-start").title = turboState !== "live" ? "Stops Turbo, then starts this world (asked first)" : "Starts this world";
-    /* a phone's strip scrolls sideways: the picked card comes into view with its Start */
-    if (pickedId && !shownBefore && acts.scrollIntoView) { try { acts.scrollIntoView({ block: "nearest", inline: "nearest" }); } catch (e) { /* old */ } }
+    /* a phone's strip scrolls sideways: the picked card comes into view with
+     * its Start, at a place the strip snaps to (its start), so it stays there */
+    var card = pickedId ? el(CARD_IDS[pickedId]).parentNode : null;
+    if (!card) cardShown = null;
+    else if (pickedId !== cardShown && drawerEl.classList.contains("open") && card.scrollIntoView) {   /* (a closed sheet: nothing to scroll) */
+      cardShown = pickedId;
+      try { card.scrollIntoView({ block: "nearest", inline: "start" }); } catch (e) { /* old */ }
+    }
   }
   /* the sheet back to the running world: its seed and size, its settings
    * with the live tweaks it accepted; an edit still on its way keeps its

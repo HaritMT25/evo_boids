@@ -564,17 +564,17 @@
   #scenario-acts svg.i { width: 18px; height: 18px; }
   #rerollbtn[hidden] { display: none; }
   @media (max-width: 599px) {
-    #scenarios { display: flex; overflow-x: auto; scroll-snap-type: x proximity; scrollbar-width: none; margin: 8px -18px 0; padding: 0 18px 4px; }
+    #scenarios { display: flex; overflow-x: auto; scroll-snap-type: x proximity; scroll-padding-inline: 18px; scrollbar-width: none; margin: 8px -18px 0; padding: 0 18px 4px; }
     #scenarios::-webkit-scrollbar { display: none; }
     .scard { flex: 0 0 min(64vw, 220px); scroll-snap-align: start; }
   }
   #randnote { margin-top: 10px; font-size: 13px; color: var(--plankton); line-height: 1.5; }
   /* the start bar's split button and its menu (same fish / new fish) */
-  .startsplit { display: inline-flex; flex: none; position: relative; }
+  .startsplit { display: inline-flex; flex: 0 1 auto; min-width: 0; position: relative; }   /* (the label shortens with … before it overflows) */
   .startsplit #restart { border-top-right-radius: 0; border-bottom-right-radius: 0; }
   #startmenubtn { min-width: 44px; padding: 0 10px; border-left-width: 0; border-top-left-radius: 0; border-bottom-left-radius: 0; }
-  #startmenubtn svg.i { width: 18px; height: 18px; transition: transform 200ms var(--ease); }
-  #startmenubtn[aria-expanded="true"] svg.i { transform: rotate(180deg); }
+  #startmenubtn svg.i { width: 18px; height: 18px; transform: rotate(180deg); transition: transform 200ms var(--ease); }   /* down: the menu opens below */
+  #startmenubtn[aria-expanded="true"] svg.i { transform: none; }
   #restart.pending + #startmenubtn { background: var(--plankton); color: var(--plankton-ink); border-color: transparent; box-shadow: inset 1px 0 0 oklch(0.22 0.06 130 / 0.35); }
   #startmenu { flex: 1 1 100%; display: flex; flex-direction: column; gap: 4px; padding: 6px; border-radius: var(--r-md);
                background: var(--surface-2); border: 1px solid var(--line-soft); }
@@ -612,8 +612,8 @@
   #startsummary .seedtag { color: var(--ink-3); font-family: var(--mono); font-size: 12px; }
   #startrow { flex: 1 1 100%; display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
   #startdiscard[hidden] { display: none; }
-  #restart { flex: none; min-width: 120px; }
-  #restart span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 16em; }
+  #restart { flex: 0 1 auto; min-width: 120px; }
+  #restart span { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 16em; }
   #restart.pending { background: var(--plankton); color: var(--plankton-ink); border-color: transparent; }
   #err { flex: 1 1 100%; min-width: 0; font-size: 13px; line-height: 1.35; color: var(--ink-3); }
   #err:empty { display: none; }
@@ -644,6 +644,16 @@
    * least a few settings show between them (the question included). */
   @media (max-width: 959px) and (max-height: 700px) {
     #drawer { height: min(80dvh, 680px); }
+    /* the summary in two lines (the whole of it in its title; the tabs and
+     * the card say the rest), and a note (never an error) only as its toast
+     * (#err stays the status a screen reader hears) */
+    #startsummary { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
+    #err:not(.error) { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  }
+  /* a 320-379 px phone: Discard and Start (with its menu) side by side */
+  @media (max-width: 379px) {
+    #startdiscard { padding: 0 10px; }
+    #restart svg.i { display: none; }
   }
   /* a sheet as wide as a tablet's: the question beside its answers, the
    * summary beside Start (one row each, not two) */

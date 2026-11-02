@@ -2723,6 +2723,17 @@ async function pageFollowBack() {
         ok(a.selectedId === null && !a.following && p.T.turboReturn === null, 'Stop Turbo & start: the new world starts with no fish picked or followed');
         ok(p.uncaught.length === 0, 'no exception escaped the page\'s handlers' + (p.uncaught.length ? ' (' + p.uncaught[0] + ')' : ''));
     }
+    {   /* a Stop Turbo & start that does not start (the engine refuses the world): the run carries on, its fish picked up again */
+        const p = await bootPage(PAGE_Q);
+        const id = pick(p, true), e0 = p.T.worldEpoch;
+        await trip(p, () => { p.edit('toroidal', true); p.click('restart'); p.click('startconfirm'); }, false);
+        await until(() => p.T.turboState === 'live' && !p.T.pendingStart, 'the hand-back');
+        const a = st(p), said = p.msg();
+        ok(p.T.worldEpoch === e0 && /that world was refused/.test(said) && a.selectedId === id && a.following && a.flashlight && p.T.turboReturn === null,
+           'Stop Turbo & start refused by the engine: the run carries on and fish #' + id + ' is followed again, the lamp on (' +
+           [a.selectedId, a.following, a.flashlight].join(' ') + ')');
+        ok(p.uncaught.length === 0, 'no exception escaped the page\'s handlers' + (p.uncaught.length ? ' (' + p.uncaught[0] + ')' : ''));
+    }
 }
 
 /* UI-3: the draft. What waits is derived from values (a field changed back

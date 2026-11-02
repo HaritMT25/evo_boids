@@ -1103,11 +1103,11 @@
   function finishPendingStart(ps) {
     if (planKey(ps.plan) !== ps.key) {
       showError("The setup changed while Turbo stopped (an edit was refused or made meanwhile), so the new world did not start: your run carries on. Check it and start again.");
-      return;
+      return false;
     }
     dropWorker();   /* a clean slate: the next Turbo gets a fresh worker */
     ps.plan.failed = "Turbo stopped and your run carries on, but that world was refused: ";
-    commitStart(ps.plan);
+    return commitStart(ps.plan);
   }
   function cancelPendingStart(why) {
     if (!pendingStart) return;
@@ -2187,10 +2187,12 @@
       }
       var ps = pendingStart;
       pendingStart = null;
-      if (ps) turboReturn = null;   /* a new world follows: no fish to pick up */
-      turboBack();
-      if (ps) finishPendingStart(ps);   /* in this message, before any frame steps the world handed back */
-      else showNote("Turbo ran " + (msg.totalSteps || 0).toLocaleString() + " steps.");
+      /* a new world follows: the fish is picked up again only if it doesn't
+       * start (the run carries on), in this message, before any frame steps
+       * the world handed back */
+      turboBack(false, false, false, !!ps);
+      if (ps && !finishPendingStart(ps)) restoreAfterTurbo();
+      if (!ps) showNote("Turbo ran " + (msg.totalSteps || 0).toLocaleString() + " steps.");
     } else if (msg.type === "error") {
       turboFailed("Turbo stopped: " + (msg.message || "unknown error"), msg.mem);
     }
@@ -2202,7 +2204,7 @@
    * After a session the world runs on (Stop Turbo and watch); a start that
    * failed (startFailed: the worker never answered) leaves the playback as
    * it was, a paused world paused. */
-  function turboBack(quiet, lost, startFailed) {
+  function turboBack(quiet, lost, startFailed, holdReturn) {
     turboState = "live";
     turboView = null; turboWire = null; wireAsked = false;
     summary = null;   /* the readout's summary: this world's again, at the next refresh */
@@ -2212,7 +2214,7 @@
     setPaused(startFailed ? turboEntryPaused : false);
     updateLocks();
     var res = replayEdits(plan, quiet);
-    restoreAfterTurbo();
+    if (!holdReturn) restoreAfterTurbo();   /* (held: Stop Turbo & start decides first) */
     return res;
   }
   /* The worker stopped on an error, or died. With its memory (the world was

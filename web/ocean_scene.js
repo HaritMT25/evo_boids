@@ -1532,7 +1532,7 @@
       renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: !opts.coarse, alpha: false,
                                            powerPreference: "high-performance", stencil: false });
     } catch (e) {
-      console.warn("evo_boids: WebGL2 unavailable, using the 2D renderer", e);
+      console.warn("evo_boids: WebGL2 unavailable: the 3-D tank cannot be drawn (the page offers 2-D Classic)", e);
       return null;
     }
     renderer.toneMapping = THREE.NoToneMapping;

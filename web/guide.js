@@ -313,10 +313,16 @@
   window.addEventListener("keydown", function (e) {
     if (idx < 0) return;
     if (steps[idx] && steps[idx].intro) { if (e.key === "Escape") endIntro(false, true); return; }
-    var t = e.target && e.target.tagName;
-    if (t === "INPUT" || t === "SELECT" || t === "TEXTAREA") return;
-    if (e.key === "Escape") finish();
-    else if (e.key === "ArrowRight" && !steps[idx].welcome && !steps[idx].last) show(idx + 1);
+    /* Esc ends the tour from anywhere, a settings field too (the tour is the
+     * top layer: the pages and the charts leave this Esc to it). The arrows
+     * page the tour unless a control has them: a field, a tab (the settings'
+     * and the charts' tabs move with them), or any handler that took the key */
+    if (e.key === "Escape") { finish(); return; }
+    if (e.defaultPrevented) return;
+    var tg = e.target, t = tg && tg.tagName;
+    if (t === "INPUT" || t === "SELECT" || t === "TEXTAREA" || (tg && tg.isContentEditable)) return;
+    if (tg && tg.getAttribute && tg.getAttribute("role") === "tab") return;
+    if (e.key === "ArrowRight" && !steps[idx].welcome && !steps[idx].last) show(idx + 1);
     else if (e.key === "ArrowLeft" && idx > 1) show(idx - 1);
   });
 

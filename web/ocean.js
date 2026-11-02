@@ -145,11 +145,15 @@
   }
   function abs(u) { return new URL(u, location.href).href; }
   var moduleUrls = null;   /* {js, wasm}: the Turbo worker loads the same module */
+  var noSimd = false;      /* Classic's modules need SIMD too: a start that fails for it offers no Classic */
   function loadModule() {
     if (!MOCK) {
       var simd = false;
       try { simd = typeof WebAssembly === "object" && WebAssembly.validate(SIMD_PROBE); } catch (e) { /* none */ }
-      if (!simd) return Promise.reject(new Error("this browser has no WebAssembly SIMD, which the simulation needs (Chrome 91+, Firefox 89+ or Safari 16.4+)"));
+      if (!simd) {
+        noSimd = true;
+        return Promise.reject(new Error("this browser has no WebAssembly SIMD, which the simulation needs (Chrome 91+, Firefox 89+ or Safari 16.4+)"));
+      }
     }
     var js = abs(MOCK ? A.mock : A.ocean), wasm = abs(A.oceanWasm);
     moduleUrls = { js: js, wasm: wasm, handoff: abs(A.handoff || "ocean_handoff.js") };
@@ -421,15 +425,18 @@
     attachTip(row, key);
     return row;
   }
+  /* a field's value as typed: a whole-number setting (opt.int) is never
+   * rounded here, so 300.5 is refused (sizeProblem on Restart, applyLive
+   * live), not run as 301 */
   function getVal(key) {
     var def = KEYS[key][0], opt = KEYS[key][1] || {}, input = el("o_" + key);
     if (typeof def === "boolean") return input.checked;
     if (opt.bit) return input.checked ? 1 : 0;
     var v = opt.options ? parseInt(input.value, 10) : parseFloat(input.value);
     if (!Number.isFinite(v)) return def;
-    if (opt.int) v = Math.round(v);
     return v;
   }
+  function wholeKey(key) { return !!(KEYS[key] && (KEYS[key][1] || {}).int); }
   function setVal(key, v) {
     var def = KEYS[key][0], opt = KEYS[key][1] || {}, input = el("o_" + key);
     if (!input) return;
@@ -472,6 +479,10 @@
     if (!wholeIn(f.height, LIM.side)) bad.push("the tank length must be a whole number from " + LIM.side[0] + " to " + LIM.side[1] + got(f.height));
     if (!depthOk(f.depth)) bad.push("the sea depth must be from " + LIM.depth[0] + " to " + LIM.depth[1] + got(f.depth));
     if (!wholeIn(f.population, LIM.population)) bad.push("the starting fish must be a whole number from 0 to " + LIM.population[1] + got(f.population));
+    /* the whole-number settings, as typed (the engine's own range checks follow in oc_init) */
+    Object.keys(f.cfg).forEach(function (k) {
+      if (wholeKey(k) && !Number.isInteger(f.cfg[k])) bad.push((LABELS[k] || k) + " must be a whole number" + got(f.cfg[k]));
+    });
     return bad.join("; ");
   }
   /* ---- live settings ----
@@ -508,6 +519,7 @@
   function applyLive(key) {
     if (!M) return;
     var num = numOf(key, getVal(key));
+    if (wholeKey(key) && !Number.isInteger(num)) { refuse(key, "it must be a whole number"); return; }   /* 300.5: never run as 301 */
     if (num < 0) {
       if (CFG.NEG_ON_RESTART[key]) {
         fieldNote(key, "Applies on Restart: a running world takes only 0 or more.");
@@ -518,11 +530,15 @@
     }
     if (turboState === "entering" || turboState === "exiting") {
       live.hold(key, num);
-      fieldNote(key, turboState === "entering" ? "Applies as soon as Turbo has started." : "Applies as soon as Turbo hands the world back.");
+      fieldNote(key, heldNote());
       return;
     }
     fieldNote(key, "");
     sendLive(key, num);
+  }
+  /* the note under a field whose edit is held for Turbo's hand-off */
+  function heldNote() {
+    return turboState === "entering" ? "Applies as soon as Turbo has started." : "Applies as soon as Turbo hands the world back.";
   }
   /* true: applied here; false: refused here (keep: the field stays, a newer
    * edit of the key follows); null: sent to the Turbo worker (seq: a held
@@ -539,20 +555,32 @@
     else refuse(key, lastError(), keep);
     return !!ok;
   }
-  function liveApplied(key, v, quiet) {
+  /* seq: the worker's acknowledgment of that edit. With no newer edit of the
+   * key on its way, the field shows what now runs (a refusal in between may
+   * have set it back), unless the visitor is in it. */
+  function liveApplied(key, v, quiet, seq) {
     if (v === KEYS[key][0]) delete runCfg[key]; else runCfg[key] = v;
     if (key === "lightEnabled" || key === "L0" || key === "kWater") readLight();
+    var input = el("o_" + key);
+    if (input && document.activeElement !== input && !(live && live.pending(key, seq)) && getVal(key) !== v) {
+      setVal(key, v); updateNeeds(); updateTabDots();
+    }
     if (!quiet) showNote((LABELS[key] || key) + " is now " + shown(v) + " (live)");
   }
-  /* a refused live value: the field goes back to what the world runs with
-   * (keep: a newer edit of it is on its way, so the field stays) */
+  /* a refused live value: the field goes back to the newest edit of it still
+   * on its way to the world (held for Turbo's hand-off, with its note, or with
+   * the worker), else to what the world runs with (keep: a newer edit of it
+   * follows, so the field stays) */
   function refuse(key, why, keep) {
+    var back = null, p = null;
     if (!keep) {
-      setVal(key, cfgVal(key));
-      fieldNote(key, "");
+      p = live ? live.latest(key) : null;
+      back = p ? valOf(key, p.num) : cfgVal(key);
+      setVal(key, back);
+      fieldNote(key, p && p.from === "held" ? heldNote() : "");
       updateNeeds(); updateTabDots();
     }
-    showError((LABELS[key] || key) + ": " + why + (keep ? "" : " (back to " + shown(cfgVal(key)) + ")"));
+    showError((LABELS[key] || key) + ": " + why + (keep ? "" : " (back to " + shown(back) + (p ? ", on its way" : "") + ")"));
   }
   /* Edits in the order they were made (ledger entries): to the worker while
    * Turbo owns the world, else to this one. A refused edit keeps its field
@@ -1016,11 +1044,14 @@
     el("speedlabel").textContent = speed() + "×";
     dirtyHud = true;
   }
-  /* Hold 60 fps may run fewer steps than asked: the label turns and says how many */
+  /* Hold 60 fps may run fewer steps than asked: the label turns, and the
+   * caption under it (#speedcap) says how many, on a touch screen too */
   function showSpeedCap() {
     var ask = speed(), ran = turboState === "live" && !paused && lastSteps > 0 ? lastSteps : ask, lab = el("speedlabel");
     lab.classList.toggle("capped", ran < ask);
     lab.title = ran < ask ? ask + "× asked; running " + ran + " steps per frame to hold 60 fps (View › Hold 60 fps)" : "steps per frame";
+    el("speedcap").hidden = !(ran < ask);
+    if (ran < ask) setTxt("speedcap", "runs " + ran);
   }
   function indexOfId(s, id) {
     if (id === null || !s) return -1;
@@ -1033,10 +1064,13 @@
     if (s.n > 1 && s.ids[i] === notId) i = (i + 1 + Math.floor(Math.random() * (s.n - 1))) % s.n;
     return i;
   }
-  function select(id) {
+  /* handover: a followed fish died and another takes its place (the frame
+   * loop), not a fish the visitor picked */
+  function select(id, handover) {
     var was = selectedId;
     selectedId = id;
-    if (id !== null) everSelected = true;
+    if (id !== null) { everSelected = true; hideCoach(); }   /* its card opens where the coach mark sits */
+    if (id !== null && id !== was && !handover) { cardNewer = true; cardHeld = false; }   /* its card, over the live numbers (updateCard) */
     if ((was === null) !== (id === null) && M && has("oc_set_capture")) M._oc_set_capture(id !== null ? 1 : 0);
     dirtyHud = true;
   }
@@ -1223,10 +1257,25 @@
   function setHtml(id, html) { var e = el(id); if (e && e._v !== html) { e._v = html; e.innerHTML = html; } }
   function setTxt(id, t) { var e = el(id); if (e && e._v !== t) { e._v = t; e.textContent = t; } }
   var statOpen = false;
+  /* The live numbers and a fish card where they overlap (a phone; a card
+   * flipped to the top; its brain open): the newer shows (updateCard). The
+   * numbers opened over a card hide it until they close (cardHeld), its
+   * fish still selected, followed and lit; a fish picked while they are open
+   * (cardNewer) closes them. */
+  var cardNewer = false, cardHeld = false;
   function setStatPanel(open) {
     statOpen = open;
+    cardNewer = false; cardHeld = false;
     el("statpanel").hidden = !open;
     el("readout").setAttribute("aria-expanded", open ? "true" : "false");
+    document.body.classList.toggle("stat-open", open);   /* the Fit button, where it would cover its first rows, waits (ocean.html) */
+    /* opening, as a popover does (setPop): never under the charts or a narrow
+     * screen's settings sheet; no popover over it; the coach mark goes */
+    if (open) {
+      if (dash() && dash().isOpen()) dash().close();
+      if (!wideMQ.matches && drawerEl.classList.contains("open")) setDrawer(false);
+      setPop(null); hideCoach();
+    }
     dirtyHud = true;
   }
   function updateHud(s, now) {
@@ -1381,13 +1430,22 @@
       connCount: nc, conns: new Float32Array(buf, M._oc_inspect_conns(), nc * 5), shape: sh
     };
   }
+  function overlap(a, b) {
+    return a.width > 0 && a.height > 0 && b.width > 0 && b.height > 0 &&
+           a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
+  }
   function updateCard(s) {
+    if (cardHeld && statOpen) { hideCard(); return s; }   /* under the live numbers: the fish stays selected */
     var idx = s.selIdx, f = idx >= 0 && turboState === "live" ? inspect(idx) : null;
     if (!f) { hideCard(); return s; }
     s = fresh(s);   /* oc_inspect may have grown the memory */
     if (cardEl.hidden) showCard();
     var p = scene.project(s, idx);
     if (p) placeCard(p.x, p.y);
+    if (statOpen && overlap(cardEl.getBoundingClientRect(), el("statpanel").getBoundingClientRect())) {
+      if (cardNewer) setStatPanel(false);   /* a fish picked over the numbers: its card */
+      else { cardHeld = true; hideCard(); return s; }   /* the numbers opened over the card: they */
+    }
     var info = f.info, id = Math.round(info[0]);
     var rgb = [s.colors[3 * idx], s.colors[3 * idx + 1], s.colors[3 * idx + 2]];
     var pkey = id + "|" + rgb.join() + "|" + info[4].toFixed(2) + "|" + info[5].toFixed(2);
@@ -1600,6 +1658,7 @@
     el("ts-food").textContent = t ? Math.round(t.food).toLocaleString() : "–";
   }
   var turboEntryCfg = null;   /* runCfg when Turbo took the world */
+  var turboEntryPaused = false;   /* and whether it was paused then: a start that fails leaves it so */
   function onTurboMessage(e) {
     var msg = e.data || {};
     if (msg.type === "stats") {
@@ -1620,7 +1679,7 @@
        * flight or held for the hand-off, follows the one answered */
       var answered = live.answered(msg.key, !!msg.ok);
       if (!answered) return;
-      if (msg.ok) liveApplied(msg.key, valOf(msg.key, msg.value));
+      if (msg.ok) liveApplied(msg.key, valOf(msg.key, msg.value), false, answered.seq);
       else refuse(msg.key, msg.error, live.pending(msg.key, answered.seq));
     } else if (msg.type === "memory") {
       if (turboState !== "exiting") return;
@@ -1643,15 +1702,18 @@
   /* The page owns the world again: its memory is the worker's, or (lost) its
    * own, from where Turbo took it. It applies, in the order they were made,
    * the edits never answered (never applied) and the held ones, and, lost,
-   * the acknowledged ones before them (ledger back). Returns replayEdits'. */
-  function turboBack(quiet, lost) {
+   * the acknowledged ones before them (ledger back). Returns replayEdits'.
+   * After a session the world runs on (Stop Turbo and watch); a start that
+   * failed (startFailed: the worker never answered) leaves the playback as
+   * it was, a paused world paused. */
+  function turboBack(quiet, lost, startFailed) {
     turboState = "live";
     turboView = null; turboWire = null; wireAsked = false;
     summary = null;   /* the readout's summary: this world's again, at the next refresh */
     var plan = live.back(!!lost);
     afterNewWorld(true);
     sampleBucket = Math.floor(M._oc_stats ? frameNow() / (dash() ? dash().every() : 60) : -1);
-    setPaused(false);
+    setPaused(startFailed ? turboEntryPaused : false);
     updateLocks();
     return replayEdits(plan, quiet);
   }
@@ -1671,7 +1733,7 @@
     }
     var lost = !back && was !== "entering";
     if (lost && turboEntryCfg) runCfg = Object.assign({}, turboEntryCfg);
-    var res = turboBack(true, lost);
+    var res = turboBack(true, lost, was === "entering");
     if (lost && dash() && dash().rewind) dash().rewind(frameNow());
     /* what this world took again (the acknowledged edits), and what it refused, truthfully */
     var again = [], seen = {};
@@ -1703,6 +1765,7 @@
       turboStats = null;
       turboView = null; turboWire = null; wireAsked = false;
       turboEntryCfg = Object.assign({}, runCfg);
+      turboEntryPaused = paused;
       live.start();
       select(null);
       unfollow();
@@ -1779,7 +1842,7 @@
     /* the selected fish, by id; a followed fish that died hands over to another */
     var idx = turboState === "live" ? indexOfId(s, selectedId) : -1;
     if (idx < 0 && selectedId !== null && turboState === "live") {
-      if (wantFollow && s.n) { idx = randomFish(s, null); select(s.ids[idx]); }
+      if (wantFollow && s.n) { idx = randomFish(s, null); select(s.ids[idx], true); }
       else select(null);
     }
     s.selIdx = idx;
@@ -1807,11 +1870,29 @@
   var heldMoveKeys = {}, shiftHeld = false;
   function releaseMoveKeys() { heldMoveKeys = {}; shiftHeld = false; }
   /* a focused field takes the keys: the text inputs, selects, text areas and
-   * editable text (the settings' number fields among them) */
+   * editable text (the settings' number fields among them). A switch or a
+   * slider is not one: letters are shortcuts there too (ownKey keeps theirs). */
   function typingIn(t) {
     if (!t || !t.tagName) return false;
-    return t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || !!t.isContentEditable;
+    if (t.tagName === "INPUT") return !/^(checkbox|radio|range|button|submit|reset|color|file|image)$/i.test(t.type || "text");
+    return t.tagName === "TEXTAREA" || t.tagName === "SELECT" || !!t.isContentEditable;
   }
+  /* the keys a focused control acts on itself: Space and Enter press a button
+   * or turn a switch (Enter follows a link), a slider takes the arrows, Home,
+   * End and Page Up / Down, a tab the arrows. Every other key stays a shortcut. */
+  function ownKey(t, k) {
+    if (!t || !t.tagName) return false;
+    var press = k === " " || k === "Spacebar" || k === "Enter";
+    if (t.tagName === "BUTTON") return press || (/^Arrow/.test(k) && t.getAttribute("role") === "tab");
+    if (t.tagName === "A") return k === "Enter";
+    if (t.tagName !== "INPUT") return false;
+    if (t.type === "range") return /^(Arrow|Page)/.test(k) || k === "Home" || k === "End";
+    return press && (t.type === "checkbox" || t.type === "radio");
+  }
+  /* One owner for each Esc, the top layer: the tour (web/guide.js), then the
+   * charts (web/ocean_dash.js: it leaves an Esc to the tour), then this
+   * page's own (a popover, the settings, the live numbers, the fish). Seen
+   * here in the capture phase, before any handler has closed anything. */
   var escHandledElsewhere = false;
   window.addEventListener("keydown", function (e) {
     if (e.key === "Escape") escHandledElsewhere = !!(dash() && dash().isOpen()) || !!document.getElementById("guide");
@@ -1827,11 +1908,15 @@
     document.addEventListener("focusin", function (e) { if (typingIn(e.target)) releaseMoveKeys(); });
     window.addEventListener("keydown", function (e) {
       if (e.key === "Escape") {
-        /* the tour or the charts take this Esc themselves; else back to the popover's opener */
+        /* the tour or the charts take this Esc themselves (escHandledElsewhere),
+         * and nothing behind them closes with it; else the popover (back to its
+         * opener), the settings, the live numbers, or the fish */
         if (openPop) { if (!escHandledElsewhere) closePop(true); return; }
-        if (drawerEl.classList.contains("open")) setDrawer(false);
-        else if (statOpen) setStatPanel(false);
-        else if (!escHandledElsewhere) { if (scene.following()) unfollow(); else select(null); }
+        if (!escHandledElsewhere) {
+          if (drawerEl.classList.contains("open")) setDrawer(false);
+          else if (statOpen) setStatPanel(false);
+          else if (scene.following()) unfollow(); else select(null);
+        }
         if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
         return;
       }
@@ -1840,6 +1925,7 @@
       if (e.key === "Shift") { shiftHeld = true; return; }
       if (e.ctrlKey || e.metaKey || e.altKey) return;
       var k = e.key, lk = String(k).toLowerCase();
+      if (ownKey(t, k)) return;   /* Space / Enter press the focused button or switch; a slider's arrows move it */
       /* the camera's movement: also with a button focused (letters don't press it) */
       var mv = MOVE_CODES[e.code], mk = mv ? "c:" + e.code : null;
       if (!mv && MOVE_KEYS[lk]) { mv = MOVE_KEYS[lk]; mk = "k:" + lk; }
@@ -1850,13 +1936,14 @@
       }
       /* the dock's and the top bar's own keys (Turbo's too: T stops it; letters press no button) */
       if (e.repeat && /^[?vtgoil]$/.test(lk)) return;   /* a held toggle acts once (the camera and speed keys repeat) */
-      if (k === "?") { togglePop("help", null, true); return; }
-      if (lk === "v") { togglePop("view", null, true); return; }
+      /* ? and V open as their buttons do from the keyboard: the focus into the
+       * popover, and back to the button when it closes */
+      if (k === "?") { togglePop("help", el(POPS.help[1]), true); return; }
+      if (lk === "v") { togglePop("view", el(POPS.view[1]), true); return; }
       if (lk === "t") { el("turbobtn").click(); return; }
       if (lk === "g") { setPop(null); el("dashbtn").click(); return; }
       if (lk === "o") { setPop(null); setDrawer(!drawerEl.classList.contains("open")); return; }
       if (lk === "i") { setPop(null); setStatPanel(!statOpen); return; }
-      if (t && t.tagName === "BUTTON") return;   /* Space / Enter belong to the button */
       /* the view: always */
       if (lk === "c") { wantFollow = false; scene.resetView(true); return; }
       if (lk === "l") { toggleLight(); return; }
@@ -1930,6 +2017,23 @@
     if (open) { setStatPanel(false); setPop(null); hideCoach(); }
     if (scene) { updateInsets(); setTimeout(updateInsets, 320); }
   }
+  /* Crossing 960 px (a resize, a rotation): a wide screen lets the settings
+   * panel stay beside a popover or the live numbers, a narrow one's sheet
+   * would cover them (and hide the dock under the View menu). What opened
+   * last stays — a popover or the live numbers, since opening the settings
+   * closes both — so the sheet closes, as it would have on this screen
+   * (setPop, setStatPanel); the focus, if it was in the sheet, goes to the
+   * popover's first control, else to the settings button. */
+  function onWideChange() {
+    if (!wideMQ.matches && drawerEl.classList.contains("open") && (openPop || statOpen)) {
+      var inSheet = drawerEl.contains(document.activeElement);
+      setDrawer(false);
+      if (inSheet) (openPop ? el(POPS[openPop][2]) : menuBtn).focus();
+    }
+    placePop();
+  }
+  if (wideMQ.addEventListener) wideMQ.addEventListener("change", onWideChange);
+  else if (wideMQ.addListener) wideMQ.addListener(onWideChange);   /* Safari before 14 */
   menuBtn.addEventListener("click", function () { setDrawer(!drawerEl.classList.contains("open")); this.blur(); });
   el("drawerclose").addEventListener("click", function () { setDrawer(false); this.blur(); });
   (function () {   /* drag the sheet's grip (or header) down to close it */
@@ -2104,15 +2208,24 @@
   function showColourMode() {
     el("colourMode").querySelectorAll("button").forEach(function (b) { b.setAttribute("aria-pressed", b.dataset.c === colourMode ? "true" : "false"); });
   }
-  el("colourMode").addEventListener("click", function (e) {
-    var b = e.target.closest("button[data-c]");
-    if (!b) return;
-    colourMode = b.dataset.c === "brain" || b.dataset.c === "appearance" ? b.dataset.c : "family";
+  /* The one way the colour mode changes: the View menu's buttons and the
+   * benchmark's cases (web/ocean_perf.js prepare) both come here, so a case
+   * runs in the mode it names. false: no such mode (nothing changes). The
+   * visitor's choice is stored, never a benchmark's. */
+  function setColourMode(mode) {
+    if (mode !== "appearance" && mode !== "family" && mode !== "brain") return false;
+    colourMode = mode;
     colourBrain = colourMode === "brain";
     if (!BENCH) store("evo_boids.colourBy", colourMode);   /* a benchmark's cases are not the visitor's choice */
     showColourMode();
     if (M) applyDisplaySwitches();
     updateModeline();
+    return true;
+  }
+  el("colourMode").addEventListener("click", function (e) {
+    var b = e.target.closest("button[data-c]");
+    if (!b) return;
+    setColourMode(b.dataset.c);
     pointerBlur(b);
   });
   el("colourwhy").addEventListener("click", function (e) {   /* "Settings › Life › Appearance genes" */
@@ -2318,6 +2431,16 @@
 
   /* ---------------- start ---------------- */
   buildHist();
+  /* An Ocean link is one with any of the keys only the Ocean reads
+   * (ocean.html's OCEAN_ONLY, the same list: tests/ocean_turbo_handoff.js
+   * holds them equal), ?speed= among them; the keys both pages read (colour,
+   * guide, intro) and those newer than walls (clarity) make no link old. A
+   * link without any is a fresh visit (glass walls); a refused link's
+   * "default settings" drops them all. */
+  var OCEAN_KEYS = ["seed", "pop", "depth", "w", "h", "cfg", "speed", "e1", "mock", "walls"];
+  /* and the keys only Classic reads (ocean.html's CLASSIC_ONLY, the same
+   * list): left in a link without Ocean keys, the head sends it to Classic */
+  var CLASSIC_KEYS = ["view", "fish", "gl", "bench", "threads", "nthreads"];
   var linkRefused = false;   /* oc_init refused the link's ?cfg= / ?e1=1 */
   splashSay(MOCK ? "Starting the ocean (mock engine)…" : "Starting the ocean…");
   var sceneReady = window.EvoOceanScene ? EvoOceanScene.load() : Promise.reject(new Error("ocean_scene.js missing"));
@@ -2384,11 +2507,7 @@
      * the cfg's own (first) "walls" either way, never deleted: a later
      * "walls" in ?cfg= (cfgRepeats) still goes to oc_init to be checked, and
      * would be the one it runs if the first were gone. An Ocean link is one
-     * with any of the keys only the Ocean reads (ocean.html's OCEAN_ONLY, the
-     * same list: tests/ocean_turbo_handoff.js holds them equal), ?speed= among
-     * them; the keys both pages read (colour, guide, intro) and those newer
-     * than walls (clarity) make no link old. */
-    var OCEAN_KEYS = ["seed", "pop", "depth", "w", "h", "cfg", "speed", "e1", "mock", "walls"];
+     * with any of OCEAN_KEYS (below, at the start). */
     var freshVisit = OCEAN_KEYS.every(function (k) { return !P.has(k); });
     if (P.has("walls")) {
       var wv = P.get("walls");
@@ -2414,7 +2533,7 @@
       bodyScale: bodyScale, onFollowChange: onFollowChange,
       profiler: PERF ? PROF : null, visualRandom: BENCH ? PERF.visualRandom(2463534242) : null
     });
-    if (!scene) throw new Error("WebGL2 is unavailable, and the 3-D Ocean has only the 3D tank");
+    if (!scene) throw new Error("This browser could not start WebGL2, which the 3-D tank needs. 2-D Classic draws its world without it.");
     detail0 = scene.quality();
     scene.setWorld(W, H, D, { walls: WALLS });
     scene.setLight(LIGHT);
@@ -2430,6 +2549,8 @@
       familyColor: function (id) { return has("oc_family_color") ? M._oc_family_color(id) : 0x3b5957; },
       wiring: wiringNow,
       setDrawer: setDrawer,
+      /* the charts cover the page: no popover left open under them, and the coach mark goes */
+      onOpen: function () { setPop(null); hideCoach(); },
       setRecEvery: function (every) {
         if (turboWorker && (turboState === "entering" || turboState === "turbo")) turboWorker.postMessage({ cmd: "rec", every: every });
       }
@@ -2468,7 +2589,7 @@
                  hasVz: HAS_VZ, view: scene.view(), e1: E1, cfg: initArgs ? initArgs.cfg : null, seed: initArgs ? initArgs.seed : null,
                  runCfg: Object.assign({}, runCfg), light: LIGHT, flashlight: scene.flashlight(), flashlightLevel: scene.flashlightLevel(),
                  stepMs: stepMs, fps: fps, following: scene.following(), selectedId: selectedId, selIdx: s.selIdx,
-                 turbo: turboState, colourBrain: colourBrain, frame: s.stats[1],
+                 turbo: turboState, colourMode: colourMode, colourBrain: colourBrain, frame: s.stats[1],
                  held: live.held(), inflight: live.inflight(), fixedSize: [URL_W, URL_H], walls: WALLS, hasWalls: hasWalls(),
                  stats: Array.prototype.slice.call(s.stats), depthMin: s.n ? lo : 0, depthMax: s.n ? hi : 0,
                  dashRows: dash() ? dash()._rows().length : 0, worldEpoch: worldEpoch };
@@ -2477,7 +2598,10 @@
     if (PROF.enabled) EvoOcean.perf = PROF;   /* ?renderBench=1 / ?perf=1 (web/ocean_perf.js) */
     if (BENCH) EvoOcean.bench = PERF.bench({ module: M, scene: scene, profiler: PROF, page: EvoOcean, setPaused: setPaused,
       last: function () { return fresh(lastS); }, epoch: function () { return worldEpoch; }, initArgs: function () { return initArgs; },
-      importWorld: importWorld });
+      importWorld: importWorld,
+      /* the page's own colour switch and state, and whether the charts are up (they suspend the tank) */
+      setColourMode: setColourMode, colourMode: function () { return colourMode; },
+      dashOpen: function () { return !!(dash() && dash().isOpen()); } });
     requestAnimationFrame(frame);
     window.EvoApp.ready = true;
     window.dispatchEvent(new Event("evo:ready"));
@@ -2489,13 +2613,25 @@
   }).catch(function (e) {
     var why = String(e && e.message || e);
     splashSay("The 3-D Ocean could not start.\n" + why, true);
-    if (linkRefused) {   /* the same link without its settings */
+    /* the ways on, over the splash that covers the page: this link fresh,
+     * and 2-D Classic (#to2d's address, which the deploy build rewrites) */
+    var acts = document.createElement("div");
+    acts.className = "splash-acts";
+    if (linkRefused) {   /* this page with the default settings: a fresh visit's, every world key gone (glass walls) */
       var u = new URL(location.href), a = document.createElement("a");
-      ["cfg", "e1", "walls", "w", "h", "pop", "depth", "seed"].forEach(function (k) { u.searchParams.delete(k); });
+      /* Classic's too, or the head would take what is left to Classic; the display ones (colour, clarity, ...) stay */
+      OCEAN_KEYS.concat(CLASSIC_KEYS).forEach(function (k) { u.searchParams.delete(k); });
       a.href = u.href; a.id = "splashplain"; a.className = "btn";
       a.textContent = "Open it with the default settings";
-      el("splashstate").parentNode.appendChild(a);
+      acts.appendChild(a);
     }
+    if (!noSimd) {
+      var c = document.createElement("a");
+      c.href = el("to2d").href; c.id = "splashclassic"; c.className = "btn" + (linkRefused ? "" : " primary");
+      c.textContent = "Open 2-D Classic";
+      acts.appendChild(c);
+    }
+    if (acts.children.length) el("splashstate").parentNode.appendChild(acts);
     console.error("ocean: " + why);
   });
 })();

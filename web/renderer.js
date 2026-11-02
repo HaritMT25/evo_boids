@@ -1775,9 +1775,13 @@
     /* Escape always closes what is open, regardless of what has focus —
      * blurring the focused control so the sim shortcuts work again. */
     if (e.key === "Escape") {
-      if (drawerEl.classList.contains("open")) setDrawer(false);
-      else if (statOpen) setStatPanel(false);
-      else if (!escHandledElsewhere) selectedId = null;
+      /* one owner for each Esc: the tour or the charts take theirs, and
+       * nothing behind them closes with it */
+      if (!escHandledElsewhere) {
+        if (drawerEl.classList.contains("open")) setDrawer(false);
+        else if (statOpen) setStatPanel(false);
+        else selectedId = null;
+      }
       if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
       return;
     }

@@ -256,9 +256,14 @@
   #dock .speed { display: flex; align-items: center; }
   #dock .speed .icon-btn { width: 38px; }
   #speedlabel { min-width: 3.2em; text-align: center; font-family: var(--mono); font-size: 14px; color: var(--ink); }
-  #speedlabel.capped { color: var(--beam); }   /* Hold 60 fps runs fewer steps than asked (its title says how many) */
+  #speedlabel.capped { color: var(--beam); transform: translateY(-5px); }   /* Hold 60 fps runs fewer steps than asked */
+  /* ... and the caption under it says how many, on any screen (the title only shows to a mouse) */
+  #dock .speed { position: relative; }
+  #speedcap { position: absolute; left: 50%; bottom: 5px; transform: translateX(-50%); white-space: nowrap; pointer-events: none;
+              font-size: 10px; line-height: 1; font-weight: 600; color: var(--beam); }
+  #speedcap[hidden] { display: none; }
   #pausebtn { color: var(--ink); background: var(--surface-3); }
-  #turbobtn { width: auto; padding: 0 12px; gap: 6px; border-radius: 999px; font-size: 13px; font-weight: 600; color: var(--ink-2); display: inline-flex; }
+  #turbobtn { width: auto; padding: 0 12px; gap: 6px; border-radius: 999px; font-size: 13px; font-weight: 600; color: var(--ink-2); display: inline-flex; justify-content: center; }
   #turbobtn[aria-pressed="true"] { background: var(--ember-soft); color: var(--ember); }
   #turbobtn span, #viewmenubtn span, #viewmenubtn .caret { display: none; }
   #lightbtn[aria-pressed="true"] { background: var(--beam-soft); color: var(--beam); }
@@ -302,7 +307,7 @@
   .pop[hidden] { display: none; }
   .pop-head { display: flex; align-items: center; justify-content: space-between; min-height: 36px; }
   .pop-head h2 { font-size: 15px; font-weight: 650; color: var(--ink); }
-  .pop-head .icon-btn { width: 36px; height: 36px; margin-right: -8px; }
+  .pop-head .icon-btn { width: 44px; height: 44px; margin: -4px -12px -4px 0; }   /* a 44 px target in the 36 px head */
   .pop-head .icon-btn svg.i { width: 18px; height: 18px; }
   .pop-acts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
   .pop-acts .btn { min-height: 40px; padding: 0 14px; }
@@ -347,7 +352,7 @@
     border-radius: 999px;
   }
   #fitbtn[hidden] { display: none; }
-  body.card-open #fitbtn { display: none; }
+  body.card-open #fitbtn, body.stat-open #fitbtn { display: none; }   /* it would sit over the card's or the live numbers' top */
   #toasts {
     position: fixed; z-index: var(--z-toast);
     left: 50%; transform: translateX(-50%);
@@ -596,6 +601,9 @@
   #splash .swim { display: block; width: 120px; height: 2px; margin: 18px auto 0; border-radius: 1px; background: var(--surface-3); overflow: hidden; position: relative; }
   #splash .swim::after { content: ""; position: absolute; inset: 0 auto 0 0; width: 40%; background: var(--deep); animation: swim 1.1s var(--ease) infinite; }
   #splash.failed .swim { display: none; }
+  /* a failed start's ways on (ocean.js): the link with the default settings, 2-D Classic */
+  #splash .splash-acts { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px; margin-top: 18px; }
+  #splash .splash-acts .btn { text-decoration: none; }
   @keyframes swim { from { transform: translateX(-100%); } to { transform: translateX(260%); } }
 
   /* ---------- tooltip ---------- */
@@ -712,6 +720,11 @@
   }
   @media (max-width: 599px) {
     #dock { width: calc(100vw - 20px); }
+    /* the dock's own buttons give way (from 44 px, 40 up to 420, down to 34)
+     * so it fits paused too, with the step button: at full size it overflowed
+     * from 371 to 387 px and from 421 to 443 */
+    #dock > .icon-btn { width: 44px; flex: 0 1 auto; min-width: 34px; }
+    #dock > #turbobtn { padding: 0; }   /* its word is hidden here */
     #viewpop { right: 10px; width: auto; }
   }
   @media (max-width: 420px) {
@@ -782,6 +795,13 @@
     .stepper { height: 44px; }
     .stepper button { width: 44px; }
     .stepper input, select { font-size: 16px; }
+    /* a switch's 48 x 28 track in a 64 x 44 target: a transparent border the
+     * background stays inside (its 1 px edge an inset shadow), the margin
+     * keeping the layout's 48 x 28 */
+    input.switch { width: 64px; height: 44px; margin: -8px; border: 8px solid transparent;
+                   background-clip: padding-box; box-shadow: inset 0 0 0 1px var(--line); }
+    input.switch:checked { background-clip: padding-box; box-shadow: none; border-color: transparent; }
+    input.switch:focus-visible { outline-offset: -6px; }
   }
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { animation-duration: 1ms !important; transition-duration: 1ms !important; }
@@ -884,6 +904,7 @@
       <button id="slower" class="icon-btn" title="Fewer steps per frame (− or ↓)" aria-label="slower"><svg class="i"><use href="#i-minus"/></svg></button>
       <output id="speedlabel" aria-live="polite">1×</output>
       <button id="faster" class="icon-btn" title="More steps per frame (+ or ↑)" aria-label="faster"><svg class="i"><use href="#i-plus"/></svg></button>
+      <span id="speedcap" hidden></span>
     </div>
     <button id="turbobtn" class="icon-btn" aria-pressed="false" title="Turbo (T): runs this same world many times faster without drawing it; stop it to watch again, exactly where it got to"><svg class="i"><use href="#i-bolt"/></svg><span>Turbo</span></button>
     <span class="dock-sep" aria-hidden="true"></span>

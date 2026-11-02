@@ -587,7 +587,12 @@
   }
   btn.addEventListener("click", function () { if (isOpen) close(); else open(); this.blur(); });
   el("dclose").addEventListener("click", close);
-  window.addEventListener("keydown", function (e) { if (e.key === "Escape" && isOpen) close(); });
+  /* One owner for each Esc, the top layer: the tour (web/guide.js), then the
+   * charts, then the page's own. Seen in the capture phase, before any
+   * handler has closed anything: with the tour open, its Esc is the tour's */
+  var escTour = false;
+  window.addEventListener("keydown", function (e) { if (e.key === "Escape") escTour = !!document.getElementById("guide"); }, true);
+  window.addEventListener("keydown", function (e) { if (e.key === "Escape" && isOpen && !escTour) close(); });
   var resizeTimer = 0;
   window.addEventListener("resize", function () {
     clearTimeout(resizeTimer);

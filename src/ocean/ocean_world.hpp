@@ -351,6 +351,49 @@ inline bool sensorWiresAction(const NeuralNet& nn, int s, int a) {
     return false;
 }
 
+// ---- the sensors a net reads (OceanWorld::computeSensors' dead-sensor skip) --
+// SenseMask: bit s = sensor s. sensesRead(nn) sets bit s exactly when SOME
+// flat connection's source is sensor s — any weight (0 included), any sink
+// (an action or a hidden neuron); a hidden-neuron source sets none. A sensor
+// with no such connection is read by nothing: feedForward multiplies only
+// vals[fc.src()] of nn.flat's entries, so its value reaches no accumulator, no
+// action and no neuron output. That is the whole argument for not computing
+// it — a raw-source test, NOT "reaches an action" (a sensor feeding only a
+// hidden neuron still sets that neuron's hashed output). Derived from nn.flat
+// at each use (no cache to invalidate). With captureActivations on the step
+// computes every sensor (kAllSenses): the captured lastSensors are hashed.
+using SenseMask = std::uint64_t;
+static_assert(NUM_SENSES <= 64, "a SenseMask holds one bit per sensor");
+inline constexpr SenseMask senseBit(int s) { return SenseMask{1} << s; }
+inline constexpr SenseMask kAllSenses =
+    (NUM_SENSES >= 64) ? ~SenseMask{0} : (SenseMask{1} << (NUM_SENSES % 64)) - 1;
+inline SenseMask sensesRead(const NeuralNet& nn) {
+    SenseMask m = 0;
+    for (const NeuralNet::FlatConn& fc : nn.flat) {
+        const unsigned s = (unsigned)fc.src();
+        // s & 63 keeps the shift defined for the eye build's sources >= 64
+        // (hidden neurons); the (s < NUM_SENSES) factor makes those 0.
+        m |= (SenseMask)(s < (unsigned)NUM_SENSES) << (s & 63u);
+    }
+    return m;
+}
+// The groups computeSensors skips whole; each lists every sensor its block
+// writes. (Single sensors are gated by their own bit.)
+inline constexpr SenseMask kSenseBoundaryXY =   // BOUNDARY_DIST is min(X, Y): it needs both
+    senseBit(BOUNDARY_DIST_X) | senseBit(BOUNDARY_DIST_Y) | senseBit(BOUNDARY_DIST);
+inline constexpr SenseMask kSenseGeneticSim = senseBit(GENETIC_SIM_NEAREST) | senseBit(GENETIC_SIM_FWD);
+inline constexpr SenseMask kSenseNeighbours =   // all need the neighbour scan (the nearest's from it)
+    senseBit(NEIGHBOR_COUNT) | senseBit(AVG_NEIGHBOR_DX) | senseBit(AVG_NEIGHBOR_DY) | senseBit(AVG_NEIGHBOR_DZ) |
+    senseBit(AVG_NEIGHBOR_HEADING_X) | senseBit(AVG_NEIGHBOR_HEADING_Y) | senseBit(NEAREST_NEIGHBOR_DIST) |
+    senseBit(POPULATION_DENSITY) | senseBit(POPULATION_FWD) | senseBit(POPULATION_LR) |
+    senseBit(NEAREST_NEIGHBOR_AGE) | senseBit(NEAREST_NEIGHBOR_FOOD) | kSenseGeneticSim;
+inline constexpr SenseMask kSenseFood = senseBit(NEAREST_FOOD_DX) | senseBit(NEAREST_FOOD_DY) |
+                                        senseBit(NEAREST_FOOD_DZ) | senseBit(NEAREST_FOOD_DIST) | senseBit(FOOD_DENSITY);
+inline constexpr SenseMask kSenseCurrent = senseBit(CURRENT_FWD) | senseBit(CURRENT_LR);
+inline constexpr SenseMask kSensePredator = senseBit(PREDATOR_FWD) | senseBit(PREDATOR_LR) | senseBit(PREDATOR_PROX);
+static_assert((kSenseNeighbours & kAllSenses) == kSenseNeighbours && (kSenseFood & kAllSenses) == kSenseFood,
+              "a sense group names a sensor outside the list");
+
 constexpr int kDepthBins = 8;
 
 #ifdef EVO_OCEAN_EYE
@@ -1974,7 +2017,11 @@ private:
 
         float sensors[NUM_SENSES];
         std::memset(sensors, 0, sizeof(sensors));
-        computeSensors<Eye, Labels, Sum>(c, i, sensors);
+        // The sensors this net reads (ocean::sensesRead); every one when the
+        // step captures them. With capture off, sensors[] is read only by
+        // feedForward below, so a sensor outside `need` is never read.
+        const ocean::SenseMask need = cfg.captureActivations ? ocean::kAllSenses : ocean::sensesRead(c.nnet);
+        computeSensors<Eye, Labels, Sum>(c, i, sensors, need);
 #ifdef EVO_OCEAN_PROF
         const auto p1 = pclk::now();
 #endif
@@ -2188,26 +2235,33 @@ private:
     }
 
     // The pheromone column and the current: horizontal, as Classic (kept in
-    // eye-only mode: they are not what the eye replaces).
-    void writeColumnSensors(const Fish& c, Vec2 fwd, Vec2 rht, float sensors[]) {
-        sensors[SIGNAL0] = signals.read(c.pos);
-        sensors[SIGNAL0_FWD] = signals.readInDir(c.pos, fwd) - signals.readInDir(c.pos, {-fwd.x, -fwd.y});
-        sensors[SIGNAL0_LR] = signals.readInDir(c.pos, rht) - signals.readInDir(c.pos, {-rht.x, -rht.y});
+    // eye-only mode: they are not what the eye replaces). Each only when
+    // `need` has it (the reads are const: no draw, no state; see stepFish).
+    void writeColumnSensors(const Fish& c, Vec2 fwd, Vec2 rht, float sensors[], ocean::SenseMask need) {
+        using ocean::senseBit;
+        if (need & senseBit(SIGNAL0)) sensors[SIGNAL0] = signals.read(c.pos);
+        if (need & senseBit(SIGNAL0_FWD))
+            sensors[SIGNAL0_FWD] = signals.readInDir(c.pos, fwd) - signals.readInDir(c.pos, {-fwd.x, -fwd.y});
+        if (need & senseBit(SIGNAL0_LR))
+            sensors[SIGNAL0_LR] = signals.readInDir(c.pos, rht) - signals.readInDir(c.pos, {-rht.x, -rht.y});
+        if (!(need & ocean::kSenseCurrent)) return;
+        // CURRENT_FWD / LR from the horizontal flow (ux, uy) here, each only if read.
+        auto current = [&](float ux, float uy) {
+            if (need & senseBit(CURRENT_FWD)) sensors[CURRENT_FWD] = evomath::tanhf((ux * fwd.x + uy * fwd.y) / 100.0f);
+            if (need & senseBit(CURRENT_LR))  sensors[CURRENT_LR]  = evomath::tanhf((ux * rht.x + uy * rht.y) / 100.0f);
+        };
         if (ocfg.walls) {
             // Glass walls: the wall flow's horizontal part here (0 with no current and no waves).
             Flow U;
             if (wallFlowOn()) U = wallFlowFast(c.pos, c.depth);
-            sensors[CURRENT_FWD] = evomath::tanhf((U.x * fwd.x + U.y * fwd.y) / 100.0f);
-            sensors[CURRENT_LR]  = evomath::tanhf((U.x * rht.x + U.y * rht.y) / 100.0f);
+            current(U.x, U.y);
         } else if (flowE1()) {
             // E1: the water's horizontal flow here (deep current × f(d) + waves).
             const Flow U = flowFast(c.pos, c.depth);
-            sensors[CURRENT_FWD] = evomath::tanhf((U.x * fwd.x + U.y * fwd.y) / 100.0f);
-            sensors[CURRENT_LR]  = evomath::tanhf((U.x * rht.x + U.y * rht.y) / 100.0f);
+            current(U.x, U.y);
         } else if (current_.active()) {
             Vec2 cur = current_.velocityAt(c.pos);
-            sensors[CURRENT_FWD] = evomath::tanhf((cur.x * fwd.x + cur.y * fwd.y) / 100.0f);
-            sensors[CURRENT_LR]  = evomath::tanhf((cur.x * rht.x + cur.y * rht.y) / 100.0f);
+            current(cur.x, cur.y);
         } else {
             sensors[CURRENT_FWD] = 0.0f;
             sensors[CURRENT_LR]  = 0.0f;
@@ -2282,7 +2336,21 @@ private:
     // wrapDelta's rule (d > W/2: d − W; d < −W/2: d + W; else d) — the two round
     // differently, so both stay (sense_edges, "wrapped filter"). The rule is
     // taken as a select between the three values wrapDelta returns, each
-    // computed as it computes it: no branch, the same bits. Scalar.
+    // computed as it computes it: no branch, the same bits.
+    //
+    // Four candidates at a time, as foodWithin's (GCC / Clang vector
+    // extensions: SSE2 on x86-64, SIMD128 under -msimd128): lane j runs
+    // candidate k + j's very operations — the image offset gx = x − cx0 and its
+    // q2 = gx·gx + gy·gy, the scan offset ux = x − px, the same IEEE single
+    // −, × and + in the same tree, no FMA (-ffp-contract=off), no relaxed SIMD;
+    // wrapDelta's select is a BITWISE select of the lane's three candidate
+    // values (ux − W if ux > W/2, else ux + W if ux < −W/2, else ux — the
+    // scalar's precedence), so a ±0 or NaN keeps its exact bits (an arithmetic
+    // blend such as ux + 0 would turn −0 into +0); the two tests are the
+    // literal masks q2 <= R² and !(d2 > R²) (a NaN d² passes the second, as it
+    // always has; a NaN q2 fails the first). The lanes are written and kept one
+    // by one in lane order, as the scalar loop would; the rest of a run (< 4)
+    // is the scalar loop (food_scan holds both to the scalar definition).
     int foodWithinWrapped(const Fish& c, float R) {
         FoodSeen* out = foodSeenList();
         const float* fx = foodGrid_.xs();
@@ -2292,9 +2360,38 @@ private:
         const float px = c.pos.x, py = c.pos.y, pz = c.depth;
         const float W = (float)width, H = (float)height;
         const float hw = 0.5f * W, hh = 0.5f * H;   // wrapDelta's half = 0.5f · span
+        typedef float v4f __attribute__((vector_size(16)));
+        typedef int v4i __attribute__((vector_size(16)));
+        const v4f PX = {px, px, px, px}, PY = {py, py, py, py}, PZ = {pz, pz, pz, pz};
+        const v4f RR = {R2, R2, R2, R2};
+        const v4f VW = {W, W, W, W}, VH = {H, H, H, H};
+        const v4f HW = {hw, hw, hw, hw}, HH = {hh, hh, hh, hh};
+        const v4f NHW = -HW, NHH = -HH;   // −hw, −hh: negation is exact, the scalar's −hw
+        // m ? a : b, lane by lane, by bits (a vector cast between equal sizes is a bitcast)
+        auto pick = [](v4i m, v4f a, v4f b) { return (v4f)(((v4i)a & m) | ((v4i)b & ~m)); };
         int n = 0;
         foodGrid_.forEachRunWrapped(c.pos, R, [&](int b, int e, float cx0, float cy0) {
-            for (int k = b; k < e; ++k) {
+            const v4f CX = {cx0, cx0, cx0, cx0}, CY = {cy0, cy0, cy0, cy0};
+            int k = b;
+            for (; k + 4 <= e; k += 4) {
+                v4f X, Y, Z;
+                std::memcpy(&X, fx + k, sizeof X);
+                std::memcpy(&Y, fy + k, sizeof Y);
+                std::memcpy(&Z, fz + k, sizeof Z);
+                const v4f gx = X - CX, gy = Y - CY;            // the grid's 2-D test
+                const v4f q2 = gx * gx + gy * gy;
+                const v4f ux = X - PX, uy = Y - PY;            // the scan's offset, wrapped
+                const v4f dx = pick(ux > HW, ux - VW, pick(ux < NHW, ux + VW, ux));
+                const v4f dy = pick(uy > HH, uy - VH, pick(uy < NHH, uy + VH, uy));
+                const v4f dz = Z - PZ;
+                const v4f d2 = dx * dx + dy * dy + dz * dz;
+                const v4i keep = (q2 <= RR) & ~(d2 > RR);    // −1 = kept
+                for (int j = 0; j < 4; ++j) {
+                    out[n] = {dx[j], dy[j], dz[j], d2[j], k + j};
+                    n -= keep[j];
+                }
+            }
+            for (; k < e; ++k) {
                 const float gx = fx[k] - cx0, gy = fy[k] - cy0;   // the grid's 2-D test
                 const float q2 = gx * gx + gy * gy;
                 const float ux = fx[k] - px, uy = fy[k] - py;     // the scan's offset, wrapped
@@ -2370,8 +2467,18 @@ private:
     }
 #endif
 
+    // need: the sensors the caller reads (stepFish: ocean::sensesRead of the
+    // net, or every one when captured). A sensor in `need` gets exactly the
+    // value it always had; one outside it may be left as it is (0, stepFish's
+    // memset) and its work skipped — a whole group's scan when no sensor of
+    // the group is in `need` (ocean::kSense*), else a single sensor's
+    // transcendental or grid reads. None of the skipped work draws from the
+    // rng or writes state (const reads of the grids, signals, flow and other
+    // fish; scratch lists): RANDOM_SENSOR is drawn always, last, as before.
+    // The eye (Eye) keeps every scan it bins objects from.
     template <bool Eye, bool Labels = true, bool Sum = false>
-    void computeSensors(const Fish& c, int selfIdx, float sensors[]) {
+    void computeSensors(const Fish& c, int selfIdx, float sensors[], ocean::SenseMask need) {
+        using ocean::senseBit;
         const Vec2 fwd = c.forward();
         const Vec2 rht = {-fwd.y, fwd.x};
         const float R = cfg.perceptionRadius, R2 = R * R;
@@ -2386,8 +2493,12 @@ private:
         // labeled senses below still use them.
         [[maybe_unused]] const bool eyeFish = !(ocfg.eyeCode & kEyeCodeNoFish);
         [[maybe_unused]] const bool eyeFood = !(ocfg.eyeCode & kEyeCodeNoFood);
+        // Whether the eye bins this step's fish / food (then their scans run
+        // whatever `need` says).
+        const bool eyeSeesFish = Eye && eyeFish, eyeSeesFood = Eye && eyeFood;
 #else
         static_assert(!Sum, "summed sectors need the eye build");
+        constexpr bool eyeSeesFish = false, eyeSeesFood = false;
 #endif
 
         sensors[LOC_X] = c.pos.x / width;
@@ -2396,7 +2507,7 @@ private:
             sensors[BOUNDARY_DIST_X] = 1.0f;
             sensors[BOUNDARY_DIST_Y] = 1.0f;
             sensors[BOUNDARY_DIST] = 1.0f;
-        } else {
+        } else if (need & ocean::kSenseBoundaryXY) {
             float bx = std::min(c.pos.x, (float)width - c.pos.x);
             float by = std::min(c.pos.y, (float)height - c.pos.y);
             sensors[BOUNDARY_DIST_X] = evomath::tanhf(bx / 100.0f);
@@ -2408,19 +2519,27 @@ private:
         sensors[OWN_VEL_Y] = c.vel.y;
         sensors[LAST_MOVE_DIR_X] = c.lastMoveDir.x;
         sensors[LAST_MOVE_DIR_Y] = c.lastMoveDir.y;
-        kernel::writeOwnStateSensors(c, cfg, sensors);
+        // kernel::writeOwnStateSensors' five, its expressions verbatim, the
+        // tanh / sine each only when read (ocean_tests "sense_dce" holds this
+        // copy to the kernel's function bit for bit).
+        sensors[OWN_SPEED] = c.speed / cfg.maxSpeed;
+        if (need & senseBit(AGE)) sensors[AGE] = evomath::tanhf(c.age / 60.0f);
+        if (need & senseBit(FOOD_RESERVES)) sensors[FOOD_RESERVES] = evomath::tanhf((c.foodReserves - 25.0f) / 25.0f);
+        if (need & senseBit(OSCILLATOR)) sensors[OSCILLATOR] = c.getOscillator();
+        sensors[RESPONSIVENESS] = c.responsiveness;
 
         // Depth: where am I, which way am I going, how far to surface / floor.
         sensors[LOC_Z] = c.depth / D;
         sensors[OWN_VEL_Z] = c.vz / ocfg.pitchMax;
-        sensors[BOUNDARY_DIST_Z] = evomath::tanhf(std::min(c.depth, D - c.depth) / (0.25f * D));
+        if (need & senseBit(BOUNDARY_DIST_Z))
+            sensors[BOUNDARY_DIST_Z] = evomath::tanhf(std::min(c.depth, D - c.depth) / (0.25f * D));
 
 #ifdef EVO_OCEAN_EYE
         if constexpr (!Labels) {
             // Eye-only mode: the labeled senses (ocean::kLabeledSenses) stay 0
             // (stepFish's memset) and are not computed; the eye, if on, looks.
             if constexpr (Eye) eyeScan(c, selfIdx, fwd, rht, eye);
-            writeColumnSensors(c, fwd, rht, sensors);
+            writeColumnSensors(c, fwd, rht, sensors, need);
             if constexpr (Eye) eyeWrite(eye, R, ocfg.eyeCode, sensors);
             sensors[RANDOM_SENSOR] = rng.range(-1.0f, 1.0f);
             return;
@@ -2431,124 +2550,150 @@ private:
         // The step's flags, read once per fish (a config change takes effect
         // between steps, never inside one).
         const bool tor = cfg.toroidal;
-        std::vector<int>& neighbors = neighbors_;
-        neighbors.clear();
-        if (tor) creatureGrid_.queryRadiusWrapped(c.pos, R, neighbors);
-        else     creatureGrid_.queryRadius(c.pos, R, neighbors);
+        // OceanConfig::labelFrame 1 (the A1 arm): the labeled food / neighbour
+        // directions in the fish's own frame (x = right, y = ahead). Each
+        // projected input reads BOTH world components of its vector (food's
+        // foodDx and foodDy; the neighbours' avgDx and avgDy, avgHx and avgHy).
+        // The skip never drops one of those: they are the scans' locals, every
+        // one computed whenever its scan runs (a projected input is in its
+        // scan's group, ocean::kSenseNeighbours / kSenseFood); only an OUTPUT is
+        // gated, by its own bit. (ocean_tests "label_mask" holds the skip to
+        // capture on under labelFrame 1, single-sensor and long runs.)
+        const bool ownLabels = ocfg.labelFrame == 1;
+        // The scan runs, as it always has, when a sensor of
+        // ocean::kSenseNeighbours is read or the eye bins fish.
+        if ((need & ocean::kSenseNeighbours) || eyeSeesFish) {
+            std::vector<int>& neighbors = neighbors_;
+            neighbors.clear();
+            if (tor) creatureGrid_.queryRadiusWrapped(c.pos, R, neighbors);
+            else     creatureGrid_.queryRadius(c.pos, R, neighbors);
 
-        float avgDx = 0, avgDy = 0, avgDz = 0, avgHx = 0, avgHy = 0;
-        float nearestDist = R;
-        int nearestIdx = -1, neighborCount = 0, popFwd = 0, popLR = 0, inRadiusCount = 0;
+            float avgDx = 0, avgDy = 0, avgDz = 0, avgHx = 0, avgHy = 0;
+            float nearestDist = R;
+            int nearestIdx = -1, neighborCount = 0, popFwd = 0, popLR = 0, inRadiusCount = 0;
 
-        auto attendTo = [&](int ni, const FishHot& other, float dx, float dy, float dz, float dist) {
-            avgDx += dx; avgDy += dy; avgDz += dz;
-            avgHx += other.vel.x; avgHy += other.vel.y;
-            const float dotFwd = dx * fwd.x + dy * fwd.y;
-            const float dotLR = dx * rht.x + dy * rht.y;
-            popFwd += (dotFwd > 0) ? 1 : -1;
-            popLR  += (dotLR > 0) ? 1 : -1;
-            if (dist < nearestDist) { nearestDist = dist; nearestIdx = ni; }
-            neighborCount++;
-        };
+            auto attendTo = [&](int ni, const FishHot& other, float dx, float dy, float dz, float dist) {
+                avgDx += dx; avgDy += dy; avgDz += dz;
+                avgHx += other.vel.x; avgHy += other.vel.y;
+                const float dotFwd = dx * fwd.x + dy * fwd.y;
+                const float dotLR = dx * rht.x + dy * rht.y;
+                popFwd += (dotFwd > 0) ? 1 : -1;
+                popLR  += (dotLR > 0) ? 1 : -1;
+                if (dist < nearestDist) { nearestDist = dist; nearestIdx = ni; }
+                neighborCount++;
+            };
 
-        // The grid's candidates within R in 3-D, by their hot_ state, in list
-        // order (as foodWithin, the 3-D test and the self test without a branch):
-        // each candidate's offset and d² are written, the list advancing exactly
-        // for another fish with !(d2 > R²). hot_ does not change while one fish
-        // senses, so these are the values the loops below would have read.
-        if (foodSeen_.size() < neighbors.size() + 1) foodSeen_.resize(neighbors.size() + 1);
-        FoodSeen* kept = foodSeen_.data();
-        int nKept = 0;
-        for (int ni : neighbors) {
-            const FishHot& other = hot_[ni];
-            float dx = other.pos.x - c.pos.x;
-            float dy = other.pos.y - c.pos.y;
-            if (tor) { dx = wrapDx(dx); dy = wrapDy(dy); }
-            const float dz = other.depth - c.depth;
-            const float d2 = dx * dx + dy * dy + dz * dz;
-            kept[nKept] = {dx, dy, dz, d2, ni};
-            nKept += (int)(ni != selfIdx) & (int)!(d2 > R2);
-        }
-
-        if (cfg.maxNeighbors <= 0) {
-            for (int j = 0; j < nKept; ++j) {
-                const int ni = kept[j].k;
+            // The grid's candidates within R in 3-D, by their hot_ state, in list
+            // order (as foodWithin, the 3-D test and the self test without a branch):
+            // each candidate's offset and d² are written, the list advancing exactly
+            // for another fish with !(d2 > R²). hot_ does not change while one fish
+            // senses, so these are the values the loops below would have read.
+            if (foodSeen_.size() < neighbors.size() + 1) foodSeen_.resize(neighbors.size() + 1);
+            FoodSeen* kept = foodSeen_.data();
+            int nKept = 0;
+            for (int ni : neighbors) {
                 const FishHot& other = hot_[ni];
-                const float dx = kept[j].dx, dy = kept[j].dy, dz = kept[j].dz, d2 = kept[j].d2;
-#ifdef EVO_OCEAN_EYE
-                if constexpr (Eye) { if (eyeFish) eyeSee(eye, fwd, rht, dx, dy, dz, d2, other.eyeSize, other.eyeCon, R); }
-#endif
-                attendTo(ni, other, dx, dy, dz, std::sqrt(d2));
+                float dx = other.pos.x - c.pos.x;
+                float dy = other.pos.y - c.pos.y;
+                if (tor) { dx = wrapDx(dx); dy = wrapDy(dy); }
+                const float dz = other.depth - c.depth;
+                const float d2 = dx * dx + dy * dy + dz * dz;
+                kept[nKept] = {dx, dy, dz, d2, ni};
+                nKept += (int)(ni != selfIdx) & (int)!(d2 > R2);
             }
-            inRadiusCount = neighborCount;
-        } else {
-            // Topological: the nearest N by (3-D distance², index), a total order.
-            const int keepMax = std::min(cfg.maxNeighbors, MAX_TOPOLOGICAL_NEIGHBORS);
-            Candidate best[MAX_TOPOLOGICAL_NEIGHBORS];
-            int have = 0;
-            for (int j = 0; j < nKept; ++j) {
-                const int ni = kept[j].k;
-                [[maybe_unused]] const FishHot& other = hot_[ni];
-                const float dx = kept[j].dx, dy = kept[j].dy, dz = kept[j].dz, d2 = kept[j].d2;
-                ++inRadiusCount;
+
+            if (cfg.maxNeighbors <= 0) {
+                for (int j = 0; j < nKept; ++j) {
+                    const int ni = kept[j].k;
+                    const FishHot& other = hot_[ni];
+                    const float dx = kept[j].dx, dy = kept[j].dy, dz = kept[j].dz, d2 = kept[j].d2;
 #ifdef EVO_OCEAN_EYE
-                if constexpr (Eye) { if (eyeFish) eyeSee(eye, fwd, rht, dx, dy, dz, d2, other.eyeSize, other.eyeCon, R); }
+                    if constexpr (Eye) { if (eyeFish) eyeSee(eye, fwd, rht, dx, dy, dz, d2, other.eyeSize, other.eyeCon, R); }
 #endif
-                if (have == keepMax) {
-                    const Candidate& worst = best[have - 1];
-                    if (d2 > worst.distSq || (d2 == worst.distSq && ni > worst.index)) continue;
+                    attendTo(ni, other, dx, dy, dz, std::sqrt(d2));
                 }
-                int at = (have < keepMax) ? have : have - 1;
-                while (at > 0) {
-                    const Candidate& prev = best[at - 1];
-                    if (prev.distSq < d2 || (prev.distSq == d2 && prev.index < ni)) break;
-                    best[at] = prev;
-                    --at;
+                inRadiusCount = neighborCount;
+            } else {
+                // Topological: the nearest N by (3-D distance², index), a total order.
+                const int keepMax = std::min(cfg.maxNeighbors, MAX_TOPOLOGICAL_NEIGHBORS);
+                Candidate best[MAX_TOPOLOGICAL_NEIGHBORS];
+                int have = 0;
+                for (int j = 0; j < nKept; ++j) {
+                    const int ni = kept[j].k;
+                    [[maybe_unused]] const FishHot& other = hot_[ni];
+                    const float dx = kept[j].dx, dy = kept[j].dy, dz = kept[j].dz, d2 = kept[j].d2;
+                    ++inRadiusCount;
+#ifdef EVO_OCEAN_EYE
+                    if constexpr (Eye) { if (eyeFish) eyeSee(eye, fwd, rht, dx, dy, dz, d2, other.eyeSize, other.eyeCon, R); }
+#endif
+                    if (have == keepMax) {
+                        const Candidate& worst = best[have - 1];
+                        if (d2 > worst.distSq || (d2 == worst.distSq && ni > worst.index)) continue;
+                    }
+                    int at = (have < keepMax) ? have : have - 1;
+                    while (at > 0) {
+                        const Candidate& prev = best[at - 1];
+                        if (prev.distSq < d2 || (prev.distSq == d2 && prev.index < ni)) break;
+                        best[at] = prev;
+                        --at;
+                    }
+                    best[at] = {d2, dx, dy, dz, ni};
+                    if (have < keepMax) ++have;
                 }
-                best[at] = {d2, dx, dy, dz, ni};
-                if (have < keepMax) ++have;
+                for (int j = 0; j < have; ++j)
+                    attendTo(best[j].index, hot_[best[j].index], best[j].dx, best[j].dy, best[j].dz,
+                             std::sqrt(best[j].distSq));
             }
-            for (int j = 0; j < have; ++j)
-                attendTo(best[j].index, hot_[best[j].index], best[j].dx, best[j].dy, best[j].dz,
-                         std::sqrt(best[j].distSq));
-        }
 
-        if (neighborCount > 0) {
-            avgDx /= neighborCount; avgDy /= neighborCount; avgDz /= neighborCount;
-            avgHx /= neighborCount; avgHy /= neighborCount;
-        }
-        sensors[NEIGHBOR_COUNT] = tanhCountOver10(inRadiusCount);
-        const bool ownLabels = ocfg.labelFrame == 1;   // OceanConfig::labelFrame (A1): x = right, y = ahead
-        if (ownLabels) {   // projected before the tanh; the heading likewise
-            sensors[AVG_NEIGHBOR_DX] = evomath::tanhf((avgDx * rht.x + avgDy * rht.y) / R);
-            sensors[AVG_NEIGHBOR_DY] = evomath::tanhf((avgDx * fwd.x + avgDy * fwd.y) / R);
-        } else {
-        sensors[AVG_NEIGHBOR_DX] = evomath::tanhf(avgDx / R);
-        sensors[AVG_NEIGHBOR_DY] = evomath::tanhf(avgDy / R);
-        }
-        sensors[AVG_NEIGHBOR_DZ] = evomath::tanhf(avgDz / R);
-        if (ownLabels) {
-            sensors[AVG_NEIGHBOR_HEADING_X] = avgHx * rht.x + avgHy * rht.y;
-            sensors[AVG_NEIGHBOR_HEADING_Y] = avgHx * fwd.x + avgHy * fwd.y;
-        } else {
-        sensors[AVG_NEIGHBOR_HEADING_X] = avgHx;
-        sensors[AVG_NEIGHBOR_HEADING_Y] = avgHy;
-        }
-        sensors[NEAREST_NEIGHBOR_DIST] = nearestDist / R;
-        sensors[POPULATION_DENSITY] = tanhCountOver15(inRadiusCount);
-        sensors[POPULATION_FWD] = tanhCountOver5(popFwd);
-        sensors[POPULATION_LR] = tanhCountOver5(popLR);
+            if (neighborCount > 0) {
+                avgDx /= neighborCount; avgDy /= neighborCount; avgDz /= neighborCount;
+                avgHx /= neighborCount; avgHy /= neighborCount;
+            }
+            sensors[NEIGHBOR_COUNT] = tanhCountOver10(inRadiusCount);
+            if (ownLabels) {   // projected BEFORE the tanh, from avgDx AND avgDy (see ownLabels)
+                if (need & senseBit(AVG_NEIGHBOR_DX))
+                    sensors[AVG_NEIGHBOR_DX] = evomath::tanhf((avgDx * rht.x + avgDy * rht.y) / R);
+                if (need & senseBit(AVG_NEIGHBOR_DY))
+                    sensors[AVG_NEIGHBOR_DY] = evomath::tanhf((avgDx * fwd.x + avgDy * fwd.y) / R);
+            } else {
+                if (need & senseBit(AVG_NEIGHBOR_DX)) sensors[AVG_NEIGHBOR_DX] = evomath::tanhf(avgDx / R);
+                if (need & senseBit(AVG_NEIGHBOR_DY)) sensors[AVG_NEIGHBOR_DY] = evomath::tanhf(avgDy / R);
+            }
+            if (need & senseBit(AVG_NEIGHBOR_DZ)) sensors[AVG_NEIGHBOR_DZ] = evomath::tanhf(avgDz / R);
+            if (ownLabels) {   // the mean neighbour velocity, from avgHx AND avgHy
+                sensors[AVG_NEIGHBOR_HEADING_X] = avgHx * rht.x + avgHy * rht.y;
+                sensors[AVG_NEIGHBOR_HEADING_Y] = avgHx * fwd.x + avgHy * fwd.y;
+            } else {
+                sensors[AVG_NEIGHBOR_HEADING_X] = avgHx;
+                sensors[AVG_NEIGHBOR_HEADING_Y] = avgHy;
+            }
+            sensors[NEAREST_NEIGHBOR_DIST] = nearestDist / R;
+            sensors[POPULATION_DENSITY] = tanhCountOver15(inRadiusCount);
+            sensors[POPULATION_FWD] = tanhCountOver5(popFwd);
+            sensors[POPULATION_LR] = tanhCountOver5(popLR);
 
-        if (nearestIdx >= 0) {
-            const Fish& nearest = creatures[nearestIdx];
-            const float sim = kernel::writeNearestSensors(c, nearest, sensors);
-            float dx = nearest.pos.x - c.pos.x;
-            float dy = nearest.pos.y - c.pos.y;
-            if (tor) { dx = wrapDx(dx); dy = wrapDy(dy); }
-            sensors[GENETIC_SIM_FWD] = (dx * fwd.x + dy * fwd.y > 0) ? sim : 0.5f;
-        } else {
-            kernel::clearNearestSensors(sensors);
-            sensors[GENETIC_SIM_FWD] = 0.5f;
+            if (nearestIdx >= 0) {
+                const Fish& nearest = creatures[nearestIdx];
+                // kernel::writeNearestSensors' three, its expressions verbatim,
+                // each only when read (the genome compare for either similarity
+                // sensor; ocean_tests "sense_dce" holds this copy to the
+                // kernel's function bit for bit).
+                if (need & senseBit(NEAREST_NEIGHBOR_AGE))
+                    sensors[NEAREST_NEIGHBOR_AGE] = evomath::tanhf((nearest.age - 50.0f) / 50.0f);
+                if (need & senseBit(NEAREST_NEIGHBOR_FOOD))
+                    sensors[NEAREST_NEIGHBOR_FOOD] = evomath::tanhf((nearest.foodReserves - 25.0f) / 25.0f);
+                if (need & ocean::kSenseGeneticSim) {
+                    const float sim = genomeSimilarity(c.genome, nearest.genome);
+                    sensors[GENETIC_SIM_NEAREST] = sim;
+                    float dx = nearest.pos.x - c.pos.x;
+                    float dy = nearest.pos.y - c.pos.y;
+                    if (tor) { dx = wrapDx(dx); dy = wrapDy(dy); }
+                    sensors[GENETIC_SIM_FWD] = (dx * fwd.x + dy * fwd.y > 0) ? sim : 0.5f;
+                }
+            } else {
+                kernel::clearNearestSensors(sensors);
+                sensors[GENETIC_SIM_FWD] = 0.5f;
+            }
         }
 
         // ---- food: nearest within R in 3-D; DX/DY/DZ = the unit vector to it ----
@@ -2557,67 +2702,71 @@ private:
         // strict test below; only a smaller d² takes the sqrt and that test
         // (which still decides: distinct d² can share a sqrt, e.g. 1 + 2^-23
         // and 1). NaN fails both. The count, the eye and the mouth gate run
-        // for every item as before.
-        float foodDx = 0, foodDy = 0, foodDz = 0, foodDist = R;
-        float foodD2 = std::numeric_limits<float>::infinity();
-        int foodCount = 0;
-        // The mouth gate, once per fish: its flag, and the size limit (the very
-        // product kMouth · bodySize the test took per item).
-        const bool mouthGate = ocfg.mouthGate;
-        const float mouthMax = ocfg.kMouth * c.bodySize;
-        // k: the item's grid slot, whose depth / size / eyeCon are food[index]'s
-        // (copied at this step's build; food does not change in the per-fish
-        // phase); (dx, dy, dz) its offset, d2 = dx·dx + dy·dy + dz·dz.
-        const float* fsize = foodGrid_.sizes();
+        // for every item as before. The scan runs, as it always has, when a
+        // sensor of ocean::kSenseFood is read or the eye bins food.
+        if ((need & ocean::kSenseFood) || eyeSeesFood) {
+            float foodDx = 0, foodDy = 0, foodDz = 0, foodDist = R;
+            float foodD2 = std::numeric_limits<float>::infinity();
+            int foodCount = 0;
+            // The mouth gate, once per fish: its flag, and the size limit (the very
+            // product kMouth · bodySize the test took per item).
+            const bool mouthGate = ocfg.mouthGate;
+            const float mouthMax = ocfg.kMouth * c.bodySize;
+            // k: the item's grid slot, whose depth / size / eyeCon are food[index]'s
+            // (copied at this step's build; food does not change in the per-fish
+            // phase); (dx, dy, dz) its offset, d2 = dx·dx + dy·dy + dz·dz.
+            const float* fsize = foodGrid_.sizes();
 #ifdef EVO_OCEAN_EYE
-        [[maybe_unused]] const float* fcon = foodGrid_.eyeCons();
+            [[maybe_unused]] const float* fcon = foodGrid_.eyeCons();
 #endif
-        auto smell = [&](int k, float dx, float dy, float dz, float d2) {
-            if (d2 > R2) return;
+            auto smell = [&](int k, float dx, float dy, float dz, float d2) {
+                if (d2 > R2) return;
 #ifdef EVO_OCEAN_EYE
-            // The eye sees every item within R (size does not hide it; unless cloaked) ...
-            if constexpr (Eye) { if (eyeFood) eyeSee(eye, fwd, rht, dx, dy, dz, d2, ocean::kEyeFoodSize, fcon[k], R); }
+                // The eye sees every item within R (size does not hide it; unless cloaked) ...
+                if constexpr (Eye) { if (eyeFood) eyeSee(eye, fwd, rht, dx, dy, dz, d2, ocean::kEyeFoodSize, fcon[k], R); }
 #endif
-            // ... the smell senses only what this fish could swallow.
-            if (mouthGate && fsize[k] > mouthMax) return;   // E1: not food for me
-            ++foodCount;
-            if (d2 < foodD2) {
-                const float dist = std::sqrt(d2);
-                if (dist < foodDist) {
-                    foodD2 = d2;
-                    foodDist = dist;
-                    const float invD = (dist > 0.001f) ? 1.0f / dist : 0.0f;
-                    foodDx = dx * invD; foodDy = dy * invD; foodDz = dz * invD;
+                // ... the smell senses only what this fish could swallow.
+                if (mouthGate && fsize[k] > mouthMax) return;   // E1: not food for me
+                ++foodCount;
+                if (d2 < foodD2) {
+                    const float dist = std::sqrt(d2);
+                    if (dist < foodDist) {
+                        foodD2 = d2;
+                        foodDist = dist;
+                        const float invD = (dist > 0.001f) ? 1.0f / dist : 0.0f;
+                        foodDx = dx * invD; foodDy = dy * invD; foodDz = dz * invD;
+                    }
                 }
+            };
+            {
+                // The items within R in the grid's visit order (foodWithin /
+                // foodWithinWrapped, see there; both keep the grid's 2-D test). Bounded,
+                // with the grid's own offset and q2 = dx·dx + dy·dy (taken against
+                // the query centre c.pos, the very values the offset here was), so
+                // d² = q2 + dz·dz is the same left-to-right sum; toroidal, with the
+                // wrapped difference from c.pos. smell's d2 > R² test is then always false.
+                const int n = tor ? foodWithinWrapped(c, R) : foodWithin(c, R);
+                const FoodSeen* s = foodSeen_.data();
+                for (int j = 0; j < n; ++j) smell(s[j].k, s[j].dx, s[j].dy, s[j].dz, s[j].d2);
             }
-        };
-        {
-            // The items within R in the grid's visit order (foodWithin /
-            // foodWithinWrapped, see there; both keep the grid's 2-D test). Bounded,
-            // with the grid's own offset and q2 = dx·dx + dy·dy (taken against
-            // the query centre c.pos, the very values the offset here was), so
-            // d² = q2 + dz·dz is the same left-to-right sum; toroidal, with the
-            // wrapped difference from c.pos. smell's d2 > R² test is then always false.
-            const int n = tor ? foodWithinWrapped(c, R) : foodWithin(c, R);
-            const FoodSeen* s = foodSeen_.data();
-            for (int j = 0; j < n; ++j) smell(s[j].k, s[j].dx, s[j].dy, s[j].dz, s[j].d2);
+            if (ownLabels) {   // the unit vector's horizontal part, right / ahead, from foodDx AND foodDy (DZ as is)
+                sensors[NEAREST_FOOD_DX] = foodDx * rht.x + foodDy * rht.y;
+                sensors[NEAREST_FOOD_DY] = foodDx * fwd.x + foodDy * fwd.y;
+            } else {
+                sensors[NEAREST_FOOD_DX] = foodDx;
+                sensors[NEAREST_FOOD_DY] = foodDy;
+            }
+            sensors[NEAREST_FOOD_DZ] = foodDz;
+            sensors[NEAREST_FOOD_DIST] = foodDist / R;
+            sensors[FOOD_DENSITY] = tanhCountOver10(foodCount);
         }
-        if (ownLabels) {   // the unit vector's horizontal part, right / ahead (DZ as is)
-            sensors[NEAREST_FOOD_DX] = foodDx * rht.x + foodDy * rht.y;
-            sensors[NEAREST_FOOD_DY] = foodDx * fwd.x + foodDy * fwd.y;
-        } else {
-        sensors[NEAREST_FOOD_DX] = foodDx;
-        sensors[NEAREST_FOOD_DY] = foodDy;
-        }
-        sensors[NEAREST_FOOD_DZ] = foodDz;
-        sensors[NEAREST_FOOD_DIST] = foodDist / R;
-        sensors[FOOD_DENSITY] = tanhCountOver10(foodCount);
 
         // ---- pheromone column and current: horizontal, as Classic (E1: the 3-D flow) ----
-        writeColumnSensors(c, fwd, rht, sensors);
+        writeColumnSensors(c, fwd, rht, sensors, need);
 
         // ---- nearest predator within R in 3-D; bearing from its horizontal part ----
-        {
+        // (when a predator sensor is read, or the eye is on: it sees every predator within R)
+        if ((need & ocean::kSensePredator) || Eye) {
             float bestD2 = R2, ox = 0, oy = 0;
             bool seen = false;
             for (const OceanPredator& p : predators) {
@@ -2647,23 +2796,25 @@ private:
         }
 
         // ---- long probe: fish within 30 (horizontally) and ±30 (depth) of a
-        // point 200 ahead at my own depth ----
-        int probeCount = 0;
-        Vec2 probePos = {c.pos.x + fwd.x * LONGPROBE_DIST, c.pos.y + fwd.y * LONGPROBE_DIST};
-        auto probe = [&](int ni, Vec2) { probeCount += (std::abs(hot_[ni].depth - c.depth) <= 30.0f); };
-        if (cfg.toroidal) {
-            probePos = {wrapCoord(probePos.x, (float)width), wrapCoord(probePos.y, (float)height)};
-            creatureGrid_.forEachInRadiusWrapped(probePos, LONGPROBE_RADIUS, probe);
-        } else {
-            creatureGrid_.forEachInRadius(probePos, LONGPROBE_RADIUS, probe);
+        // point 200 ahead at my own depth (when read) ----
+        if (need & senseBit(LONGPROBE_POP_FWD)) {
+            int probeCount = 0;
+            Vec2 probePos = {c.pos.x + fwd.x * LONGPROBE_DIST, c.pos.y + fwd.y * LONGPROBE_DIST};
+            auto probe = [&](int ni, Vec2) { probeCount += (std::abs(hot_[ni].depth - c.depth) <= 30.0f); };
+            if (cfg.toroidal) {
+                probePos = {wrapCoord(probePos.x, (float)width), wrapCoord(probePos.y, (float)height)};
+                creatureGrid_.forEachInRadiusWrapped(probePos, LONGPROBE_RADIUS, probe);
+            } else {
+                creatureGrid_.forEachInRadius(probePos, LONGPROBE_RADIUS, probe);
+            }
+            sensors[LONGPROBE_POP_FWD] = tanhCountOver5(probeCount);
         }
-        sensors[LONGPROBE_POP_FWD] = tanhCountOver5(probeCount);
 
 #ifdef EVO_OCEAN_EYE
         if constexpr (Eye) eyeWrite(eye, R, ocfg.eyeCode, sensors);   // off: stays 0 (stepFish's memset)
 #endif
 
-        sensors[RANDOM_SENSOR] = rng.range(-1.0f, 1.0f);
+        sensors[RANDOM_SENSOR] = rng.range(-1.0f, 1.0f);   // drawn whether read or not: the stream
     }
 
     // Classic's predator hunt and Stage B economy (World::updatePredators), in

@@ -152,6 +152,13 @@
         var s = afterSeq === undefined ? 0 : afterSeq;
         return inflight.concat(held).some(function (e) { return e.key === key && e.seq > s; });
       },
+      /* the newest edit of key still on its way (in flight or held), or null:
+       * what the page's field shows when a newer edit of it is refused */
+      latest: function (key) {
+        var best = null;
+        inflight.concat(held).forEach(function (e) { if (e.key === key && (!best || e.seq > best.seq)) best = e; });
+        return best;
+      },
       /* the held edits, oldest first, now that one side owns the world */
       takeHeld: function () { var l = held; held = []; return l; },
       /* the page owns the world again: what it applies, oldest first */

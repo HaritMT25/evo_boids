@@ -981,10 +981,14 @@
       if (b.parentNode && b.parentNode.classList) b.parentNode.classList.toggle("picked", on);
       if (on && b.parentNode && acts.parentNode !== b.parentNode) b.parentNode.appendChild(acts);
     });
+    var shownBefore = !acts.hidden;
     acts.hidden = !pickedId;
     el("rerollbtn").hidden = pickedId !== "surprise";
     var lab = el("scenario-start").querySelector("span");
-    if (lab) lab.textContent = turboState !== "live" ? "Stop Turbo & start" : "Start";
+    if (lab) lab.textContent = turboState !== "live" ? "Stop & start" : "Start";
+    el("scenario-start").title = turboState !== "live" ? "Stops Turbo, then starts this world (asked first)" : "Starts this world";
+    /* a phone's strip scrolls sideways: the picked card comes into view with its Start */
+    if (pickedId && !shownBefore && acts.scrollIntoView) { try { acts.scrollIntoView({ block: "nearest", inline: "nearest" }); } catch (e) { /* old */ } }
   }
   /* the sheet back to the running world: its seed and size, its settings
    * with the live tweaks it accepted; an edit still on its way keeps its
@@ -1131,6 +1135,7 @@
     showAsk(title + " replaces " + (n === 1 ? "the change" : "the " + n + " changes") + " waiting for the next start.", "Replace", "Keep editing");
   }
   function showAsk(msg, yes, no) {
+    if (errEl.className !== "error") clearError();   /* a note under the question would only repeat it */
     el("startaskmsg").textContent = msg;
     el("startconfirm").textContent = yes;
     el("startcancel").textContent = no;
@@ -1174,8 +1179,13 @@
              build: function () { var x = f(); return { seed: x.seed, population: x.population, depth: x.depth, size: [x.width, x.height], cfg: x.cfg }; } };
   }
   function restart(done) {
-    var plan = startPlan(), d0 = plan.done;
-    plan.done = function () { el("randnote").textContent = ""; if (d0) d0(); if (done) done(); };
+    var plan = startPlan(), d0 = plan.done, picked = !!draft && draft.id === "surprise";
+    plan.done = function () {
+      if (picked) el("randnote").textContent = el("randnote").textContent.replace(/ Reroll draws again;.*$/, " It runs now; every setting is in the tabs.");
+      else el("randnote").textContent = "";
+      if (d0) d0();
+      if (done) done();
+    };
     return requestStart(plan);
   }
   function newWorld() {
@@ -2093,8 +2103,9 @@
     spark.forEach(function (v) { lo = Math.min(lo, v); hi = Math.max(hi, v); });
     if (hi - lo < 2) { hi += 1; lo -= 1; }
     g.beginPath();
+    var n = spark.length, step = (w - 2) / (Math.max(n, 16) - 1);   /* the newest on the right; a short run spreads over a quarter or more */
     spark.forEach(function (v, i) {
-      var x = 1 + (w - 2) * i / (SPARK_N - 1), y = h - 2 - (v - lo) / (hi - lo) * (h - 4);
+      var x = w - 1 - (n - 1 - i) * step, y = h - 2 - (v - lo) / (hi - lo) * (h - 4);
       if (i) g.lineTo(x, y); else g.moveTo(x, y);
     });
     g.strokeStyle = "#ef8a5a"; g.lineWidth = 1.5; g.lineJoin = "round";
@@ -2867,6 +2878,7 @@
   setPaused(BENCH);
   changeSpeed(0);
   updateLocks();   /* the mode the page starts in: Live (or Paused), no Turbo strip */
+  setStartMenu(false); hideAsk();   /* the start bar's menu and question closed */
 
   /* ---------------- the tour (web/guide.js reads this) ---------------- */
   var guideFish = null;

@@ -293,11 +293,15 @@ const PAGE_SRC = (() => {
         '    get runCfg() { return runCfg; }, get initArgs() { return initArgs; }, get live() { return live; },\n' +
         '    get W() { return W; }, get H() { return H; }, get D() { return D; }, get WALLS() { return WALLS; },\n' +
         '    get paused() { return paused; }, get openPop() { return openPop; }, get statOpen() { return statOpen; },\n' +
-        '    get worldEpoch() { return worldEpoch; }, get pendingStart() { return pendingStart; }, get asking() { return asking; },\n' +
-        '    get usedTurbo() { return usedTurbo; }, get turboStats() { return turboStats; }, startWorld: startWorld,\n' +
-        '    get turboReturn() { return turboReturn; }, set turboReturn(v) { turboReturn = v; },\n' +
+        /* (typeof: a page from before UI-4 / UI-3 has none of these, so the new sections run against it and fail, not throw) */
+        '    get worldEpoch() { return worldEpoch; }, get pendingStart() { return typeof pendingStart === "undefined" ? null : pendingStart; },\n' +
+        '    get asking() { return typeof asking === "undefined" ? null : asking; },\n' +
+        '    get usedTurbo() { return typeof usedTurbo === "undefined" ? null : usedTurbo; }, get turboStats() { return turboStats; },\n' +
+        '    get turboReturn() { return typeof turboReturn === "undefined" ? null : turboReturn; },\n' +
+        '    set turboReturn(v) { if (typeof turboReturn !== "undefined") turboReturn = v; },\n' +
         '    get lastS() { return fresh(lastS); }, inspect: inspect,\n' +
-        '    get draft() { return draft; }, get draftGen() { return draftGen; }, pendingDiff: pendingDiff, readForm: readForm,\n' +
+        '    get draft() { return typeof draft === "undefined" ? null : draft; }, get draftGen() { return typeof draftGen === "undefined" ? 0 : draftGen; },\n' +
+        '    pendingDiff: typeof pendingDiff === "function" ? pendingDiff : function () { return []; }, readForm: readForm,\n' +
         '    getVal: getVal, importWorld: importWorld, wiringNow: wiringNow, frame: frame,\n' +
         '    urlImport: function (P) {\n' + src.slice(a, b) + '    }\n  };';
     return src.slice(0, end) + access + src.slice(end);
@@ -2912,8 +2916,8 @@ async function pageScenarios() {
         const ask = asked(p);
         p.click('startconfirm');
         await until(() => p.T.turboState === 'live' && !p.T.pendingStart, 'the start');
-        ok(staged && label === 'Stop Turbo & start' && ask && delta(a, c()).inits === 1 && p.T.initArgs.cfg.currentStrength === 80,
-           'in Turbo: Currents & patches stages without stopping Turbo; its Start reads "Stop Turbo & start", asks, then starts it once');
+        ok(staged && label === 'Stop & start' && ask && delta(a, c()).inits === 1 && p.T.initArgs.cfg.currentStrength === 80,
+           'in Turbo: Currents & patches stages without stopping Turbo; its Start reads "Stop & start", asks, then starts it once');
         ok(p.uncaught.length === 0, 'no exception escaped the page\'s handlers' + (p.uncaught.length ? ' (' + p.uncaught[0] + ')' : ''));
     }
 }
@@ -2942,7 +2946,11 @@ process.on('unhandledRejection', (e) => { unhandled.push(e); });
     const t0 = Date.now(), only = process.argv.slice(2);
     const bad = only.filter(n => !SECTIONS[n]);
     if (bad.length) throw new Error('no section ' + bad.join(', ') + ' (sections: ' + Object.keys(SECTIONS).join(', ') + ')');
-    for (const name of Object.keys(SECTIONS)) if (!only.length || only.includes(name)) await SECTIONS[name]();
+    for (const name of Object.keys(SECTIONS)) {
+        if (only.length && !only.includes(name)) continue;
+        /* a section that throws is one failed check, and the others still run */
+        try { await SECTIONS[name](); } catch (e) { ok(false, name + ' threw: ' + String(e && e.stack || e).split('\n').slice(0, 3).join(' | ')); }
+    }
     ok(unhandled.length === 0, 'no unhandled promise rejection' + (unhandled.length ? ': ' + unhandled[0] : ''));
     console.log('\n' + (checks - failures) + ' / ' + checks + ' checks passed in ' + ((Date.now() - t0) / 1000).toFixed(1) + ' s');
     process.exit(failures ? 1 : 0);

@@ -2695,6 +2695,30 @@ async function pageFollowBack() {
            /nor did any of its family line/.test(t2),
            'a fish that died during Turbo: its family line\'s nearest (#' + want + ') is followed instead, said so; a family line gone: none, said so');
     }
+    {   /* the family scan with the memory growing inside oc_inspect (review of the brief, Gemini q25): ids and places
+         * copied first, a fresh view after each call: the same nearest, nothing read from a detached view */
+        const p = await bootPage(PAGE_Q);
+        const k = 5, fam = Math.round(p.T.inspect(k).info[7]);
+        const at = { x: p.T.lastS.segs[12 * k] - 19, y: p.T.lastS.segs[12 * k + 1] + 44, d: p.T.lastS.depth[k] };
+        const real = p.M._oc_inspect, mb0 = HO.buffer(p.M).byteLength;
+        let grown = 0;
+        await trip(p, () => {
+            p.T.turboReturn = { id: 1e9, follow: false, epoch: p.T.worldEpoch, family: fam, x: at.x, y: at.y, d: at.d };
+            p.M._oc_inspect = function (i) { if (grown < 3) { growMiB(p.M); grown++; } return real.call(this, i); };
+        });
+        p.M._oc_inspect = real;
+        const a = st(p), s = p.T.lastS, n = s.n, ids = Array.from(s.ids.subarray(0, n)), xs = [], ys = [], ds = [];
+        for (let i = 0; i < n; i++) { xs.push(s.segs[12 * i]); ys.push(s.segs[12 * i + 1]); ds.push(s.depth[i]); }
+        let want = null, bd = Infinity;
+        for (let i = 0; i < n; i++) {
+            if (Math.round(p.T.inspect(i).info[7]) !== fam) continue;
+            const d2 = (xs[i] - at.x) ** 2 + (ys[i] - at.y) ** 2 + (ds[i] - at.d) ** 2;
+            if (d2 < bd || (d2 === bd && ids[i] < want)) { bd = d2; want = ids[i]; }
+        }
+        ok(grown === 3 && HO.buffer(p.M).byteLength > mb0 && want !== null && a.selectedId === want && !a.following && p.uncaught.length === 0,
+           'the family scan with the memory growing inside oc_inspect (' + grown + ' times): the same nearest (#' + want + '), picked, not followed; no exception' +
+           (p.uncaught.length ? ' (' + p.uncaught[0] + ')' : ''));
+    }
     {   /* the preference off: the follow leaves the lamp alone, before and after */
         const p = await bootPage(PAGE_Q);
         const sw = p.el('followLight');

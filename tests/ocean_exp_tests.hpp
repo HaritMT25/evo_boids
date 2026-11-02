@@ -24,6 +24,18 @@
 //                   steerFrame 1; 0 / 1 valid, others refused; labelFrame 0 ==
 //                   the key absent, every section (sense_ref_a1 in
 //                   tests/ocean_sense_tests.hpp checks 600 random scenes)
+//   label_mask      (both builds) the dead-sensor skip (turbo-speed-1) under
+//                   labelFrame 1, where each projected input reads both world
+//                   components of its vector: capture off (the skip) == capture
+//                   on (every sensor) each step — dynamics, neuron outputs, each
+//                   world's own rng stream — (a) every fish reading ONE
+//                   projected input, sense_dce's rich worlds; (b) long runs (the
+//                   A1 arm in the L12 ecology, 2000 steps; toroidal topological,
+//                   600) whose founders each read one projected input, with
+//                   births and mutation; fish reading one component of a pair
+//                   but not the other required in every pair, at the end too.
+//                   tests/label_mask_fault.sh plants three wrongly-masked
+//                   components in a copy of the engine: each must fail it
 
 // One step of a quiet scene around a viewer at (500, 500, 120) heading `head`
 // (rotated by quarter turns `q`, about the viewer): food 20 to world +x, two
@@ -155,7 +167,7 @@ inline void testLabelFrameNeutral() {
              "labelFrame 1 at init: the config hash did not change, or another section did");
     t.note("labelFrame 0 == the key absent over 200 steps, every section; labelFrame 1 is hashed (cfg) and changes nothing at init");
 }
-#ifdef EVO_OCEAN_EYE
+
 // protocol v2's L12 ecology (experiments/alife2027/v2/common_l12.json)
 constexpr const char* kExpL12 =
     R"({"walls":false,"toroidal":false,"appearance":0,"minPopulation":50,"perceptionRadius":100,"interactRadius":36,)"
@@ -163,6 +175,145 @@ constexpr const char* kExpL12 =
     R"("predatorCount":4,"predatorSpeed":110,"predatorPerception":150,"predatorCaptureRadius":14,"predatorEconomy":true,)"
     R"("predatorCooldown":3,"predatorMetabolism":2,"predatorMoveCost":0,"predatorMeal":10,"predatorReproEnergy":60,)"
     R"("predatorMaxPopulation":6,"predatorMinPopulation":2,"predatorInheritance":true})";
+
+// ---- label_mask: the dead-sensor skip (turbo-speed-1) under own-frame labels ----
+// Under labelFrame 1 each of the six projected inputs reads BOTH world
+// components of its vector (OceanWorld::computeSensors, ownLabels): the skip,
+// which computes only the sensors a net reads, must never drop the component
+// whose own output is not read. Capture on computes every sensor (the
+// definition); capture off is the skip.
+inline constexpr int kOwnFrameLabels[] = {NEAREST_FOOD_DX, NEAREST_FOOD_DY, AVG_NEIGHBOR_DX, AVG_NEIGHBOR_DY,
+                                          AVG_NEIGHBOR_HEADING_X, AVG_NEIGHBOR_HEADING_Y};   // three x / y pairs
+
+// a JSON object with more keys: `{...}` -> `{...,extra}`
+inline std::string withKeys(const char* json, const char* extra) {
+    std::string s(json);
+    s.insert(s.size() - 1, std::string(",") + extra);
+    return s;
+}
+
+// The fish in w reading one component of a pair (food, offset, heading) and
+// not the other: the case a wrongly-masked component would break.
+inline void countSingleReaders(const OceanWorld& w, long out[3]) {
+    for (const Fish& f : w.creatures) {
+        const ocean::SenseMask m = ocean::sensesRead(f.nnet);
+        for (int p = 0; p < 3; ++p)
+            out[p] += ((m >> kOwnFrameLabels[2 * p]) & 1) != ((m >> kOwnFrameLabels[2 * p + 1]) & 1);
+    }
+}
+
+inline void testLabelMask() {
+    Test t("label_mask");
+    using sense::sameBits;
+    long compared = 0, longSteps = 0, longBirths = 0;
+    // Single-sensor worlds: sense_dce's rich worlds (walls 40 steps from founders
+    // old enough to pair; the others 10) with labelFrame 1 and steerFrame 1, every
+    // fish reading ONE projected input (speed::readOnly).
+    for (const speed::RichCfg& rc : speed::kRich) {
+        const bool longRun = (&rc == &speed::kRich[0]);
+        const int steps = longRun ? 40 : 10;
+        const std::string json = withKeys(rc.json, R"("labelFrame":1,"steerFrame":1)");
+        OceanWorld base;
+        std::string err;
+        if (!t.expect(ofp::initWorld(base, 78, 1920, 1080, 240.0f, 300, json.c_str(), err), "%s: %s", rc.name, err.c_str()))
+            continue;
+        for (int k = 0; k < (longRun ? 400 : 200); ++k) base.update(0.016f);
+        const RandomGen r0 = rng;
+        for (int s : kOwnFrameLabels) {
+            OwnRng off{base, r0};
+            for (Fish& f : off.w.creatures) speed::readOnly(f, s);
+            OwnRng on = off;
+            off.w.cfg.captureActivations = false;   // the skip: only s is computed
+            on.w.cfg.captureActivations = true;     // every sensor
+            for (int step = 0; step < steps; ++step) {
+                off.step();
+                on.step();
+                const ofp::Fingerprint a = off.fp(), b = on.fp();   // each with its own stream
+                bool same = sameEngine(off.r, on.r) && sameDynamics(a, b) && off.w.creatures.size() == on.w.creatures.size();
+                for (std::size_t i = 0; same && i < off.w.creatures.size(); ++i)
+                    same = sameBits(off.w.creatures[i].nnet.neurons[0].output, on.w.creatures[i].nnet.neurons[0].output);
+                if (!t.expect(same, "%s: labelFrame 1, reading only %s, step %d: capture off (the skip) and on differ "
+                                    "(fish %016llx vs %016llx)",
+                              rc.name, ocean::kSensorNames[s], step + 1, (unsigned long long)a.fish, (unsigned long long)b.fish))
+                    break;
+                ++compared;
+                if (step == 0 && !speed::mayBeAllZero(s, rc)) {   // teeth: s read non-zero for some fish
+                    long nonZero = 0;
+                    for (const Fish& f : on.w.creatures) nonZero += !sameBits(f.lastSensors[s], 0.0f);
+                    t.expect(nonZero > 0, "%s: %s read 0 for every fish: this scene cannot tell a skip", rc.name,
+                             ocean::kSensorNames[s]);
+                }
+            }
+        }
+    }
+    // Long runs: the A1 arm (labelFrame 1, steerFrame 1, the eye off) in protocol
+    // v2's L12 ecology, and a toroidal world with topological neighbours. Every
+    // founder gets one wire from a projected input to STEER_X or STEER_Y (its
+    // partner not added; the rest of its genome kept); births, mutation and the
+    // population floor run as usual.
+    struct Long { const char* name; std::string json; int steps; };
+    const Long longs[] = {
+        {"A1 in L12", withKeys(kExpL12, R"("labelFrame":1,"steerFrame":1)"), 2000},
+        {"toroidal topo", withKeys(speed::kRich[2].json, R"("labelFrame":1,"steerFrame":1)"), 600},
+    };
+    std::string cover;
+    for (const Long& lc : longs) {
+        OceanWorld base;
+        std::string err;
+        if (!t.expect(ofp::initWorld(base, 2027, 1920, 1080, 240.0f, 300, lc.json.c_str(), err), "%s: %s", lc.name, err.c_str()))
+            continue;
+        int i = 0;
+        for (Fish& f : base.creatures) {
+            Gene g;
+            g.sourceType = SOURCE_SENSOR;
+            g.sourceNum = (uint16_t)kOwnFrameLabels[i % 6];
+            g.sinkType = SINK_ACTION;
+            g.sinkNum = ((i / 6) % 2) ? STEER_Y : STEER_X;
+            g.weight = (int16_t)((i % 3 == 0 ? -1 : 1) * (6000 + 997 * (i % 7)));
+            f.genome.push_back(g);
+            buildNeuralNet(f.genome, f.nnet);
+            ++i;
+        }
+        const RandomGen r0 = rng;
+        OwnRng off{base, r0}, on{base, r0};
+        off.w.cfg.captureActivations = false;
+        on.w.cfg.captureActivations = true;
+        const long long births0 = on.w.totalBirths;
+        long single[3] = {0, 0, 0};
+        int step = 0;
+        for (; step < lc.steps; ++step) {
+            countSingleReaders(off.w, single);
+            off.step();
+            on.step();
+            const ofp::Fingerprint a = off.fp(), b = on.fp();
+            const bool same = sameEngine(off.r, on.r) && sameDynamics(a, b);
+            if (!t.expect(same, "%s: step %d: capture off (the skip) and on differ (fish %016llx vs %016llx, rng %016llx vs %016llx)",
+                          lc.name, step + 1, (unsigned long long)a.fish, (unsigned long long)b.fish, (unsigned long long)a.rng,
+                          (unsigned long long)b.rng))
+                break;
+            ++longSteps;
+        }
+        long atEnd[3] = {0, 0, 0};
+        countSingleReaders(off.w, atEnd);
+        const long long births = on.w.totalBirths - births0;
+        longBirths += births;
+        t.expect(births > 0, "%s: no births in %d steps: inherited and mutated nets were not exercised", lc.name, step);
+        for (int p = 0; p < 3; ++p)
+            t.expect(single[p] > 0 && atEnd[p] > 0, "%s: pair %d: %ld fish-steps read one component only (%ld at the end): "
+                     "no coverage", lc.name, p, single[p], atEnd[p]);
+        char buf[200];
+        std::snprintf(buf, sizeof buf, " %s: %d steps, %lld births, %zu fish at the end, one-component readers "
+                      "food %ld / offset %ld / heading %ld fish-steps (%ld / %ld / %ld at the end);", lc.name, step, births,
+                      off.w.creatures.size(), single[0], single[1], single[2], atEnd[0], atEnd[1], atEnd[2]);
+        cover += buf;
+    }
+    t.note("labelFrame 1: %ld single-sensor worlds x steps (the six projected inputs, %d configs): capture off == on",
+           compared, (int)(sizeof speed::kRich / sizeof speed::kRich[0]));
+    t.note("long runs, capture off == on every step (dynamics, each world's own rng stream), %ld steps, %ld births:%s", longSteps,
+           longBirths, cover.c_str());
+}
+
+#ifdef EVO_OCEAN_EYE
 
 struct ExpArm { const char* name; std::vector<std::pair<std::string, int>> keys; };
 inline std::vector<ExpArm> expArms() {

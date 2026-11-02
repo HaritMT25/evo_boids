@@ -54,7 +54,11 @@
 //                 eye mode: capture off == capture on, bit for bit
 //   capture_toggle  capture on -> off -> on: the same run; captured arrays
 //                 untouched while off
-//   food_scan     the food scans' item lists == their scalar definition, bit
+//   label_mask    the skip under own-frame labels (labelFrame 1, the A1 arm):
+//                 capture off == on, single-sensor and 2000-step runs
+//                 (tests/ocean_exp_tests.hpp; tests/label_mask_fault.sh plants
+//                 wrongly-masked components, each must fail it)
+//   food_scan    the food scans' item lists == their scalar definition, bit
 //                 for bit (the four in tests/ocean_speed_tests.hpp)
 //   food_life     foodLife: an item goes on the step its age reaches foodLife;
 //                 off, none do; the first stock's ages spread; draws unchanged;
@@ -4816,6 +4820,17 @@ int main(int argc, char** argv) {
     (void)argc; (void)argv;
 #endif
     std::printf("ocean_tests: NUM_SENSES %d, NUM_ACTIONS %d\n", (int)NUM_SENSES, (int)NUM_ACTIONS);
+    // --only label_mask: that test alone (tests/label_mask_fault.sh runs it on
+    // copies of the engine with a planted fault, each of which must fail it)
+    if (argc > 2 && std::strcmp(argv[1], "--only") == 0) {
+        if (std::strcmp(argv[2], "label_mask") != 0) {
+            std::fprintf(stderr, "--only: label_mask is the one test it runs\n");
+            return 2;
+        }
+        ot::testLabelMask();
+        std::printf("OCEAN TESTS: %d passed, %d failed\n", ot::g_passed, ot::g_failed);
+        return ot::g_failed ? 1 : 0;
+    }
     ot::testBounds();
     ot::testBuoyancy();
     ot::testSteerZ();
@@ -4837,6 +4852,7 @@ int main(int argc, char** argv) {
     ot::testSenseMask();   // tests/ocean_speed_tests.hpp: the dead-sensor skip's mask,
     ot::testSenseDce();    // and what the speed-ups must keep
     ot::testCaptureToggle();
+    ot::testLabelMask();   // tests/ocean_exp_tests.hpp: the skip under own-frame labels (labelFrame 1)
     ot::testFoodScan();
     ot::testFoodLife();
     ot::testRemovedNonFinite();
